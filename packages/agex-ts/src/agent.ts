@@ -263,11 +263,17 @@ export class Agent {
     return this.#caches.cache(session)
   }
 
-  /** Per-session event log. Same instance for the same session id. */
-  events(session: string = DEFAULT_SESSION): EventLog {
+  /** Per-session event log. Same instance for the same session id.
+   *
+   *  Returns the concrete `EventLogImpl` rather than just the public
+   *  `EventLog` interface, because framework-internal callers (the
+   *  task lifecycle, chaptering machinery) need extra methods like
+   *  `refs()` and `replaceRange()`. The public surface is the same;
+   *  end-user code generally interacts via the `EventLog` interface. */
+  events(session: string = DEFAULT_SESSION): EventLogImpl {
     const cached = this.#eventLogs.get(session)
     if (cached !== undefined) return cached
-    const fresh = new EventLogImpl(this.#state)
+    const fresh = new EventLogImpl(this.#state, session)
     this.#eventLogs.set(session, fresh)
     return fresh
   }

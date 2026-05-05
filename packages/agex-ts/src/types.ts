@@ -256,12 +256,14 @@ export type AgentEvent =
   | SystemNoteEvent
   | ChapterEvent
 
-/** Pair returned by chaptering — `start` and `end` reference event
- *  positions in the numbered index the chapter task receives (e.g.
- *  `"[1]"`, `"[3]"`). They bracket the range being summarized. */
+/** Returned by the chapter task. `start` and `end` are 1-based,
+ *  inclusive positions into the numbered event index the task
+ *  receives — e.g. `{ start: 1, end: 3 }` covers the first three
+ *  entries. The framework translates these positions to actual
+ *  state keys when applying the chapter to the log. */
 export interface Chapter {
-  readonly start: string
-  readonly end: string
+  readonly start: number
+  readonly end: number
   readonly name: string
   readonly message: string
 }

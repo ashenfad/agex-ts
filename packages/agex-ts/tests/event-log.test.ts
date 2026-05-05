@@ -11,27 +11,20 @@ const evt = (overrides: Partial<AgentEvent> & { type: AgentEvent['type'] }): Age
   }) as AgentEvent
 
 describe('EventLog — add + iter', () => {
-  it('returns events in chronological order', async () => {
+  it('returns events in insertion order', async () => {
     const log = new EventLogImpl(new Live())
-    await log.add(
-      evt({
-        type: 'taskStart',
-        timestamp: '2026-05-05T00:00:01.000Z',
-        taskName: 't',
-        inputs: null,
-      }),
-    )
-    await log.add(evt({ type: 'success', timestamp: '2026-05-05T00:00:00.000Z', result: 'r' }))
-    await log.add(evt({ type: 'fail', timestamp: '2026-05-05T00:00:02.000Z', message: 'm' }))
+    await log.add(evt({ type: 'taskStart', taskName: 't', inputs: null }))
+    await log.add(evt({ type: 'success', result: 'r' }))
+    await log.add(evt({ type: 'fail', message: 'm' }))
     const out: string[] = []
     for await (const e of log.iter()) out.push(e.type)
-    expect(out).toEqual(['success', 'taskStart', 'fail'])
+    expect(out).toEqual(['taskStart', 'success', 'fail'])
   })
 
   it('returns the storage key from add()', async () => {
     const log = new EventLogImpl(new Live())
     const key = await log.add(evt({ type: 'success', result: 1 }))
-    expect(key.startsWith('evt/')).toBe(true)
+    expect(key.startsWith('default/evt/')).toBe(true)
   })
 
   it('handles same-millisecond collisions with sequence suffix', async () => {

@@ -33,7 +33,10 @@
       "import": "./dist/render/index.js"
     }
   },
-  "files": ["dist", "README.md"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsup",
     "test": "vitest run",
@@ -41,6 +44,7 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@vitest/coverage-v8": "^2.1.9",
     "kvgit-ts": "workspace:*",
     "termish-ts": "workspace:*",
     "tsup": "^8.3.5",

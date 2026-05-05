@@ -8,9 +8,22 @@
  */
 
 import type { CommandHandler } from '../context'
+import { basename, cd, cp, dirname, ls, mkdir, mv, pwd, rm, touch } from './filesystem'
 import { cat, echo } from './io'
 
 export const BUILTINS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHandler>([
+  // Filesystem
+  ['pwd', pwd],
+  ['cd', cd],
+  ['ls', ls],
+  ['mkdir', mkdir],
+  ['touch', touch],
+  ['cp', cp],
+  ['mv', mv],
+  ['rm', rm],
+  ['basename', basename],
+  ['dirname', dirname],
+  // I/O
   ['echo', echo],
   ['cat', cat],
 ])

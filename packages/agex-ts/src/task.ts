@@ -20,6 +20,7 @@
 
 import type { StandardSchemaV1 } from '@standard-schema/spec'
 import type { Agent } from './agent'
+import { runChaptering, shouldTriggerChaptering } from './chaptering'
 import { dispatchFileEdit, dispatchFileWrite, dispatchTerminal } from './dispatcher'
 import { CancelledError, SchemaError, TaskClarifyError, TaskFailError } from './errors'
 import type {
@@ -119,6 +120,25 @@ export function makeTask<I, O>(agent: Agent, def: TaskDefinition<I, O>): TaskFn<
           ...(outputTokens !== undefined && { outputTokens }),
         }
         await emit(actionEvent, eventLog, options.onEvent)
+
+        // Chaptering — context compaction triggered by token budget.
+        // Runs after the ActionEvent is logged so the trigger reads
+        // the just-arrived inputTokens, and before dispatch so the
+        // chapter handler sees the same event prefix the next LLM
+        // call will see (minus the chapter event we're about to add).
+        if (agent.chapterHandler !== undefined) {
+          const allEvents = await collectEvents(eventLog)
+          if (shouldTriggerChaptering(allEvents, agent.chapteringTrigger)) {
+            await runChaptering(
+              allEvents,
+              agent.chapterHandler,
+              eventLog,
+              agent.name,
+              signal,
+              (e) => emit(e, eventLog, options.onEvent),
+            )
+          }
+        }
 
         // Dispatch
         const ctx: ExecuteContext = { fs, cache, signal }

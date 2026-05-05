@@ -20,6 +20,7 @@ import { type StateBackend, connectState, isVersioned } from './state'
 import { type TaskDefinition, makeTask } from './task'
 import type {
   Cache,
+  ChapterHandler,
   EventLog,
   FSConfig,
   LLMClient,
@@ -51,9 +52,14 @@ export interface AgentOptions {
   readonly fs?: FSConfig
   /** Max iterations per task (turn cap). Default `10`. */
   readonly maxIterations?: number
-  /** Threshold for triggering chaptering on cumulative input tokens.
-   *  Optional — when omitted, chaptering never fires. */
+  /** Threshold (in input tokens, as reported by the latest
+   *  `ActionEvent`) at which chaptering fires. Pair with
+   *  `chapterHandler` — without one the trigger is a no-op. */
   readonly chapteringTrigger?: number
+  /** Handler invoked when chaptering triggers. Receives the current
+   *  event log; returns one or more `Chapter` summaries to compact
+   *  into the rendered context. */
+  readonly chapterHandler?: ChapterHandler
 }
 
 /** Async factory — handles the awaitable parts of state setup. */
@@ -154,6 +160,18 @@ export class Agent {
    *  this isn't set. */
   get runtime(): RuntimeAdapter | undefined {
     return this.#opts.runtime
+  }
+
+  /** The token threshold above which chaptering fires (if a handler
+   *  is registered). Undefined disables chaptering. */
+  get chapteringTrigger(): number | undefined {
+    return this.#opts.chapteringTrigger
+  }
+
+  /** Chapter handler invoked when chaptering trips. Undefined means
+   *  no compaction happens even if the trigger fires. */
+  get chapterHandler(): ChapterHandler | undefined {
+    return this.#opts.chapterHandler
   }
 
   /** Read-only snapshot of the registration policy. */

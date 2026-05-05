@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { createAgent } from '../src/agent'
-import { runChaptering, shouldTriggerChaptering } from '../src/chaptering'
+import { isChapteringInFlight, shouldTriggerChaptering } from '../src/chaptering'
 import { Dummy } from '../src/llm/dummy'
 import { evalRuntime } from '../src/runtime/eval'
-import type { AgentEvent, Chapter, ChapterEvent } from '../src/types'
+import type { AgentEvent, ChapterEvent, LLMResponse } from '../src/types'
 
 describe('shouldTriggerChaptering', () => {
   it('false when threshold is undefined', () => {
@@ -44,97 +44,174 @@ describe('shouldTriggerChaptering', () => {
   })
 })
 
-describe('runChaptering — handler invocation', () => {
-  it('emits one ChapterEvent per returned Chapter', async () => {
-    const emitted: AgentEvent[] = []
-    const handler = async () =>
-      [
-        { start: 'k0', end: 'k5', name: 'phase 1', message: 'planned' },
-        { start: 'k6', end: 'k9', name: 'phase 2', message: 'executed' },
-      ] as ReadonlyArray<Chapter>
-    const n = await runChaptering(
-      [],
-      handler,
-      // log isn't used in v1 chaptering
-      // biome-ignore lint/suspicious/noExplicitAny: minimal log stub for the test
-      { add: async () => 'k', iter: async function* () {}, at: async () => null } as any,
-      'agent',
-      new AbortController().signal,
-      async (e) => void emitted.push(e),
-    )
-    expect(n).toBe(2)
-    expect(emitted.length).toBe(2)
-    expect(emitted.every((e) => e.type === 'chapter')).toBe(true)
-    const ch0 = emitted[0] as ChapterEvent
-    expect(ch0.name).toBe('phase 1')
-    expect(ch0.eventRefs).toEqual(['k0', 'k5'])
-  })
+/** Build a Dummy with responses interleaved in the order the action
+ *  loop will actually consume them. Order matters: parent turn N
+ *  → if chaptering trips, chapter task turn(s) → parent turn N+1. */
+function dummyWith(responses: ReadonlyArray<LLMResponse | Error>): Dummy {
+  return new Dummy({ responses })
+}
 
-  it('surfaces handler failures as a SystemNoteEvent', async () => {
-    const emitted: AgentEvent[] = []
-    const handler = async () => {
-      throw new Error('summary api down')
-    }
-    const n = await runChaptering(
-      [],
-      handler,
-      // biome-ignore lint/suspicious/noExplicitAny: minimal log stub
-      { add: async () => 'k', iter: async function* () {}, at: async () => null } as any,
-      'agent',
-      new AbortController().signal,
-      async (e) => void emitted.push(e),
-    )
-    expect(n).toBe(0)
-    expect(emitted.length).toBe(1)
-    expect(emitted[0]?.type).toBe('systemNote')
-    expect((emitted[0] as { message: string }).message).toMatch(/summary api down/)
-  })
-})
+const heavyTurn: LLMResponse = {
+  emissions: [{ type: 'ts', code: '/* think */' }],
+  inputTokens: 5000,
+}
+const finishTurn: LLMResponse = {
+  emissions: [{ type: 'ts', code: 'taskSuccess(null)' }],
+  inputTokens: 50,
+}
 
-describe('chaptering integration in the action loop', () => {
-  it('does not fire when no chapterHandler is registered', async () => {
-    const llm = new Dummy({
+async function runChapterAgent(opts: {
+  responses: ReadonlyArray<LLMResponse | Error>
+  withChapterTask: boolean
+}) {
+  const llm = dummyWith(opts.responses)
+  const agent = await createAgent({
+    name: 'A',
+    llm,
+    runtime: evalRuntime(),
+    chapteringTrigger: 1000,
+  })
+  if (opts.withChapterTask) {
+    agent.chapterTask({ description: 'Summarize completed task ranges into chapters.' })
+  }
+  const fn = agent.task<undefined, null>({ description: 'X.' })
+  const events: AgentEvent[] = []
+  await fn(undefined, { onEvent: (e) => void events.push(e) })
+  return { agent, llm, events }
+}
+
+describe('chaptering — chapterTask integration', () => {
+  it('does not fire when no chapter task is registered', async () => {
+    const { events } = await runChapterAgent({
       responses: [
         { emissions: [{ type: 'ts', code: 'taskSuccess(null)' }], inputTokens: 1_000_000 },
       ],
+      withChapterTask: false,
     })
-    const agent = await createAgent({
-      name: 'A',
-      llm,
-      runtime: evalRuntime(),
-      chapteringTrigger: 100,
-      // intentionally no chapterHandler
-    })
-    const fn = agent.task<undefined, null>({ description: 'X.' })
-    const events: AgentEvent[] = []
-    await fn(undefined, { onEvent: (e) => void events.push(e) })
     expect(events.find((e) => e.type === 'chapter')).toBeUndefined()
   })
 
-  it('fires after an ActionEvent that exceeds the threshold', async () => {
-    const llm = new Dummy({
+  it('runs the chapter task when threshold is exceeded', async () => {
+    const { events } = await runChapterAgent({
+      // Order: parent heavy → triggers chaptering → chapter task → parent finish
       responses: [
-        { emissions: [{ type: 'ts', code: '/* think */' }], inputTokens: 5000 },
-        { emissions: [{ type: 'ts', code: 'taskSuccess(null)' }], inputTokens: 50 },
+        heavyTurn,
+        {
+          emissions: [
+            {
+              type: 'ts',
+              code: 'taskSuccess([{ start: "[1]", end: "[2]", name: "warmup", message: "thought briefly" }])',
+            },
+          ],
+        },
+        finishTurn,
       ],
+      withChapterTask: true,
     })
-    let chapterCalls = 0
-    const agent = await createAgent({
-      name: 'A',
-      llm,
-      runtime: evalRuntime(),
-      chapteringTrigger: 1000,
-      chapterHandler: async () => {
-        chapterCalls++
-        return [{ start: 'a', end: 'b', name: 'compact', message: '...' }]
-      },
-    })
-    const fn = agent.task<undefined, null>({ description: 'X.' })
-    const events: AgentEvent[] = []
-    await fn(undefined, { onEvent: (e) => void events.push(e) })
-    expect(chapterCalls).toBe(1)
-    const chapters = events.filter((e) => e.type === 'chapter')
+
+    const chapters = events.filter((e): e is ChapterEvent => e.type === 'chapter')
     expect(chapters.length).toBe(1)
-    expect((chapters[0] as ChapterEvent).name).toBe('compact')
+    expect(chapters[0]?.name).toBe('warmup')
+    expect(chapters[0]?.message).toBe('thought briefly')
+    expect(chapters[0]?.eventRefs).toEqual(['[1]', '[2]'])
+  })
+
+  it('emits a SystemNoteEvent when the chapter task throws', async () => {
+    const { events } = await runChapterAgent({
+      responses: [
+        heavyTurn,
+        // Chapter task fails
+        { emissions: [{ type: 'ts', code: 'taskFail("summary api down")' }] },
+        finishTurn,
+      ],
+      withChapterTask: true,
+    })
+
+    const note = events.find((e) => e.type === 'systemNote')
+    expect(note).toBeDefined()
+    expect((note as { message: string }).message).toMatch(/chaptering failed/)
+    expect(events.find((e) => e.type === 'chapter')).toBeUndefined()
+  })
+
+  it('emits a SystemNoteEvent when the chapter task returns malformed output', async () => {
+    const { events } = await runChapterAgent({
+      responses: [
+        heavyTurn,
+        // Wrong shape
+        { emissions: [{ type: 'ts', code: 'taskSuccess("not an array")' }] },
+        finishTurn,
+      ],
+      withChapterTask: true,
+    })
+
+    const note = events.find((e) => e.type === 'systemNote')
+    expect(note).toBeDefined()
+    expect((note as { message: string }).message).toMatch(/must return an array/)
+  })
+
+  it('chapter task events go to a child session, not the parent log', async () => {
+    const { agent } = await runChapterAgent({
+      responses: [
+        heavyTurn,
+        {
+          emissions: [
+            {
+              type: 'ts',
+              code: 'taskSuccess([{ start: "[1]", end: "[1]", name: "x", message: "y" }])',
+            },
+          ],
+        },
+        finishTurn,
+      ],
+      withChapterTask: true,
+    })
+
+    const parentEvents: AgentEvent[] = []
+    for await (const e of agent.events('default').iter()) parentEvents.push(e)
+    const childEvents: AgentEvent[] = []
+    for await (const e of agent.events('default/__chapter__').iter()) childEvents.push(e)
+
+    // Parent session: one taskStart (the parent task)
+    expect(parentEvents.filter((e) => e.type === 'taskStart').length).toBe(1)
+    // Child session: one taskStart (the chapter task)
+    expect(childEvents.filter((e) => e.type === 'taskStart').length).toBe(1)
+    // The chapter task's success lives in the child log too
+    expect(childEvents.filter((e) => e.type === 'success').length).toBe(1)
+    // The parent's chapter event lives in the parent log
+    expect(parentEvents.filter((e) => e.type === 'chapter').length).toBe(1)
+  })
+
+  it('chaptering does not recurse — the chapter task itself does not trigger chaptering', async () => {
+    // Configure threshold so even the chapter task's action would
+    // trip it if the recursion guard were missing.
+    const { events } = await runChapterAgent({
+      responses: [
+        // Parent turn 1 — heavy → trips chaptering
+        { emissions: [{ type: 'ts', code: '/* think */' }], inputTokens: 5000 },
+        // Chapter task turn — also heavy, but guard prevents re-fire
+        {
+          emissions: [
+            {
+              type: 'ts',
+              code: 'taskSuccess([{ start: "[1]", end: "[1]", name: "n", message: "m" }])',
+            },
+          ],
+          inputTokens: 9999,
+        },
+        // Parent turn 2 — finish
+        finishTurn,
+      ],
+      withChapterTask: true,
+    })
+
+    // Exactly one chapter event — the recursion guard worked
+    expect(events.filter((e) => e.type === 'chapter').length).toBe(1)
+  })
+})
+
+describe('isChapteringInFlight (recursion guard)', () => {
+  it('is false outside of a chapter run', async () => {
+    const agent = await createAgent({ name: 'A' })
+    expect(isChapteringInFlight(agent)).toBe(false)
   })
 })

@@ -21,7 +21,7 @@ import { describe, expect, it } from 'vitest'
 import { createAgent } from '../src/agent'
 import { Dummy } from '../src/llm/dummy'
 import { evalRuntime } from '../src/runtime/eval'
-import type { AgentEvent, Chapter, LLMResponse } from '../src/types'
+import type { AgentEvent, LLMResponse } from '../src/types'
 
 const r = (...emissions: LLMResponse['emissions']): LLMResponse => ({ emissions })
 const dec = new TextDecoder()
@@ -55,6 +55,19 @@ describe('E2E smoke — full agent pipeline', () => {
         ],
         inputTokens: 5_000, // exceeds chapteringTrigger
       },
+      // Chapter task's one turn — consumed when chaptering trips
+      // *after* turn 2. The Dummy cycles in declaration order, so this
+      // entry has to land between turn 2 and turn 3. A real LLM would
+      // summarize the index it sees; the Dummy just emits structured
+      // chapters directly.
+      {
+        emissions: [
+          {
+            type: 'ts',
+            code: 'taskSuccess([{ start: "[1]", end: "[3]", name: "setup + edit", message: "seeded files; sorted; uppercased apple" }])',
+          },
+        ],
+      },
       // Turn 3: read everything back via a registered fn and finish
       {
         emissions: [
@@ -68,24 +81,15 @@ describe('E2E smoke — full agent pipeline', () => {
     ]
     const llm = new Dummy({ responses })
 
-    const chapterCalls: number[] = []
     const agent = await createAgent({
       name: 'smoke',
       llm,
       runtime: evalRuntime(),
       state: { type: 'versioned', storage: 'memory' },
       chapteringTrigger: 1000,
-      chapterHandler: async (events): Promise<readonly Chapter[]> => {
-        chapterCalls.push(events.length)
-        return [
-          {
-            start: 'evt/begin',
-            end: 'evt/snapshot',
-            name: 'turn 1 + 2',
-            message: 'seeded files; sorted; uppercased apple',
-          },
-        ]
-      },
+    })
+    agent.chapterTask({
+      description: 'Summarize completed task ranges into chapters.',
     })
 
     // Register a host fn the agent can call from emission code, plus
@@ -140,12 +144,12 @@ describe('E2E smoke — full agent pipeline', () => {
     expect(types).toContain('chapter')
     expect(types[types.length - 1]).toBe('success')
 
-    // Chaptering fired exactly once (after turn 2's heavy ActionEvent)
-    expect(chapterCalls.length).toBe(1)
-
-    // The Dummy LLM observed every system + events the agent sent
-    expect(llm.callCount).toBe(3)
+    // The Dummy LLM observed every system + events the agent sent.
+    // 3 parent-task calls + 1 chapter-task call = 4.
+    expect(llm.callCount).toBe(4)
     expect(llm.allSystems[0]).toContain('Sort, edit, summarize.')
+    // Chapter task ran with its own primer in the system prompt
+    expect(llm.allSystems.some((s) => s.includes('Summarize completed task ranges'))).toBe(true)
 
     // Streaming worked
     expect(onToken.length).toBeGreaterThan(0)

@@ -10,7 +10,7 @@
  * lives in the host-side persistence APIs, not here.
  */
 
-import type { Staged } from 'kvgit-ts'
+import type { CommitInfo, Staged, Versioned } from 'kvgit-ts'
 import type { VersionedStateBackend } from './backend'
 
 export class KvgitState implements VersionedStateBackend {
@@ -60,5 +60,25 @@ export class KvgitState implements VersionedStateBackend {
       ...(opts.info !== undefined && { info: opts.info as Record<string, unknown> }),
     })
     return result.commit ?? this.#staged.currentCommit
+  }
+
+  /** Pass through to the underlying VersionedKV. Returns commit
+   *  metadata (info dict + parents) at `hash`, or current HEAD if
+   *  omitted. Returns `null` if the hash doesn't exist. */
+  async commitInfo(hash?: string): Promise<CommitInfo | null> {
+    return this.#staged.versioned.commitInfo(hash)
+  }
+
+  /** Walk commit hashes from `hash` (or HEAD) backward through
+   *  the history. Pass through to the underlying VersionedKV. */
+  history(hash?: string, opts: { allParents?: boolean } = {}): AsyncIterable<string> {
+    return this.#staged.versioned.history(hash, opts)
+  }
+
+  /** Open a read-only view at a historical commit. Returns the
+   *  underlying `Versioned`; callers wrap with their own `Staged`
+   *  if they need write semantics. */
+  async checkoutAt(hash: string): Promise<Versioned | null> {
+    return this.#staged.versioned.checkout(hash)
   }
 }

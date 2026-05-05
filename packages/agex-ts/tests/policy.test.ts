@@ -38,8 +38,7 @@ describe('PolicyBuilder — registerTerminal', () => {
     const p = new PolicyBuilder()
     expect(() =>
       p.registerTerminal('beep', {
-        // biome-ignore lint/suspicious/noEmptyBlockStatements: handler not under test
-        handler: async () => {},
+        handler: async () => undefined,
       }),
     ).toThrow(/description is required/)
   })
@@ -56,8 +55,7 @@ describe('PolicyBuilder — registerTerminal', () => {
     const p = new PolicyBuilder()
     p.registerTerminal('beep', {
       description: 'Make a beep.',
-      // biome-ignore lint/suspicious/noEmptyBlockStatements: stub
-      handler: async () => {},
+      handler: async () => undefined,
     })
     expect(p.snapshot().terminals.get('beep')?.description).toBe('Make a beep.')
   })

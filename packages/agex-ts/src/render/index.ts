@@ -46,6 +46,15 @@ export {
 export { renderRegistrations } from './registrations'
 export { buildSystemMessage, type SystemMessageInputs } from './system-message'
 export { buildTaskMessage } from './task-message'
+export {
+  TOOL_TS,
+  TOOL_TERMINAL,
+  TOOL_WRITE_FILE,
+  TOOL_EDIT_FILE,
+  toolSchemas,
+  type ToolSchema,
+  type ToolSchemaOptions,
+} from './tool-schemas'
 
 // ---------------------------------------------------------------------------
 // Neutral content shapes

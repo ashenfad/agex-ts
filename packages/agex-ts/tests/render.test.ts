@@ -3,6 +3,10 @@ import { PolicyBuilder } from '../src/policy'
 import {
   BUILTIN_PRIMER,
   type NeutralTurn,
+  TOOL_EDIT_FILE,
+  TOOL_TERMINAL,
+  TOOL_TS,
+  TOOL_WRITE_FILE,
   buildSystemMessage,
   buildTaskMessage,
   extractJsonSchema,
@@ -11,6 +15,7 @@ import {
   objectPropertyNames,
   renderEvents,
   renderRegistrations,
+  toolSchemas,
 } from '../src/render'
 import type {
   ActionEvent,
@@ -783,5 +788,80 @@ describe('NeutralTurn type', () => {
     } else {
       throw new Error('did not narrow')
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// toolSchemas
+// ---------------------------------------------------------------------------
+
+describe('toolSchemas', () => {
+  function findSchema(name: string, schemas: ReturnType<typeof toolSchemas>) {
+    const s = schemas.find((x) => x.name === name)
+    if (s === undefined) throw new Error(`schema ${name} not found`)
+    return s
+  }
+
+  function getProps(name: string, schemas: ReturnType<typeof toolSchemas>): string[] {
+    const params = findSchema(name, schemas).parameters as {
+      properties?: Record<string, unknown>
+    }
+    return Object.keys(params.properties ?? {})
+  }
+
+  function getRequired(name: string, schemas: ReturnType<typeof toolSchemas>): string[] {
+    const params = findSchema(name, schemas).parameters as { required?: string[] }
+    return params.required ?? []
+  }
+
+  it('returns the four agex action tools in stable order', () => {
+    const schemas = toolSchemas()
+    expect(schemas.map((s) => s.name)).toEqual([
+      TOOL_TS,
+      TOOL_TERMINAL,
+      TOOL_WRITE_FILE,
+      TOOL_EDIT_FILE,
+    ])
+  })
+
+  it('non-native variant keeps the thinking parameter on action tools', () => {
+    const schemas = toolSchemas()
+    expect(getProps(TOOL_TS, schemas)).toContain('thinking')
+    expect(getRequired(TOOL_TS, schemas)).toContain('thinking')
+    expect(getProps(TOOL_TERMINAL, schemas)).toContain('thinking')
+    expect(getRequired(TOOL_TERMINAL, schemas)).toContain('thinking')
+  })
+
+  it('nativeThinking strips thinking from action tools but keeps title + code/commands', () => {
+    const schemas = toolSchemas({ nativeThinking: true })
+    expect(getProps(TOOL_TS, schemas)).not.toContain('thinking')
+    expect(getRequired(TOOL_TS, schemas)).not.toContain('thinking')
+    expect(getProps(TOOL_TS, schemas)).toEqual(expect.arrayContaining(['title', 'code']))
+    expect(getRequired(TOOL_TS, schemas)).toEqual(expect.arrayContaining(['title', 'code']))
+    expect(getProps(TOOL_TERMINAL, schemas)).not.toContain('thinking')
+    expect(getProps(TOOL_TERMINAL, schemas)).toEqual(expect.arrayContaining(['title', 'commands']))
+  })
+
+  it('file tools are identical between native and non-native modes', () => {
+    const plain = toolSchemas()
+    const native = toolSchemas({ nativeThinking: true })
+    expect(findSchema(TOOL_WRITE_FILE, plain)).toEqual(findSchema(TOOL_WRITE_FILE, native))
+    expect(findSchema(TOOL_EDIT_FILE, plain)).toEqual(findSchema(TOOL_EDIT_FILE, native))
+  })
+
+  it('edit_file uses content (not replace) and matchAll (camelCase) to match the renderer', () => {
+    // Tool input keys MUST match what render/index.ts puts into tool_use
+    // input objects, otherwise the model emits a tool call the renderer
+    // can't roundtrip. This pins down the contract.
+    const props = getProps(TOOL_EDIT_FILE, toolSchemas())
+    expect(props).toEqual(expect.arrayContaining(['path', 'search', 'content', 'matchAll']))
+    expect(props).not.toContain('replace')
+    expect(props).not.toContain('match_all')
+  })
+
+  it('write_file declares the mode enum', () => {
+    const write = findSchema(TOOL_WRITE_FILE, toolSchemas())
+    const params = write.parameters as { properties: { mode: { enum: string[] } } }
+    expect(params.properties.mode.enum).toEqual(['write', 'append'])
   })
 })

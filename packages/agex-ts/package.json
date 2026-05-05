@@ -33,10 +33,7 @@
       "import": "./dist/render/index.js"
     }
   },
-  "files": [
-    "dist",
-    "README.md"
-  ],
+  "files": ["dist", "README.md"],
   "scripts": {
     "build": "tsup",
     "test": "vitest run",

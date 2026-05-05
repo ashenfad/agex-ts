@@ -159,7 +159,9 @@ export function renderEvents(events: ReadonlyArray<AgentEvent>): NeutralTurn[] {
   }
 
   function lastEmissionId(): string | null {
-    return toolUseOrder.length > 0 ? (toolUseOrder[toolUseOrder.length - 1] as { id: string }).id : null
+    return toolUseOrder.length > 0
+      ? (toolUseOrder[toolUseOrder.length - 1] as { id: string }).id
+      : null
   }
 
   for (const event of events) {
@@ -180,8 +182,7 @@ export function renderEvents(events: ReadonlyArray<AgentEvent>): NeutralTurn[] {
         // emissionId, or outputs surfaced from a wrapper that didn't
         // stamp). When no tool_use exists at all, hold the parts as
         // plain user content for the next flush.
-        const id =
-          stamped !== undefined && orderIds.has(stamped) ? stamped : lastEmissionId()
+        const id = stamped !== undefined && orderIds.has(stamped) ? stamped : lastEmissionId()
         if (id !== null) {
           const slot = obsByEmission.get(id) ?? []
           slot.push(...event.parts)

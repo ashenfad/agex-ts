@@ -175,11 +175,13 @@ export interface ActionEvent extends EventBase {
   readonly emissions: ReadonlyArray<Emission>
 }
 
+export type ImageFormat = 'png' | 'jpeg' | 'webp'
+
 export type OutputPart =
   | { readonly type: 'text'; readonly text: string }
   | {
       readonly type: 'image'
-      readonly format: 'png' | 'jpeg' | 'webp'
+      readonly format: ImageFormat
       /** Base64-encoded bytes. */
       readonly data: string
       readonly altText?: string
@@ -311,6 +313,10 @@ export interface ExecuteContext {
   readonly fs: VirtualFileSystem
   readonly cache: Cache
   readonly signal: AbortSignal
+  /** The validated task input, exposed to the agent code as the
+   *  `inputs` variable. Stable across every emission of a single
+   *  task call. `undefined` for tasks with no input. */
+  readonly inputs?: unknown
   /** Optional identifier for the source emission, for diagnostics. */
   readonly emissionId?: string
 }
@@ -343,11 +349,19 @@ export interface RuntimeAdapter {
 // ---------------------------------------------------------------------------
 
 export interface LLMRequest {
-  /** System prompt (primer + registered help + skill markdown). */
+  /** Fully assembled system prompt: BUILTIN_PRIMER (or override),
+   *  capabilities or registered resources, skills listing, the
+   *  agent's own primer. Provider sends this as the system field
+   *  of its API request. */
   readonly system: string
-  /** Event log rendered as conversation turns. The provider adapter
-   *  decides how to encode each variant. */
-  readonly events: ReadonlyArray<AgentEvent>
+  /** Conversation turns, pre-rendered into neutral parts by
+   *  `agex-ts/render`. The first turn is always the per-task
+   *  opening user message (description + inputs + expected return);
+   *  subsequent turns come from `renderEvents()` over the event
+   *  log. Provider lowers each part into its wire format
+   *  (Anthropic content blocks, OpenAI tool messages, Gemini
+   *  parts arrays). */
+  readonly turns: ReadonlyArray<import('./render').NeutralTurn>
 }
 
 export interface LLMResponse {

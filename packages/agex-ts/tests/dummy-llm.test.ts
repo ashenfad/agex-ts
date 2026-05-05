@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { Dummy } from '../src/llm/dummy'
+import type { NeutralTurn } from '../src/render'
 import type { Emission, LLMResponse, TokenChunk } from '../src/types'
 
 const success: Emission = { type: 'ts', code: 'taskSuccess(1)' }
@@ -11,10 +12,14 @@ async function collect(stream: AsyncIterable<TokenChunk>): Promise<TokenChunk[]>
   return out
 }
 
+const sampleTurns: NeutralTurn[] = [
+  { role: 'user', content: [{ type: 'text', text: 'Task: do a thing.' }] },
+]
+
 describe('Dummy — defaults', () => {
   it('produces a default success-with-null response', async () => {
     const d = new Dummy()
-    const tokens = await collect(d.complete({ system: 'sys', events: [] }))
+    const tokens = await collect(d.complete({ system: 'sys', turns: sampleTurns }))
     expect(tokens.length).toBe(2) // one emission + final marker
     expect(tokens[0]?.emission?.type).toBe('ts')
   })
@@ -31,9 +36,9 @@ describe('Dummy — scripted cycling', () => {
     const d = new Dummy({
       responses: [r({ type: 'ts', code: 'one' }), r({ type: 'ts', code: 'two' })],
     })
-    const a = await collect(d.complete({ system: '', events: [] }))
-    const b = await collect(d.complete({ system: '', events: [] }))
-    const c = await collect(d.complete({ system: '', events: [] }))
+    const a = await collect(d.complete({ system: '', turns: sampleTurns }))
+    const b = await collect(d.complete({ system: '', turns: sampleTurns }))
+    const c = await collect(d.complete({ system: '', turns: sampleTurns }))
     expect(a[0]?.emission).toMatchObject({ type: 'ts', code: 'one' })
     expect(b[0]?.emission).toMatchObject({ type: 'ts', code: 'two' })
     expect(c[0]?.emission).toMatchObject({ type: 'ts', code: 'one' })
@@ -46,30 +51,28 @@ describe('Dummy — error-as-response', () => {
     const boom = new Error('rate limit')
     const d = new Dummy({ responses: [r(success), boom, r(success)] })
     // Turn 0: ok
-    await collect(d.complete({ system: '', events: [] }))
+    await collect(d.complete({ system: '', turns: sampleTurns }))
     // Turn 1: throws synchronously when the iterable is requested
-    expect(() => d.complete({ system: '', events: [] })).toThrow('rate limit')
-    // callCount still bumped past the failure so the next call advances
+    expect(() => d.complete({ system: '', turns: sampleTurns })).toThrow('rate limit')
     expect(d.callCount).toBe(2)
     // Turn 2: ok again
-    const out = await collect(d.complete({ system: '', events: [] }))
+    const out = await collect(d.complete({ system: '', turns: sampleTurns }))
     expect(out[0]?.emission).toBeDefined()
   })
 })
 
 describe('Dummy — inspection state', () => {
-  it('records every system + events sent', async () => {
+  it('records every system + turns sent', async () => {
     const d = new Dummy()
-    await collect(d.complete({ system: 'sys-1', events: [] }))
-    await collect(
-      d.complete({
-        system: 'sys-2',
-        events: [{ type: 'success', timestamp: 't', agentName: 'a', result: null }],
-      }),
-    )
+    await collect(d.complete({ system: 'sys-1', turns: sampleTurns }))
+    const turns2: NeutralTurn[] = [
+      { role: 'user', content: [{ type: 'text', text: 'second task' }] },
+      { role: 'assistant', content: [{ type: 'text', text: 'an answer' }] },
+    ]
+    await collect(d.complete({ system: 'sys-2', turns: turns2 }))
     expect(d.allSystems).toEqual(['sys-1', 'sys-2'])
-    expect(d.allEvents.length).toBe(2)
-    expect(d.allEvents[1]?.length).toBe(1)
+    expect(d.allTurns.length).toBe(2)
+    expect(d.allTurns[1]?.length).toBe(2)
   })
 })
 
@@ -108,7 +111,7 @@ describe('Dummy — final emission marker', () => {
     const d = new Dummy({
       responses: [{ emissions: [success], inputTokens: 100, outputTokens: 50 }],
     })
-    const tokens = await collect(d.complete({ system: '', events: [] }))
+    const tokens = await collect(d.complete({ system: '', turns: sampleTurns }))
     const last = tokens[tokens.length - 1]
     expect(last?.content).toBe('')
     expect(last?.inputTokens).toBe(100)

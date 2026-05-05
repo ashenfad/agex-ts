@@ -17,6 +17,7 @@
  * package, because it has no provider dep.
  */
 
+import type { NeutralTurn } from '../render'
 import type {
   AgentEvent,
   Emission,
@@ -70,8 +71,10 @@ export class Dummy implements LLMClient {
   /** Every `system` string the agent passed in, in order. */
   allSystems: string[] = []
 
-  /** Every `events` array the agent passed in, in order. */
-  allEvents: AgentEvent[][] = []
+  /** Every `turns` array the agent passed in, in order. The first
+   *  turn is always the per-task user message. Tests inspect
+   *  these to verify what the agent actually saw. */
+  allTurns: NeutralTurn[][] = []
 
   summaryResponse: string | undefined
   summaryError: Error | undefined
@@ -88,7 +91,7 @@ export class Dummy implements LLMClient {
 
   complete(request: LLMRequest, signal?: AbortSignal): AsyncIterable<TokenChunk> {
     this.allSystems.push(request.system)
-    this.allEvents.push([...request.events])
+    this.allTurns.push([...request.turns])
     const item = this.responses[this.callCount % this.responses.length]
     this.callCount++
 

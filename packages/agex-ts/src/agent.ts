@@ -60,6 +60,19 @@ export interface AgentOptions {
    *  registered `agent.chapterTask({ ... })` — without one the
    *  trigger is a no-op. */
   readonly chapteringTrigger?: number
+  /** Replace the agex-ts `BUILTIN_PRIMER` entirely. Use only if
+   *  you really mean to override agex's environment description —
+   *  the agent loses the conventions explanation and best
+   *  practices. Most users want `primer` (their own voice) or
+   *  `capabilitiesPrimer` (curated tools list) instead. */
+  readonly agexPrimerOverride?: string
+  /** Replace the auto-rendered "Registered Resources" section with
+   *  curated prose. Useful when you want to organize tools
+   *  thematically or surface only some of them. The auto-renderer
+   *  still runs against the policy table (so the runtime adapter
+   *  injects everything that's registered) — this only affects
+   *  what the agent SEES in the system prompt. */
+  readonly capabilitiesPrimer?: string
 }
 
 /** Async factory — handles the awaitable parts of state setup. */
@@ -180,6 +193,17 @@ export class Agent {
     return this.#opts.chapteringTrigger
   }
 
+  /** Override for the BUILTIN_PRIMER. Undefined uses the default. */
+  get agexPrimerOverride(): string | undefined {
+    return this.#opts.agexPrimerOverride
+  }
+
+  /** Curated capabilities primer used in place of the auto-rendered
+   *  registrations section. Undefined falls back to auto-rendering. */
+  get capabilitiesPrimer(): string | undefined {
+    return this.#opts.capabilitiesPrimer
+  }
+
   /** Read-only snapshot of the registration policy. */
   policy(): Policy {
     return this.#policy.snapshot()
@@ -256,6 +280,17 @@ export class Agent {
    *  persist across calls within the agent's lifetime. */
   fs(session: string = DEFAULT_SESSION): VirtualFileSystem {
     return this.#vfs.fs(session)
+  }
+
+  /** Framework-internal: rebuild the `/skills/` overlay for `session`
+   *  from the current registered skills. Called by the action loop
+   *  on every task start so newly-registered skills become
+   *  browseable. */
+  refreshSkillsOverlay(session: string = DEFAULT_SESSION): void {
+    // Touch fs(session) first to ensure the session entry exists,
+    // otherwise refresh is a no-op.
+    this.fs(session)
+    this.#vfs.refreshSkillsOverlay(session, this.policy().skills)
   }
 
   /** Framework-internal: rebuild the `/chapters/` overlay for

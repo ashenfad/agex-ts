@@ -144,12 +144,22 @@ describe('E2E smoke — full agent pipeline', () => {
     expect(types).toContain('chapter')
     expect(types[types.length - 1]).toBe('success')
 
-    // The Dummy LLM observed every system + events the agent sent.
+    // The Dummy LLM observed every (system, turns) pair the agent sent.
     // 3 parent-task calls + 1 chapter-task call = 4.
     expect(llm.callCount).toBe(4)
-    expect(llm.allSystems[0]).toContain('Sort, edit, summarize.')
-    // Chapter task ran with its own primer in the system prompt
-    expect(llm.allSystems.some((s) => s.includes('Summarize completed task ranges'))).toBe(true)
+    // System message contains the BUILTIN_PRIMER, not the task
+    // description (that's now in the first user turn).
+    expect(llm.allSystems[0]).toContain('Agex Agent Environment')
+    // The task description lives in the opening user turn.
+    const firstParentTurn = llm.allTurns[0]?.[0]
+    const firstTurnText =
+      firstParentTurn?.content[0]?.type === 'text' ? firstParentTurn.content[0].text : ''
+    expect(firstTurnText).toContain('Sort, edit, summarize.')
+    // Chapter task ran with its own task message
+    const chapterTaskCallText = llm.allTurns
+      .map((t) => (t[0]?.content[0]?.type === 'text' ? t[0].content[0].text : ''))
+      .find((s) => s.includes('Summarize completed task ranges'))
+    expect(chapterTaskCallText).toBeDefined()
 
     // Streaming worked
     expect(onToken.length).toBeGreaterThan(0)
@@ -241,22 +251,28 @@ describe('E2E smoke — full agent pipeline', () => {
     const result = await fn(undefined)
     expect(result).toBe('done')
 
-    // The Dummy captured every (system, events) pair. Turn 3 is the
-    // parent's second LLM call. Its events array should reflect the
-    // compacted log: the original ActionEvent from turn 1 should be
-    // gone, replaced by a ChapterEvent.
-    expect(llm.allEvents.length).toBe(3) // parent t1, chapter t1, parent t2
+    // The Dummy captured every (system, turns) pair. Turn 3 is the
+    // parent's second LLM call. Its rendered turns should reflect
+    // the compacted log: the original heavy ActionEvent is replaced
+    // by a ChapterEvent (which renders as a text part containing
+    // the "📖 Chapter:" hint).
+    expect(llm.allTurns.length).toBe(3) // parent t1, chapter t1, parent t2
 
-    const turn3Events = llm.allEvents[2] ?? []
-    const turn3Types = turn3Events.map((e) => e.type)
-
-    // Parent's original action (the heavy one) — gone from turn 3's view
-    const heavyActions = turn3Events.filter(
-      (e) => e.type === 'action' && (e.inputTokens ?? 0) === 5000,
+    const turn3 = llm.allTurns[2] ?? []
+    // The chapter rendering surfaces a text part with the slug hint
+    const chapterTextSeen = turn3.some((t) =>
+      t.content.some((p) => p.type === 'text' && p.text.includes('📖 Chapter')),
     )
-    expect(heavyActions.length).toBe(0)
-    // Chapter event is in its place
-    expect(turn3Types).toContain('chapter')
+    expect(chapterTextSeen).toBe(true)
+    // The original heavy ts emission shouldn't appear in turn 3's
+    // turns (its tool_use was rolled into the chapter)
+    const heavyTsToolUses = turn3.flatMap((t) =>
+      t.content.filter(
+        (p) =>
+          p.type === 'toolUse' && p.toolName === 'ts_action' && p.input.code === '/* think hard */',
+      ),
+    )
+    expect(heavyTsToolUses.length).toBe(0)
 
     // Parent's final iter() over its log shows the same compacted shape:
     // taskStart, chapter, success (the success comes after turn 3 lands).

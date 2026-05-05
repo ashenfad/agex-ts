@@ -7,6 +7,7 @@ export default defineConfig({
     'src/state/index.ts',
     'src/llm/dummy.ts',
     'src/runtime/eval.ts',
+    'src/render/index.ts',
   ],
   format: ['esm'],
   dts: true,

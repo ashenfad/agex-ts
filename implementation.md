@@ -598,15 +598,39 @@ Major shapes (mirror `design.md` §4.5, §4.6, §5, §8.3, §9.2):
   full unsummarized history; only the *primer rendering* uses the
   chapter summary.
 
-- **Live host instances cannot cross the worker boundary.**
-  `agent.namespace(instance, ...)` accepts live objects (database
-  handles, file handles), but those don't structured-clone, so they
-  can't be sent into a Web Worker or `worker_threads`. agex-py
-  raises `ValueError` if `host` is non-Local and a live instance is
-  registered; the TS equivalent must check the runtime's transport
-  capabilities at registration time and refuse asymmetric
-  combinations early. Functions and classes serialized as policy
-  records are fine; instances are not.
+- **Live host instances stay on the host; the worker accesses them
+  through an RPC proxy.** A live instance (DB connection, open file
+  handle, socket) can't structured-clone into a Web Worker, but the
+  same is already true of the `fs` and `cache` host APIs — the
+  runtime adapter handles them by exposing a host-side proxy whose
+  method calls become postMessage round-trips. `agent.namespace
+  (instance, ...)` works the same way: the instance stays where it
+  was registered, and the agent's `import { db } from 'db'` resolves
+  to a Proxy in the worker that forwards method calls. Consequences
+  agents and authors need to know:
+  - **All proxied methods are async**, even ones that were
+    synchronous on the host. Acceptable because TS is async-first;
+    document the pattern in the registration help.
+  - **Per-call postMessage overhead.** Microseconds in-browser —
+    fine for studio-style work — but the agent should not call the
+    proxy in a tight inner loop.
+  - **Method arguments and return values must structured-clone.**
+    The instance itself doesn't cross; what crosses per call is the
+    args (host-bound) and the return value (worker-bound). Same
+    `DataCloneError` surface as `fs` / `cache`.
+  - **Iterators and async iterators need explicit support** in the
+    proxy layer (postMessage doesn't stream natively); the runtime
+    adapter wraps an `AsyncIterable` return into a chunked-message
+    protocol.
+  - **The fail-loud case is narrow**: a live instance the agent
+    tries to *return* through `taskSuccess(...)` hits structured-
+    clone on the way out. Method-call usage is fine; only escaping
+    the worker as a value fails.
+
+  Same-realm execution (no worker boundary, sync method calls) is
+  expressible as an alternative runtime adapter — see `design.md`
+  §8.4 — but `@agex-ts/runtime-worker` is the default and what the
+  studio path targets.
 
 - **VFS modules persist as agent-authored helpers; the cache does
   not.** Agents mutate code in `helpers/*.ts` and import from there
@@ -816,10 +840,13 @@ defined by agex-ts core. Per `design.md` §8.
     it terminates the worker; the next emission gets a fresh one.
 - **Worker message protocol** — small discriminated union over
   `postMessage`: `{ type: 'execute'; code; namespace; signalKey }`,
-  `{ type: 'cancel' }`, `{ type: 'fs-call'; ... }` and
-  `{ type: 'cache-call'; ... }` (RPC for runtime → host calls),
-  `{ type: 'output'; ... }`, `{ type: 'result'; ... }`. Every
-  payload must structured-clone.
+  `{ type: 'cancel' }`, `{ type: 'fs-call'; ... }`,
+  `{ type: 'cache-call'; ... }`, `{ type: 'namespace-call';
+  namespace; member; args; callId }` (RPC for runtime → host calls
+  on registered live instances), `{ type: 'namespace-yield';
+  callId; value; done }` (chunked iterator returns from the host
+  side), `{ type: 'output'; ... }`, `{ type: 'result'; ... }`.
+  Every payload must structured-clone.
 - **Module resolution policy** — bare imports route to the policy
   table (resolved by name); relative imports route to the VFS;
   builtins (`crypto`, `text-encoding`, etc. on a small allowlist)
@@ -878,11 +905,31 @@ defined by agex-ts core. Per `design.md` §8.
   reach for a heavier sandbox (isolated-vm on Node, SES Compartments
   in the browser — both deferred per `design.md` §11).
 
-- **Live host instances cannot be passed in via the namespace.**
-  The agent-side `agent.namespace(instance, ...)` registration must
-  fail loud at registration time when paired with `workerRuntime`,
-  not at first execute. Surface `LiveInstanceUnsupportedError` with
-  the offending name.
+- **Live host instances are exposed via host-side proxies, not
+  serialized.** The same RPC pattern that already carries `fs` and
+  `cache` calls back across the worker boundary handles
+  `agent.namespace(instance, ...)`. The instance stays where it
+  was registered; the worker sees a Proxy whose method invocations
+  postMessage the call and await the response. Implementation
+  notes specific to the runtime:
+  - The proxy is built from the policy's per-member `configure`
+    table — only `include`-allowed methods are reachable, and the
+    proxy's `get` trap raises `MemberNotAllowedError` for the
+    rest. Don't expose unknown members.
+  - All methods on the proxy return `Promise<T>` regardless of the
+    host method's actual return type. Document this in the
+    namespace's auto-generated primer entry so the agent writes
+    `await db.query(...)` instead of bare `db.query(...)`.
+  - Method arguments are structured-cloned host-bound; return
+    values are structured-cloned worker-bound. Surface
+    `DataCloneError` with the offending parameter name.
+  - For methods that return an `AsyncIterable`, the proxy uses a
+    chunked-message protocol: each `yield` is its own postMessage,
+    and the worker-side iterator awaits the next chunk. Test with
+    a streaming registration (e.g. a database cursor).
+  - Synchronous methods on the live instance are *called*
+    synchronously on the host side of the bridge; only the
+    worker-side wrapper is async. No re-entrancy issue.
 
 **Verification.**
 
@@ -920,6 +967,17 @@ defined by agex-ts core. Per `design.md` §8.
   via `cache.set(...)` are visible to the next `ts` emission via
   `cache.get(...)` after the agent loop has staged + committed the
   intervening turn.
+
+- **Live-instance namespace proxy**: register a host-side instance
+  with a synchronous method (`add(a, b) => a + b`), an async method
+  (`fetchUser(id) => Promise<User>`), and an async-iterable method
+  (`stream() => AsyncIterable<Row>`). A `ts` emission imports the
+  namespace, awaits each variant, and confirms (a) all calls work
+  through the worker boundary, (b) the synchronous host method is
+  await-able from the worker side, (c) the async-iterable
+  round-trips chunk-by-chunk via `namespace-yield`, and (d)
+  unregistered members raise `MemberNotAllowedError` rather than
+  silently returning `undefined`.
 
 ---
 

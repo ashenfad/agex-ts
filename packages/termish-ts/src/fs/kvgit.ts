@@ -44,7 +44,10 @@ interface FileRecord {
 const enc = new TextEncoder()
 const dec = new TextDecoder()
 
-export const fileRecordEncoder: Encoder<FileRecord> = (rec) => {
+/** Typed as `Encoder` (value: unknown) so it plugs into `Staged`'s
+ *  constructor without a generic-variance cast at call sites. */
+export const fileRecordEncoder: Encoder = (value) => {
+  const rec = value as FileRecord
   const out = new Uint8Array(HEADER_LEN + rec.content.byteLength)
   out[0] = rec.isDir ? TYPE_DIR : TYPE_FILE
   const c = enc.encode(rec.createdAt.padEnd(ISO_LEN, ' ').slice(0, ISO_LEN))
@@ -55,7 +58,7 @@ export const fileRecordEncoder: Encoder<FileRecord> = (rec) => {
   return out
 }
 
-export const fileRecordDecoder: Decoder<FileRecord> = (bytes) => {
+export const fileRecordDecoder: Decoder = (bytes) => {
   if (bytes.byteLength < HEADER_LEN) {
     throw new Error('KvgitFS: record too short')
   }

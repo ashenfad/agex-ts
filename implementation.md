@@ -467,6 +467,11 @@ dependency.
   `state.checkout()`).
 - `RuntimeAdapter` contract (`design.md` §8.3).
 - `LLMClient` contract (`design.md` §9.2).
+- **`Dummy` LLM client** — first-class shipped test double, ports
+  agex-py's `agex/llm/dummy_client.py`. Lives in core (no provider
+  dep), exported from `agex-ts/llm-dummy`. Used by agex-ts's own
+  tests *and* by downstream consumers writing tests for their own
+  agents without spending tokens.
 - Chaptering machinery (`design.md` §6.7).
 - `viewImage(...)` built-in helper for image OutputEvents.
 - *Not in v1*: multi-agent, setup parameter, agent-side LLM access,
@@ -534,6 +539,26 @@ Major shapes (mirror `design.md` §4.5, §4.6, §5, §8.3, §9.2):
   helper used by chaptering. `LLMRequest` carries `system`, `events`,
   `tools` (normalized schemas), and `cacheBoundaries` (the markers a
   provider adapter places into its wire format).
+- **`Dummy` LLM client** — concrete `LLMClient` implementation that
+  cycles through a scripted sequence of `LLMResponse | Error` items.
+  Constructor: `new Dummy({ responses?, summaryResponse?, summaryError? })`.
+  Surface:
+  - `responses: Array<LLMResponse | Error>` — cycled by
+    `callCount % responses.length`. An `Error` entry is thrown on
+    that turn (simulates provider failure mid-task).
+  - Inspection state: `callCount: number`, `allSystems: string[]`,
+    `allEvents: AgentEvent[][]`, `allRenderedMessages: unknown[][]`.
+    Tests assert against these to verify what the agent sent.
+  - Runs the same event-rendering pass real provider clients use,
+    so any image-export or serialization bug surfaces in tests
+    before it hits a real provider.
+  - `summarize()` returns `summaryResponse` (default: a
+    deterministic stringification of inputs) or throws
+    `summaryError` if set — lets chaptering tests cover both paths.
+  - `dumpConfig()` / `Dummy.fromConfig(cfg)` serialize the scripted
+    response list (Errors are stripped, since they don't
+    structured-clone) so a `StateConfig`-tracked agent reconstitutes
+    the same dummy on another process. Mirrors agex-py exactly.
 - **`Policy`** — registration table built incrementally by `agent.fn`
   / `.cls` / `.namespace` / `.skill` / `.terminal`. Carries
   `RegisteredFn`, `RegisteredCls`, `RegisteredNs`, `RegisteredSkill`,
@@ -712,10 +737,22 @@ Major shapes (mirror `design.md` §4.5, §4.6, §5, §8.3, §9.2):
   rendered event log presents the same signatures byte-for-byte.
   Regression guard against accidental re-encoding.
 
+- **`Dummy` LLM behavior.** A scripted response list cycles
+  correctly across multiple turns (`callCount % len`); inserting an
+  `Error` mid-list throws on that turn and surfaces as a
+  `FailEvent` with the original cause; `allSystems` / `allEvents`
+  capture every input the agent sent; `dumpConfig()` →
+  `fromConfig()` produces an equivalent client (modulo `Error`
+  entries, which are documented to drop); `summarize()` honors the
+  configured response or throws the configured error. Plus a
+  rendering-pass test: registering an unsupported image type in an
+  emission triggers the same warning string the real clients
+  produce, surfaced via `allRenderedMessages`.
+
 - **Cross-package smoke.** A scripted demo constructs an Agent with
   a `MemoryFS`-backed kvgit `VersionedKV`, registers a `helloWorld`
   namespace and a custom `agent.terminal` command, runs a one-turn
-  task with a stub LLM that emits one `ts` and one `terminal`
+  task driven by `Dummy` emitting one `ts` and one `terminal`
   action, and asserts the resulting event log + cache + VFS state.
 
 **Build order within agex-ts core.**
@@ -758,8 +795,16 @@ is wired.
 10. **Stub `RuntimeAdapter`** — pure-JS evaluator that runs code in
     the same realm with policy-injected names; skips sandboxing
     entirely. Used only in tests; never shipped.
-11. **Stub `LLMClient`** — replays a scripted sequence of token
-    chunks. Used only in tests.
+11. **`Dummy` LLM client** — first-class shipped artifact (sub-path
+    export `agex-ts/llm-dummy`). Cycles through a scripted
+    `Array<LLMResponse | Error>`, exposes inspection state
+    (`callCount`, `allSystems`, `allEvents`, `allRenderedMessages`),
+    runs the same event-rendering pass as real providers, supports
+    configurable `summarize()` for chaptering tests, and round-trips
+    through `dumpConfig()` / `fromConfig()` so a reconstituted
+    `StateConfig` produces an equivalent client. Used by agex-ts's
+    own integration tests *and* shipped to downstream consumers
+    writing tests for their own agents.
 12. **Task lifecycle** — `agent.task({ description, input, output })`
     factory returning a `TaskFn<I, O>`. Action loop:
     `LLMClient.complete()` → emissions → `RuntimeAdapter.execute()`
@@ -1009,6 +1054,14 @@ dependency. Per `design.md` §9.
 - **Each provider's official TS SDK** — `@anthropic-ai/sdk`,
   `openai`, `@google/generative-ai`. Each exposes streaming and
   tool-use primitives we wrap thinly.
+
+**Note on test doubles.** No provider package ships its own dummy
+or mock client. The `Dummy` LLM lives in agex-ts core
+(`agex-ts/llm-dummy`) because it's provider-agnostic and pulling a
+real provider SDK in just to satisfy the `LLMClient` interface is
+overkill. Provider packages' own tests use canned SSE fixtures (see
+Verification below) to exercise the SDK-specific stream-parsing
+path; the `Dummy` covers the agent-facing `LLMClient` shape.
 
 **v1 scope per provider.**
 

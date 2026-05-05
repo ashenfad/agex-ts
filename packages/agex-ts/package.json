@@ -23,6 +23,10 @@
     "./llm-dummy": {
       "types": "./dist/llm/dummy.d.ts",
       "import": "./dist/llm/dummy.js"
+    },
+    "./runtime-eval": {
+      "types": "./dist/runtime/eval.d.ts",
+      "import": "./dist/runtime/eval.js"
     }
   },
   "files": ["dist", "README.md"],

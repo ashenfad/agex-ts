@@ -30,6 +30,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Build first so cross-package type imports resolve via the
+      # `dist/*.d.ts` paths declared in each package's `exports` map
+      # (e.g. `termish-ts` importing `kvgit-ts`).
+      - name: Build
+        run: pnpm build
+
       - name: Lint
         run: pnpm lint
 
@@ -38,9 +44,6 @@ jobs:
 
       - name: Test (Node + fake-indexeddb)
         run: pnpm test
-
-      - name: Build
-        run: pnpm build
 
   browser:
     name: Browser tests (real IndexedDB)

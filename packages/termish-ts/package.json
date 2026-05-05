@@ -1,0 +1,49 @@
+{
+  "name": "termish-ts",
+  "version": "0.0.1",
+  "description": "Pure-TypeScript shell parser + builtins over an async FileSystem. TypeScript port of agex-py's termish (minus jq).",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./fs/memory": {
+      "types": "./dist/fs/memory.d.ts",
+      "import": "./dist/fs/memory.js"
+    },
+    "./fs/node": {
+      "types": "./dist/fs/node.d.ts",
+      "import": "./dist/fs/node.js"
+    },
+    "./fs/kvgit": {
+      "types": "./dist/fs/kvgit.d.ts",
+      "import": "./dist/fs/kvgit.js"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "kvgit-ts": "workspace:*"
+  },
+  "peerDependenciesMeta": {
+    "kvgit-ts": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "kvgit-ts": "workspace:*",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

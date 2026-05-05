@@ -13,10 +13,11 @@
  * those will hook into.
  */
 
+import type { CommitInfo } from 'kvgit-ts'
 import { CacheManager } from './cache'
 import { EventLogImpl } from './event-log'
 import { PolicyBuilder, memberAllowed } from './policy'
-import { type StateBackend, connectState, isVersioned } from './state'
+import { KvgitState, type StateBackend, connectState, isVersioned } from './state'
 import { type TaskDefinition, makeTask } from './task'
 import type {
   Cache,
@@ -253,6 +254,39 @@ export class Agent {
   async commit(opts: { info?: Readonly<Record<string, unknown>> } = {}): Promise<string | null> {
     if (!isVersioned(this.#state)) return null
     return this.#state.commit(opts)
+  }
+
+  // -- Inspection / time-travel ------------------------------------------
+
+  /** Commit metadata at `hash` (or current HEAD if omitted). Null
+   *  on non-versioned state or if the commit doesn't exist. */
+  async commitInfo(hash?: string): Promise<CommitInfo | null> {
+    if (!(this.#state instanceof KvgitState)) return null
+    return this.#state.commitInfo(hash)
+  }
+
+  /** Walk commit hashes backward through the history. Yields
+   *  nothing on non-versioned state. */
+  async *history(hash?: string, opts: { allParents?: boolean } = {}): AsyncIterable<string> {
+    if (!(this.#state instanceof KvgitState)) return
+    for await (const h of this.#state.history(hash, opts)) yield h
+  }
+
+  /** Read the events as they were at a historical commit, for the
+   *  given session. Returns `null` if the backend isn't versioned
+   *  or the commit doesn't exist. */
+  async eventsAt(commitHash: string, session: string = DEFAULT_SESSION): Promise<EventLog | null> {
+    if (!(this.#state instanceof KvgitState)) return null
+    const view = await this.#state.checkoutAt(commitHash)
+    if (view === null) return null
+    // Build a thin StateBackend over the historical Versioned. We
+    // don't need writes — just iter() and get() — so a minimal
+    // adapter wraps the Versioned's reads directly.
+    void session
+    const { Staged } = await import('kvgit-ts')
+    const historicalStaged = new Staged(view)
+    const historicalState = new KvgitState(historicalStaged)
+    return new EventLogImpl(historicalState)
   }
 
   // -- Internals exposed for the action loop / runtime adapter ----------

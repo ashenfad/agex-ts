@@ -44,9 +44,8 @@ describe('connectState — versioned/memory', () => {
 
 describe('connectState — errors', () => {
   it('rejects sqlite without a path', async () => {
-    await expect(
-      // @ts-expect-error — intentionally missing path
-      connectState({ type: 'versioned', storage: 'sqlite' }),
-    ).rejects.toThrow(/requires a `path`/)
+    await expect(connectState({ type: 'versioned', storage: 'sqlite' })).rejects.toThrow(
+      /requires a `path`/,
+    )
   })
 })

@@ -20,3 +20,11 @@ export {
   type ResolveMergeOptions,
 } from './versioned/merge'
 export { diffKeysets, walkHistory, type ParentLoader } from './versioned/helpers'
+export {
+  Staged,
+  jsonDecoder,
+  jsonEncoder,
+  type StagedCommitOptions,
+  type StagedOptions,
+} from './staged'
+export { Namespaced, type NamespaceableStore } from './namespaced'

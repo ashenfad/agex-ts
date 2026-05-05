@@ -2,6 +2,7 @@ export type { Command, Operator, Pipeline, Redirect, RedirectType, Script } from
 export type { CommandContext, CommandHandler, CommandResult } from './context'
 export { ParseError, TerminalError } from './errors'
 export type { FileInfo, FileMetadata, FileSystem } from './fs/protocol'
+export { compileGlob, glob, globMatch, hasGlobChars } from './glob'
 export { toScript } from './parser'
 export {
   maskQuotes,

@@ -421,20 +421,13 @@ function processContent(
         const regex = cmd.pattern as RegExp
         const repl = cmd.replacement ?? ''
         let numSubs = 0
-        // Track substitution count for the `p` flag.
-        if (flags.includes('g')) {
-          // Use replaceAll-style with a callback that increments; the
-          // regex was compiled with the `g` flag for this case.
-          lineContent = lineContent.replace(regex, (match, ...rest) => {
-            numSubs++
-            return applyReplacement(repl, match, rest)
-          })
-        } else {
-          lineContent = lineContent.replace(regex, (match, ...rest) => {
-            numSubs++
-            return applyReplacement(repl, match, rest)
-          })
-        }
+        // The regex was compiled with the `g` flag in `parseSubstitution`
+        // when `g` was requested, so a single `replace` call covers both
+        // first-match and global cases.
+        lineContent = lineContent.replace(regex, (match, ...rest) => {
+          numSubs++
+          return applyReplacement(repl, match, rest)
+        })
         if (numSubs > 0 && flags.includes('p')) {
           outputLines.push(`${lineContent}\n`)
         }

@@ -3,6 +3,7 @@ export type { CommandContext, CommandHandler, CommandResult } from './context'
 export { ParseError, TerminalError } from './errors'
 export type { FileInfo, FileMetadata, FileSystem } from './fs/protocol'
 export { compileGlob, glob, globMatch, hasGlobChars } from './glob'
+export { execute, executeScript, type ExecuteOptions } from './interpreter'
 export { toScript } from './parser'
 export {
   maskQuotes,

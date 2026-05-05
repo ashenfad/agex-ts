@@ -387,12 +387,6 @@ export interface LLMClient {
    *  them. The agent loop forwards these to `onToken` and assembles
    *  full `Emission`s from `done` boundaries. */
   complete(request: LLMRequest, signal?: AbortSignal): AsyncIterable<TokenChunk>
-  /** Non-streaming summarization endpoint used by chaptering. */
-  summarize(
-    system: string,
-    content: string | ReadonlyArray<AgentEvent>,
-    signal?: AbortSignal,
-  ): Promise<string>
   /** Serialize for transport (e.g. when state-config carries the LLM
    *  shape across a worker boundary). */
   dumpConfig(): LLMConfig

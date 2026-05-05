@@ -18,27 +18,13 @@
  */
 
 import type { NeutralTurn } from '../render'
-import type {
-  AgentEvent,
-  Emission,
-  LLMClient,
-  LLMConfig,
-  LLMRequest,
-  LLMResponse,
-  TokenChunk,
-} from '../types'
+import type { Emission, LLMClient, LLMConfig, LLMRequest, LLMResponse, TokenChunk } from '../types'
 
 export interface DummyOptions {
   /** Scripted responses cycled by `callCount % len`. An `Error` entry
    *  is thrown on that turn. Defaults to a single one-emission
    *  response that just calls `taskSuccess(null)`. */
   readonly responses?: ReadonlyArray<LLMResponse | Error>
-  /** Static value to return from `summarize()`. If omitted, the
-   *  default is a deterministic stringification of the inputs. */
-  readonly summaryResponse?: string
-  /** Error to throw from `summarize()`. Takes precedence over
-   *  `summaryResponse` when both are set. */
-  readonly summaryError?: Error
   /** Surfaced via `dumpConfig()`. */
   readonly model?: string
   /** Surfaced via `dumpConfig()`. Default `60`. */
@@ -76,15 +62,10 @@ export class Dummy implements LLMClient {
    *  these to verify what the agent actually saw. */
   allTurns: NeutralTurn[][] = []
 
-  summaryResponse: string | undefined
-  summaryError: Error | undefined
-
   constructor(opts: DummyOptions = {}) {
     this.model = opts.model ?? 'dummy'
     this.timeoutSeconds = opts.timeoutSeconds ?? 60
     this.responses = opts.responses ?? DEFAULT_RESPONSES
-    this.summaryResponse = opts.summaryResponse
-    this.summaryError = opts.summaryError
   }
 
   // ---------- LLMClient surface ----------
@@ -98,17 +79,6 @@ export class Dummy implements LLMClient {
     if (item instanceof Error) throw item
 
     return emissionsToTokens(item as LLMResponse, signal)
-  }
-
-  async summarize(
-    system: string,
-    content: string | ReadonlyArray<AgentEvent>,
-    _signal?: AbortSignal,
-  ): Promise<string> {
-    if (this.summaryError !== undefined) throw this.summaryError
-    if (this.summaryResponse !== undefined) return this.summaryResponse
-    const flat = typeof content === 'string' ? content : `${content.length} events`
-    return `${system} ${flat}`.trim() || 'dummy'
   }
 
   dumpConfig(): LLMConfig {

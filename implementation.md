@@ -254,7 +254,7 @@ the implementations and re-export through `src/index.ts`.
 ### `termish-ts`
 
 **Purpose.** Shell parser + builtin commands operating over an
-`fs`-shaped surface. Powers agex-ts's `terminal` emissions
+async `FileSystem` interface. Powers agex-ts's `terminal` emissions
 (`design.md` §4.2). Custom commands plug in via `agent.terminal` —
 agex-ts core provides that hook on top of termish-ts's lower-level
 registration mechanism.
@@ -265,8 +265,8 @@ registration mechanism.
   reference. Shell parser (pipelines, redirects, semicolons,
   quoting, line continuation), the bundled builtins (`ls`, `cat`,
   `grep`, `find`, `sed`, `tr`, `wc`, `sort`, `uniq`, `cut`, `tar`,
-  `gzip`, etc.), the `CommandContext` pattern. Skip the `jq` engine
-  — explicitly out of v1 scope.
+  `gzip`, `diff`, `xargs`, etc.), the `CommandContext` pattern.
+  Skip the `jq` engine — deferred per `design.md` §11.
 - **agex-studio's esbuild terminal command** —
   `agex-studio/public/python/agent_modules.py` `_register_esbuild` —
   concrete example of a complex custom command (esbuild-wasm
@@ -274,34 +274,148 @@ registration mechanism.
   consumer building rich custom commands on top of `agent.terminal`.
 - **Existing TS shell tooling** worth surveying for sub-problems:
   `shell-quote` (npm, argument tokenization), `mvdan/sh` (Go, but
-  the AST shape is informative). Don't depend on these; survey to
-  avoid reinventing solved primitives.
+  the AST shape is informative). Don't depend on these for parser
+  work; survey to avoid reinventing solved primitives.
 
 **v1 scope.**
 
-- Shell parser with the same surface as agex-py's termish (pipes,
-  redirects `>`, `>>`, `<`, semicolons, quoted strings, line
-  continuation).
-- Builtins matching agex-py's set **except `jq`** (deferred per
-  `design.md` §11).
-- `FileSystem`-shaped surface — works against Node `fs.promises`,
-  `memfs`, or any fs-shaped library. No custom protocol invented;
-  Node's fs is the convergent seam.
-- Custom command registration mechanism (the underlying hook
-  agex-ts core's `agent.terminal` builds on).
+In:
+- Shell parser with full termish-py surface: pipes (`|`), redirects
+  (`<`, `>`, `>>`), pipeline operators (`;`, `&&`, `||`), single +
+  double quoting, line continuation, fd-1/2 stderr discard.
+- Async interpreter with `AbortSignal` support (agex's task loop is
+  cancellable; long-running `find` / `grep` should bail at iteration
+  boundaries).
+- **Full builtin parity with termish-py minus `jq`** —
+  ~30 commands across filesystem (`pwd`, `cd`, `ls`, `mkdir`,
+  `touch`, `cp`, `mv`, `rm`, `basename`, `dirname`), I/O (`echo`,
+  `cat`, `head`, `tail`, `tee`), search (`grep`, `find`),
+  text (`wc`, `sort`, `uniq`, `cut`, `tr`, `sed`), `diff`,
+  `xargs`, archive (`tar`, `gzip`, `gunzip`, `zip`, `unzip`).
+- Own `FileSystem` interface (~12 async methods + cwd state). The
+  in-memory file metadata an interactive shell needs (`stat()` size
+  + mtime) doesn't exist on `node:fs/promises` cleanly, and the
+  shell needs cwd state which `fs.promises` lacks — so we define
+  our own protocol and ship adapters.
+- **Three FS adapters** in v1:
+  - `MemoryFS` — in-process, for tests + ephemeral use
+  - `NodeFS` — wraps `node:fs/promises` + tracks cwd
+  - `KvgitFS` — backed by a `Staged<Uint8Array>` from `kvgit-ts`,
+    so agent shell sessions get versioning / branching / merge for
+    free. Sub-path export `termish-ts/fs/kvgit`; `kvgit-ts` is a
+    peer dependency. Synthesizes `stat()` from value byte length;
+    real `MetaEntry` exposure on `Staged` can come later.
+- Standalone `glob()` helper (`*`, `?`, `[abc]`, `**`) over the
+  `FileSystem` listing primitives — backends don't need to
+  implement glob themselves.
+- Custom command registration mechanism (`CommandContext` +
+  injected commands map, with injected names overriding builtins).
 
-**Concrete contracts.** `[TBD]` — formal TypeScript signatures for
-`TerminalContext`, `CommandResult`, `CommandHandler`, the parser's
-AST shape.
+Out (deferred):
+- `jq` engine — per `design.md` §11. Agents working with JSON in
+  `terminal` emissions can use registered helpers or `ts`
+  emissions with `JSON.parse` plus lodash/object navigation.
 
-**Pitfalls and lessons from agex-py.** `[TBD]` — expect notes on
-the parser's quoting rules, pipe semantics under cancellation, and
-the bundled-builtins-vs-agent-overrides priority (user registrations
-override builtins).
+**String pipelines + binary archive constraint.** Stdin / stdout
+between pipeline stages are `string`s (matches termish-py, simplest
+mental model, covers all text builtins). Archive commands that
+would write binary to a string pipeline (`tar -c` with no `-f`,
+`gzip -c`, etc.) raise a meaningful `TerminalError` directing the
+agent to use a file (`-f file` or `> redirect`). Archives operate
+on FS files for round-tripping; pipeline binary streaming is out of
+scope. (Same constraint as termish-py.)
 
-**Verification.** `[TBD]` — at minimum: parser fixture tests for
-the shell-grammar edge cases, builtin behavior tests against an
-in-memory fs, pipeline correctness with redirects.
+**Cross-cutting decisions.**
+
+| Decision | Choice |
+|---|---|
+| Async surface | Async end-to-end. FS calls are async; builtins are async; pipeline executor awaits each stage. |
+| Pipeline data type | `string` between stages; binary handled at FS boundaries (read/write bytes, in-memory text). |
+| Cancellation | `AbortSignal` on `CommandContext` from v1. Loop-heavy builtins (grep, find, xargs) check at iteration boundaries. |
+| Globbing | Standalone helper over FS listing primitives. Backends do not implement `glob()`. |
+| Quote masking | Hand-port from termish-py's `quote_masker.py` — preserves quoted wildcards through tokenization. |
+| Tokenization | Hand-rolled (no JS equivalent of Python's `shlex`). Same token vocabulary. |
+| Sub-path exports | Yes — `termish-ts/fs/memory`, `/fs/node`, `/fs/kvgit` so unused adapters tree-shake. |
+| Archive deps | `tar-stream` (tar I/O), `fflate` (zip + DEFLATE) as runtime deps. gzip uses Node `node:zlib` and browser `DecompressionStream` — no extra dep. |
+
+**Concrete contracts.** Live in `packages/termish-ts/src/types.ts`
+(or the relevant module for each shape) — that file is the
+canonical source. Major shapes:
+
+- `Script`, `Pipeline`, `Command`, `Redirect` (AST)
+- `CommandContext` (args, stdin, stdout, fs, env, signal),
+  `CommandResult` (exitCode, stderr)
+- `CommandHandler` (`(ctx) => Promise<CommandResult | void>`)
+- `FileSystem` interface (~12 async methods), `FileMetadata`,
+  `FileInfo`
+- Errors: `TerminalError`, `ParseError`
+
+**Pitfalls and lessons from agex-py.**
+
+- **`shlex.shlex(posix=True, punctuation_chars=True)`** is doing
+  real work. The TS hand-rolled tokenizer needs to handle:
+  - Single + double quoting with escape inside doubles
+  - Punctuation as separate tokens (`ls|grep` → `[ls, |, grep]`)
+  - Word characters: alphanumeric + `:@,%+!^` (so `user@host`
+    stays one token)
+  - Newlines as separators (not whitespace)
+- **Quote masker preserves quoted wildcards.** Without it, `'*'`
+  gets unquoted and globbed; with it, the literal `*` survives.
+  This is how `grep '*' file` works correctly.
+- **Injected commands override builtins** — the priority isn't
+  "fall back to builtin"; it's "user-registered name *replaces*
+  the builtin of the same name."
+- **String pipelines + binary archives**: write a clear error
+  message when an archive command would emit binary to a string
+  pipeline. Agents need to know how to adapt (use `-f file` or
+  redirect to a file).
+- **`AbortSignal` discipline**: builtins that loop check at the
+  top of each iteration. Failure to check leads to runaway commands
+  the host can't cancel.
+- **`KvgitFS`'s file metadata gap**: `Staged` doesn't expose
+  `MetaEntry` (size + createdAt). v1 synthesizes `stat()` from
+  `value.byteLength` and uses an unknown-mtime sentinel. If a
+  consumer needs real meta, extend kvgit-ts's `Staged` to expose
+  `KeysetEntry` directly.
+
+**Verification.**
+
+- Parser: fixture tests for shell-grammar edge cases (nested
+  quotes, escaped quotes, line continuation, `2>` discard,
+  trailing pipe error, etc.).
+- Interpreter: pipeline correctness with redirects, exit-code
+  propagation through `&&` / `||`, `AbortSignal` cancellation at
+  iteration boundaries, injected-command override.
+- Builtins: per-command behavior tests against `MemoryFS`. The
+  archive commands test the file round-trip (`tar -czf` then
+  `tar -tzf`) plus the binary-to-pipeline error.
+- FS adapters: `MemoryFS` and `KvgitFS` exercised by the same
+  conformance suite (when extracted); `NodeFS` tested against
+  a temp directory.
+- End-to-end: a story-shaped flow exercising parser →
+  interpreter → builtins → MemoryFS, plus `KvgitFS` with branching.
+
+**Build order within termish-ts.**
+
+1. Skeleton: package.json, tsconfig, vitest, tsup.
+2. AST + errors + `CommandContext`.
+3. Parser: tokenizer + quote masker + AST builder.
+4. `FileSystem` protocol + `MemoryFS` + standalone `glob` helper.
+5. Interpreter core (pipeline executor, redirects, injected
+   commands, `AbortSignal`) — with `echo` + `cat` only as
+   throwaway builtins for the early end-to-end signal.
+6. Filesystem builtins (10).
+7. I/O builtins (5).
+8. Text builtins (5).
+9. Search builtins (`grep`, `find` — full flag coverage).
+10. `diff`.
+11. `sed` (full).
+12. `xargs`.
+13. Archive (`tar` via `tar-stream`, `gzip`/`gunzip` native, `zip`/`unzip` via `fflate`).
+14. `NodeFS` adapter.
+15. `KvgitFS` adapter (sub-path export, `kvgit-ts` peer dep).
+16. End-to-end smoke.
+17. CI (Node-only — no browser-specific behavior).
 
 ---
 

@@ -20,10 +20,6 @@
       "types": "./dist/backends/idb.d.ts",
       "import": "./dist/backends/idb.js"
     },
-    "./backends/opfs": {
-      "types": "./dist/backends/opfs.d.ts",
-      "import": "./dist/backends/opfs.js"
-    },
     "./backends/sqlite": {
       "types": "./dist/backends/sqlite.d.ts",
       "import": "./dist/backends/sqlite.js"

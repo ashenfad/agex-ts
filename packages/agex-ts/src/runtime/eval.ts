@@ -79,6 +79,10 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
 
       // Build the injected name list. Functions go in directly;
       // namespaces are exposed as objects keyed by member name.
+      // `inputs` is the validated task input (per design.md and the
+      // builtin primer) — stable across every emission of a single
+      // task call, accessed via `inputs.field` syntax in the agent
+      // code.
       const injected: Record<string, unknown> = {
         taskSuccess,
         taskFail,
@@ -87,6 +91,7 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
         cache: ctx.cache,
         fs: ctx.fs,
         console: captureConsole,
+        inputs: ctx.inputs,
       }
       for (const [name, reg] of policy.fns) injected[name] = reg.fn
       for (const [name, reg] of policy.namespaces) injected[name] = reg.target

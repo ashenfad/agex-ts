@@ -27,6 +27,10 @@
     "./runtime-eval": {
       "types": "./dist/runtime/eval.d.ts",
       "import": "./dist/runtime/eval.js"
+    },
+    "./render": {
+      "types": "./dist/render/index.d.ts",
+      "import": "./dist/render/index.js"
     }
   },
   "files": ["dist", "README.md"],

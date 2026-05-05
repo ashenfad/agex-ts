@@ -18,13 +18,16 @@
 import { MemoryFS } from 'termish-ts/fs/memory'
 import { ChaptersOverlay, buildChaptersOverlay } from './fs/chapters-overlay'
 import { MountFS } from './fs/mount'
-import type { AgentEvent, FSConfig } from './types'
+import { SkillsOverlay } from './fs/skills-overlay'
+import type { AgentEvent, FSConfig, RegisteredSkill } from './types'
 
 const CHAPTERS_PREFIX = '/chapters'
+const SKILLS_PREFIX = '/skills'
 
 interface SessionEntry {
   readonly mount: MountFS
   readonly chaptersOverlay: ChaptersOverlay
+  readonly skillsOverlay: SkillsOverlay
 }
 
 export class VfsManager {
@@ -42,8 +45,12 @@ export class VfsManager {
     if (cached !== undefined) return cached.mount
     const backing = this.#createBacking()
     const chaptersOverlay = new ChaptersOverlay()
-    const mount = new MountFS(backing, [{ prefix: CHAPTERS_PREFIX, fs: chaptersOverlay }])
-    this.#cache.set(session, { mount, chaptersOverlay })
+    const skillsOverlay = new SkillsOverlay()
+    const mount = new MountFS(backing, [
+      { prefix: CHAPTERS_PREFIX, fs: chaptersOverlay },
+      { prefix: SKILLS_PREFIX, fs: skillsOverlay },
+    ])
+    this.#cache.set(session, { mount, chaptersOverlay, skillsOverlay })
     return mount
   }
 
@@ -61,6 +68,16 @@ export class VfsManager {
     if (entry === undefined) return
     const files = await buildChaptersOverlay(events, resolveEvent)
     entry.chaptersOverlay.swap(files)
+  }
+
+  /** Rebuild the `/skills/` overlay for `session` from the agent's
+   *  current registered skills. Called when a new skill registers,
+   *  or lazily on first task call (so freshly registered skills are
+   *  visible without an explicit refresh). */
+  refreshSkillsOverlay(session: string, skills: ReadonlyMap<string, RegisteredSkill>): void {
+    const entry = this.#cache.get(session)
+    if (entry === undefined) return
+    entry.skillsOverlay.swap(skills)
   }
 
   #createBacking(): MemoryFS {

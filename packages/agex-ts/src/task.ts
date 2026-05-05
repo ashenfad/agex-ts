@@ -23,6 +23,7 @@ import type { Agent } from './agent'
 import { runChaptering, shouldTriggerChaptering } from './chaptering'
 import { dispatchFileEdit, dispatchFileWrite, dispatchTerminal } from './dispatcher'
 import { CancelledError, SchemaError, TaskClarifyError, TaskFailError } from './errors'
+import { type NeutralTurn, buildSystemMessage, buildTaskMessage, renderEvents } from './render'
 import type {
   ActionEvent,
   AgentEvent,
@@ -46,13 +47,30 @@ import type {
 const DEFAULT_SESSION = 'default'
 
 export interface TaskDefinition<I, O> {
-  /** What this task does — surfaced in the system prompt. */
+  /** What this task does — surfaced in the per-task user message. */
   readonly description: string
-  /** Optional Standard Schema for input validation. */
+  /** Optional Standard Schema for input validation. The renderer
+   *  also tries to extract a JSON Schema from this for shape
+   *  presentation; supply `inputJsonSchema` to override. */
   readonly input?: StandardSchemaV1<I, I>
   /** Optional Standard Schema for output validation. */
   readonly output?: StandardSchemaV1<O, O>
-  /** Optional task-specific addendum to the system prompt. */
+  /** Optional override for the JSON Schema sent to the agent for
+   *  inputs. Use when your validator's introspection isn't picked
+   *  up automatically, or when you want a stripped-down shape. */
+  readonly inputJsonSchema?: object
+  /** Optional override for the JSON Schema sent to the agent for
+   *  the expected output. Same use cases as `inputJsonSchema`. */
+  readonly outputJsonSchema?: object
+  /** Optional prose description of the input shape. Surfaced when
+   *  no JSON Schema is available; useful for handwritten guidance
+   *  beyond what schema introspection can express. */
+  readonly inputDescription?: string
+  /** Optional prose description of the expected output. Same role
+   *  as `inputDescription` but for the return value. */
+  readonly outputDescription?: string
+  /** Optional task-specific addendum surfaced after the
+   *  description in the per-task user message. */
   readonly primer?: string
 }
 
@@ -76,6 +94,10 @@ export function makeTask<I, O>(agent: Agent, def: TaskDefinition<I, O>): TaskFn<
     // -- Initialize runtime ----------------------------------------------
     await runtimeAdapter.init(agent.policy())
 
+    // Make sure registered skills are visible at /skills/<name>/SKILL.md
+    // before the agent starts running.
+    agent.refreshSkillsOverlay(session)
+
     // -- Log TaskStartEvent ----------------------------------------------
     const startEvent: TaskStartEvent = {
       type: 'taskStart',
@@ -89,7 +111,24 @@ export function makeTask<I, O>(agent: Agent, def: TaskDefinition<I, O>): TaskFn<
     // -- Action loop -----------------------------------------------------
     let iter = 0
     const maxIter = agent.maxIterations
-    const system = buildSystemPrompt(agent, def)
+    // Stable across the loop — only changes if the agent's
+    // registration table mutates mid-task (it shouldn't).
+    const system = buildSystemMessage({
+      policy: agent.policy(),
+      ...(agent.agexPrimerOverride !== undefined && {
+        agexPrimerOverride: agent.agexPrimerOverride,
+      }),
+      ...(agent.capabilitiesPrimer !== undefined && {
+        capabilitiesPrimer: agent.capabilitiesPrimer,
+      }),
+      ...(agent.primer !== undefined && { agentPrimer: agent.primer }),
+    })
+    // The opening per-task user turn — also stable across the loop.
+    const taskMessage = buildTaskMessage(def, validatedInput)
+    const taskTurn: NeutralTurn = {
+      role: 'user',
+      content: [{ type: 'text', text: taskMessage }],
+    }
 
     try {
       while (iter < maxIter) {
@@ -98,11 +137,12 @@ export function makeTask<I, O>(agent: Agent, def: TaskDefinition<I, O>): TaskFn<
 
         // Stream + assemble emissions
         const events = await collectEvents(eventLog)
+        const turns = [taskTurn, ...renderEvents(events)]
         const emissions: Emission[] = []
         let inputTokens: number | undefined
         let outputTokens: number | undefined
 
-        for await (const chunk of llmClient.complete({ system, events }, signal)) {
+        for await (const chunk of llmClient.complete({ system, turns }, signal)) {
           if (signal.aborted) throw new CancelledError()
           if (options.onToken !== undefined) await options.onToken(chunk)
           if (chunk.done && chunk.emission !== undefined) emissions.push(chunk.emission)
@@ -140,7 +180,12 @@ export function makeTask<I, O>(agent: Agent, def: TaskDefinition<I, O>): TaskFn<
         }
 
         // Dispatch
-        const ctx: ExecuteContext = { fs, cache, signal }
+        const ctx: ExecuteContext = {
+          fs,
+          cache,
+          signal,
+          ...(validatedInput !== undefined && { inputs: validatedInput }),
+        }
         const outcome = await dispatchEmissions(
           emissions,
           runtimeAdapter,
@@ -322,18 +367,6 @@ async function emit(
 ): Promise<void> {
   await log.add(event)
   if (onEvent !== undefined) await onEvent(event)
-}
-
-function buildSystemPrompt<I, O>(agent: Agent, def: TaskDefinition<I, O>): string {
-  // v1 system prompt is intentionally minimal: agent primer +
-  // task description + per-task primer. The richer renderer (registered
-  // namespace help, skill markdown, primer composition) lands once the
-  // wire-format module exists in the provider packages.
-  const parts: string[] = []
-  if (agent.primer !== undefined && agent.primer.length > 0) parts.push(agent.primer)
-  parts.push(`Task: ${def.description}`)
-  if (def.primer !== undefined && def.primer.length > 0) parts.push(def.primer)
-  return parts.join('\n\n')
 }
 
 function deriveTaskName<I, O>(def: TaskDefinition<I, O>): string {

@@ -180,6 +180,30 @@ describe('execute — injected commands', () => {
     })
     expect(out).toBe('mapform\n')
   })
+
+  it('host commands stay reachable through xargs', async () => {
+    const shout: CommandHandler = async (ctx) => {
+      ctx.stdout.write(`SHOUT(${ctx.args.join(',')})\n`)
+    }
+    const out = await execute("echo -e 'a\\nb' | xargs -I {} shout {}", new MemoryFS(), {
+      commands: { shout },
+    })
+    expect(out).toBe('SHOUT(a)\nSHOUT(b)\n')
+  })
+
+  it('host commands stay reachable through find -exec', async () => {
+    const fs = new MemoryFS()
+    await fs.write('/a.txt', bytes('alpha'))
+    await fs.write('/b.txt', bytes('bravo'))
+    const tag: CommandHandler = async (ctx) => {
+      ctx.stdout.write(`TAG:${ctx.args[0]}\n`)
+    }
+    const out = await execute("find / -name '*.txt' -exec tag {} ';'", fs, {
+      commands: { tag },
+    })
+    expect(out).toContain('TAG:/a.txt')
+    expect(out).toContain('TAG:/b.txt')
+  })
 })
 
 describe('execute — partial output on failure', () => {

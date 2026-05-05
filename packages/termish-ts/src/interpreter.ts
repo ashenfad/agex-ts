@@ -62,7 +62,7 @@ export async function executeScript(
   fs: FileSystem,
   opts: ExecuteOptions = {},
 ): Promise<string> {
-  const commands = normalizeCommands(opts.commands)
+  const commands = mergeCommands(opts.commands)
   const signal = opts.signal ?? NEVER_ABORT
   const out: { value: string } = { value: '' }
 
@@ -123,7 +123,7 @@ async function executePipeline(
     }
 
     const expandedArgs = await expandArgs(cmd.args, fs)
-    const handler = commands.get(cmd.name) ?? BUILTINS.get(cmd.name)
+    const handler = commands.get(cmd.name)
     if (handler === undefined) {
       throw new TerminalError(`${cmd.name}: command not found`)
     }
@@ -136,6 +136,7 @@ async function executePipeline(
       fs,
       env: {},
       signal,
+      commands,
     }
 
     let result: Awaited<ReturnType<CommandHandler>>
@@ -208,15 +209,18 @@ function expandPath(target: string): string {
   return unmaskAndUnquote(masked, map)
 }
 
-function normalizeCommands(
-  commands: ExecuteOptions['commands'],
-): ReadonlyMap<string, CommandHandler> {
-  if (commands === undefined) return EMPTY_COMMANDS
-  if (commands instanceof Map) return commands
-  return new Map(Object.entries(commands))
+/** Merge host-injected commands on top of BUILTINS into a single
+ *  read-only registry. Host entries override builtins by name. The
+ *  merged map becomes `ctx.commands`, so builtins like xargs and
+ *  `find -exec` see the same surface the top-level pipeline does. */
+function mergeCommands(commands: ExecuteOptions['commands']): ReadonlyMap<string, CommandHandler> {
+  if (commands === undefined) return BUILTINS
+  const host = commands instanceof Map ? commands : new Map(Object.entries(commands))
+  if (host.size === 0) return BUILTINS
+  const merged = new Map<string, CommandHandler>(BUILTINS)
+  for (const [name, handler] of host) merged.set(name, handler)
+  return merged
 }
-
-const EMPTY_COMMANDS: ReadonlyMap<string, CommandHandler> = new Map()
 
 class StringStdout {
   readonly #parts: string[] = []

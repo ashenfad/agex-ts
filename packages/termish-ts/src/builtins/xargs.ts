@@ -109,7 +109,7 @@ export const xargs: CommandHandler = async (ctx) => {
     xargsDepth++
     let out: string
     try {
-      out = await execute(cmdStr, ctx.fs, { signal: ctx.signal })
+      out = await execute(cmdStr, ctx.fs, { signal: ctx.signal, commands: ctx.commands })
     } catch (e) {
       throw e instanceof TerminalError
         ? e

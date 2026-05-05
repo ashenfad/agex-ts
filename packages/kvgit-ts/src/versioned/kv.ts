@@ -445,9 +445,7 @@ export class VersionedKV extends VersionedBase {
     const theirParent = parents[0] as string
     const theirRootBytes = await this.store.get(COMMIT_ROOT(theirParent))
     const theirKs =
-      theirRootBytes !== null
-        ? Keyset.fromRoot(this.store, loads(theirRootBytes) as string)
-        : null
+      theirRootBytes !== null ? Keyset.fromRoot(this.store, loads(theirRootBytes) as string) : null
 
     const now = Date.now()
     const mergedMeta = new Map<string, MetaEntry>()
@@ -828,6 +826,18 @@ export class VersionedKV extends VersionedBase {
  * Uses `Keyset.materialize()` (batched BFS, one `getMany` per HAMT
  * level) so cold loads against high-latency stores are O(log N)
  * round-trips instead of O(N).
+ *
+ * **Eager-materialization tradeoff.** This holds the entire commit's
+ * keyset (key → blob pointer + meta) in memory. The benefit:
+ * `get(key)` is one in-memory map lookup followed by a single store
+ * fetch for the blob, regardless of total commit size. The cost:
+ * memory scales with key count.
+ *
+ * Matches kvgit-py's design. For agex sessions (typically hundreds
+ * to a few thousand keys) this is fine. A lazy/HAMT-walk-on-demand
+ * variant would scale better for very large keysets at the cost of
+ * extra store reads per `get`. Worth revisiting if a real consumer
+ * measures the limit.
  */
 async function populateState(
   store: KVStore,

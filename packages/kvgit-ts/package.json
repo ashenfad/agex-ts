@@ -1,0 +1,44 @@
+{
+  "name": "kvgit-ts",
+  "version": "0.0.1",
+  "description": "Versioned key-value store with branches, commits, and three-way merges. TypeScript port of agex-py's kvgit.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./backends/memory": {
+      "types": "./dist/backends/memory.d.ts",
+      "import": "./dist/backends/memory.js"
+    },
+    "./backends/idb": {
+      "types": "./dist/backends/idb.d.ts",
+      "import": "./dist/backends/idb.js"
+    },
+    "./backends/opfs": {
+      "types": "./dist/backends/opfs.d.ts",
+      "import": "./dist/backends/opfs.js"
+    },
+    "./backends/sqlite": {
+      "types": "./dist/backends/sqlite.d.ts",
+      "import": "./dist/backends/sqlite.js"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

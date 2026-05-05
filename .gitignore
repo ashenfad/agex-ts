@@ -1,0 +1,21 @@
+node_modules/
+dist/
+build/
+coverage/
+.DS_Store
+*.log
+.turbo/
+.vitest-cache/
+.tsbuildinfo
+*.tsbuildinfo
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Env
+.env
+.env.local
+.env.*.local

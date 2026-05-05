@@ -1,0 +1,42 @@
+{
+  "name": "agex-ts",
+  "version": "0.0.1",
+  "description": "Embeddable LLM-work primitive: typed-function task contract, code as the action space, kvgit-backed state. TypeScript port of agex-py.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.js"
+    },
+    "./state": {
+      "types": "./dist/state/index.d.ts",
+      "import": "./dist/state/index.js"
+    },
+    "./llm-dummy": {
+      "types": "./dist/llm/dummy.d.ts",
+      "import": "./dist/llm/dummy.js"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "kvgit-ts": "workspace:*",
+    "termish-ts": "workspace:*",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

@@ -7,3 +7,16 @@ export {
   type KeysetOptions,
   type KeysetUpdatedOptions,
 } from './keyset'
+export { VersionedBase } from './versioned/base'
+export {
+  VersionedKV,
+  type CorruptHeadRecoverer,
+  type VersionedKVOptions,
+} from './versioned/kv'
+export {
+  resolveMerge,
+  type BlobReader,
+  type MergeResolution,
+  type ResolveMergeOptions,
+} from './versioned/merge'
+export { diffKeysets, walkHistory, type ParentLoader } from './versioned/helpers'

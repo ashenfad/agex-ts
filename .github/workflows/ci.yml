@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main, init]
+  pull_request:
+
+# Cancel an in-flight run for the same ref when a new push lands.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node:
+    name: Node tests (lint + typecheck + test + build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test (Node + fake-indexeddb)
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+  browser:
+    name: Browser tests (real IndexedDB)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright Chromium (with system deps)
+        run: pnpm --filter kvgit-ts exec playwright install chromium --with-deps
+
+      - name: Test (Chromium + real IndexedDB)
+        run: pnpm --filter kvgit-ts test:browser

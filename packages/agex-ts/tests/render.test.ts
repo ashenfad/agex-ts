@@ -274,9 +274,13 @@ describe('renderEvents', () => {
     expect(renderEvents(events)).toEqual([])
   })
 
-  it('renders ActionEvent as an assistant turn with toolUse parts', () => {
+  it('renders ActionEvent as an assistant turn with toolUse parts + synth tool_result', () => {
     const turns = renderEvents([action(1, 'one')])
-    expect(turns.length).toBe(1)
+    // Two turns: the assistant tool_use, plus the user tool_result
+    // ("(no observation)" for a silent ts emission). Every tool_use
+    // must have a paired tool_result, so the renderer never leaves
+    // the trailing tool_use unmatched.
+    expect(turns.length).toBe(2)
     expect(turns[0]?.role).toBe('assistant')
     const part = turns[0]?.content[0]
     expect(part?.type).toBe('toolUse')
@@ -284,15 +288,24 @@ describe('renderEvents', () => {
       expect(part.toolName).toBe('ts_action')
       expect(part.input.code).toBe('one')
     }
+    expect(turns[1]?.role).toBe('user')
+    const result = turns[1]?.content[0]
+    expect(result?.type).toBe('toolResult')
+    if (result?.type === 'toolResult' && result.content[0]?.type === 'text') {
+      expect(result.content[0].text).toBe('ts_action: (no observation)')
+    }
   })
 
-  it('ties OutputEvent back to the prior tool_use as a tool_result', () => {
+  it('ties OutputEvent back to its emissionId as a tool_result', () => {
+    const actionTs = '2026-05-05T00:00:01.000Z'
+    const emissionId = makeToolUseId(actionTs, 0)
     const events: AgentEvent[] = [
       action(1, 'one'),
       {
         type: 'output',
         timestamp: '2026-05-05T00:00:02.000Z',
         agentName: 'a',
+        emissionId,
         parts: [{ type: 'text', text: 'stdout' }],
       } as OutputEvent,
     ]
@@ -301,9 +314,29 @@ describe('renderEvents', () => {
     const result = turns[1]?.content[0]
     expect(result?.type).toBe('toolResult')
     if (result?.type === 'toolResult') {
-      // Same tool-use id derivation as the corresponding action
+      expect(result.toolUseId).toBe(emissionId)
+      const text = result.content[0]
+      if (text?.type === 'text') expect(text.text).toContain('stdout')
+    }
+  })
+
+  it('falls back to the most recent tool_use when output has no emissionId', () => {
+    // Legacy / unstamped OutputEvents still pair to *something*, so
+    // providers don't see a dangling tool_use.
+    const events: AgentEvent[] = [
+      action(1, 'one'),
+      {
+        type: 'output',
+        timestamp: '2026-05-05T00:00:02.000Z',
+        agentName: 'a',
+        parts: [{ type: 'text', text: 'unstamped' }],
+      } as OutputEvent,
+    ]
+    const turns = renderEvents(events)
+    expect(turns.length).toBe(2)
+    const result = turns[1]?.content[0]
+    if (result?.type === 'toolResult') {
       expect(result.toolUseId).toBe(makeToolUseId('2026-05-05T00:00:01.000Z', 0))
-      expect(result.content[0]?.type).toBe('text')
     }
   })
 
@@ -435,6 +468,180 @@ describe('renderEvents — emission variants', () => {
     expect(turn?.role).toBe('user')
     expect(turn?.content[0]?.type).toBe('text')
     expect(turn?.content[1]?.type).toBe('image')
+  })
+})
+
+describe('renderEvents — tool_use ↔ tool_result pairing', () => {
+  // Provider invariant: every tool_use part in an assistant turn must
+  // have a tool_result part with the matching id in the *next* user
+  // turn, and providers reject multiple consecutive user turns of
+  // tool_results. These tests pin those invariants down so the
+  // upcoming Anthropic provider doesn't have to relearn them.
+
+  function collectToolUseIds(turns: ReturnType<typeof renderEvents>): Set<string> {
+    const ids = new Set<string>()
+    for (const t of turns) {
+      if (t.role !== 'assistant') continue
+      for (const p of t.content) {
+        if (p.type === 'toolUse') ids.add(p.toolUseId)
+      }
+    }
+    return ids
+  }
+
+  function collectToolResultIds(turns: ReturnType<typeof renderEvents>): Set<string> {
+    const ids = new Set<string>()
+    for (const t of turns) {
+      if (t.role !== 'user') continue
+      for (const p of t.content) {
+        if (p.type === 'toolResult') ids.add(p.toolUseId)
+      }
+    }
+    return ids
+  }
+
+  it('every tool_use gets a matching tool_result, even with no output', () => {
+    const ev: ActionEvent = {
+      type: 'action',
+      timestamp: ts,
+      agentName: 'a',
+      emissions: [
+        { type: 'thinking', text: 'plan' },
+        { type: 'fileWrite', path: '/n', content: 'hi', mode: 'write' },
+        { type: 'terminal', commands: 'ls /' },
+        { type: 'ts', code: '/* silent */' },
+      ],
+    }
+    const turns = renderEvents([ev])
+    const useIds = collectToolUseIds(turns)
+    const resultIds = collectToolResultIds(turns)
+    expect(useIds.size).toBe(3) // thinking is not a tool_use
+    expect(resultIds).toEqual(useIds)
+  })
+
+  it('multiple OutputEvents collapse into one user turn (no split tool_results)', () => {
+    const t0 = '2026-05-05T00:00:01.000Z'
+    const ev: ActionEvent = {
+      type: 'action',
+      timestamp: t0,
+      agentName: 'a',
+      emissions: [
+        { type: 'terminal', commands: 'echo a' },
+        { type: 'terminal', commands: 'echo b' },
+      ],
+    }
+    const events: AgentEvent[] = [
+      ev,
+      {
+        type: 'output',
+        timestamp: '2026-05-05T00:00:02.000Z',
+        agentName: 'a',
+        emissionId: makeToolUseId(t0, 0),
+        parts: [{ type: 'text', text: 'a' }],
+      },
+      {
+        type: 'output',
+        timestamp: '2026-05-05T00:00:03.000Z',
+        agentName: 'a',
+        emissionId: makeToolUseId(t0, 1),
+        parts: [{ type: 'text', text: 'b' }],
+      },
+    ]
+    const turns = renderEvents(events)
+    // Exactly: assistant (action) + user (both tool_results)
+    expect(turns.length).toBe(2)
+    expect(turns[1]?.role).toBe('user')
+    const userParts = turns[1]?.content ?? []
+    const toolResultCount = userParts.filter((p) => p.type === 'toolResult').length
+    expect(toolResultCount).toBe(2)
+  })
+
+  it('fileWrite/fileEdit get synthesized "wrote /path" tool_results on success', () => {
+    const ev: ActionEvent = {
+      type: 'action',
+      timestamp: ts,
+      agentName: 'a',
+      emissions: [
+        { type: 'fileWrite', path: '/a.txt', content: 'x', mode: 'write' },
+        { type: 'fileWrite', path: '/b.txt', content: 'y', mode: 'append' },
+        { type: 'fileEdit', path: '/c.txt', search: 'old', content: 'new', matchAll: true },
+      ],
+    }
+    const turns = renderEvents([ev])
+    const userTurn = turns[1]
+    expect(userTurn?.role).toBe('user')
+    const texts = (userTurn?.content ?? [])
+      .flatMap((p) => (p.type === 'toolResult' ? p.content : []))
+      .filter((p): p is { type: 'text'; text: string } => p.type === 'text')
+      .map((p) => p.text)
+    expect(texts.some((t) => t.includes('write_file: wrote /a.txt'))).toBe(true)
+    expect(texts.some((t) => t.includes('write_file: appended to /b.txt'))).toBe(true)
+    expect(texts.some((t) => t.includes('edit_file: replace applied to /c.txt (matchAll)'))).toBe(
+      true,
+    )
+  })
+
+  it('real observations override the synth fallback (failed file ops)', () => {
+    // If a fileEdit fails and its error lands as an OutputEvent on
+    // the same emissionId, the renderer must NOT also paste in the
+    // synth "success" line — that would tell the agent the edit
+    // succeeded when it didn't.
+    const t0 = '2026-05-05T00:00:01.000Z'
+    const ev: ActionEvent = {
+      type: 'action',
+      timestamp: t0,
+      agentName: 'a',
+      emissions: [{ type: 'fileEdit', path: '/c.txt', search: 'old', content: 'new' }],
+    }
+    const events: AgentEvent[] = [
+      ev,
+      {
+        type: 'output',
+        timestamp: '2026-05-05T00:00:02.000Z',
+        agentName: 'a',
+        emissionId: makeToolUseId(t0, 0),
+        parts: [{ type: 'text', text: 'edit_file: search not found' }],
+      },
+    ]
+    const turns = renderEvents(events)
+    const result = turns[1]?.content[0]
+    if (result?.type === 'toolResult' && result.content[0]?.type === 'text') {
+      expect(result.content[0].text).toContain('search not found')
+      expect(result.content[0].text).not.toContain('replace applied')
+    } else {
+      throw new Error('expected toolResult with text content')
+    }
+  })
+
+  it('chapter forces a flush so tool_results land before the chapter turn', () => {
+    const t0 = '2026-05-05T00:00:01.000Z'
+    const events: AgentEvent[] = [
+      {
+        type: 'action',
+        timestamp: t0,
+        agentName: 'a',
+        emissions: [{ type: 'terminal', commands: 'echo hi' }],
+      },
+      {
+        type: 'output',
+        timestamp: '2026-05-05T00:00:02.000Z',
+        agentName: 'a',
+        emissionId: makeToolUseId(t0, 0),
+        parts: [{ type: 'text', text: 'hi' }],
+      },
+      {
+        type: 'chapter',
+        timestamp: '2026-05-05T00:00:03.000Z',
+        agentName: 'a',
+        name: 'P1',
+        message: 'm',
+        slug: 'p1',
+        eventRefs: [],
+      },
+    ]
+    const turns = renderEvents(events)
+    // assistant(action), user(toolResult), assistant(chapter)
+    expect(turns.map((t) => t.role)).toEqual(['assistant', 'user', 'assistant'])
   })
 })
 

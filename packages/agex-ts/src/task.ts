@@ -23,7 +23,13 @@ import type { Agent } from './agent'
 import { runChaptering, shouldTriggerChaptering } from './chaptering'
 import { dispatchFileEdit, dispatchFileWrite, dispatchTerminal } from './dispatcher'
 import { CancelledError, SchemaError, TaskClarifyError, TaskFailError } from './errors'
-import { type NeutralTurn, buildSystemMessage, buildTaskMessage, renderEvents } from './render'
+import {
+  type NeutralTurn,
+  buildSystemMessage,
+  buildTaskMessage,
+  makeToolUseId,
+  renderEvents,
+} from './render'
 import type {
   ActionEvent,
   AgentEvent,
@@ -188,6 +194,7 @@ export function makeTask<I, O>(agent: Agent, def: TaskDefinition<I, O>): TaskFn<
         }
         const outcome = await dispatchEmissions(
           emissions,
+          actionEvent.timestamp,
           runtimeAdapter,
           ctx,
           fs,
@@ -275,6 +282,7 @@ export function makeTask<I, O>(agent: Agent, def: TaskDefinition<I, O>): TaskFn<
 
 async function dispatchEmissions(
   emissions: ReadonlyArray<Emission>,
+  actionTimestamp: string,
   runtime: RuntimeAdapter,
   ctx: ExecuteContext,
   fs: VirtualFileSystem,
@@ -283,16 +291,19 @@ async function dispatchEmissions(
   eventLog: { add(e: AgentEvent): Promise<string> },
   onEvent: ((e: AgentEvent) => void | Promise<void>) | undefined,
 ): Promise<TaskOutcome> {
-  for (const em of emissions) {
+  for (let i = 0; i < emissions.length; i++) {
+    const em = emissions[i] as Emission
     if (ctx.signal.aborted) throw new CancelledError()
+    const emissionId = makeToolUseId(actionTimestamp, i)
 
     if (em.type === 'ts') {
-      const result = await runtime.execute(em.code, ctx)
+      const result = await runtime.execute(em.code, { ...ctx, emissionId })
       if (result.outputs.length > 0) {
         const outputEvent: OutputEvent = {
           type: 'output',
           timestamp: new Date().toISOString(),
           agentName,
+          emissionId,
           parts: result.outputs,
         }
         await emit(outputEvent, eventLog, onEvent)
@@ -335,6 +346,7 @@ async function dispatchEmissions(
             type: 'output',
             timestamp: new Date().toISOString(),
             agentName,
+            emissionId,
             parts: [{ type: 'text', text: stdout }],
           }
           await emit(outputEvent, eventLog, onEvent)

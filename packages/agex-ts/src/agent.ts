@@ -21,7 +21,7 @@ import { KvgitState, type StateBackend, connectState, isVersioned } from './stat
 import { type TaskDefinition, makeTask } from './task'
 import type {
   Cache,
-  ChapterHandler,
+  Chapter,
   EventLog,
   FSConfig,
   LLMClient,
@@ -30,6 +30,8 @@ import type {
   Policy,
   RuntimeAdapter,
   StateConfig,
+  TaskCallOptions,
+  TaskFn,
   TerminalCommandHandler,
   VirtualFileSystem,
 } from './types'
@@ -54,13 +56,10 @@ export interface AgentOptions {
   /** Max iterations per task (turn cap). Default `10`. */
   readonly maxIterations?: number
   /** Threshold (in input tokens, as reported by the latest
-   *  `ActionEvent`) at which chaptering fires. Pair with
-   *  `chapterHandler` — without one the trigger is a no-op. */
+   *  `ActionEvent`) at which chaptering fires. Pair with a
+   *  registered `agent.chapterTask({ ... })` — without one the
+   *  trigger is a no-op. */
   readonly chapteringTrigger?: number
-  /** Handler invoked when chaptering triggers. Receives the current
-   *  event log; returns one or more `Chapter` summaries to compact
-   *  into the rendered context. */
-  readonly chapterHandler?: ChapterHandler
 }
 
 /** Async factory — handles the awaitable parts of state setup. */
@@ -114,6 +113,17 @@ export interface TerminalRegistration {
 const DEFAULT_SESSION = 'default'
 const DEFAULT_MAX_ITERATIONS = 10
 
+/** Options accepted by `agent.chapterTask()`. The chapter task uses
+ *  fixed input/output shapes (numbered event index → `Chapter[]`)
+ *  set by the framework, so the user only supplies the prose. */
+export interface ChapterTaskDefinition {
+  /** Surfaced in the system prompt for the chapter task. Should
+   *  describe the chaptering goal in the agent's voice. */
+  readonly description: string
+  /** Optional task-specific addendum. */
+  readonly primer?: string
+}
+
 export class Agent {
   readonly #opts: AgentOptions
   readonly #state: StateBackend
@@ -121,6 +131,7 @@ export class Agent {
   readonly #vfs: VfsManager
   readonly #caches: CacheManager
   readonly #eventLogs = new Map<string, EventLogImpl>()
+  #chapterTask: TaskFn<string, ReadonlyArray<Chapter>> | undefined
 
   constructor(opts: AgentOptions, state: StateBackend) {
     this.#opts = opts
@@ -163,16 +174,10 @@ export class Agent {
     return this.#opts.runtime
   }
 
-  /** The token threshold above which chaptering fires (if a handler
-   *  is registered). Undefined disables chaptering. */
+  /** The token threshold above which chaptering fires (if a chapter
+   *  task is registered). Undefined disables chaptering. */
   get chapteringTrigger(): number | undefined {
     return this.#opts.chapteringTrigger
-  }
-
-  /** Chapter handler invoked when chaptering trips. Undefined means
-   *  no compaction happens even if the trigger fires. */
-  get chapterHandler(): ChapterHandler | undefined {
-    return this.#opts.chapterHandler
   }
 
   /** Read-only snapshot of the registration policy. */
@@ -215,10 +220,34 @@ export class Agent {
 
   /** Define a typed callable that drives the action loop. The
    *  returned function is awaitable: `const result = await task(input)`. */
-  task<I, O>(
-    def: TaskDefinition<I, O>,
-  ): (input: I, options?: import('./types').TaskCallOptions) => Promise<O> {
+  task<I, O>(def: TaskDefinition<I, O>): (input: I, options?: TaskCallOptions) => Promise<O> {
     return makeTask(this, def)
+  }
+
+  /** Register the agent's `__chapter__` task — runs through the
+   *  same task() machinery, with the agent's LLM and registered
+   *  fns/namespaces in scope, when the chaptering trigger fires.
+   *
+   *  Contract: input is a numbered event index (string) the
+   *  framework constructs from the parent task's log. Output is
+   *  `readonly Chapter[]`, returned via `taskSuccess(chapters)`.
+   *
+   *  Skipping this method disables chaptering even when
+   *  `chapteringTrigger` is set. */
+  chapterTask(def: ChapterTaskDefinition): this {
+    this.#chapterTask = makeTask<string, ReadonlyArray<Chapter>>(this, {
+      description: def.description,
+      ...(def.primer !== undefined && { primer: def.primer }),
+    })
+    return this
+  }
+
+  /** Framework-internal accessor — chaptering machinery looks the
+   *  registered chapter task up through here. Public so the
+   *  chaptering module (which lives outside Agent) can reach it;
+   *  not part of the user-facing surface. */
+  getChapterTask(): TaskFn<string, ReadonlyArray<Chapter>> | undefined {
+    return this.#chapterTask
   }
 
   // -- Per-session host APIs ---------------------------------------------

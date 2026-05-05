@@ -124,18 +124,15 @@ export function makeTask<I, O>(agent: Agent, def: TaskDefinition<I, O>): TaskFn<
         // Chaptering — context compaction triggered by token budget.
         // Runs after the ActionEvent is logged so the trigger reads
         // the just-arrived inputTokens, and before dispatch so the
-        // chapter handler sees the same event prefix the next LLM
-        // call will see (minus the chapter event we're about to add).
-        if (agent.chapterHandler !== undefined) {
+        // chapter task sees the same event prefix the next LLM call
+        // will see (minus the chapter event we're about to add).
+        // The chapter task itself runs in a child session (see
+        // runChaptering) so its events don't pollute the parent log.
+        if (agent.getChapterTask() !== undefined) {
           const allEvents = await collectEvents(eventLog)
           if (shouldTriggerChaptering(allEvents, agent.chapteringTrigger)) {
-            await runChaptering(
-              allEvents,
-              agent.chapterHandler,
-              eventLog,
-              agent.name,
-              signal,
-              (e) => emit(e, eventLog, options.onEvent),
+            await runChaptering(allEvents, agent, session, signal, (e) =>
+              emit(e, eventLog, options.onEvent),
             )
           }
         }
@@ -215,9 +212,13 @@ export function makeTask<I, O>(agent: Agent, def: TaskDefinition<I, O>): TaskFn<
         )
       }
       throw e
-    } finally {
-      await runtimeAdapter.dispose()
     }
+    // No dispose() per-task — the runtime adapter is meant to be
+    // long-lived across task calls (a worker stays warm, eval-runtime
+    // keeps its policy ref). dispose() is for agent shutdown, not for
+    // per-task cleanup. Disposing here would also break nested task
+    // calls (parent task → chapter task): the inner task's finally
+    // would tear down the runtime out from under the outer task.
   }
 }
 

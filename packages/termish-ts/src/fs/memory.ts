@@ -274,15 +274,19 @@ export class MemoryFS implements FileSystem {
   async listDetailed(path = '.', opts: { recursive?: boolean } = {}): Promise<FileInfo[]> {
     const names = await this.list(path, opts)
     const abs = resolve(path, this.#cwd)
+    // FileInfo.path is `<userQueriedPath>/<rel>` — preserves the
+    // caller's prefix (relative or absolute) per the protocol.
+    const userPrefix = path === '/' ? '/' : path.replace(/\/$/, '')
     const out: FileInfo[] = []
     for (const name of names) {
       const childAbs = joinPath(abs, name)
+      const userPath = joinPath(userPrefix, name)
       const isDir = this.#dirExists(childAbs) && !this.#files.has(childAbs)
       if (isDir) {
         const meta = this.#dirMeta.get(childAbs) ?? syntheticDirMeta()
         out.push({
           name: basename(name),
-          path: name,
+          path: userPath,
           size: 0,
           createdAt: meta.createdAt,
           modifiedAt: meta.modifiedAt,
@@ -294,7 +298,7 @@ export class MemoryFS implements FileSystem {
         if (value === undefined || meta === undefined) continue // pruned mid-iteration
         out.push({
           name: basename(name),
-          path: name,
+          path: userPath,
           size: value.byteLength,
           createdAt: meta.createdAt,
           modifiedAt: meta.modifiedAt,

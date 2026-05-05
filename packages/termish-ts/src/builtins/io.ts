@@ -314,12 +314,12 @@ function preprocessLineShorthand(args: readonly string[]): string[] {
 }
 
 function parseIntegerFlag(
-  raw: string | boolean | undefined,
+  raw: string | boolean | string[] | undefined,
   fallback: number,
   prog: string,
   flag: string,
 ): number {
-  if (raw === undefined || typeof raw === 'boolean') return fallback
+  if (raw === undefined || typeof raw === 'boolean' || Array.isArray(raw)) return fallback
   const n = Number.parseInt(raw, 10)
   if (Number.isNaN(n)) throw new TerminalError(`${prog}: invalid value for ${flag}: '${raw}'`)
   return n

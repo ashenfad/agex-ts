@@ -24,6 +24,10 @@ export interface FlagDef {
   readonly aliases: readonly string[]
   /** True if the flag takes a value; default false (boolean). */
   readonly takesValue?: boolean
+  /** True if the flag can be passed multiple times, accumulating
+   *  values into an array. Implies `takesValue: true`. The default
+   *  value in `parsed.flags` is an empty array. */
+  readonly multi?: boolean
 }
 
 export interface ParseSpec {
@@ -38,8 +42,9 @@ export interface ParseSpec {
 
 export interface ParsedArgs {
   /** Flag values keyed by canonical name. Booleans default to `false`
-   *  if absent; value-flags are missing from the object if not passed. */
-  readonly flags: Readonly<Record<string, boolean | string>>
+   *  if absent; value-flags are missing from the object if not passed.
+   *  Multi flags default to `[]` and accumulate each occurrence. */
+  readonly flags: Readonly<Record<string, boolean | string | string[]>>
   readonly positional: readonly string[]
 }
 
@@ -53,9 +58,10 @@ export interface ParsedArgs {
  */
 export function parseArgs(args: readonly string[], spec: ParseSpec, prog: string): ParsedArgs {
   const flagsByAlias = new Map<string, [string, FlagDef]>()
-  const flags: Record<string, boolean | string> = {}
+  const flags: Record<string, boolean | string | string[]> = {}
   for (const [name, def] of Object.entries(spec.flags ?? {})) {
-    if (def.takesValue !== true) flags[name] = false
+    if (def.multi === true) flags[name] = []
+    else if (def.takesValue !== true) flags[name] = false
     for (const alias of def.aliases) flagsByAlias.set(alias, [name, def])
   }
 
@@ -79,14 +85,20 @@ export function parseArgs(args: readonly string[], spec: ParseSpec, prog: string
         throw new TerminalError(`${prog}: unknown option: ${name}`)
       }
       const [canonical, def] = entry
-      if (def.takesValue === true) {
+      if (def.takesValue === true || def.multi === true) {
+        let value: string
         if (inlineValue !== null) {
-          flags[canonical] = inlineValue
+          value = inlineValue
         } else {
           if (i >= args.length) {
             throw new TerminalError(`${prog}: option ${name} requires a value`)
           }
-          flags[canonical] = args[i++] as string
+          value = args[i++] as string
+        }
+        if (def.multi === true) {
+          ;(flags[canonical] as string[]).push(value)
+        } else {
+          flags[canonical] = value
         }
       } else {
         if (inlineValue !== null) {
@@ -109,18 +121,24 @@ export function parseArgs(args: readonly string[], spec: ParseSpec, prog: string
           throw new TerminalError(`${prog}: unknown option: ${flagName}`)
         }
         const [canonical, def] = entry
-        if (def.takesValue === true) {
+        if (def.takesValue === true || def.multi === true) {
           // -nVALUE (rest of cluster) or -n VALUE (next argv).
           const remaining = chars.slice(chi + 1)
+          let value: string
           if (remaining.length > 0) {
-            flags[canonical] = remaining
+            value = remaining
             chi = chars.length
           } else {
             if (i >= args.length) {
               throw new TerminalError(`${prog}: option ${flagName} requires a value`)
             }
-            flags[canonical] = args[i++] as string
+            value = args[i++] as string
             chi = chars.length
+          }
+          if (def.multi === true) {
+            ;(flags[canonical] as string[]).push(value)
+          } else {
+            flags[canonical] = value
           }
         } else {
           flags[canonical] = true

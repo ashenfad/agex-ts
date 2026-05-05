@@ -4,24 +4,33 @@
  * Mechanism (mirrors agex-py):
  *   - The user registers a chapter task via `agent.chapterTask({...})`.
  *     It's a normal task that runs through the action loop, sees
- *     registered fns/namespaces, and uses the agent's LLM. Its
- *     contract: input is a numbered event index (string); output is
- *     `readonly Chapter[]`, returned via `taskSuccess(...)`.
+ *     registered fns/namespaces, and uses the agent's LLM. Contract:
+ *     input is a numbered event index (string); output is `Chapter[]`
+ *     where each chapter has 1-based inclusive `start`/`end`
+ *     positions into that index.
  *   - After each `ActionEvent`, the parent task's loop calls
  *     `shouldTriggerChaptering`. If it trips and a chapter task is
- *     registered, `runChaptering` builds the event index, invokes
- *     the chapter task (in a separate session so its events don't
- *     pollute the parent), and writes one `ChapterEvent` per
- *     returned `Chapter`.
+ *     registered, `runChaptering` builds the index, invokes the
+ *     chapter task (in a child session so its events don't pollute
+ *     the parent), and for each returned `Chapter`:
+ *       1. Translates `start`/`end` to the actual state keys at those
+ *          index positions.
+ *       2. Calls `EventLogImpl.replaceRange(refs, chapterEvent)`,
+ *          which writes the chapter event and rewrites the log's
+ *          index — the chaptered range is removed and the chapter
+ *          ref is spliced in. The originals stay at their state keys
+ *          but leave the active log.
  *   - Recursion guard: chaptering doesn't re-fire while the chapter
  *     task itself is executing. Tracked via a `WeakSet<Agent>`.
  *
- * Per `design.md` §6.7, the originals stay in the event log;
- * substituting the chapter summary for them is the renderer's call,
- * not the log's.
+ * After this, subsequent `iter()` over the parent's event log yields
+ * the chapter event in place of the originals — so the next LLM call
+ * sees the compacted log naturally, no separate render-time
+ * substitution needed.
  */
 
 import type { Agent } from './agent'
+import type { EventLogImpl } from './event-log'
 import type { ActionEvent, AgentEvent, Chapter, ChapterEvent } from './types'
 
 /** True when the latest `ActionEvent.inputTokens` is at or above
@@ -53,20 +62,29 @@ export function isChapteringInFlight(agent: Agent): boolean {
   return chapteringInFlight.has(agent)
 }
 
-/** Run the registered chapter task and append `ChapterEvent`s for
- *  each returned `Chapter`. No-op if no chapter task is registered.
- *  Returns the number of chapter events emitted. */
+/** Run the registered chapter task and apply each returned `Chapter`
+ *  to the parent log via `replaceRange`. No-op if no chapter task is
+ *  registered. Returns the number of chapter events applied.
+ *
+ *  `notify` is invoked for every event the user-facing onEvent
+ *  callback should see (SystemNote on failure + each ChapterEvent on
+ *  success). The chaptering machinery handles writing to the log
+ *  itself — `notify` is purely for the live event stream. */
 export async function runChaptering(
   parentEvents: ReadonlyArray<AgentEvent>,
+  parentEventLog: EventLogImpl,
   agent: Agent,
   parentSession: string,
   signal: AbortSignal,
-  emit: (event: AgentEvent) => Promise<void>,
+  notify: (event: AgentEvent) => Promise<void>,
 ): Promise<number> {
   const chapterTask = agent.getChapterTask()
   if (chapterTask === undefined) return 0
   if (chapteringInFlight.has(agent)) return 0
 
+  // Snapshot the index before we run the chapter task — chapter
+  // positions resolve against this exact ordering.
+  const refsAtTrigger = await parentEventLog.refs()
   const eventIndex = renderEventIndex(parentEvents)
 
   chapteringInFlight.add(agent)
@@ -79,17 +97,16 @@ export async function runChaptering(
       session: `${parentSession}/__chapter__`,
       signal,
     })
-    chapters = validateChapters(raw)
+    chapters = validateChapters(raw, parentEvents.length)
   } catch (e) {
-    // Surface chaptering failures as a SystemNoteEvent so the agent
-    // sees that compaction was attempted and failed; don't crash the
-    // outer task.
-    await emit({
+    const note: AgentEvent = {
       type: 'systemNote',
       timestamp: new Date().toISOString(),
       agentName: agent.name,
       message: `chaptering failed: ${e instanceof Error ? e.message : String(e)}`,
-    })
+    }
+    await parentEventLog.add(note)
+    await notify(note)
     return 0
   } finally {
     chapteringInFlight.delete(agent)
@@ -97,32 +114,37 @@ export async function runChaptering(
 
   if (chapters.length === 0) return 0
 
-  for (const ch of chapters) {
+  // Apply chapters in reverse order so earlier indices remain valid
+  // as we mutate the log (mirrors agex-py's reverse-application).
+  const sorted = [...chapters].sort((a, b) => b.start - a.start)
+  let applied = 0
+  for (const ch of sorted) {
+    // Translate 1-based inclusive positions to a slice of state keys.
+    const refs = refsAtTrigger.slice(ch.start - 1, ch.end)
+    if (refs.length === 0) continue
     const ev: ChapterEvent = {
       type: 'chapter',
       timestamp: new Date().toISOString(),
       agentName: agent.name,
       name: ch.name,
       message: ch.message,
-      eventRefs: [ch.start, ch.end],
+      eventRefs: refs,
     }
-    await emit(ev)
+    await parentEventLog.replaceRange(refs, ev)
+    await notify(ev)
+    applied++
   }
-  return chapters.length
+  return applied
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Render the parent event log as a numbered index for the chapter
- *  task to consume. One line per event, position prefixed in
- *  brackets. The chapter task uses the bracketed positions as
- *  `start` / `end` values when constructing chapters.
- *
- *  Format kept terse to keep the chapter-task prompt cheap — the
- *  task can refer back to its own conversation history for richer
- *  detail on any range it wants to summarize. */
+/** Render the parent event log as a numbered index. One line per
+ *  event, position prefixed in brackets. The chapter task uses the
+ *  bracketed positions as `start` / `end` values when constructing
+ *  chapters. */
 function renderEventIndex(events: ReadonlyArray<AgentEvent>): string {
   const lines: string[] = []
   for (let i = 0; i < events.length; i++) {
@@ -173,9 +195,10 @@ function truncate(s: string, max: number): string {
   return s.length <= max ? s : `${s.slice(0, max - 1)}…`
 }
 
-/** Validate that the chapter task's output looks like `Chapter[]`.
- *  Throws on shape mismatch — caller surfaces as a SystemNoteEvent. */
-function validateChapters(raw: unknown): ReadonlyArray<Chapter> {
+/** Validate that the chapter task's output looks like `Chapter[]`
+ *  with reasonable position bounds. Throws on shape mismatch —
+ *  caller surfaces as a SystemNoteEvent. */
+function validateChapters(raw: unknown, indexLen: number): ReadonlyArray<Chapter> {
   if (!Array.isArray(raw)) {
     throw new Error(`chapter task must return an array, got ${typeof raw}`)
   }
@@ -185,19 +208,38 @@ function validateChapters(raw: unknown): ReadonlyArray<Chapter> {
     if (
       c === null ||
       typeof c !== 'object' ||
-      typeof c.start !== 'string' ||
-      typeof c.end !== 'string' ||
+      typeof c.start !== 'number' ||
+      typeof c.end !== 'number' ||
       typeof c.name !== 'string' ||
       typeof c.message !== 'string'
     ) {
-      throw new Error(`chapter task: item ${i} must be { start, end, name, message } strings`)
+      throw new Error(
+        `chapter task: item ${i} must be { start: number, end: number, name: string, message: string }`,
+      )
+    }
+    if (c.start < 1 || c.end > indexLen || c.start > c.end) {
+      throw new Error(
+        `chapter task: item ${i} range [${c.start}, ${c.end}] is invalid for index of length ${indexLen}`,
+      )
     }
     out.push({
-      start: c.start as string,
-      end: c.end as string,
+      start: c.start as number,
+      end: c.end as number,
       name: c.name as string,
       message: c.message as string,
     })
+  }
+  // Reject overlapping ranges — they'd cause replaceRange to operate
+  // on stale refs.
+  const sorted = [...out].sort((a, b) => a.start - b.start)
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = sorted[i - 1] as Chapter
+    const curr = sorted[i] as Chapter
+    if (curr.start <= prev.end) {
+      throw new Error(
+        `chapter task: chapters [${prev.start},${prev.end}] and [${curr.start},${curr.end}] overlap`,
+      )
+    }
   }
   return out
 }

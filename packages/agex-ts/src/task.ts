@@ -122,18 +122,20 @@ export function makeTask<I, O>(agent: Agent, def: TaskDefinition<I, O>): TaskFn<
         await emit(actionEvent, eventLog, options.onEvent)
 
         // Chaptering — context compaction triggered by token budget.
-        // Runs after the ActionEvent is logged so the trigger reads
-        // the just-arrived inputTokens, and before dispatch so the
-        // chapter task sees the same event prefix the next LLM call
-        // will see (minus the chapter event we're about to add).
-        // The chapter task itself runs in a child session (see
-        // runChaptering) so its events don't pollute the parent log.
+        // Runs after the ActionEvent is logged (so the trigger reads
+        // the just-arrived inputTokens) and before dispatch (so any
+        // chapter events the chaptering machinery splices in are in
+        // place before the next LLM call). The chapter task itself
+        // runs in a child session (see runChaptering) so its events
+        // don't pollute the parent log.
         if (agent.getChapterTask() !== undefined) {
           const allEvents = await collectEvents(eventLog)
           if (shouldTriggerChaptering(allEvents, agent.chapteringTrigger)) {
-            await runChaptering(allEvents, agent, session, signal, (e) =>
-              emit(e, eventLog, options.onEvent),
-            )
+            await runChaptering(allEvents, eventLog, agent, session, signal, async (e) => {
+              // Forward to the user's onEvent callback only —
+              // replaceRange has already updated the index for us.
+              if (options.onEvent !== undefined) await options.onEvent(e)
+            })
           }
         }
 

@@ -100,7 +100,7 @@ describe('chaptering — chapterTask integration', () => {
           emissions: [
             {
               type: 'ts',
-              code: 'taskSuccess([{ start: "[1]", end: "[2]", name: "warmup", message: "thought briefly" }])',
+              code: 'taskSuccess([{ start: 2, end: 2, name: "warmup", message: "thought briefly" }])',
             },
           ],
         },
@@ -113,7 +113,9 @@ describe('chaptering — chapterTask integration', () => {
     expect(chapters.length).toBe(1)
     expect(chapters[0]?.name).toBe('warmup')
     expect(chapters[0]?.message).toBe('thought briefly')
-    expect(chapters[0]?.eventRefs).toEqual(['[1]', '[2]'])
+    // eventRefs holds the actual state keys that the chapter replaced.
+    expect(chapters[0]?.eventRefs.length).toBe(1)
+    expect(chapters[0]?.eventRefs.every((r) => r.includes('/evt/'))).toBe(true)
   })
 
   it('emits a SystemNoteEvent when the chapter task throws', async () => {
@@ -157,7 +159,7 @@ describe('chaptering — chapterTask integration', () => {
           emissions: [
             {
               type: 'ts',
-              code: 'taskSuccess([{ start: "[1]", end: "[1]", name: "x", message: "y" }])',
+              code: 'taskSuccess([{ start: 2, end: 2, name: "x", message: "y" }])',
             },
           ],
         },
@@ -193,7 +195,7 @@ describe('chaptering — chapterTask integration', () => {
           emissions: [
             {
               type: 'ts',
-              code: 'taskSuccess([{ start: "[1]", end: "[1]", name: "n", message: "m" }])',
+              code: 'taskSuccess([{ start: 2, end: 2, name: "n", message: "m" }])',
             },
           ],
           inputTokens: 9999,

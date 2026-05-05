@@ -64,7 +64,7 @@ describe('E2E smoke — full agent pipeline', () => {
         emissions: [
           {
             type: 'ts',
-            code: 'taskSuccess([{ start: "[1]", end: "[3]", name: "setup + edit", message: "seeded files; sorted; uppercased apple" }])',
+            code: 'taskSuccess([{ start: 1, end: 3, name: "setup + edit", message: "seeded files; sorted; uppercased apple" }])',
           },
         ],
       },
@@ -191,6 +191,89 @@ describe('E2E smoke — full agent pipeline', () => {
     await expect(promise).rejects.toThrow()
 
     expect(onEvent.find((e) => e.type === 'cancelled')).toBeDefined()
+  })
+
+  it('chaptering compacts the parent log: turn 3 sees the chapter, not the originals', async () => {
+    // Turn 1: heavy work that trips chaptering after this turn
+    // Turn 2 is consumed by the chapter task (replaces turn-1 events)
+    // Turn 3: the parent's actual second turn — its LLM call should
+    // see the *chapter* in place of the originals.
+    const llm = new Dummy({
+      responses: [
+        // Parent turn 1 — heavy
+        {
+          emissions: [
+            {
+              type: 'fileWrite',
+              path: '/seed.txt',
+              content: 'first',
+              mode: 'write',
+            },
+            { type: 'ts', code: '/* think hard */' },
+          ],
+          inputTokens: 5000,
+        },
+        // Chapter task turn — chapter the action that just landed
+        // (position 2: taskStart=1, action=2)
+        {
+          emissions: [
+            {
+              type: 'ts',
+              code: 'taskSuccess([{ start: 2, end: 2, name: "warmup", message: "wrote seed and thought" }])',
+            },
+          ],
+        },
+        // Parent turn 2 — finish
+        {
+          emissions: [{ type: 'ts', code: 'taskSuccess("done")' }],
+          inputTokens: 100,
+        },
+      ],
+    })
+    const agent = await createAgent({
+      name: 'chaptered',
+      llm,
+      runtime: evalRuntime(),
+      chapteringTrigger: 1000,
+    })
+    agent.chapterTask({ description: 'Summarize prior task work into chapters.' })
+    const fn = agent.task<undefined, string>({ description: 'X.' })
+    const result = await fn(undefined)
+    expect(result).toBe('done')
+
+    // The Dummy captured every (system, events) pair. Turn 3 is the
+    // parent's second LLM call. Its events array should reflect the
+    // compacted log: the original ActionEvent from turn 1 should be
+    // gone, replaced by a ChapterEvent.
+    expect(llm.allEvents.length).toBe(3) // parent t1, chapter t1, parent t2
+
+    const turn3Events = llm.allEvents[2] ?? []
+    const turn3Types = turn3Events.map((e) => e.type)
+
+    // Parent's original action (the heavy one) — gone from turn 3's view
+    const heavyActions = turn3Events.filter(
+      (e) => e.type === 'action' && (e.inputTokens ?? 0) === 5000,
+    )
+    expect(heavyActions.length).toBe(0)
+    // Chapter event is in its place
+    expect(turn3Types).toContain('chapter')
+
+    // Parent's final iter() over its log shows the same compacted shape:
+    // taskStart, chapter, success (the success comes after turn 3 lands).
+    const finalEvents: AgentEvent[] = []
+    for await (const e of agent.events('default').iter()) finalEvents.push(e)
+    const finalTypes = finalEvents.map((e) => e.type)
+    expect(finalTypes).toEqual(['taskStart', 'chapter', 'action', 'success'])
+
+    // The originals stay accessible via ChapterEvent.eventRefs even
+    // though they're out of the active log.
+    const chapterEv = finalEvents.find((e) => e.type === 'chapter')
+    expect(chapterEv).toBeDefined()
+    if (chapterEv?.type === 'chapter') {
+      expect(chapterEv.eventRefs.length).toBe(1)
+      // VFS overlay /chapters/<slug>/ that exposes these is TBD —
+      // but the refs are here for it to read.
+    }
   })
 
   it('host-injected fns and terminals resolve in deeply nested code', async () => {

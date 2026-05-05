@@ -240,10 +240,11 @@ export class IndexedDB implements KVStore {
 
   // ---------- Iteration ----------
 
-  async *keys(): AsyncIterable<string> {
+  async *keys(prefix?: string): AsyncIterable<string> {
     const { store, tx } = this.#tx('readonly')
+    const range = prefix !== undefined ? prefixRange(prefix) : null
     const collected = await new Promise<IDBValidKey[]>((resolve, reject) => {
-      const req = store.getAllKeys()
+      const req = range !== null ? store.getAllKeys(range) : store.getAllKeys()
       req.onsuccess = () => resolve(req.result)
       req.onerror = () => reject(req.error)
       tx.onabort = () => reject(tx.error ?? new Error('IndexedDB transaction aborted'))
@@ -251,11 +252,13 @@ export class IndexedDB implements KVStore {
     for (const k of collected) yield String(k)
   }
 
-  async *items(): AsyncIterable<readonly [string, Uint8Array]> {
+  async *items(prefix?: string): AsyncIterable<readonly [string, Uint8Array]> {
     const { store, tx } = this.#tx('readonly')
+    const range = prefix !== undefined ? prefixRange(prefix) : null
+    // Materialize-then-yield (deliberate; see file-level comment).
     const collected = await new Promise<Array<[string, Uint8Array]>>((resolve, reject) => {
       const items: Array<[string, Uint8Array]> = []
-      const req = store.openCursor()
+      const req = range !== null ? store.openCursor(range) : store.openCursor()
       req.onsuccess = () => {
         const cursor = req.result
         if (cursor) {
@@ -289,4 +292,13 @@ function bytesEqual(a: Uint8Array | null, b: Uint8Array | null): boolean {
   if (a.length !== b.length) return false
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
   return true
+}
+
+/**
+ * Build an `IDBKeyRange` covering all keys with the given prefix.
+ * `'￿'` is the highest BMP code point — well beyond any sensible
+ * suffix character.
+ */
+function prefixRange(prefix: string): IDBKeyRange {
+  return IDBKeyRange.bound(prefix, `${prefix}￿`, false, false)
 }

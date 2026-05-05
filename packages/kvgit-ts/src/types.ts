@@ -78,8 +78,19 @@ export interface KVStore {
    */
   cas(key: string, value: Uint8Array, expected: Uint8Array | null): Promise<boolean>
 
-  keys(): AsyncIterable<string>
-  items(): AsyncIterable<readonly [string, Uint8Array]>
+  /**
+   * Iterate keys, optionally restricted to a string prefix.
+   *
+   * Backends with native prefix support (IDB key ranges, SQLite
+   * range scans) implement this in O(matching keys). Memory falls
+   * back to filter-after-iterate, which is still O(N) but correct.
+   * Pass `undefined` (or no argument) to iterate all keys.
+   */
+  keys(prefix?: string): AsyncIterable<string>
+
+  /** Iterate `(key, value)` pairs, optionally restricted to a prefix. */
+  items(prefix?: string): AsyncIterable<readonly [string, Uint8Array]>
+
   clear(): Promise<void>
 }
 

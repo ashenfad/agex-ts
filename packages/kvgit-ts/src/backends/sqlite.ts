@@ -77,6 +77,8 @@ export class Sqlite implements KVStore {
   readonly #hasStmt: StatementSync
   readonly #allKeysStmt: StatementSync
   readonly #allItemsStmt: StatementSync
+  readonly #prefixKeysStmt: StatementSync
+  readonly #prefixItemsStmt: StatementSync
   readonly #clearStmt: StatementSync
   readonly #casUpdateStmt: StatementSync
   readonly #casInsertIfAbsentStmt: StatementSync
@@ -93,6 +95,8 @@ export class Sqlite implements KVStore {
     this.#hasStmt = db.prepare('SELECT 1 AS present FROM kv WHERE key = ? LIMIT 1')
     this.#allKeysStmt = db.prepare('SELECT key FROM kv')
     this.#allItemsStmt = db.prepare('SELECT key, value FROM kv')
+    this.#prefixKeysStmt = db.prepare('SELECT key FROM kv WHERE key >= ? AND key < ?')
+    this.#prefixItemsStmt = db.prepare('SELECT key, value FROM kv WHERE key >= ? AND key < ?')
     this.#clearStmt = db.prepare('DELETE FROM kv')
     this.#casUpdateStmt = db.prepare('UPDATE kv SET value = ? WHERE key = ? AND value = ?')
     this.#casInsertIfAbsentStmt = db.prepare('INSERT OR IGNORE INTO kv (key, value) VALUES (?, ?)')
@@ -190,13 +194,21 @@ export class Sqlite implements KVStore {
 
   // ---------- Iteration ----------
 
-  async *keys(): AsyncIterable<string> {
-    const rows = this.#allKeysStmt.all() as Array<{ key: string }>
+  async *keys(prefix?: string): AsyncIterable<string> {
+    const rows = (
+      prefix !== undefined
+        ? this.#prefixKeysStmt.all(prefix, prefixUpperBound(prefix))
+        : this.#allKeysStmt.all()
+    ) as Array<{ key: string }>
     for (const row of rows) yield row.key
   }
 
-  async *items(): AsyncIterable<readonly [string, Uint8Array]> {
-    const rows = this.#allItemsStmt.all() as Array<{ key: string; value: Uint8Array }>
+  async *items(prefix?: string): AsyncIterable<readonly [string, Uint8Array]> {
+    const rows = (
+      prefix !== undefined
+        ? this.#prefixItemsStmt.all(prefix, prefixUpperBound(prefix))
+        : this.#allItemsStmt.all()
+    ) as Array<{ key: string; value: Uint8Array }>
     for (const row of rows) yield [row.key, toFreshUint8Array(row.value)] as const
   }
 
@@ -213,4 +225,13 @@ export class Sqlite implements KVStore {
  */
 function toFreshUint8Array(v: Uint8Array): Uint8Array {
   return new Uint8Array(v)
+}
+
+/**
+ * Compute the exclusive upper bound for a prefix range scan.
+ * `'￿'` (highest BMP code point) is appended so the half-open
+ * range `[prefix, upper)` covers every key starting with `prefix`.
+ */
+function prefixUpperBound(prefix: string): string {
+  return `${prefix}￿`
 }

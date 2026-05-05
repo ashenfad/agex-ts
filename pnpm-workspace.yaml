@@ -7,3 +7,7 @@ packages:
 allowBuilds:
   '@biomejs/biome': true
   esbuild: true
+  # msw is a transitive dep of @vitest/browser. Its postinstall prints a
+  # one-time setup message and is otherwise inert; allow it to clear
+  # pnpm's "ignored builds" gate.
+  msw: true

@@ -29,6 +29,11 @@ export interface CommandContext {
   /** Cooperative cancellation. Loop-heavy builtins (grep, find,
    *  xargs) check this at iteration boundaries. */
   readonly signal: AbortSignal
+  /** The full command registry — host overrides merged on top of
+   *  builtins. Builtins that re-enter the interpreter (xargs,
+   *  `find -exec`) thread this through so host-injected commands
+   *  remain reachable in nested invocations. */
+  readonly commands: ReadonlyMap<string, CommandHandler>
 }
 
 export interface CommandResult {

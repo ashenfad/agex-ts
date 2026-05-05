@@ -750,9 +750,11 @@ export const find: CommandHandler = async (ctx: CommandContext) => {
 
   // Dynamic import breaks the circular dep:
   //   search.ts → interpreter.ts → builtins/index.ts → search.ts
+  // Pass ctx.commands so host-injected commands stay reachable from
+  // `find -exec`.
   const executor = async (cmdStr: string, fs: FileSystem): Promise<string> => {
     const { execute } = await import('../interpreter')
-    return execute(cmdStr, fs)
+    return execute(cmdStr, fs, { signal: ctx.signal, commands: ctx.commands })
   }
 
   const predicate = parseFindPredicates(predicateTokens, {

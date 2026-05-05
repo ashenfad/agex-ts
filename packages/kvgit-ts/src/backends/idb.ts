@@ -240,6 +240,22 @@ export class IndexedDB implements KVStore {
 
   // ---------- Iteration ----------
 
+  // ----- Iteration design note -----
+  //
+  // Both `keys()` and `items()` materialize the result set inside the
+  // IDB transaction's lifetime, then yield from memory. True
+  // cursor-streaming (yield each row from inside the cursor callback)
+  // is possible but conflicts with two of this file's discipline rules
+  // (handler-attach-synchronously, no-await-in-tx) — the consumer's
+  // pull rate would dictate when `cursor.continue()` runs, and any
+  // delay risks the tx auto-committing mid-iteration.
+  //
+  // For our usage patterns — bounded HAMT walks, prefix-scoped GC
+  // sweeps — the consumer always drains the iterator anyway, so
+  // streaming's memory benefit doesn't materialize. We pay the
+  // materialization cost knowingly. Revisit if a real consumer
+  // genuinely benefits from backpressure-friendly streaming.
+
   async *keys(prefix?: string): AsyncIterable<string> {
     const { store, tx } = this.#tx('readonly')
     const range = prefix !== undefined ? prefixRange(prefix) : null
@@ -255,7 +271,6 @@ export class IndexedDB implements KVStore {
   async *items(prefix?: string): AsyncIterable<readonly [string, Uint8Array]> {
     const { store, tx } = this.#tx('readonly')
     const range = prefix !== undefined ? prefixRange(prefix) : null
-    // Materialize-then-yield (deliberate; see file-level comment).
     const collected = await new Promise<Array<[string, Uint8Array]>>((resolve, reject) => {
       const items: Array<[string, Uint8Array]> = []
       const req = range !== null ? store.openCursor(range) : store.openCursor()

@@ -8,6 +8,7 @@
  */
 
 import type { CommandHandler } from '../context'
+import { diff } from './diff'
 import { basename, cd, cp, dirname, ls, mkdir, mv, pwd, rm, touch } from './filesystem'
 import { cat, echo, head, tail, tee } from './io'
 import { find, grep } from './search'
@@ -40,4 +41,6 @@ export const BUILTINS: ReadonlyMap<string, CommandHandler> = new Map<string, Com
   // Search
   ['grep', grep],
   ['find', find],
+  // Diff
+  ['diff', diff],
 ])

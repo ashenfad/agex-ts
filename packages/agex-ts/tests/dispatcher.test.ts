@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { createAgent } from '../src/agent'
 import { Dummy } from '../src/llm/dummy'
+import { makeToolUseId } from '../src/render'
 import { evalRuntime } from '../src/runtime/eval'
-import type { LLMResponse } from '../src/types'
+import type { ActionEvent, AgentEvent, LLMResponse, OutputEvent } from '../src/types'
 
 const enc = new TextEncoder()
 const dec = new TextDecoder()
@@ -136,6 +137,66 @@ describe('emission dispatch — terminal', () => {
     await fn(undefined, { onEvent: (e) => void events.push(e) })
     const outputs = events.filter((e) => e.type === 'output')
     expect(outputs.length).toBeGreaterThan(0)
+  })
+})
+
+describe('OutputEvent emissionId stamping', () => {
+  // The renderer relies on OutputEvent.emissionId to pair outputs to
+  // the right tool_use. The id is derived from
+  // makeToolUseId(actionTimestamp, emissionIndex), so each
+  // OutputEvent must carry the id of the *specific* emission that
+  // produced it — not the whole action, not a positional cursor.
+
+  it('stamps the producing emission index, even when earlier emissions are silent', async () => {
+    const { agent } = await makeAgent([
+      r(
+        // index 0: thinking — no output
+        { type: 'thinking', text: 'plan' },
+        // index 1: silent fileWrite — no output
+        { type: 'fileWrite', path: '/x.txt', content: 'hi\n', mode: 'write' },
+        // index 2: terminal with stdout — produces OutputEvent
+        { type: 'terminal', commands: 'cat /x.txt' },
+        // index 3: ts terminator
+        { type: 'ts', code: 'taskSuccess(null)' },
+      ),
+    ])
+    const fn = agent.task<undefined, null>({ description: 'Stamp test.' })
+    const events: AgentEvent[] = []
+    await fn(undefined, { onEvent: (e) => void events.push(e) })
+
+    const action = events.find((e): e is ActionEvent => e.type === 'action')
+    const output = events.find((e): e is OutputEvent => e.type === 'output')
+    expect(action).toBeDefined()
+    expect(output).toBeDefined()
+
+    // The single OutputEvent must point at emission index 2 (the
+    // terminal), NOT index 0 (which was a thinking part — not even a
+    // tool_use). A positional-cursor implementation would get this
+    // wrong and produce a dangling tool_result.
+    if (action !== undefined && output !== undefined) {
+      expect(output.emissionId).toBe(makeToolUseId(action.timestamp, 2))
+    }
+  })
+
+  it('stamps distinct ids for multiple producing emissions', async () => {
+    const { agent } = await makeAgent([
+      r(
+        { type: 'fileWrite', path: '/a.txt', content: 'A\n', mode: 'write' },
+        { type: 'fileWrite', path: '/b.txt', content: 'B\n', mode: 'write' },
+        { type: 'terminal', commands: 'cat /a.txt' },
+        { type: 'terminal', commands: 'cat /b.txt' },
+        { type: 'ts', code: 'taskSuccess(null)' },
+      ),
+    ])
+    const fn = agent.task<undefined, null>({ description: 'Two outputs.' })
+    const events: AgentEvent[] = []
+    await fn(undefined, { onEvent: (e) => void events.push(e) })
+
+    const action = events.find((e): e is ActionEvent => e.type === 'action') as ActionEvent
+    const outputs = events.filter((e): e is OutputEvent => e.type === 'output')
+    expect(outputs.length).toBe(2)
+    expect(outputs[0]?.emissionId).toBe(makeToolUseId(action.timestamp, 2))
+    expect(outputs[1]?.emissionId).toBe(makeToolUseId(action.timestamp, 3))
   })
 })
 

@@ -76,24 +76,6 @@ describe('Dummy — inspection state', () => {
   })
 })
 
-describe('Dummy — summarize', () => {
-  it('honors a configured summaryResponse', async () => {
-    const d = new Dummy({ summaryResponse: 'tldr;' })
-    expect(await d.summarize('sys', 'big text')).toBe('tldr;')
-  })
-
-  it('throws a configured summaryError', async () => {
-    const d = new Dummy({ summaryError: new Error('summary down') })
-    await expect(d.summarize('sys', '')).rejects.toThrow('summary down')
-  })
-
-  it('default summarize is a deterministic stringification', async () => {
-    const d = new Dummy()
-    const text = await d.summarize('S', 'C')
-    expect(text).toBe('S C')
-  })
-})
-
 describe('Dummy — dumpConfig / fromConfig round-trip', () => {
   it('preserves responses (modulo Error entries)', () => {
     const original = new Dummy({

@@ -250,6 +250,11 @@ async function dispatchEmissions(
         await emit(outputEvent, eventLog, onEvent)
       }
       if (result.error !== null && result.outcome.kind === 'continue') {
+        // Cancellation surfaced by the runtime: re-raise so the outer
+        // catch emits CancelledEvent rather than burying it in a fail.
+        if (result.error instanceof CancelledError || ctx.signal.aborted) {
+          throw new CancelledError(result.error.message)
+        }
         return { kind: 'fail', message: result.error.message }
       }
       if (result.outcome.kind !== 'continue') return result.outcome

@@ -32,14 +32,6 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
-  "peerDependencies": {
-    "kvgit-ts": "workspace:*"
-  },
-  "peerDependenciesMeta": {
-    "kvgit-ts": {
-      "optional": true
-    }
-  },
   "devDependencies": {
     "kvgit-ts": "workspace:*",
     "tsup": "^8.3.5",

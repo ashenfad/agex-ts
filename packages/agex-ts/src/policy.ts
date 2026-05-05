@@ -14,6 +14,7 @@
  * should re-snapshot after each registration burst.
  */
 
+import { globMatch as termishGlobMatch } from 'termish-ts'
 import { RegistrationError } from './errors'
 import type {
   MemberConfig,
@@ -191,9 +192,9 @@ export function memberAllowed(
 
 function matchesFilter(name: string, filter: MemberFilter): boolean {
   if (typeof filter === 'function') return filter(name)
-  if (typeof filter === 'string') return globMatch(name, filter)
+  if (typeof filter === 'string') return termishGlobMatch(filter, name)
   for (const f of filter) {
-    if (globMatch(name, f)) return true
+    if (termishGlobMatch(f, name)) return true
   }
   return false
 }
@@ -207,16 +208,4 @@ function omitUndefined<T extends object>(obj: T): T {
     if (v !== undefined) out[k] = v
   }
   return out as T
-}
-
-function globMatch(name: string, pattern: string): boolean {
-  // Compile to a single-segment glob regex. Same surface as termish-ts's
-  // basic globbing (no `**` because member names have no slashes).
-  let re = ''
-  for (const c of pattern) {
-    if (c === '*') re += '[^/]*'
-    else if (c === '?') re += '[^/]'
-    else re += c.replace(/[.+^${}()|[\]\\]/g, '\\$&')
-  }
-  return new RegExp(`^${re}$`).test(name)
 }

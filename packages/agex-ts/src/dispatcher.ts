@@ -38,10 +38,11 @@ export async function dispatchFileEdit(
   emission: FileEditEmission,
   fs: VirtualFileSystem,
 ): Promise<void> {
-  const existing = await fs.read(emission.path).catch(() => null)
-  if (existing === null) {
+  if (!(await fs.exists(emission.path))) {
     throw new Error(`fileEdit: ${emission.path}: no such file`)
   }
+  // Don't catch here — IO / permission errors should surface unmasked.
+  const existing = await fs.read(emission.path)
   const text = decoder.decode(existing)
   const search = emission.search
   if (search.length === 0) {

@@ -17,5 +17,5 @@ See [`design.md`](../../design.md) and the `termish-ts` section of [`implementat
 | Adapter | Sub-path | When to reach for it |
 |---|---|---|
 | `MemoryFS` | `termish-ts/fs/memory` | Tests, ephemeral use, browser-side state with no persistence |
-| `NodeFS` | `termish-ts/fs/node` | Server-side Node, wraps `node:fs/promises` + tracks cwd |
+| `RealFS` | `termish-ts/fs/real` | Hits the actual disk on Node — wraps `node:fs/promises` + tracks cwd |
 | `KvgitFS` | `termish-ts/fs/kvgit` | Versioned shell sessions backed by `kvgit-ts` (peer dep) |

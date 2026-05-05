@@ -2,7 +2,7 @@
  * `FileSystem` protocol for termish-ts.
  *
  * Async, structurally-typed interface that every adapter (MemoryFS,
- * NodeFS, KvgitFS, host-defined) implements. We define our own
+ * RealFS, KvgitFS, host-defined) implements. We define our own
  * protocol rather than reusing `node:fs/promises` directly because:
  *
  * - An interactive shell needs **cwd state** (the `cd` command

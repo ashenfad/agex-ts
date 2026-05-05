@@ -299,7 +299,10 @@ In:
   our own protocol and ship adapters.
 - **Three FS adapters** in v1:
   - `MemoryFS` — in-process, for tests + ephemeral use
-  - `NodeFS` — wraps `node:fs/promises` + tracks cwd
+  - `RealFS` — hits the actual disk on Node; wraps `node:fs/promises`
+    + tracks cwd. Useful for direct termish-ts consumers (CLI tools)
+    and e2e tests; agex agents intentionally don't reach for it (they
+    get `MemoryFS` or `KvgitFS` per design.md's sandbox-vs-host model).
   - `KvgitFS` — backed by a `Staged<Uint8Array>` from `kvgit-ts`,
     so agent shell sessions get versioning / branching / merge for
     free. Sub-path export `termish-ts/fs/kvgit`; `kvgit-ts` is a
@@ -335,7 +338,7 @@ scope. (Same constraint as termish-py.)
 | Globbing | Standalone helper over FS listing primitives. Backends do not implement `glob()`. |
 | Quote masking | Hand-port from termish-py's `quote_masker.py` — preserves quoted wildcards through tokenization. |
 | Tokenization | Hand-rolled (no JS equivalent of Python's `shlex`). Same token vocabulary. |
-| Sub-path exports | Yes — `termish-ts/fs/memory`, `/fs/node`, `/fs/kvgit` so unused adapters tree-shake. |
+| Sub-path exports | Yes — `termish-ts/fs/memory`, `/fs/real`, `/fs/kvgit` so unused adapters tree-shake. |
 | Archive deps | `tar-stream` (tar I/O), `fflate` (zip + DEFLATE) as runtime deps. gzip uses Node `node:zlib` and browser `DecompressionStream` — no extra dep. |
 
 **Concrete contracts.** Live in `packages/termish-ts/src/types.ts`
@@ -390,7 +393,7 @@ canonical source. Major shapes:
   archive commands test the file round-trip (`tar -czf` then
   `tar -tzf`) plus the binary-to-pipeline error.
 - FS adapters: `MemoryFS` and `KvgitFS` exercised by the same
-  conformance suite (when extracted); `NodeFS` tested against
+  conformance suite (when extracted); `RealFS` tested against
   a temp directory.
 - End-to-end: a story-shaped flow exercising parser →
   interpreter → builtins → MemoryFS, plus `KvgitFS` with branching.
@@ -412,7 +415,7 @@ canonical source. Major shapes:
 11. `sed` (full).
 12. `xargs`.
 13. Archive (`tar` via `tar-stream`, `gzip`/`gunzip` native, `zip`/`unzip` via `fflate`).
-14. `NodeFS` adapter.
+14. `RealFS` adapter.
 15. `KvgitFS` adapter (sub-path export, `kvgit-ts` peer dep).
 16. End-to-end smoke.
 17. CI (Node-only — no browser-specific behavior).

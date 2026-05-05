@@ -17,6 +17,7 @@ import { CacheManager } from './cache'
 import { EventLogImpl } from './event-log'
 import { PolicyBuilder, memberAllowed } from './policy'
 import { type StateBackend, connectState, isVersioned } from './state'
+import { type TaskDefinition, makeTask } from './task'
 import type {
   Cache,
   EventLog,
@@ -137,6 +138,24 @@ export class Agent {
     return this.#policy.fingerprint()
   }
 
+  /** The agent's primer prose, if any. Surfaced as part of the
+   *  system prompt during task runs. */
+  get primer(): string | undefined {
+    return this.#opts.primer
+  }
+
+  /** The configured LLM driver, if any. Tasks throw at call time
+   *  if this isn't set. */
+  get llm(): LLMClient | undefined {
+    return this.#opts.llm
+  }
+
+  /** The configured runtime, if any. Tasks throw at call time if
+   *  this isn't set. */
+  get runtime(): RuntimeAdapter | undefined {
+    return this.#opts.runtime
+  }
+
   /** Read-only snapshot of the registration policy. */
   policy(): Policy {
     return this.#policy.snapshot()
@@ -171,6 +190,16 @@ export class Agent {
   terminal(name: string, opts: TerminalRegistration): this {
     this.#policy.registerTerminal(name, opts)
     return this
+  }
+
+  // -- Task lifecycle ----------------------------------------------------
+
+  /** Define a typed callable that drives the action loop. The
+   *  returned function is awaitable: `const result = await task(input)`. */
+  task<I, O>(
+    def: TaskDefinition<I, O>,
+  ): (input: I, options?: import('./types').TaskCallOptions) => Promise<O> {
+    return makeTask(this, def)
   }
 
   // -- Per-session host APIs ---------------------------------------------

@@ -7,4 +7,6 @@
  */
 
 export { isVersioned, type StateBackend, type VersionedStateBackend } from './backend'
+export { connectState } from './connect'
+export { KvgitState } from './kvgit'
 export { Live } from './live'

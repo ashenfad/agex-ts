@@ -116,9 +116,9 @@ In:
   the implementation can land later without restructuring.
   Synthetic-corrupt-store test infra ships in v1 so both tiers
   are testable.
-- Backends: `memory` (always), `indexeddb` (browser), `opfs`
-  (browser), `sqlite` (Node — `node:sqlite` if available, else
-  `better-sqlite3`). `KVStore` interface for custom backends.
+- Backends: `memory` (always), `indexeddb` (browser), `sqlite`
+  (Node — `node:sqlite`, requires Node 22.5+). `KVStore` interface
+  for custom backends.
 
 Out (deferred per `design.md` §11):
 - Custom value codecs (chunked dedup of large numpy/pandas-style
@@ -127,6 +127,9 @@ Out (deferred per `design.md` §11):
   migration story.
 - Commit-scan fallback in `_resolve_head` (slot-only in v1).
 - `Live` — that's an agex-ts state primitive, not a kvgit one.
+- OPFS as a first-party backend — the `KVStore` interface lets
+  users plug their own OPFS implementation in the meantime; we
+  re-evaluate when a real consumer measures it as necessary.
 
 **Cross-cutting decisions.**
 
@@ -139,7 +142,7 @@ Out (deferred per `design.md` §11):
 | `info` dict | `Record<string, unknown> \| undefined` on commits, surfaced via `commitInfo()`. |
 | `history()` | `AsyncIterable<string>` with `allParents` flag — preserves laziness for long histories. |
 | Concurrency | Optimistic with `ConcurrencyError` on branch-update CAS, no locking. |
-| Sub-path exports | Yes — `kvgit-ts/backends/idb`, `kvgit-ts/backends/opfs`, etc., so unused backends tree-shake out of bundles. |
+| Sub-path exports | Yes — `kvgit-ts/backends/idb`, `kvgit-ts/backends/sqlite`, etc., so unused backends tree-shake out of bundles. |
 | TS strictness | `strict: true` + `noUncheckedIndexedAccess` + `exactOptionalPropertyTypes`. |
 | Module / target | ESM-only, `target: ES2022`, `moduleResolution: Bundler`. |
 
@@ -221,12 +224,12 @@ the implementations and re-export through `src/index.ts`.
   blobs are removed; reachable commits preserved; young orphans
   protected; HAMT nodes shared by multiple deleted commits
   removed exactly once.
-- Backend conformance: each backend (memory, IDB, OPFS, SQLite)
-  passes the same interface-conformance suite. CAS is
-  correctness-critical and tested under simulated concurrent
-  access where the backend supports it.
-- Browser tests via Vitest browser mode (Playwright) for IDB
-  and OPFS; Node tests for memory and SQLite.
+- Backend conformance: each backend (memory, IDB, SQLite) passes
+  the same interface-conformance suite. CAS is correctness-critical
+  and tested under simulated concurrent access where the backend
+  supports it.
+- Browser tests via Vitest browser mode (Playwright) for IDB; Node
+  tests for memory and SQLite.
 
 **Build order within kvgit-ts.**
 
@@ -243,8 +246,8 @@ the implementations and re-export through `src/index.ts`.
    memory backend.
 9. IndexedDB backend (with the two lessons baked in: handle
    `onblocked`, attach handlers synchronously).
-10. SQLite backend (Node).
-11. OPFS backend (browser, lowest priority).
+10. SQLite backend (Node, via `node:sqlite`).
+11. *(deferred)* OPFS backend — see `design.md` §11.
 
 ---
 

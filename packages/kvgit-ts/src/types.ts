@@ -187,15 +187,18 @@ export type BytesMergeFn = (
 export type MergeFn<T = unknown> = (old: T | null, ours: T | null, theirs: T | null) => T
 
 /**
- * Disposition for committing onto a branch HEAD that has moved between
- * `Versioned`'s in-memory base and the live HEAD.
+ * Disposition for a `commit()` that can't land cleanly.
  *
- * - `'raise'` (default): throw `ConcurrencyError`. Caller handles.
- * - `'merge'`: perform a three-way merge using registered merge fns.
- *    Throws `MergeConflict` if any contested key has no fn.
- * - `'skip'`: silently drop the commit. Staged changes remain.
+ * `commit()` always attempts to advance HEAD: if HEAD has moved, it
+ * tries a three-way merge using the registered merge fns. This flag
+ * governs only what happens when *that* fails (no LCA, contested key
+ * with no merge fn, CAS lost the race).
+ *
+ * - `'raise'` (default): throw `ConcurrencyError` or `MergeConflict`.
+ * - `'skip'`: return `{ merged: false }`. Staged changes remain;
+ *   in-memory base is restored. Caller decides whether to retry.
  */
-export type ConflictDisposition = 'raise' | 'merge' | 'skip'
+export type ConflictDisposition = 'raise' | 'skip'
 
 /** Optional commit-level metadata. Surfaced via `commitInfo()`. */
 export type CommitInfo = Record<string, unknown>

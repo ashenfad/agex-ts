@@ -472,22 +472,292 @@ dependency.
 - *Not in v1*: multi-agent, setup parameter, agent-side LLM access,
   per `design.md` §11.
 
-**Concrete contracts.** `[TBD]` — formal TypeScript signatures for
-`Agent`, `TaskFn`, `TaskCallOptions`, every event type, every
-emission type, `TokenChunk`, `RuntimeAdapter`, `LLMClient`,
-`AgentEvent` discriminated union, `Chapter` constructor args.
+**Cross-cutting decisions.**
 
-**Pitfalls and lessons from agex-py.** `[TBD]` — expect lessons
-about system-message construction (cache-friendliness matters from
-day one), event-log token estimation (the `low_detail_tokens`
-shape), chaptering trigger heuristics, the bare-`except` rewrite
-(we can't replicate; document the limitation per `design.md` §4.3
-and the appendix).
+| Decision | Choice |
+|---|---|
+| Async surface | Async end-to-end. No sync mirrors of LLM/runtime APIs (Pyodide-compatibility was an agex-py concession; TS has no equivalent constraint). |
+| State storage | `kvgit-ts` `VersionedKV` for the durable path, `Live` (in-process Map) for ephemeral. Same `Versioned`-shaped surface for both so the Agent code is unaware. |
+| Cancellation | `AbortSignal` from v1, threaded through both `RuntimeAdapter.execute` and `LLMClient.complete`. Worker-side cancellation reads a state-key sentinel since Workers can't observe an `AbortSignal` directly. |
+| Schema validation | [`@standard-schema/spec`](https://standardschema.dev/) — pluggable validators (zod, valibot, arktype, etc.) for task input/output. |
+| Prominence model | Binary, presence-of-description. No numeric tiers — see `design.md` §5.7. |
+| Registration timing | Eager — every registration call validates and updates the policy table immediately; cached primer/dependency snapshots invalidate on registration. |
+| Event log key generation | ISO-8601 timestamp prefix with collision suffix; chronological iteration is `keys.sort()`. |
+| Error classification | Provider/runtime errors surface as `TransientError` (retry candidate) or `FatalError` (reraise) — retry budget is centralized in the agent loop, never inside the SDK. |
+| Sub-path exports | Yes — `agex-ts/types`, `agex-ts/state` so consumers can pull the contract surface without dragging the agent runtime. |
+| Module / target | ESM-only, `target: ES2022`, `moduleResolution: Bundler`. |
+| TS strictness | `strict: true` + `noUncheckedIndexedAccess` + `exactOptionalPropertyTypes`. |
 
-**Verification.** `[TBD]` — unit tests for registration, task
-definition, event log construction, chaptering boundary detection,
-schema validation. Integration tests using the runtime-worker +
-Anthropic provider for an end-to-end smoke flow.
+**Concrete contracts.** Live in `packages/agex-ts/src/types.ts` — that
+file is the canonical source for signatures; this doc defers to it.
+Major shapes (mirror `design.md` §4.5, §4.6, §5, §8.3, §9.2):
+
+- **`Agent`** — class with the `design.md` §4.5 constructor surface.
+  Carries a `Policy` (registration table), a `StateConfig`, an
+  optional `FSConfig`, an `LLMClient`, a `RuntimeAdapter`, and the
+  five registration methods plus `task()`, `state(session)`,
+  `fs(session)`, `cache(session)`.
+- **`TaskFn<I, O>`** — `(input: I, options?: TaskCallOptions) => Promise<O>`.
+- **`TaskCallOptions`** — `{ session?: string; signal?: AbortSignal;
+  onEvent?: (e: AgentEvent) => void; onToken?: (t: TokenChunk) => void }`.
+- **`Emission`** — discriminated union over `'ts' | 'terminal' |
+  'fileWrite' | 'fileEdit' | 'text' | 'thinking'`. Each variant
+  carries its own fields plus optional `signature?: Uint8Array` for
+  provider-native round-trip (Claude thinking blocks, Gemini
+  `thought_signatures`).
+- **`AgentEvent`** — discriminated union of the v1 event types:
+  `TaskStartEvent`, `ActionEvent` (carries `emissions: Emission[]`,
+  preserving order), `OutputEvent`, `SuccessEvent`, `FailEvent`,
+  `ClarifyEvent`, `CancelledEvent`, `ChapterEvent`, `FileEvent`,
+  `ErrorEvent`, `SystemNoteEvent`. Every event carries `timestamp`
+  (ISO 8601 UTC), `agentName`, optional `commitHash`, optional
+  `parentRef` (kvgit commit hash threading task ancestry), optional
+  token estimates.
+- **`TokenChunk`** — streaming chunk: `{ type, content, done,
+  emissionIndex, emission?, signature?, inputTokens?, outputTokens? }`.
+  `type` ranges over the same set as `Emission` plus internal
+  markers (`'title'`, `'tool_start'`, `'signature'`).
+- **`Chapter`** — `{ start: string; end: string; name: string;
+  message: string }`. `start`/`end` are state keys bracketing the
+  range being summarized.
+- **`RuntimeAdapter`** (`design.md` §8.3) — interface with three
+  methods: `init(policy)`, `execute(code, opts)` returning
+  `Promise<ExecResult>`, `dispose()`. `ExecResult = { error:
+  TaskOutcome | Error | null; outputs: OutputPart[]; elapsedMs: number;
+  inputTokens?: number; outputTokens?: number }`. `TaskOutcome` is the
+  discriminated union `{ kind: 'success'; value: unknown }` |
+  `{ kind: 'fail'; message: string }` |
+  `{ kind: 'clarify'; message: string }` | `{ kind: 'continue' }`.
+- **`LLMClient`** (`design.md` §9.2) — interface with
+  `complete(request, signal)` returning `AsyncIterable<TokenChunk>`,
+  plus `dumpConfig()` for serialization, plus a `summarize(...)`
+  helper used by chaptering. `LLMRequest` carries `system`, `events`,
+  `tools` (normalized schemas), and `cacheBoundaries` (the markers a
+  provider adapter places into its wire format).
+- **`Policy`** — registration table built incrementally by `agent.fn`
+  / `.cls` / `.namespace` / `.skill` / `.terminal`. Carries
+  `RegisteredFn`, `RegisteredCls`, `RegisteredNs`, `RegisteredSkill`,
+  `RegisteredTerminal` records. The runtime adapter consumes it at
+  `init()` to scope the agent's name resolution.
+- **Persistence APIs**: `Cache` (typed Map-shaped, `set`/`get`/`has`/
+  `delete`/`keys`, all async), `VirtualFileSystem` (re-exported from
+  termish-ts's `FileSystem` protocol), `EventLog` (append-only,
+  `add(event) => Promise<string>`, `iter() => AsyncIterable<AgentEvent>`,
+  `at(commitHash)` for time-travel views).
+- **Errors**: `TaskFailError`, `TaskClarifyError` (thrown from inside
+  `ts` emissions by the injected `taskFail` / `taskClarify`); base
+  `AgentError`; runtime/provider errors classified as `TransientError |
+  FatalError` for the retry layer.
+
+**Pitfalls and lessons from agex-py.**
+
+- **Emission order is load-bearing for prompt caching.**
+  `ActionEvent.emissions` carries the LLM's exact output sequence
+  (interleaved thinking, code, file actions, tool calls). Every
+  emission may carry an opaque provider signature (Claude thinking
+  blocks, Gemini `thought_signatures`) that the next turn's request
+  must echo verbatim — providers reject mismatched signatures with
+  "invalid block signature" errors, and the resulting cache miss
+  invalidates hours of context. Treat emissions as an ordered
+  sequence with immutable signatures from the moment of capture; do
+  not filter, reorder, or re-encode them when rendering the event
+  log back to the provider.
+
+- **Fingerprint changes invalidate the agent's cached state.**
+  agex-py's `_update_fingerprint` clears the cached dependency graph
+  on every registration call. The TS analogue: any `agent.fn` /
+  `.cls` / `.namespace` / `.skill` / `.terminal` call invalidates
+  the cached primer/policy snapshot. Lazy recomputation on first
+  use is fine, but the cache lifetime is registration-driven, not
+  time-driven. Don't snapshot outside the agent.
+
+- **Cancellation reaches sandboxed code via state polling, not
+  signals.** A worker can't observe a parent-thread `AbortSignal`
+  directly. The pattern: when the host signal fires, the agent
+  loop writes a sentinel key to the session's state; the runtime
+  adapter checks for it at safe points (between iterations of
+  agent-authored loops, before injecting `taskSuccess`-class raises)
+  and raises a `CancelledError` inside the worker. Outer worker
+  termination is the fallback, not the primary path — termination
+  loses partial work.
+
+- **Description-presence is the only prominence lever.** Per
+  `design.md` §5.7, agex-ts has no per-registration
+  `visibility: high|medium|low` enum. Presence of `description:` in
+  the registration call is the lever — described items go in the
+  primer, undescribed ones don't. This is a deliberate
+  simplification from agex-py; resist requests to add tiers, since
+  doing so re-creates the agex-py footgun of "the agent has no idea
+  this method exists because it's hidden."
+
+- **`ChapterEvent` is summarization, not deletion.** The events it
+  replaces in the rendered context still live in the event log
+  (referenced by `eventRefs: string[]`). `state.events()` and
+  `state.checkout()` resolve through chapters to the originals.
+  Test that listing events from a chaptered session returns the
+  full unsummarized history; only the *primer rendering* uses the
+  chapter summary.
+
+- **Live host instances cannot cross the worker boundary.**
+  `agent.namespace(instance, ...)` accepts live objects (database
+  handles, file handles), but those don't structured-clone, so they
+  can't be sent into a Web Worker or `worker_threads`. agex-py
+  raises `ValueError` if `host` is non-Local and a live instance is
+  registered; the TS equivalent must check the runtime's transport
+  capabilities at registration time and refuse asymmetric
+  combinations early. Functions and classes serialized as policy
+  records are fine; instances are not.
+
+- **VFS modules persist as agent-authored helpers; the cache does
+  not.** Agents mutate code in `helpers/*.ts` and import from there
+  in later `ts` emissions. Caching arbitrary closures or live
+  references in the typed cache is unsafe (no structured-clone
+  guarantee). Document the boundary clearly: "code goes in the VFS;
+  data goes in the cache."
+
+- **The bare-`except` rewrite from agex-py doesn't translate.**
+  agex-py rewrites `except:` and `except Exception:` clauses to skip
+  the framework's task-control raises. TS has no equivalent rewrite
+  hook; agent-authored `try { ... } catch (e) { ... }` *will* swallow
+  task-control exceptions. Mitigation: make `TaskFailError` /
+  `TaskClarifyError` instances carry a brand symbol, document that
+  agents should re-throw branded errors, and surface a
+  `SystemNoteEvent` warning on first occurrence per task. Tracked
+  in `design.md` §4.3 and the appendix.
+
+- **The optional sync API was an agex-py concession, not a goal.**
+  agex-py exposes both `complete()` and `acomplete()` because
+  Pyodide-hosted contexts need a sync pathway. TS has no equivalent
+  constraint — every storage and provider call is async from the
+  start. Don't ship sync mirrors of `LLMClient` / `RuntimeAdapter`
+  surface.
+
+**Verification.**
+
+- **Registration round-trip.** Each kind (`fn`, `cls`, `namespace`,
+  `skill`, `terminal`) builds the right `Policy` entry; the
+  description-presence flag tracks correctly; `include`/`exclude`
+  patterns filter as expected; `agent.terminal`'s description
+  requirement is enforced (it has no docstring fallback in JS).
+
+- **Task lifecycle without an LLM.** A stub `LLMClient` returns a
+  scripted sequence of emissions; a stub `RuntimeAdapter` echoes
+  them as outcomes. End-to-end task call exercises the action loop,
+  the emission dispatcher (`ts` → runtime, `fileWrite` → fs,
+  `fileEdit` → fs, `terminal` → termish-ts via injected handlers,
+  `text` / `thinking` → log only), and task-control exits
+  (`taskSuccess` resolves the value, `taskFail` rejects with
+  `TaskFailError`, `taskClarify` rejects with `TaskClarifyError`).
+
+- **Event log + persistence.** With kvgit-ts as the state backend,
+  events written through one `Agent` instance are readable through
+  a fresh `Agent` instance pointed at the same `VersionedKV`.
+  ChapterEvent rendering: a chaptered log returns the original
+  events from `state.events()` but the primer (when re-rendered)
+  shows the summary. `state.checkout(commitHash)` returns a
+  read-only view at the historical commit.
+
+- **Cache and VFS host APIs.** `agent.fs(session).write(...)` is
+  visible to a subsequent `ts` emission's `fs.read(...)` (via the
+  termish-ts VFS); `agent.cache(session).set/get` round-trips typed
+  values through the kvgit-ts staging buffer; deleting and re-
+  reading is idempotent; `keys()` enumerates all live entries.
+
+- **Chaptering trigger.** `shouldTriggerChaptering(events,
+  threshold)` reads the last `ActionEvent.inputTokens` (real
+  provider count) and fires above threshold. The `__chapter__` task
+  is invoked with the right input shape and the returned `Chapter[]`
+  produces correctly-bounded `ChapterEvent`s.
+
+- **AbortSignal propagation.** Aborting mid-task writes a
+  cancellation sentinel into state; the next `RuntimeAdapter.execute`
+  call raises `CancelledError`; the outer task call rejects with
+  the same error and emits a `CancelledEvent` rather than a regular
+  `SuccessEvent` / `FailEvent`. Worker termination is exercised as
+  the fallback path.
+
+- **Schema validation.** Task input validates against the supplied
+  Standard Schema (zod / valibot / arktype examples in the test
+  matrix). Output validation runs on `taskSuccess`'s value; a
+  schema-rejecting value rejects the outer task call (no silent
+  coercion).
+
+- **Provider-signature round-trip.** With a recording stub provider:
+  capture an `ActionEvent` carrying thinking-block signatures,
+  persist it, replay through a fresh task call, and verify the
+  rendered event log presents the same signatures byte-for-byte.
+  Regression guard against accidental re-encoding.
+
+- **Cross-package smoke.** A scripted demo constructs an Agent with
+  a `MemoryFS`-backed kvgit `VersionedKV`, registers a `helloWorld`
+  namespace and a custom `agent.terminal` command, runs a one-turn
+  task with a stub LLM that emits one `ts` and one `terminal`
+  action, and asserts the resulting event log + cache + VFS state.
+
+**Build order within agex-ts core.**
+
+The order favors building inward-out: contracts first, persistence
+second, agent surface third, action loop last. A working end-to-end
+smoke with stub adapters lands before any real runtime or provider
+is wired.
+
+1. Skeleton: package.json (workspace deps on `kvgit-ts` +
+   `termish-ts`), tsconfig, vitest, tsup. Sub-path exports for
+   anything a consumer might import without dragging the agent
+   runtime in (`agex-ts/types`, `agex-ts/state`).
+2. **Types module** (`src/types.ts`) — discriminated unions
+   (`Emission`, `AgentEvent`, `TokenChunk`, `TaskOutcome`),
+   contracts (`RuntimeAdapter`, `LLMClient`), registration record
+   types. No runtime code, just the surface.
+3. **`Live` state** — in-memory MutableMap analogue. No kvgit-ts
+   dependency. Used as a fallback storage and for tests that don't
+   want commit overhead.
+4. **State adapter** — polymorphic over `Versioned` (kvgit-ts) and
+   `Live`. `connectState({ type, storage, path? })` factory per
+   `design.md` §6.5.
+5. **`EventLog`** — append-only over the state adapter, with
+   `ChapterEvent` resolution. Timestamp-based key generation
+   (collision-handled), `add(event)` / `iter()` / `at(commitHash)`.
+6. **VFS host API** — `agent.fs(session)` returning a `FileSystem`
+   (the termish-ts protocol) backed by a kvgit `Staged` namespace
+   per session.
+7. **Cache host API** — `agent.cache(session)` returning a typed
+   Map-shaped surface backed by a different kvgit `Staged` namespace
+   per session.
+8. **`Policy`** — registration table. Implement each registration
+   method one-by-one with eager validation: `fn`, `cls`, `namespace`,
+   `skill`, `terminal`. Pattern matching for `include`/`exclude`
+   reuses termish-ts's glob helper.
+9. **`Agent` class** — constructor, registration delegation,
+   fingerprint computation, `state()` / `fs()` / `cache()`
+   inspection methods.
+10. **Stub `RuntimeAdapter`** — pure-JS evaluator that runs code in
+    the same realm with policy-injected names; skips sandboxing
+    entirely. Used only in tests; never shipped.
+11. **Stub `LLMClient`** — replays a scripted sequence of token
+    chunks. Used only in tests.
+12. **Task lifecycle** — `agent.task({ description, input, output })`
+    factory returning a `TaskFn<I, O>`. Action loop:
+    `LLMClient.complete()` → emissions → `RuntimeAdapter.execute()`
+    → outcome → next turn or terminal outcome. Threads `AbortSignal`
+    through both adapters.
+13. **Emission dispatcher** — routes each emission type to the right
+    handler: `ts` → runtime, `fileWrite` → VFS, `fileEdit` → VFS
+    with diff-apply, `terminal` → registered terminal handlers (via
+    termish-ts's pipeline executor + the agent's policy table),
+    `text` / `thinking` → no side effect, just logged.
+14. **Chaptering machinery** — `shouldTriggerChaptering` check after
+    each `ActionEvent`; invokes the agent's registered `__chapter__`
+    task; resolves `Chapter[]` to `ChapterEvent`s.
+15. **Inspection surface** — `state.events()`, `state.checkout()`,
+    `state.commitInfo(hash)` per `design.md` §6.6.
+16. **End-to-end smoke** — full integration test using stub runtime
+    + stub LLM + kvgit `MemoryStore` + termish-ts `MemoryFS`.
+    Exercises a multi-turn task with a chaptering boundary and an
+    AbortSignal cancellation.
+17. **Public API surface freeze** — once the smoke passes, lock the
+    `RuntimeAdapter` and `LLMClient` contracts so the runtime-worker
+    and Anthropic provider packages can build against stable shapes.
 
 ---
 
@@ -529,21 +799,127 @@ defined by agex-ts core. Per `design.md` §8.
 - *Not in v1*: hard memory limits, mid-instruction cancellation,
   SES Compartments, isolated-vm, iframe primitives.
 
-**Concrete contracts.** `[TBD]` — `workerRuntime(options)` factory
-signature, platform-specific options (e.g., `Worker` URL handling
-for browsers, `eval: true` for Node Workers), the structured-clone
-boundary semantics.
+**Concrete contracts.** Live in
+`packages/runtime-worker/src/types.ts`. Major shapes:
 
-**Pitfalls and lessons from agex-py.** `[TBD]` — most agex-py
-runtime work is Python-specific (sandtrap), but expect lessons from
-agex-studio's Worker integration: cancellation bypass paths
-(asyncio.CancelledError recovery), localStorage shimming,
-import-map cache-busting, and the policy-table-injection ordering.
+- **`workerRuntime(opts)`** — factory returning a `RuntimeAdapter`
+  (the contract from agex-ts core). Options:
+  - `target?: 'auto' | 'browser' | 'node'` (default `'auto'`)
+  - `workerUrl?: string | URL` (browser only; defaults to a sibling
+    file the package emits)
+  - `esbuild?: { wasmURL?: string; transformOptions?: TransformOptions }`
+    — esbuild config for `ts` stripping. `wasmURL` only applies in
+    the browser; Node uses the native binary.
+  - `console?: 'capture' | 'pass'` — by default, captured `console.*`
+    becomes `OutputEvent`s. Pass-through is for debugging.
+  - `timeoutMs?: number` — per-emission wall-clock budget. Hitting
+    it terminates the worker; the next emission gets a fresh one.
+- **Worker message protocol** — small discriminated union over
+  `postMessage`: `{ type: 'execute'; code; namespace; signalKey }`,
+  `{ type: 'cancel' }`, `{ type: 'fs-call'; ... }` and
+  `{ type: 'cache-call'; ... }` (RPC for runtime → host calls),
+  `{ type: 'output'; ... }`, `{ type: 'result'; ... }`. Every
+  payload must structured-clone.
+- **Module resolution policy** — bare imports route to the policy
+  table (resolved by name); relative imports route to the VFS;
+  builtins (`crypto`, `text-encoding`, etc. on a small allowlist)
+  are unconditional; everything else throws
+  `ModuleNotAllowedError`. Policy enforcement happens in the
+  worker's loader hook (Node) or import-map (browser).
+- **`ExecResult`** — matches the agex-ts core contract:
+  `{ error: TaskOutcome | Error | null; outputs: OutputPart[];
+  elapsedMs: number }`.
 
-**Verification.** `[TBD]` — dual-target test matrix per `design.md`
-notes (Vitest in Node mode + Vitest browser mode via Playwright).
-At minimum: end-to-end smoke test that runs a `ts` emission and
-returns a result, on both platforms.
+**Pitfalls and lessons from agex-py.**
+
+- **Worker termination is the only reliable kill.** There is no
+  mid-instruction interrupt for either Web Workers or
+  `worker_threads` — `AbortSignal` propagation requires cooperative
+  checks. Bake in a pattern: the agent loop writes a cancellation
+  sentinel into the session state; the runtime checks for it at
+  safe points (between worker-side iterations, before injecting
+  `taskSuccess`-class raises). When the timeout truly trips,
+  `worker.terminate()` is the fallback; partial outputs from before
+  termination still surface as `OutputEvent`s.
+
+- **esbuild-wasm load is a multi-second startup cost.** Browsers
+  download ~5MB of wasm on first transform. Preload at `Agent`
+  construction (or expose a `prepareRuntime()` async hook) so the
+  first task doesn't pay it. Cache the wasm in the worker's scope.
+
+- **Structured-clone is the boundary.** Any value crossing
+  `postMessage` — host → worker (namespace, fs results) or worker →
+  host (outputs, exec result) — must structured-clone-able. No
+  functions, no closures, no class instances with private state.
+  Non-cloneable values surface as `DataCloneError`; catch and
+  rethrow with a useful message identifying the offending key.
+
+- **Browser import-map cache-busting.** Once an import-map is
+  installed in a worker, mutating it requires a fresh worker. Plan
+  for one worker per task call (the cost is small) rather than
+  attempting in-flight policy mutation. agex-studio's worker
+  reload-on-policy-change pattern is the model here.
+
+- **Node loader hooks differ from `--experimental-vm-modules`.**
+  The worker must use the loader-hook API
+  (`register('./loader.mjs')`) so dynamic imports route correctly.
+  Don't try to share the parent thread's module cache.
+
+- **`console.*` capture races with `result` emit.** Without
+  buffering, a worker that calls `console.log` then immediately
+  `taskSuccess(...)` can have the result message overtake the
+  output messages. Flush outputs before sending `result`.
+
+- **No equivalent of CPython's instruction counting.** agex-py
+  enforces a tick limit at the bytecode level via sandtrap; TS has
+  no analogue. The closest substitute is wall-clock `timeoutMs`
+  plus an esbuild transform that injects abort-checks at loop
+  entries. Document the gap; users who need stricter caps should
+  reach for a heavier sandbox (isolated-vm on Node, SES Compartments
+  in the browser — both deferred per `design.md` §11).
+
+- **Live host instances cannot be passed in via the namespace.**
+  The agent-side `agent.namespace(instance, ...)` registration must
+  fail loud at registration time when paired with `workerRuntime`,
+  not at first execute. Surface `LiveInstanceUnsupportedError` with
+  the offending name.
+
+**Verification.**
+
+- Per-target test matrix: Vitest in Node mode for `worker_threads`,
+  Vitest browser mode (Playwright) for the Web Worker path. Same
+  test bodies run in both modes via shared fixtures.
+
+- **Smoke**: a `ts` emission with `import { greet } from 'helloWorld'`
+  resolves the policy entry, calls it, captures `console.log`
+  output, and returns `taskSuccess(value)`. Captured output and
+  result round-trip back through the worker boundary correctly.
+
+- **Cancellation**: a long-running emission (`while (true) {}`) is
+  aborted via the AbortSignal pathway; verify the worker is
+  terminated within `timeoutMs` and the parent receives a
+  `CancelledError` with any partial output collected before
+  termination.
+
+- **Module-policy enforcement**: unregistered bare imports
+  (`import x from 'random-package'`) throw `ModuleNotAllowedError`;
+  registered names resolve; relative imports against the VFS work
+  for both `./helpers/x.ts` and `../something/y.ts` (rejecting
+  paths that escape the session root).
+
+- **esbuild integration**: a `ts` emission with TS-only syntax
+  (interfaces, type imports, `as const`) transpiles correctly in
+  both targets; a syntax error surfaces as a structured error
+  rather than a silent worker crash.
+
+- **Per-emission timeout**: a slow emission (`await sleep(10000)`)
+  is killed at `timeoutMs` and the next emission in the same task
+  gets a clean worker.
+
+- **Round-trip with kvgit-ts state**: writes from a `ts` emission
+  via `cache.set(...)` are visible to the next `ts` emission via
+  `cache.get(...)` after the agent loop has staged + committed the
+  intervening turn.
 
 ---
 
@@ -606,16 +982,105 @@ dependency. Per `design.md` §9.
   translation layer needs to be careful about argument
   serialization. Thought parts surface as a separate content type.
 
-**Pitfalls and lessons from agex-py.** `[TBD]` — expect lessons
-about streaming-edge-case handling, the precise error-class
-boundary between transient and fatal, cache-marker placement
-specifics, and Gemini's odd response shapes (especially around
-streaming tool calls).
+**Pitfalls and lessons from agex-py.**
 
-**Verification.** `[TBD]` — fixture-based tests with mock provider
-responses (canned SSE streams from each provider); live integration
-tests gated on env-var API keys and run in CI on a separate
-workflow.
+- **Cache markers, not arbitrary cache keys.** Each provider has a
+  specific way to flag where the prefix-cacheable boundary is.
+  Anthropic uses `cache_control: { type: 'ephemeral' }` on a
+  message; OpenAI relies on stable-prefix automatic caching and
+  doesn't accept a marker; Gemini exposes a `cachedContent` field
+  via `genai.caches`. The provider adapter places these markers at
+  the right boundary (system + tools + history-prefix), and the
+  agex-ts core builds the request with that ordering in mind.
+
+- **Tool-schema-shape drift is the main porting risk.** Each
+  provider names the same primitives differently (`tools` vs
+  `functions` vs `function_declarations`), with subtly different
+  parameter shapes and slightly different streaming event names for
+  tool-call deltas. Build a translation layer (the `WireFormat`
+  abstraction in agex-py) that takes agex-ts's normalized schemas
+  and emits each provider's exact wire shape — and a complementary
+  parser that turns the provider's streaming event sequence into
+  agex-ts's `TokenChunk` stream.
+
+- **Reasoning models change the request shape.** OpenAI's `gpt-5` /
+  `o-series` use the Responses API (different endpoint, different
+  request fields); Anthropic's extended thinking has a separate
+  `thinking: { type: 'enabled', budget_tokens: N }` block; Gemini's
+  thought parts surface as a separate content type. Auto-detect on
+  model name (`gpt-5*`, `o[1-9]*` → Responses; `claude-3.5*` and
+  later support extended thinking; etc.) but expose explicit
+  overrides for users.
+
+- **Don't retry inside the SDK.** agex-py disables provider-SDK
+  retries (`max_retries=0`) and lets the agent loop handle
+  classification (timeouts and rate-limits → transient → retry;
+  parse errors and 4xx → fatal → reraise). This keeps the retry
+  budget centralized and avoids exponential-backoff stacking. TS
+  provider packages should set `maxRetries: 0` on each SDK and
+  surface `TransientError` / `FatalError` on the way out.
+
+- **Streaming-edge cases bite first.** Each provider emits subtly
+  different event sequences when a tool call has zero arguments,
+  when a reasoning-only response with no text comes back, when a
+  rate-limit fires mid-stream, and when the connection drops
+  without a clean end. Test these explicitly with canned SSE
+  fixtures (one fixture per edge case per provider).
+
+- **Signatures are opaque blobs that round-trip.** Don't decode
+  them. Don't filter or skip emissions that carry one. Don't
+  re-encode text adjacent to them. Provider signatures are
+  validated server-side against a hash that includes the surrounding
+  content; any perturbation breaks the next request.
+
+- **OpenAI-compatible endpoints work via `baseUrl` override.** Don't
+  ship a separate `@agex-ts/openrouter` package. Document
+  `baseUrl` + `apiKey` in the OpenAI client's options as the path
+  for OpenRouter, Together, Anyscale, etc.
+
+- **Gemini's function-call argument serialization is fussy.** It
+  expects strict JSON with no trailing commas or `undefined`
+  fields; the SDK doesn't always normalize. Run the rendered
+  arguments through `JSON.parse(JSON.stringify(...))` before
+  handing them to the SDK to strip `undefined`s.
+
+**Verification.**
+
+- **Fixture-based streaming tests.** Per provider, capture or write
+  canned SSE response sequences for: a simple text response, a
+  single tool call, multiple sequential tool calls, an interleaved
+  thinking + tool-use response, a zero-argument tool call, a
+  cache-hit response (token counts reflect cache), and a mid-stream
+  error. Each fixture round-trips through the provider client into
+  agex-ts's `TokenChunk` stream and asserts the right emission
+  shape and order.
+
+- **Schema translation correctness.** A normalized agex-ts
+  tool-schema input produces the right wire shape for each provider.
+  Sample registrations (a function with primitives, with nested
+  types, with optional fields, with array types) all translate
+  without loss.
+
+- **Cache-marker placement.** With a provider-aware mock that
+  echoes the cache markers back, verify the right boundaries get
+  marked: system + tools (one marker) and the history-prefix (one
+  or two markers depending on provider).
+
+- **Live integration tests** — gated on `ANTHROPIC_API_KEY` /
+  `OPENAI_API_KEY` / `GOOGLE_API_KEY`. Each provider runs a tiny
+  end-to-end `helloWorld` task with a real model. Workflow lives
+  outside the default CI run; fires on schedule + manual trigger,
+  with cost ceilings.
+
+- **Error classification.** Inject HTTP 429, 500, network
+  disconnect, and parse-error responses; verify each surfaces as
+  `TransientError` (with a backoff hint) or `FatalError` (with the
+  raw cause attached).
+
+- **Reasoning-model routing.** A request to `gpt-5-mini` hits the
+  Responses endpoint; a request to `gpt-4o` hits Chat Completions;
+  the explicit `useResponses: true | false` override forces either
+  path regardless of model.
 
 ---
 

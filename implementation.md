@@ -1,10 +1,13 @@
 # agex-ts: Implementation Plan
 
-> **Status:** Scaffolded. Component sections fill in iteratively as
-> implementation begins. `design.md` is the source of truth for
-> *what* we're building; this document covers *how, in what order,
-> and where to look for inspiration*. When a section here disagrees
-> with `design.md`, design wins — fix this document.
+> **Status:** kvgit-ts ✅ shipped (PR #1). termish-ts ✅ shipped (PR #2).
+> agex-ts core ✅ all 17 build steps landed across PRs #3 and the
+> follow-up (chaptering + inspection + smoke + freeze). Public
+> contracts now stable for parallel work on `@agex-ts/runtime-worker`
+> and `@agex-ts/anthropic`. `design.md` remains the source of truth
+> for *what* we're building; this document covers *how, in what
+> order, and where to look for inspiration*. When a section here
+> disagrees with `design.md`, design wins — fix this document.
 
 ## Build order
 

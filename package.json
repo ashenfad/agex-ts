@@ -14,10 +14,15 @@
     "typecheck": "pnpm -r typecheck",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
-    "format": "biome format --write ."
+    "format": "biome format --write .",
+    "postinstall": "simple-git-hooks"
+  },
+  "simple-git-hooks": {
+    "pre-commit": "pnpm exec biome check --write --staged --no-errors-on-unmatched && git update-index --again"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
+    "simple-git-hooks": "^2.13.1",
     "typescript": "^5.7.2"
   }
 }

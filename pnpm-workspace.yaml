@@ -11,3 +11,7 @@ allowBuilds:
   # one-time setup message and is otherwise inert; allow it to clear
   # pnpm's "ignored builds" gate.
   msw: true
+  # Disabled: we invoke `simple-git-hooks` explicitly from the root
+  # `postinstall` script, so the package's own opt-in install script
+  # would just duplicate that work.
+  simple-git-hooks: false

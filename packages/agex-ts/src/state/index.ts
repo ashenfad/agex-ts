@@ -1,4 +1,10 @@
-// State sub-path — Live, the polymorphic state adapter, StateConfig, and
-// the connectState() factory. Built out across the next several commits.
+/**
+ * State sub-path — backends and configuration types.
+ *
+ * `Live` is the in-process default; kvgit-backed adapters land in
+ * a follow-up commit. The `StateBackend` / `VersionedStateBackend`
+ * interfaces are the shared surface every backend implements.
+ */
 
-export {}
+export { isVersioned, type StateBackend, type VersionedStateBackend } from './backend'
+export { Live } from './live'

@@ -10,6 +10,7 @@
 import type { CommandHandler } from '../context'
 import { basename, cd, cp, dirname, ls, mkdir, mv, pwd, rm, touch } from './filesystem'
 import { cat, echo, head, tail, tee } from './io'
+import { cut, sort, tr, uniq, wc } from './text'
 
 export const BUILTINS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHandler>([
   // Filesystem
@@ -29,4 +30,10 @@ export const BUILTINS: ReadonlyMap<string, CommandHandler> = new Map<string, Com
   ['head', head],
   ['tail', tail],
   ['tee', tee],
+  // Text
+  ['wc', wc],
+  ['sort', sort],
+  ['uniq', uniq],
+  ['cut', cut],
+  ['tr', tr],
 ])

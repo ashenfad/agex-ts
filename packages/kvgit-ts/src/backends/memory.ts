@@ -57,12 +57,24 @@ export class Memory implements KVStore {
     return true
   }
 
-  async *keys(): AsyncIterable<string> {
-    for (const k of this.#data.keys()) yield k
+  async *keys(prefix?: string): AsyncIterable<string> {
+    if (prefix === undefined) {
+      for (const k of this.#data.keys()) yield k
+    } else {
+      for (const k of this.#data.keys()) {
+        if (k.startsWith(prefix)) yield k
+      }
+    }
   }
 
-  async *items(): AsyncIterable<readonly [string, Uint8Array]> {
-    for (const entry of this.#data.entries()) yield entry
+  async *items(prefix?: string): AsyncIterable<readonly [string, Uint8Array]> {
+    if (prefix === undefined) {
+      for (const entry of this.#data.entries()) yield entry
+    } else {
+      for (const entry of this.#data.entries()) {
+        if (entry[0].startsWith(prefix)) yield entry
+      }
+    }
   }
 
   async clear(): Promise<void> {

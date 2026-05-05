@@ -144,11 +144,9 @@ async function checkStorageVersion(store: KVStore): Promise<void> {
 
   // No version sentinel. Either fresh, or pre-v1.
   let hasExisting = false
-  for await (const k of store.keys()) {
-    if (k.startsWith(BRANCH_HEAD_PREFIX)) {
-      hasExisting = true
-      break
-    }
+  for await (const _k of store.keys(BRANCH_HEAD_PREFIX)) {
+    hasExisting = true
+    break
   }
   if (hasExisting) {
     throw new Error(
@@ -666,11 +664,12 @@ export class VersionedKV extends VersionedBase {
 
   async listBranches(): Promise<string[]> {
     const out: string[] = []
-    for await (const k of this.store.keys()) {
-      if (k.startsWith(BRANCH_HEAD_PREFIX) && !k.startsWith('__branch_head_prev__')) {
-        const name = k.slice(BRANCH_HEAD_PREFIX.length)
-        if (name.length > 0) out.push(name)
-      }
+    // `__branch_head_prev__*` doesn't start with `__branch_head__`
+    // (the prev variant has `_p` where `__` would be), so the prefix
+    // scan naturally excludes prev backups — no extra filter needed.
+    for await (const k of this.store.keys(BRANCH_HEAD_PREFIX)) {
+      const name = k.slice(BRANCH_HEAD_PREFIX.length)
+      if (name.length > 0) out.push(name)
     }
     return out.sort()
   }
@@ -724,9 +723,10 @@ export class VersionedKV extends VersionedBase {
       for (const node of newNodes) reachableNodes.add(node)
     }
 
-    // Mark phase: walk every branch's full ancestry.
-    for await (const k of this.store.keys()) {
-      if (!k.startsWith(BRANCH_HEAD_PREFIX) || k.startsWith('__branch_head_prev__')) continue
+    // Mark phase: walk every branch's full ancestry. Prefix scan
+    // returns only branch-head pointers (prev backups don't match
+    // — see listBranches comment).
+    for await (const k of this.store.keys(BRANCH_HEAD_PREFIX)) {
       const branchName = k.slice(BRANCH_HEAD_PREFIX.length)
       const branchHead = await resolveHead(this.store, branchName, { repair: false })
       if (branchHead === null) continue
@@ -744,8 +744,7 @@ export class VersionedKV extends VersionedBase {
     const youngOrphanCommits: string[] = []
     const COMMIT_ROOT_PREFIX = '__commit_root__'
 
-    for await (const k of this.store.keys()) {
-      if (!k.startsWith(COMMIT_ROOT_PREFIX)) continue
+    for await (const k of this.store.keys(COMMIT_ROOT_PREFIX)) {
       const commitHash = k.slice(COMMIT_ROOT_PREFIX.length)
       if (commitHash.length === 0 || reachableCommits.has(commitHash)) continue
       const timeBytes = await this.store.get(COMMIT_TIME(commitHash))
@@ -796,8 +795,7 @@ export class VersionedKV extends VersionedBase {
     // Orphan HAMT nodes: any keyset node not reachable from a live
     // commit (or a young orphan, see above) is fair game.
     const KEYSET_PREFIX = Keyset.DEFAULT_PREFIX
-    for await (const k of this.store.keys()) {
-      if (!k.startsWith(KEYSET_PREFIX)) continue
+    for await (const k of this.store.keys(KEYSET_PREFIX)) {
       const nodeHash = k.slice(KEYSET_PREFIX.length)
       if (nodeHash.length > 0 && !reachableNodes.has(nodeHash)) {
         allRemovals.push(k)

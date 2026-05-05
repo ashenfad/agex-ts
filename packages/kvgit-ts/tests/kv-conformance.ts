@@ -189,6 +189,56 @@ export function runConformance(name: string, makeStore: StoreFactory): void {
       })
     })
 
+    describe('iteration with prefix', () => {
+      it('keys(prefix) returns only keys matching the prefix', async () => {
+        const s = await makeStore()
+        await s.setMany([
+          ['user:alice', bytes('1')],
+          ['user:bob', bytes('2')],
+          ['post:hello', bytes('3')],
+          ['admin', bytes('4')],
+        ])
+        const got = new Set<string>()
+        for await (const k of s.keys('user:')) got.add(k)
+        expect(got).toEqual(new Set(['user:alice', 'user:bob']))
+      })
+
+      it('items(prefix) returns only items matching the prefix', async () => {
+        const s = await makeStore()
+        await s.setMany([
+          ['user:alice', bytes('alice')],
+          ['post:hello', bytes('hello')],
+        ])
+        const got = new Map<string, Uint8Array>()
+        for await (const [k, v] of s.items('user:')) got.set(k, v)
+        expect(got.size).toBe(1)
+        expect(bytesEqual(got.get('user:alice') as Uint8Array, bytes('alice'))).toBe(true)
+      })
+
+      it('keys(prefix) on a non-matching prefix yields nothing', async () => {
+        const s = await makeStore()
+        await s.set('user:alice', bytes('1'))
+        const got: string[] = []
+        for await (const k of s.keys('absent:')) got.push(k)
+        expect(got).toEqual([])
+      })
+
+      it('keys(prefix) excludes near-misses (longer prefix in same range)', async () => {
+        // Keys that share a prefix beyond the requested one should be
+        // included; keys whose prefix is shorter must be excluded.
+        const s = await makeStore()
+        await s.setMany([
+          ['foo', bytes('1')], // shorter — must NOT match prefix 'foo:'
+          ['foo:a', bytes('2')], // exact prefix match
+          ['foo:a:b', bytes('3')], // longer key sharing the prefix
+          ['fop', bytes('4')], // adjacent key beyond the range
+        ])
+        const got = new Set<string>()
+        for await (const k of s.keys('foo:')) got.add(k)
+        expect(got).toEqual(new Set(['foo:a', 'foo:a:b']))
+      })
+    })
+
     describe('clear', () => {
       it('removes everything', async () => {
         const s = await makeStore()

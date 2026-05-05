@@ -20,6 +20,7 @@
 
 import type { StandardSchemaV1 } from '@standard-schema/spec'
 import type { Agent } from './agent'
+import { dispatchFileEdit, dispatchFileWrite, dispatchTerminal } from './dispatcher'
 import { CancelledError, SchemaError, TaskClarifyError, TaskFailError } from './errors'
 import type {
   ActionEvent,
@@ -29,6 +30,8 @@ import type {
   ExecuteContext,
   FailEvent,
   LLMClient,
+  OutputEvent,
+  Policy,
   RuntimeAdapter,
   SuccessEvent,
   TaskCallOptions,
@@ -36,6 +39,7 @@ import type {
   TaskOutcome,
   TaskStartEvent,
   TokenChunk,
+  VirtualFileSystem,
 } from './types'
 
 const DEFAULT_SESSION = 'default'
@@ -118,7 +122,16 @@ export function makeTask<I, O>(agent: Agent, def: TaskDefinition<I, O>): TaskFn<
 
         // Dispatch
         const ctx: ExecuteContext = { fs, cache, signal }
-        const outcome = await dispatchEmissions(emissions, runtimeAdapter, ctx)
+        const outcome = await dispatchEmissions(
+          emissions,
+          runtimeAdapter,
+          ctx,
+          fs,
+          agent.policy(),
+          agent.name,
+          eventLog,
+          options.onEvent,
+        )
 
         // Terminal outcomes
         if (outcome.kind === 'success') {
@@ -196,21 +209,76 @@ async function dispatchEmissions(
   emissions: ReadonlyArray<Emission>,
   runtime: RuntimeAdapter,
   ctx: ExecuteContext,
+  fs: VirtualFileSystem,
+  policy: Policy,
+  agentName: string,
+  eventLog: { add(e: AgentEvent): Promise<string> },
+  onEvent: ((e: AgentEvent) => void | Promise<void>) | undefined,
 ): Promise<TaskOutcome> {
-  // v1 dispatcher handles `ts` only. The full dispatcher (fileWrite,
-  // fileEdit, terminal) lands in the next commit; until then, those
-  // emissions are no-ops other than appearing in the event log.
   for (const em of emissions) {
-    if (em.type !== 'ts') continue
-    const result = await runtime.execute(em.code, ctx)
-    if (result.error !== null && result.outcome.kind === 'continue') {
-      // Unexpected runtime error with no terminal outcome — surface
-      // as a fail so the task doesn't loop forever on broken code.
-      return { kind: 'fail', message: result.error.message }
+    if (ctx.signal.aborted) throw new CancelledError()
+
+    if (em.type === 'ts') {
+      const result = await runtime.execute(em.code, ctx)
+      if (result.outputs.length > 0) {
+        const outputEvent: OutputEvent = {
+          type: 'output',
+          timestamp: new Date().toISOString(),
+          agentName,
+          parts: result.outputs,
+        }
+        await emit(outputEvent, eventLog, onEvent)
+      }
+      if (result.error !== null && result.outcome.kind === 'continue') {
+        return { kind: 'fail', message: result.error.message }
+      }
+      if (result.outcome.kind !== 'continue') return result.outcome
+      continue
     }
-    if (result.outcome.kind !== 'continue') return result.outcome
+
+    if (em.type === 'fileWrite') {
+      try {
+        await dispatchFileWrite(em, fs)
+      } catch (e) {
+        return { kind: 'fail', message: describeError(e) }
+      }
+      continue
+    }
+
+    if (em.type === 'fileEdit') {
+      try {
+        await dispatchFileEdit(em, fs)
+      } catch (e) {
+        return { kind: 'fail', message: describeError(e) }
+      }
+      continue
+    }
+
+    if (em.type === 'terminal') {
+      try {
+        const stdout = await dispatchTerminal(em.commands, fs, policy, ctx.signal)
+        if (stdout.length > 0) {
+          const outputEvent: OutputEvent = {
+            type: 'output',
+            timestamp: new Date().toISOString(),
+            agentName,
+            parts: [{ type: 'text', text: stdout }],
+          }
+          await emit(outputEvent, eventLog, onEvent)
+        }
+      } catch (e) {
+        return { kind: 'fail', message: describeError(e) }
+      }
+    }
+
+    // text / thinking — already in the event log via the ActionEvent;
+    // no further side effect.
   }
   return { kind: 'continue' }
+}
+
+function describeError(e: unknown): string {
+  return e instanceof Error ? e.message : String(e)
 }
 
 async function collectEvents(log: { iter(): AsyncIterable<AgentEvent> }): Promise<AgentEvent[]> {

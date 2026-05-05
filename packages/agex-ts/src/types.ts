@@ -190,6 +190,10 @@ export type OutputPart =
 export interface OutputEvent extends EventBase {
   readonly type: 'output'
   readonly parts: ReadonlyArray<OutputPart>
+  /** Stable id of the emission that produced these outputs. The
+   *  renderer uses this to pair the OutputEvent back to the right
+   *  `tool_use` block when composing turns for the next LLM call. */
+  readonly emissionId?: string
 }
 
 export interface SuccessEvent extends EventBase {

@@ -33,7 +33,7 @@ import type {
   ChapterEvent,
   Emission,
   ImageFormat,
-  OutputEvent,
+  OutputPart,
 } from '../types'
 
 // Re-exports — single import surface for provider packages
@@ -117,46 +117,87 @@ export interface NeutralTurn {
  *    - `error` / `file` / `systemNote` — framework metadata, not
  *      conversation
  *
- * Rendered events:
- *    - `ActionEvent` → assistant turn with one part per emission
- *    - `OutputEvent` → user turn with `toolResult` if it can be
- *      tied back to a prior ActionEvent's emission, else plain
- *      user text/image content
- *    - `ChapterEvent` → assistant turn with the chapter summary +
- *      `/chapters/<slug>/` path hint
+ * Tool-use pairing (the part most providers care about):
+ *
+ *    - Each `ActionEvent` becomes one assistant turn. Tool-call
+ *      emissions (`ts` / `terminal` / `fileWrite` / `fileEdit`)
+ *      become `tool_use` parts. `text` / `thinking` become
+ *      text / thinking parts inline in the same assistant turn.
+ *    - `OutputEvent`s following the action are routed by their
+ *      `emissionId` back to the tool_use that produced them. All
+ *      tool_results for one assistant turn collapse into a single
+ *      user turn (Anthropic and OpenAI both reject split user
+ *      turns of tool_results).
+ *    - Every tool_use part gets *some* tool_result: real outputs
+ *      when present, a synthesized "wrote /path" line for file
+ *      emissions on success, or "(no observation)" for silent
+ *      `ts` / `terminal` blocks.
+ *    - `ChapterEvent` becomes its own assistant turn (with the
+ *      `/chapters/<slug>/` hint) and forces a flush of any pending
+ *      user content first.
  */
 export function renderEvents(events: ReadonlyArray<AgentEvent>): NeutralTurn[] {
   const turns: NeutralTurn[] = []
-  // Track the most recent action so OutputEvents can be tied back to
-  // the right tool_use IDs. Multiple OutputEvents may follow one
-  // ActionEvent (one per emission that produced output).
-  let lastActionTimestamp: string | null = null
-  let lastActionEmissionCount = 0
-  let outputCursor = 0
+
+  // Per-action state, reset each time a new ActionEvent arrives.
+  let toolUseOrder: { id: string; toolName: ToolName }[] = []
+  let obsByEmission = new Map<string, OutputPart[]>()
+  let synthByEmission = new Map<string, string>()
+  let pendingTrailingParts: NeutralPart[] = []
+
+  function flushUser(): void {
+    const parts: NeutralPart[] = []
+    for (const { id, toolName } of toolUseOrder) {
+      parts.push(buildToolResultPart(id, toolName, obsByEmission.get(id), synthByEmission.get(id)))
+    }
+    parts.push(...pendingTrailingParts)
+    if (parts.length > 0) turns.push({ role: 'user', content: parts })
+    toolUseOrder = []
+    obsByEmission = new Map()
+    synthByEmission = new Map()
+    pendingTrailingParts = []
+  }
+
+  function lastEmissionId(): string | null {
+    return toolUseOrder.length > 0 ? (toolUseOrder[toolUseOrder.length - 1] as { id: string }).id : null
+  }
+
   for (const event of events) {
     switch (event.type) {
       case 'taskStart':
         // Skipped — buildTaskMessage handles the opening user turn
         break
-      case 'action':
-        turns.push(renderActionTurn(event))
-        lastActionTimestamp = event.timestamp
-        lastActionEmissionCount = event.emissions.length
-        outputCursor = 0
+      case 'action': {
+        flushUser()
+        turns.push(renderActionTurn(event, toolUseOrder, synthByEmission))
         break
+      }
       case 'output': {
-        if (lastActionTimestamp !== null && outputCursor < lastActionEmissionCount) {
-          const toolUseId = makeToolUseId(lastActionTimestamp, outputCursor)
-          outputCursor++
-          turns.push(renderOutputAsToolResult(event, toolUseId))
+        const stamped = event.emissionId
+        const orderIds = new Set(toolUseOrder.map((t) => t.id))
+        // Route by stamped id when it matches a known tool_use; fall
+        // back to the most recent tool_use (e.g. legacy events without
+        // emissionId, or outputs surfaced from a wrapper that didn't
+        // stamp). When no tool_use exists at all, hold the parts as
+        // plain user content for the next flush.
+        const id =
+          stamped !== undefined && orderIds.has(stamped) ? stamped : lastEmissionId()
+        if (id !== null) {
+          const slot = obsByEmission.get(id) ?? []
+          slot.push(...event.parts)
+          obsByEmission.set(id, slot)
         } else {
-          turns.push(renderOutputAsUserMessage(event))
+          for (const p of event.parts) {
+            pendingTrailingParts.push(outputPartToNeutral(p))
+          }
         }
         break
       }
-      case 'chapter':
+      case 'chapter': {
+        flushUser()
         turns.push(renderChapterTurn(event))
         break
+      }
       case 'success':
       case 'fail':
       case 'clarify':
@@ -171,6 +212,9 @@ export function renderEvents(events: ReadonlyArray<AgentEvent>): NeutralTurn[] {
       }
     }
   }
+  // Final flush — the last action's tool_results need to land in the
+  // request as the trailing user turn so the next LLM call sees them.
+  flushUser()
   return turns
 }
 
@@ -194,22 +238,38 @@ export function makeToolUseId(actionTimestamp: string, emissionIndex: number): s
 // Per-event renderers
 // ---------------------------------------------------------------------------
 
-function renderActionTurn(event: ActionEvent): NeutralTurn {
+function renderActionTurn(
+  event: ActionEvent,
+  toolUseOrder: { id: string; toolName: ToolName }[],
+  synthByEmission: Map<string, string>,
+): NeutralTurn {
   const content: NeutralPart[] = []
   for (let i = 0; i < event.emissions.length; i++) {
     const em = event.emissions[i] as Emission
-    const part = renderEmission(em, event.timestamp, i)
-    if (part !== null) content.push(part)
+    const id = makeToolUseId(event.timestamp, i)
+    const built = renderEmission(em, id)
+    if (built === null) continue
+    content.push(built.part)
+    if (built.toolName !== null) {
+      toolUseOrder.push({ id, toolName: built.toolName })
+      const synth = synthesizeFileResult(em)
+      if (synth !== null) synthByEmission.set(id, synth)
+    }
   }
   return { role: 'assistant', content }
 }
 
-function renderEmission(em: Emission, actionTimestamp: string, index: number): NeutralPart | null {
+/** Build the neutral part for an emission. `toolName` is non-null iff
+ *  the part is a `tool_use` (i.e. needs a paired tool_result). */
+function renderEmission(
+  em: Emission,
+  emissionId: string,
+): { part: NeutralPart; toolName: ToolName | null } | null {
   switch (em.type) {
     case 'ts': {
       const part: ToolUsePart = {
         type: 'toolUse',
-        toolUseId: makeToolUseId(actionTimestamp, index),
+        toolUseId: emissionId,
         toolName: 'ts_action',
         input: {
           code: em.code,
@@ -218,12 +278,12 @@ function renderEmission(em: Emission, actionTimestamp: string, index: number): N
         },
         ...(em.signature !== undefined && { signature: em.signature }),
       }
-      return part
+      return { part, toolName: 'ts_action' }
     }
     case 'terminal': {
       const part: ToolUsePart = {
         type: 'toolUse',
-        toolUseId: makeToolUseId(actionTimestamp, index),
+        toolUseId: emissionId,
         toolName: 'terminal_action',
         input: {
           commands: em.commands,
@@ -232,22 +292,22 @@ function renderEmission(em: Emission, actionTimestamp: string, index: number): N
         },
         ...(em.signature !== undefined && { signature: em.signature }),
       }
-      return part
+      return { part, toolName: 'terminal_action' }
     }
     case 'fileWrite': {
       const part: ToolUsePart = {
         type: 'toolUse',
-        toolUseId: makeToolUseId(actionTimestamp, index),
+        toolUseId: emissionId,
         toolName: 'write_file',
         input: { path: em.path, content: em.content, mode: em.mode },
         ...(em.signature !== undefined && { signature: em.signature }),
       }
-      return part
+      return { part, toolName: 'write_file' }
     }
     case 'fileEdit': {
       const part: ToolUsePart = {
         type: 'toolUse',
-        toolUseId: makeToolUseId(actionTimestamp, index),
+        toolUseId: emissionId,
         toolName: 'edit_file',
         input: {
           path: em.path,
@@ -257,10 +317,10 @@ function renderEmission(em: Emission, actionTimestamp: string, index: number): N
         },
         ...(em.signature !== undefined && { signature: em.signature }),
       }
-      return part
+      return { part, toolName: 'edit_file' }
     }
     case 'text':
-      return { type: 'text', text: em.text }
+      return { part: { type: 'text', text: em.text }, toolName: null }
     case 'thinking': {
       const part: ThinkingPart = {
         type: 'thinking',
@@ -268,7 +328,7 @@ function renderEmission(em: Emission, actionTimestamp: string, index: number): N
         ...(em.redacted !== undefined && { redacted: em.redacted }),
         ...(em.signature !== undefined && { signature: em.signature }),
       }
-      return part
+      return { part, toolName: null }
     }
     default: {
       const exhaustive: never = em
@@ -278,32 +338,49 @@ function renderEmission(em: Emission, actionTimestamp: string, index: number): N
   }
 }
 
-function renderOutputAsToolResult(event: OutputEvent, toolUseId: string): NeutralTurn {
-  const content: Array<TextPart | ImagePart> = []
-  for (const p of event.parts) {
-    if (p.type === 'text') {
-      content.push({ type: 'text', text: p.text })
-    } else {
-      content.push({
-        type: 'image',
-        format: p.format,
-        data: p.data,
-        ...(p.altText !== undefined && { altText: p.altText }),
-      })
-    }
+/** File ops produce no execution output on the happy path, so the
+ *  renderer synthesizes a short "wrote /path" line that stands in for
+ *  the missing tool_result content. Used only when no real
+ *  observation lands on this emission's id. */
+function synthesizeFileResult(em: Emission): string | null {
+  if (em.type === 'fileWrite') {
+    const verb = em.mode === 'append' ? 'appended to' : 'wrote'
+    return `write_file: ${verb} ${em.path}`
   }
-  return {
-    role: 'user',
-    content: [{ type: 'toolResult', toolUseId, content }],
+  if (em.type === 'fileEdit') {
+    const suffix = em.matchAll === true ? ' (matchAll)' : ''
+    return `edit_file: replace applied to ${em.path}${suffix}`
   }
+  return null
 }
 
-function renderOutputAsUserMessage(event: OutputEvent): NeutralTurn {
-  const content: NeutralPart[] = []
-  for (const p of event.parts) {
-    if (p.type === 'text') {
-      content.push({ type: 'text', text: p.text })
-    } else {
+/** Produce the tool_result part for one tool_use. Real observations
+ *  win over the synth fallback (e.g. a failed fileEdit logs an error
+ *  to its slot, which would be wrong to mask with a "success" line). */
+function buildToolResultPart(
+  toolUseId: string,
+  toolName: ToolName,
+  observations: OutputPart[] | undefined,
+  synth: string | undefined,
+): ToolResultPart {
+  const obs = observations ?? []
+  const hasText = obs.some((p) => p.type === 'text')
+  const hasImage = obs.some((p) => p.type === 'image')
+  if (synth !== undefined && !hasText && !hasImage) {
+    return {
+      type: 'toolResult',
+      toolUseId,
+      content: [{ type: 'text', text: synth }],
+    }
+  }
+  const content: Array<TextPart | ImagePart> = []
+  const textBits = obs.filter((p): p is { type: 'text'; text: string } => p.type === 'text')
+  if (textBits.length > 0) {
+    const body = textBits.map((p) => p.text).join('\n')
+    content.push({ type: 'text', text: `${toolName}: output\n${body}` })
+  }
+  for (const p of obs) {
+    if (p.type === 'image') {
       content.push({
         type: 'image',
         format: p.format,
@@ -312,7 +389,20 @@ function renderOutputAsUserMessage(event: OutputEvent): NeutralTurn {
       })
     }
   }
-  return { role: 'user', content }
+  if (content.length === 0) {
+    content.push({ type: 'text', text: `${toolName}: (no observation)` })
+  }
+  return { type: 'toolResult', toolUseId, content }
+}
+
+function outputPartToNeutral(p: OutputPart): TextPart | ImagePart {
+  if (p.type === 'text') return { type: 'text', text: p.text }
+  return {
+    type: 'image',
+    format: p.format,
+    data: p.data,
+    ...(p.altText !== undefined && { altText: p.altText }),
+  }
 }
 
 function renderChapterTurn(event: ChapterEvent): NeutralTurn {

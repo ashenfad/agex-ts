@@ -117,9 +117,14 @@ export async function glob(pattern: string, fs: FileSystem): Promise<string[]> {
     : resolve(baseRel.length > 0 ? baseRel : '.', cwd)
   const relPattern = segments.slice(firstGlobIdx).join('/')
 
+  // Only recurse when the pattern actually crosses directory levels —
+  // either via `**` or via slashes. A single-segment pattern like
+  // `*.ts` is satisfied by listing the base dir's direct children,
+  // which avoids walking the whole subtree.
+  const needsRecursion = relPattern.includes('**') || relPattern.includes('/')
   let entries: string[]
   try {
-    entries = await fs.list(baseAbs, { recursive: true })
+    entries = await fs.list(baseAbs, { recursive: needsRecursion })
   } catch {
     return []
   }

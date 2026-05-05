@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pnpm typecheck *)",
+      "Bash(pnpm typecheck)",
+      "Bash(pnpm lint *)",
+      "Bash(pnpm lint)",
+      "Bash(pnpm test *)",
+      "Bash(pnpm test)",
+      "Bash(pnpm test:browser *)",
+      "Bash(pnpm test:browser)",
+      "Bash(pnpm --filter agex-ts typecheck *)",
+      "Bash(pnpm --filter agex-ts typecheck)",
+      "Bash(pnpm --filter agex-ts test *)",
+      "Bash(pnpm --filter agex-ts test)",
+      "Bash(pnpm --filter termish-ts typecheck *)",
+      "Bash(pnpm --filter termish-ts typecheck)",
+      "Bash(pnpm --filter kvgit-ts typecheck *)",
+      "Bash(pnpm --filter kvgit-ts typecheck)",
+      "Bash(npm test *)",
+      "Bash(npm test)"
+    ]
+  }
+}

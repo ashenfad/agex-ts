@@ -32,6 +32,7 @@ import type {
   RuntimeAdapter,
   TaskOutcome,
 } from '../types'
+import { safeStringifyArgs } from './safe-stringify'
 
 export interface EvalRuntimeOptions {
   /** Per-emission wall-clock budget in milliseconds. Default `5000`. */
@@ -157,7 +158,11 @@ function makeConsoleCapture(outputs: OutputPart[], passConsole: boolean): Consol
   const capture =
     (level: 'log' | 'error' | 'warn' | 'info') =>
     (...args: unknown[]) => {
-      const text = args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ')
+      // safeStringifyArgs handles Error / BigInt / Symbol / undefined /
+      // circular refs without throwing, and per-arg char-budgets the
+      // output so a single huge value can't blow out the agent's
+      // context. See src/runtime/safe-stringify.ts.
+      const text = safeStringifyArgs(args)
       outputs.push({ type: 'text', text })
       if (passConsole) console[level](...args)
     }

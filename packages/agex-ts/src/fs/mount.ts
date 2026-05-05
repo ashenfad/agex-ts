@@ -35,18 +35,22 @@ export class MountFS implements FileSystem {
 
   constructor(backing: FileSystem, mounts: ReadonlyArray<Mount> = []) {
     this.#backing = backing
-    // Defensive copy so callers can pass a literal array
-    this.#mounts = [...mounts]
-    for (const m of this.#mounts) this.#validatePrefix(m.prefix)
+    this.#mounts = []
+    for (const m of mounts) this.mount(m.prefix, m.fs)
   }
 
   /** Add or replace a mount at `prefix`. Throws if the prefix is
-   *  invalid; replaces silently if a mount at the same prefix exists. */
+   *  invalid; replaces silently if a mount at the same prefix exists.
+   *
+   *  Mounts are kept sorted by descending prefix length so the most
+   *  specific match wins during routing — e.g. given mounts at `/a`
+   *  and `/a/b`, a read at `/a/b/file.txt` correctly routes to `/a/b`. */
   mount(prefix: string, fs: FileSystem): void {
     this.#validatePrefix(prefix)
     const idx = this.#mounts.findIndex((m) => m.prefix === prefix)
     if (idx >= 0) this.#mounts[idx] = { prefix, fs }
     else this.#mounts.push({ prefix, fs })
+    this.#mounts.sort((a, b) => b.prefix.length - a.prefix.length)
   }
 
   /** Remove a mount. Returns true if one was removed. */

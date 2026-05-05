@@ -121,6 +121,17 @@ export interface HamtDiff {
   readonly modified: ReadonlyMap<string, readonly [Uint8Array, Uint8Array]>
 }
 
+/**
+ * Structural diff between two `Keyset` roots — the typed-entry analog
+ * of `HamtDiff`. Same hash-skipping payoff: cost is proportional to the
+ * number of changed entries, not the total entry count.
+ */
+export interface KeysetDiff {
+  readonly added: ReadonlyMap<string, KeysetEntry>
+  readonly removed: ReadonlyMap<string, KeysetEntry>
+  readonly modified: ReadonlyMap<string, readonly [KeysetEntry, KeysetEntry]>
+}
+
 // ---------------------------------------------------------------------------
 // Versioned
 // ---------------------------------------------------------------------------

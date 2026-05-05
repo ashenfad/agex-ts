@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, init]
+    branches: [main, init, nxt]
   pull_request:
 
 # Cancel an in-flight run for the same ref when a new push lands.

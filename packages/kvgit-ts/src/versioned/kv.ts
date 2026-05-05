@@ -436,16 +436,18 @@ export class VersionedKV extends VersionedBase {
       mergedKeyset.set(key, versionedKey)
     }
 
-    // Build merged meta. Our meta is in memory; theirs we fetch from
-    // their HAMT.
+    // Build merged meta. Most keys' meta comes from our in-memory
+    // map; the only keys we need from "their" side are those that
+    // ended up in mergedKeyset, weren't merged-value-produced, and
+    // we don't already have meta for. That's typically a small set
+    // (keys "they" added that "we" didn't have). Look those up
+    // pointwise rather than walking the entire "their" keyset.
     const theirParent = parents[0] as string
     const theirRootBytes = await this.store.get(COMMIT_ROOT(theirParent))
-    const theirMeta = new Map<string, MetaEntry>()
-    if (theirRootBytes !== null) {
-      const theirRoot = loads(theirRootBytes) as string
-      const theirKs = Keyset.fromRoot(this.store, theirRoot)
-      for await (const [k, e] of theirKs.items()) theirMeta.set(k, e.meta)
-    }
+    const theirKs =
+      theirRootBytes !== null
+        ? Keyset.fromRoot(this.store, loads(theirRootBytes) as string)
+        : null
 
     const now = Date.now()
     const mergedMeta = new Map<string, MetaEntry>()
@@ -454,8 +456,9 @@ export class VersionedKV extends VersionedBase {
         mergedMeta.set(k, { size: (mergedValues.get(k) as Uint8Array).length, createdAt: now })
       } else if (this.meta.has(k)) {
         mergedMeta.set(k, this.meta.get(k) as MetaEntry)
-      } else if (theirMeta.has(k)) {
-        mergedMeta.set(k, theirMeta.get(k) as MetaEntry)
+      } else if (theirKs !== null) {
+        const theirEntry = await theirKs.get(k)
+        if (theirEntry !== null) mergedMeta.set(k, theirEntry.meta)
       }
     }
 

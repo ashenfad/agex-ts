@@ -14,6 +14,7 @@ import { cat, echo, head, tail, tee } from './io'
 import { find, grep } from './search'
 import { sed } from './sed'
 import { cut, sort, tr, uniq, wc } from './text'
+import { xargs } from './xargs'
 
 export const BUILTINS: ReadonlyMap<string, CommandHandler> = new Map<string, CommandHandler>([
   // Filesystem
@@ -46,4 +47,6 @@ export const BUILTINS: ReadonlyMap<string, CommandHandler> = new Map<string, Com
   ['diff', diff],
   // Sed
   ['sed', sed],
+  // Meta
+  ['xargs', xargs],
 ])

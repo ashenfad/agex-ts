@@ -682,6 +682,134 @@ export class VersionedKV extends VersionedBase {
     return loads(raw) as CommitInfo
   }
 
+  // --- Orphan cleanup ---
+
+  /**
+   * Remove orphaned commits (and their unreachable blobs + HAMT nodes)
+   * not reachable from any live branch HEAD.
+   *
+   * Mark phase walks every branch's full ancestry, accumulating
+   * reachable commits / blobs / HAMT node hashes. `Keyset.walk(skipNodes)`
+   * is given the cumulative seen-set so subtrees shared via structural
+   * sharing across commits are visited exactly once.
+   *
+   * The `minAge` guard (default 1 hour) protects recently-created
+   * commits from being swept. Within that window, an orphan commit's
+   * blobs are marked reachable too — they may belong to an in-flight
+   * writer whose CAS hasn't landed yet.
+   *
+   * @param opts.minAge Milliseconds. Commits younger than this are
+   *   protected from sweep, even if currently unreachable. Default: 1 hour.
+   * @returns Number of orphaned commits removed.
+   */
+  async cleanOrphans(opts: { minAge?: number } = {}): Promise<number> {
+    const minAge = opts.minAge ?? 3_600_000
+    const cutoffTime = Date.now() - minAge
+
+    const reachableCommits = new Set<string>()
+    const reachableBlobs = new Set<string>()
+    const reachableNodes = new Set<string>()
+
+    // Walk one commit's keyset, accumulating reachable refs.
+    const walkCommitForMarks = async (commitHash: string): Promise<void> => {
+      const rootBytes = await this.store.get(COMMIT_ROOT(commitHash))
+      if (rootBytes === null) return
+      const root = loads(rootBytes) as string
+      const ks = Keyset.fromRoot(this.store, root)
+      // skipNodes is read at call time, then we add to it after — so
+      // subtrees shared with already-visited commits are skipped, and
+      // newly-discovered nodes become reachable for the next iteration.
+      const [entries, newNodes] = await ks.walk(reachableNodes)
+      for (const entry of entries.values()) reachableBlobs.add(entry.blob)
+      for (const node of newNodes) reachableNodes.add(node)
+    }
+
+    // Mark phase: walk every branch's full ancestry.
+    for await (const k of this.store.keys()) {
+      if (!k.startsWith(BRANCH_HEAD_PREFIX) || k.startsWith('__branch_head_prev__')) continue
+      const branchName = k.slice(BRANCH_HEAD_PREFIX.length)
+      const branchHead = await resolveHead(this.store, branchName, { repair: false })
+      if (branchHead === null) continue
+      // Use allParents=true to follow merge commits' second parents too.
+      for await (const commit of this.history(branchHead, { allParents: true })) {
+        if (reachableCommits.has(commit)) continue
+        reachableCommits.add(commit)
+        await walkCommitForMarks(commit)
+      }
+    }
+
+    // Sweep phase: scan commit roots, partition into orphans (old enough
+    // to delete) and young orphans (within the minAge window).
+    const orphans: string[] = []
+    const youngOrphanCommits: string[] = []
+    const COMMIT_ROOT_PREFIX = '__commit_root__'
+
+    for await (const k of this.store.keys()) {
+      if (!k.startsWith(COMMIT_ROOT_PREFIX)) continue
+      const commitHash = k.slice(COMMIT_ROOT_PREFIX.length)
+      if (commitHash.length === 0 || reachableCommits.has(commitHash)) continue
+      const timeBytes = await this.store.get(COMMIT_TIME(commitHash))
+      if (timeBytes === null) continue // no timestamp — be conservative, skip
+      const ts = safeLoads(timeBytes)
+      if (typeof ts !== 'number') continue
+      if (ts < cutoffTime) {
+        orphans.push(commitHash)
+      } else {
+        youngOrphanCommits.push(commitHash)
+      }
+    }
+
+    // Protect blobs/HAMT nodes referenced by young orphans — they may
+    // belong to in-flight writers whose CAS hasn't landed yet.
+    for (const young of youngOrphanCommits) {
+      await walkCommitForMarks(young)
+    }
+
+    // Collect everything to delete in one batch so the sweep is atomic
+    // at the store level (defends against partial sweeps under crash).
+    const allRemovals: string[] = []
+
+    for (const orphan of orphans) {
+      const orphanRootBytes = await this.store.get(COMMIT_ROOT(orphan))
+      if (orphanRootBytes !== null) {
+        try {
+          const orphanRoot = loads(orphanRootBytes) as string
+          const orphanKs = Keyset.fromRoot(this.store, orphanRoot)
+          const orphanEntries = await orphanKs.materialize()
+          for (const entry of orphanEntries.values()) {
+            if (!reachableBlobs.has(entry.blob)) {
+              allRemovals.push(entry.blob)
+            }
+          }
+        } catch {
+          // best-effort — a corrupt orphan keyset just means we leave
+          // its blobs (they'll be unreachable HAMT-side and swept by a
+          // future GC pass once the format settles)
+        }
+      }
+      allRemovals.push(COMMIT_ROOT(orphan))
+      allRemovals.push(PARENT_COMMIT(orphan))
+      allRemovals.push(COMMIT_TIME(orphan))
+      allRemovals.push(INFO_KEY(orphan))
+    }
+
+    // Orphan HAMT nodes: any keyset node not reachable from a live
+    // commit (or a young orphan, see above) is fair game.
+    const KEYSET_PREFIX = Keyset.DEFAULT_PREFIX
+    for await (const k of this.store.keys()) {
+      if (!k.startsWith(KEYSET_PREFIX)) continue
+      const nodeHash = k.slice(KEYSET_PREFIX.length)
+      if (nodeHash.length > 0 && !reachableNodes.has(nodeHash)) {
+        allRemovals.push(k)
+      }
+    }
+
+    if (allRemovals.length > 0) {
+      await this.store.removeMany(allRemovals)
+    }
+    return orphans.length
+  }
+
   // --- Internal ---
 
   private async loadCommitInto(commitHash: string, updateBase: boolean): Promise<void> {

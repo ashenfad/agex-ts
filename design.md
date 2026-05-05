@@ -1025,8 +1025,8 @@ import { Agent, connectState } from 'agex-ts'
 const agent = new Agent({
   state: connectState({
     type: 'versioned',           // 'versioned' | 'live'
-    storage: 'opfs',             // 'memory' | 'indexeddb' | 'opfs' | 'sqlite'
-    path: './agex-state',        // required for sqlite; optional for opfs
+    storage: 'sqlite',           // 'memory' | 'indexeddb' | 'sqlite'
+    path: './agex-state',        // required for sqlite
   }),
 })
 ```
@@ -1049,8 +1049,12 @@ const agent = new Agent({
 |---|---|---|---|
 | `'memory'` | in-process map | none | dev, tests |
 | `'indexeddb'` | browser IndexedDB | survives reload | browser apps |
-| `'opfs'` | browser OPFS (mounted as file-system) | survives reload | browser apps with many or large files |
-| `'sqlite'` | local SQLite (`node:sqlite` if available, else `better-sqlite3`) | persistent | server-side Node, single-process |
+| `'sqlite'` | local SQLite (`node:sqlite`, Node 22.5+) | persistent | server-side Node, single-process |
+
+OPFS as a separately-shipped backend is **deferred** — see
+[§11](#11-non-goals). Browser apps that hit IndexedDB's per-record
+overhead or quota limits can plug in a custom `KVStore` against OPFS
+in the meantime.
 
 `'live'` always uses in-process storage; the `storage` field is
 ignored.
@@ -1470,7 +1474,7 @@ unambiguously the TS version.)
 | Workspace | Role |
 |---|---|
 | `agex-ts` | Top-level. The `Agent`, task definition, registration surface, event log, cache, VFS API, runtime adapter glue. No LLM SDK dependency. |
-| `kvgit-ts` | Versioned KV store: branches, commits, merges, storage backends (memory, IndexedDB, OPFS, SQLite). |
+| `kvgit-ts` | Versioned KV store: branches, commits, merges, storage backends (memory, IndexedDB, SQLite). OPFS deferred — see §11. |
 | `termish-ts` | Shell parser + builtins over an `fs`-shaped surface. Powers `terminal` emissions. |
 | LLM providers | One package per provider — e.g. `@agex-ts/anthropic`, `@agex-ts/openai`, `@agex-ts/gemini`. Each depends on the provider's SDK; users install only the ones they need. See [§9](#9-llm-integration). |
 
@@ -1558,6 +1562,15 @@ agex-ts isn't.
   [§6.5](#65-state-configuration). Custom value codecs can be added
   when a clear need emerges; users with heavy-blob workloads can plug
   a custom `KVStore` backend in the meantime.
+
+- **OPFS as a first-party `kvgit-ts` backend.** v1 ships memory,
+  IndexedDB, and SQLite. OPFS would be the right reach when a browser
+  app hits IndexedDB's per-record overhead (large blob writes) or
+  needs sync-handle access from a Web Worker — both real but
+  specialist concerns. The `KVStore` interface is sufficient for users
+  to plug an OPFS-backed implementation in the meantime; we'll
+  re-evaluate when a real consumer (likely agex-studio) measures it as
+  necessary. Affects [§6.5](#65-state-configuration).
 
 ### Structurally not goals
 

@@ -246,30 +246,38 @@ export class KvgitFS implements FileSystem {
 
     if (await this.#dirExists(absSrc)) {
       const srcPrefix = `${absSrc}/`
-      const fileMoves: Array<[string, FileRecord]> = []
-      const dirMoves: Array<[string, FileRecord | null]> = []
+      // Materialize the matching keys up front. Awaiting `staged.get()`
+      // mid-iteration over `staged.keys()` can let an IndexedDB-backed
+      // store auto-commit its read cursor between awaits — pulling the
+      // candidates into an array first keeps the cursor walk tight and
+      // confines the per-key loads to a separate phase.
+      const fileKeys: string[] = []
+      const dirKeys: string[] = []
       for await (const k of this.#staged.keys()) {
         if (k.startsWith('f:')) {
-          const path = k.slice(2)
-          if (path.startsWith(srcPrefix)) {
-            const rec = await this.#staged.get<FileRecord>(k)
-            if (rec !== undefined) {
-              fileMoves.push([`${absDst}/${path.slice(srcPrefix.length)}`, rec])
-              this.#staged.delete(k)
-            }
-          }
+          if (k.slice(2).startsWith(srcPrefix)) fileKeys.push(k)
         } else if (k.startsWith('d:')) {
           const path = k.slice(2)
-          if (path === absSrc) {
-            const rec = await this.#staged.get<FileRecord>(k)
-            dirMoves.push([absDst, rec ?? null])
-            this.#staged.delete(k)
-          } else if (path.startsWith(srcPrefix)) {
-            const rec = await this.#staged.get<FileRecord>(k)
-            dirMoves.push([`${absDst}/${path.slice(srcPrefix.length)}`, rec ?? null])
-            this.#staged.delete(k)
-          }
+          if (path === absSrc || path.startsWith(srcPrefix)) dirKeys.push(k)
         }
+      }
+
+      const fileMoves: Array<[string, FileRecord]> = []
+      const dirMoves: Array<[string, FileRecord | null]> = []
+      for (const k of fileKeys) {
+        const path = k.slice(2)
+        const rec = await this.#staged.get<FileRecord>(k)
+        if (rec !== undefined) {
+          fileMoves.push([`${absDst}/${path.slice(srcPrefix.length)}`, rec])
+          this.#staged.delete(k)
+        }
+      }
+      for (const k of dirKeys) {
+        const path = k.slice(2)
+        const rec = await this.#staged.get<FileRecord>(k)
+        const dst = path === absSrc ? absDst : `${absDst}/${path.slice(srcPrefix.length)}`
+        dirMoves.push([dst, rec ?? null])
+        this.#staged.delete(k)
       }
       for (const [dstPath, rec] of fileMoves) this.#staged.set(`f:${dstPath}`, rec)
       for (const [dstPath, rec] of dirMoves) {

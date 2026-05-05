@@ -2,7 +2,7 @@
  * In-process `FileSystem` implementation backed by a `Map`.
  *
  * Used by tests, ephemeral agent sessions, and as the reference
- * implementation against which other adapters (NodeFS, KvgitFS) are
+ * implementation against which other adapters (RealFS, KvgitFS) are
  * conformance-tested.
  *
  * Path model: POSIX-style absolute paths internally. Relative paths

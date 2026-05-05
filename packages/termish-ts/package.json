@@ -16,9 +16,9 @@
       "types": "./dist/fs/memory.d.ts",
       "import": "./dist/fs/memory.js"
     },
-    "./fs/node": {
-      "types": "./dist/fs/node.d.ts",
-      "import": "./dist/fs/node.js"
+    "./fs/real": {
+      "types": "./dist/fs/real.d.ts",
+      "import": "./dist/fs/real.js"
     },
     "./fs/kvgit": {
       "types": "./dist/fs/kvgit.d.ts",

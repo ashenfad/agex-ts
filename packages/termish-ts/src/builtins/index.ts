@@ -8,6 +8,7 @@
  */
 
 import type { CommandHandler } from '../context'
+import { gunzip, gzip, tar, unzip, zip } from './archive'
 import { diff } from './diff'
 import { basename, cd, cp, dirname, ls, mkdir, mv, pwd, rm, touch } from './filesystem'
 import { cat, echo, head, tail, tee } from './io'
@@ -49,4 +50,10 @@ export const BUILTINS: ReadonlyMap<string, CommandHandler> = new Map<string, Com
   ['sed', sed],
   // Meta
   ['xargs', xargs],
+  // Archive
+  ['gzip', gzip],
+  ['gunzip', gunzip],
+  ['tar', tar],
+  ['zip', zip],
+  ['unzip', unzip],
 ])

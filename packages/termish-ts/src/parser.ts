@@ -81,6 +81,28 @@ function tokenize(text: string): string[] {
       continue
     }
 
+    // FD-prefixed redirects (`2>`, `2>>`, `2>&1`) — must have NO
+    // whitespace between the digit and the operator. Recognized at
+    // word-start only so `echo 2 > file` keeps `2` as a regular arg.
+    if (/[0-9]/.test(c) && text[i + 1] === '>') {
+      // 2>&1
+      if (text[i + 2] === '&' && i + 3 < n && /[0-9]/.test(text[i + 3] ?? '')) {
+        tokens.push(`${c}>&${text[i + 3]}`)
+        i += 4
+        continue
+      }
+      // 2>>
+      if (text[i + 2] === '>') {
+        tokens.push(`${c}>>`)
+        i += 3
+        continue
+      }
+      // 2>
+      tokens.push(`${c}>`)
+      i += 2
+      continue
+    }
+
     // Multi-char operators (greedy, before single-char check).
     if (i + 1 < n) {
       const two = `${c}${text[i + 1]}`
@@ -200,24 +222,30 @@ function parseTokens(tokens: readonly string[], maskMap: ReadonlyMap<string, str
       if (NON_TARGET_TOKENS.has(target)) {
         throw new ParseError(`Expected filename after '${token}', got '${target}'`)
       }
+      cmdRedirects.push({ type: token as RedirectType, target: unmask(target) })
+      continue
+    }
 
-      // Stderr suppression: if the immediately preceding arg was the
-      // literal `2`, treat this as `2> file` and discard the redirect
-      // entirely (termish has no separate stderr stream during
-      // execution; stderr surfaces post-hoc on TerminalError).
-      const isStderr = cmdArgs.length > 0 && cmdArgs[cmdArgs.length - 1] === '2'
-      if (isStderr) cmdArgs.pop()
-
-      if (!isStderr) {
-        cmdRedirects.push({ type: token as RedirectType, target: unmask(target) })
+    // FD-prefixed redirects emitted by the tokenizer when there's
+    // no whitespace between the digit and `>` (e.g. `2>file`,
+    // `2>>file`). Termish has no separate stderr stream, so these
+    // are vacuously discarded — but we still consume the filename
+    // so it doesn't leak into args.
+    if (/^[0-9]>>?$/.test(token)) {
+      if (i >= tokens.length) {
+        throw new ParseError(`Expected filename after '${token}'`)
+      }
+      const target = tokens[i] as string
+      i++
+      if (NON_TARGET_TOKENS.has(target)) {
+        throw new ParseError(`Expected filename after '${token}', got '${target}'`)
       }
       continue
     }
 
     if (token === '>&') {
-      // bash-style fd merge (`2>&1`, `>&1`). termish has no separate
-      // stderr stream, so any fd merge is vacuously a no-op — we
-      // recognize it so it doesn't fall through as args.
+      // bash-style fd merge (`>&1`); fd-prefixed forms like `2>&1`
+      // come pre-glued from the tokenizer (handled below).
       if (i >= tokens.length) {
         throw new ParseError("Expected fd after '>&'")
       }
@@ -226,8 +254,11 @@ function parseTokens(tokens: readonly string[], maskMap: ReadonlyMap<string, str
       if (NON_TARGET_TOKENS.has(targetFd)) {
         throw new ParseError(`Expected fd after '>&', got '${targetFd}'`)
       }
-      const last = cmdArgs[cmdArgs.length - 1]
-      if (last === '1' || last === '2') cmdArgs.pop()
+      continue
+    }
+
+    // Pre-glued fd merge `2>&1` from the tokenizer — vacuously discarded.
+    if (/^[0-9]>&[0-9]$/.test(token)) {
       continue
     }
 

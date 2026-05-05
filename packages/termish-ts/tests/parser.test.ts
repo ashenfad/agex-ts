@@ -121,7 +121,23 @@ describe('toScript — redirects', () => {
   it('discards 2>&1 fd merge', () => {
     const s = toScript('cmd arg 2>&1')
     const cmd = s.pipelines[0]?.commands[0]
-    expect(cmd?.args).toEqual(['arg']) // "2" popped
+    expect(cmd?.args).toEqual(['arg'])
+    expect(cmd?.redirects).toEqual([])
+  })
+
+  it("treats '2' followed by space + '>' as a regular arg + redirect (not fd-2)", () => {
+    // `echo 2 > file` should write the literal "2" to `file`,
+    // not be interpreted as a fd-2 redirect.
+    const s = toScript('echo 2 > file')
+    const cmd = s.pipelines[0]?.commands[0]
+    expect(cmd?.args).toEqual(['2'])
+    expect(cmd?.redirects).toEqual([{ type: '>', target: 'file' }])
+  })
+
+  it('handles 2>>file (append fd-2 redirect)', () => {
+    const s = toScript('grep foo file 2>>err.log')
+    const cmd = s.pipelines[0]?.commands[0]
+    expect(cmd?.args).toEqual(['foo', 'file'])
     expect(cmd?.redirects).toEqual([])
   })
 

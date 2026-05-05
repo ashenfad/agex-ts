@@ -5,19 +5,31 @@
  * session's `/data` / `/scratch` / `/helpers` etc. — the same FS
  * the agent's `ts` emissions see via the runtime adapter.
  *
- * v1 backs each session with an independent `MemoryFS` cached on
- * the agent. The kvgit-backed path (sharing the agent's state
- * backend so the FS lands in the same versioned commit chain as
- * the event log + cache) is a follow-up; the design.md §6.2 notes
- * apply once that wiring exists.
+ * Each session's FS is a `MountFS` composing:
+ *   - a writable backing FS (a per-session `MemoryFS` in v1)
+ *   - read-only overlays at fixed prefixes (`/chapters/` today,
+ *     future `/skills/`)
+ *
+ * The chapters overlay is created on first request and refreshed
+ * via `refreshChaptersOverlay(session, ...)` whenever the action
+ * loop applies new chapters to the session's event log.
  */
 
 import { MemoryFS } from 'termish-ts/fs/memory'
-import type { FSConfig, VirtualFileSystem } from './types'
+import { ChaptersOverlay, buildChaptersOverlay } from './fs/chapters-overlay'
+import { MountFS } from './fs/mount'
+import type { AgentEvent, FSConfig } from './types'
+
+const CHAPTERS_PREFIX = '/chapters'
+
+interface SessionEntry {
+  readonly mount: MountFS
+  readonly chaptersOverlay: ChaptersOverlay
+}
 
 export class VfsManager {
   readonly #config: FSConfig
-  readonly #cache = new Map<string, VirtualFileSystem>()
+  readonly #cache = new Map<string, SessionEntry>()
 
   constructor(config: FSConfig = { type: 'memory' }) {
     this.#config = config
@@ -25,15 +37,33 @@ export class VfsManager {
 
   /** Get the FileSystem for a session. Lazily creates and caches one
    *  per session id; subsequent calls return the same instance. */
-  fs(session: string): VirtualFileSystem {
+  fs(session: string): MountFS {
     const cached = this.#cache.get(session)
-    if (cached !== undefined) return cached
-    const fresh = this.#create()
-    this.#cache.set(session, fresh)
-    return fresh
+    if (cached !== undefined) return cached.mount
+    const backing = this.#createBacking()
+    const chaptersOverlay = new ChaptersOverlay()
+    const mount = new MountFS(backing, [{ prefix: CHAPTERS_PREFIX, fs: chaptersOverlay }])
+    this.#cache.set(session, { mount, chaptersOverlay })
+    return mount
   }
 
-  #create(): VirtualFileSystem {
+  /** Rebuild the `/chapters/` overlay for `session` from the current
+   *  event log. Called by the action loop after chaptering applies a
+   *  new chapter so the agent sees it immediately on its next
+   *  filesystem read. No-op if the session hasn't been initialized
+   *  yet (the next `fs()` call will build a fresh overlay). */
+  async refreshChaptersOverlay(
+    session: string,
+    events: AsyncIterable<AgentEvent>,
+    resolveEvent: (ref: string) => Promise<AgentEvent | undefined>,
+  ): Promise<void> {
+    const entry = this.#cache.get(session)
+    if (entry === undefined) return
+    const files = await buildChaptersOverlay(events, resolveEvent)
+    entry.chaptersOverlay.swap(files)
+  }
+
+  #createBacking(): MemoryFS {
     switch (this.#config.type) {
       case 'memory':
         return new MemoryFS()

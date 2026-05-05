@@ -1,6 +1,15 @@
-// Public surface — re-export the canonical types and runtime entry points.
-// Sub-path consumers can import narrower slices from `agex-ts/types`,
-// `agex-ts/state`, or `agex-ts/llm-dummy` without pulling everything.
+// Public surface — the lean default entry: Agent + createAgent + types.
+//
+// Heavier surfaces live behind sub-path imports so unused code paths
+// tree-shake cleanly:
+//
+//   - `agex-ts/types`        — contracts only, no runtime code
+//   - `agex-ts/state`        — Live / KvgitState / connectState / backend types
+//   - `agex-ts/llm-dummy`    — Dummy LLM client for tests
+//   - `agex-ts/runtime-eval` — same-realm eval RuntimeAdapter
+//
+// Production runtime (`@agex-ts/runtime-worker`) and provider clients
+// (`@agex-ts/anthropic` etc.) ship as separate packages.
 
 export {
   Agent,
@@ -11,4 +20,6 @@ export {
   type NsRegistration,
   type TerminalRegistration,
 } from './agent'
+export { shouldTriggerChaptering } from './chaptering'
+export type { TaskDefinition } from './task'
 export * from './types'

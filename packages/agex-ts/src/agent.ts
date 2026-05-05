@@ -304,6 +304,18 @@ export class Agent {
     return this.#state.commit(opts)
   }
 
+  /** Release runtime resources. Must be called when the agent is no
+   *  longer needed — a worker-based `RuntimeAdapter` (the production
+   *  default) holds onto a Worker / `worker_threads` instance that
+   *  won't get GC'd otherwise. No-op if no runtime is configured.
+   *
+   *  After `dispose()`, calling `task()` will fail because the runtime
+   *  is gone. Don't reuse the agent. */
+  async dispose(): Promise<void> {
+    const runtime = this.#opts.runtime
+    if (runtime !== undefined) await runtime.dispose()
+  }
+
   // -- Inspection / time-travel ------------------------------------------
 
   /** Commit metadata at `hash` (or current HEAD if omitted). Null
@@ -329,12 +341,13 @@ export class Agent {
     if (view === null) return null
     // Build a thin StateBackend over the historical Versioned. We
     // don't need writes — just iter() and get() — so a minimal
-    // adapter wraps the Versioned's reads directly.
-    void session
+    // adapter wraps the Versioned's reads directly. Pass `session`
+    // so the historical EventLog reads from the right per-session
+    // index (not the default).
     const { Staged } = await import('kvgit-ts')
     const historicalStaged = new Staged(view)
     const historicalState = new KvgitState(historicalStaged)
-    return new EventLogImpl(historicalState)
+    return new EventLogImpl(historicalState, session)
   }
 
   // -- Internals exposed for the action loop / runtime adapter ----------

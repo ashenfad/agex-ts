@@ -53,6 +53,14 @@ export class EventLogImpl implements EventLog {
   }
 
   async add(event: AgentEvent): Promise<string> {
+    // The read-modify-write of the index isn't atomic. Safe under the
+    // v1 contract — the action loop is sequential within a session,
+    // and the chapter task runs in a child session — so two `add()`
+    // calls on the same EventLogImpl never overlap. If we ever permit
+    // concurrent tasks per session, this needs a CAS loop or an index
+    // mutex. Note also: `set` is sync per `StateBackend` (writes go to
+    // the kvgit Staged buffer; transactions only fire on commit), so
+    // there's nothing to await here.
     const key = this.#generateKey(event)
     this.#state.set(key, event)
     const index = ((await this.#state.get<string[]>(this.#indexKey)) ?? []) as string[]
@@ -99,6 +107,9 @@ export class EventLogImpl implements EventLog {
     if (eventRefs.length === 0) {
       throw new Error('replaceRange: eventRefs must be non-empty')
     }
+    // Same sequential-within-session assumption as `add()` — see the
+    // comment there. Chaptering runs between LLM turns, not concurrent
+    // with anything else writing to the same session log.
     const chapterKey = this.#generateKey(chapterEvent)
     this.#state.set(chapterKey, chapterEvent)
 

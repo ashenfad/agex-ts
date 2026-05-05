@@ -67,6 +67,24 @@ describe('MountFS — routing', () => {
     ).toThrow(/must not end with/)
   })
 
+  it('most-specific (longest) prefix wins on overlapping mounts', async () => {
+    const outer = makeOverlay({ '/x.md': 'from outer' })
+    const inner = makeOverlay({ '/x.md': 'from inner' })
+    // Register the shorter prefix first to make sure ordering matters
+    const fs = new MountFS(new MemoryFS(), [
+      { prefix: '/a', fs: outer },
+      { prefix: '/a/b', fs: inner },
+    ])
+    expect(dec.decode(await fs.read('/a/x.md'))).toBe('from outer')
+    expect(dec.decode(await fs.read('/a/b/x.md'))).toBe('from inner')
+    // And in the opposite registration order — same result
+    const fs2 = new MountFS(new MemoryFS(), [
+      { prefix: '/a/b', fs: inner },
+      { prefix: '/a', fs: outer },
+    ])
+    expect(dec.decode(await fs2.read('/a/b/x.md'))).toBe('from inner')
+  })
+
   it('mount() and unmount() update the active mounts', async () => {
     const fs = new MountFS(new MemoryFS())
     expect(fs.mounts.length).toBe(0)

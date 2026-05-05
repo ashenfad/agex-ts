@@ -85,6 +85,53 @@ describe('MountFS — routing', () => {
     expect(dec.decode(await fs2.read('/a/b/x.md'))).toBe('from inner')
   })
 
+  it('listDetailed splices in mount points as virtual subdirs', async () => {
+    const overlay = makeOverlay({ '/a/x.md': 'hi' })
+    const fs = new MountFS(new MemoryFS(), [{ prefix: '/chapters', fs: overlay }])
+    // Top-level listDetailed should show the /chapters mount point
+    const top = await fs.listDetailed('/')
+    const names = top.map((e) => e.name).sort()
+    expect(names).toContain('chapters')
+    const chaptersEntry = top.find((e) => e.name === 'chapters')
+    expect(chaptersEntry?.isDir).toBe(true)
+    expect(chaptersEntry?.path).toBe('/chapters')
+  })
+
+  it('listDetailed under a mount routes to the overlay', async () => {
+    const overlay = makeOverlay({ '/a/summary.md': 'sum', '/a/events/1.md': 'e' })
+    const fs = new MountFS(new MemoryFS(), [{ prefix: '/chapters', fs: overlay }])
+    const inside = await fs.listDetailed('/chapters/a')
+    const names = inside.map((e) => e.name).sort()
+    expect(names).toEqual(['events', 'summary.md'])
+    expect(inside.find((e) => e.name === 'summary.md')?.isDir).toBe(false)
+    expect(inside.find((e) => e.name === 'events')?.isDir).toBe(true)
+  })
+
+  it('listDetailed recursive includes mount contents', async () => {
+    const overlay = makeOverlay({ '/a/summary.md': 'sum' })
+    const fs = new MountFS(new MemoryFS(), [{ prefix: '/chapters', fs: overlay }])
+    const all = await fs.listDetailed('/', { recursive: true })
+    const paths = all.map((e) => e.path).sort()
+    expect(paths).toContain('/chapters')
+    expect(paths.some((p) => p.includes('chapters/a'))).toBe(true)
+  })
+
+  it('rename rejects when src or dst would cross a mount', async () => {
+    const fs = new MountFS(new MemoryFS(), [{ prefix: '/chapters', fs: makeOverlay() }])
+    await fs.write('/foo.txt', enc.encode('hi'))
+    await expect(fs.rename('/foo.txt', '/chapters/a.txt')).rejects.toThrow(
+      /cannot rename across or under read-only mounts/,
+    )
+    await expect(fs.rename('/chapters/x', '/foo.txt')).rejects.toThrow(/cannot rename/)
+  })
+
+  it('mkdir/remove/rmdir under a mount throw clearly', async () => {
+    const fs = new MountFS(new MemoryFS(), [{ prefix: '/chapters', fs: makeOverlay() }])
+    await expect(fs.mkdir('/chapters/new')).rejects.toThrow(/cannot mkdir under read-only mount/)
+    await expect(fs.remove('/chapters/x')).rejects.toThrow(/cannot remove under read-only mount/)
+    await expect(fs.rmdir('/chapters/x')).rejects.toThrow(/cannot rmdir under read-only mount/)
+  })
+
   it('mount() and unmount() update the active mounts', async () => {
     const fs = new MountFS(new MemoryFS())
     expect(fs.mounts.length).toBe(0)

@@ -348,6 +348,188 @@ describe('renderEvents', () => {
   })
 })
 
+describe('renderEvents — emission variants', () => {
+  it('terminal emission becomes a terminal_action toolUse', () => {
+    const ev: ActionEvent = {
+      type: 'action',
+      timestamp: ts,
+      agentName: 'a',
+      emissions: [{ type: 'terminal', commands: 'ls /', thinking: 'glance' }],
+    }
+    const turns = renderEvents([ev])
+    const part = turns[0]?.content[0]
+    expect(part?.type).toBe('toolUse')
+    if (part?.type === 'toolUse') {
+      expect(part.toolName).toBe('terminal_action')
+      expect(part.input.commands).toBe('ls /')
+      expect(part.input.thinking).toBe('glance')
+    }
+  })
+
+  it('fileWrite + fileEdit become write_file / edit_file toolUses', () => {
+    const ev: ActionEvent = {
+      type: 'action',
+      timestamp: ts,
+      agentName: 'a',
+      emissions: [
+        { type: 'fileWrite', path: '/n.txt', content: 'hi', mode: 'write' },
+        { type: 'fileEdit', path: '/n.txt', search: 'hi', content: 'bye', matchAll: true },
+      ],
+    }
+    const turn = renderEvents([ev])[0]
+    expect(turn?.content.length).toBe(2)
+    const w = turn?.content[0]
+    const e = turn?.content[1]
+    if (w?.type === 'toolUse') {
+      expect(w.toolName).toBe('write_file')
+      expect(w.input.mode).toBe('write')
+    } else throw new Error('expected toolUse')
+    if (e?.type === 'toolUse') {
+      expect(e.toolName).toBe('edit_file')
+      expect(e.input.matchAll).toBe(true)
+    } else throw new Error('expected toolUse')
+  })
+
+  it('text emission becomes a text part', () => {
+    const ev: ActionEvent = {
+      type: 'action',
+      timestamp: ts,
+      agentName: 'a',
+      emissions: [{ type: 'text', text: 'aside to the user' }],
+    }
+    const part = renderEvents([ev])[0]?.content[0]
+    expect(part?.type).toBe('text')
+    if (part?.type === 'text') expect(part.text).toBe('aside to the user')
+  })
+
+  it('thinking emission becomes a thinking part with redacted + signature', () => {
+    const sig = new Uint8Array([1, 2, 3])
+    const ev: ActionEvent = {
+      type: 'action',
+      timestamp: ts,
+      agentName: 'a',
+      emissions: [{ type: 'thinking', text: 'hmm', redacted: false, signature: sig }],
+    }
+    const part = renderEvents([ev])[0]?.content[0]
+    expect(part?.type).toBe('thinking')
+    if (part?.type === 'thinking') {
+      expect(part.text).toBe('hmm')
+      expect(part.redacted).toBe(false)
+      expect(part.signature).toBe(sig)
+    }
+  })
+
+  it('OutputEvent without a prior ActionEvent renders as a plain user message', () => {
+    const events: AgentEvent[] = [
+      {
+        type: 'output',
+        timestamp: ts,
+        agentName: 'a',
+        parts: [
+          { type: 'text', text: 'orphan output' },
+          { type: 'image', format: 'png', data: 'b64stuff', altText: 'a chart' },
+        ],
+      } as OutputEvent,
+    ]
+    const turn = renderEvents(events)[0]
+    expect(turn?.role).toBe('user')
+    expect(turn?.content[0]?.type).toBe('text')
+    expect(turn?.content[1]?.type).toBe('image')
+  })
+})
+
+describe('renderRegistrations — classes with members', () => {
+  it('lists class methods with descriptions from configure', () => {
+    class MyClass {
+      run(): number {
+        return 1
+      }
+      reset(): void {
+        // empty
+      }
+    }
+    const p = new PolicyBuilder()
+    p.registerCls('MyClass', {
+      cls: MyClass as unknown as new (...args: unknown[]) => unknown,
+      description: 'A demo class.',
+      configure: { run: { description: 'Run once.' } },
+    })
+    const out = renderRegistrations(p.snapshot())
+    expect(out).toContain('## Classes')
+    expect(out).toContain('MyClass')
+    expect(out).toContain('A demo class.')
+    expect(out).toContain('run')
+    expect(out).toContain('Run once.')
+    expect(out).toContain('reset')
+  })
+
+  it('non-constructable classes get a hint', () => {
+    class StaticOnly {}
+    const p = new PolicyBuilder()
+    p.registerCls('StaticOnly', {
+      cls: StaticOnly as unknown as new (...args: unknown[]) => unknown,
+      description: 'Static API.',
+      constructable: false,
+    })
+    expect(renderRegistrations(p.snapshot())).toContain('not constructable')
+  })
+
+  it('live: true namespace gets a proxy hint', () => {
+    const p = new PolicyBuilder()
+    p.registerNamespace('db', {
+      target: { query: () => null },
+      description: 'Live db.',
+      live: true,
+    })
+    expect(renderRegistrations(p.snapshot())).toContain('live host instance')
+  })
+})
+
+describe('extractJsonSchema — error paths', () => {
+  it('catches a throwing toJSONSchema and falls back to null', () => {
+    const schema = {
+      '~standard': {
+        version: 1 as const,
+        vendor: 'broken',
+        validate: (v: unknown) => ({ value: v }),
+      },
+      toJSONSchema: () => {
+        throw new Error('unsupported')
+      },
+    }
+    // biome-ignore lint/suspicious/noExplicitAny: hand-rolled schema
+    expect(extractJsonSchema(schema as any)).toBeNull()
+  })
+
+  it('catches a throwing toJsonSchema (lowercase variant)', () => {
+    const schema = {
+      '~standard': {
+        version: 1 as const,
+        vendor: 'broken',
+        validate: (v: unknown) => ({ value: v }),
+      },
+      toJsonSchema: () => {
+        throw new Error('unsupported')
+      },
+    }
+    // biome-ignore lint/suspicious/noExplicitAny: hand-rolled schema
+    expect(extractJsonSchema(schema as any)).toBeNull()
+  })
+
+  it('uses toJsonSchema (lowercase) when present', () => {
+    const schema = {
+      '~standard': {
+        version: 1 as const,
+        vendor: 'valibot-ish',
+        validate: (v: unknown) => ({ value: v }),
+      },
+      toJsonSchema: () => ({ type: 'array' }),
+    }
+    // biome-ignore lint/suspicious/noExplicitAny: hand-rolled schema
+    expect(extractJsonSchema(schema as any)).toEqual({ type: 'array' })
+  })
+})
+
 describe('makeToolUseId', () => {
   it('is stable across calls', () => {
     expect(makeToolUseId(ts, 0)).toBe(makeToolUseId(ts, 0))

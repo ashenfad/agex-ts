@@ -265,6 +265,15 @@ export interface Chapter {
   readonly message: string
 }
 
+/** User-supplied function that runs when chaptering triggers. Given
+ *  the current event log, returns one or more `Chapter` summaries
+ *  to compact into the rendered context. The originals stay in the
+ *  log; only the *primer rendering* uses the chapter summaries. */
+export type ChapterHandler = (
+  events: ReadonlyArray<AgentEvent>,
+  signal: AbortSignal,
+) => Promise<ReadonlyArray<Chapter>>
+
 // ---------------------------------------------------------------------------
 // Task lifecycle
 // ---------------------------------------------------------------------------

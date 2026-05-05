@@ -258,6 +258,19 @@ export class Agent {
     return this.#vfs.fs(session)
   }
 
+  /** Framework-internal: rebuild the `/chapters/` overlay for
+   *  `session` from the current event log + state, so a chapter that
+   *  just landed becomes browseable on the next read. The chaptering
+   *  machinery calls this after `replaceRange`. */
+  async refreshChaptersOverlay(session: string = DEFAULT_SESSION): Promise<void> {
+    const log = this.events(session)
+    await this.#vfs.refreshChaptersOverlay(
+      session,
+      log.iter(),
+      (ref) => this.#state.get(ref) as Promise<import('./types').AgentEvent | undefined>,
+    )
+  }
+
   /** Per-session typed cache. */
   cache(session: string = DEFAULT_SESSION): Cache {
     return this.#caches.cache(session)

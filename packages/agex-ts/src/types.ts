@@ -231,15 +231,21 @@ export interface SystemNoteEvent extends EventBase {
   readonly message: string
 }
 
-/** Context-compaction marker. The events it summarizes still live in
- *  the log (referenced by `eventRefs`); only the *primer rendering*
- *  uses the chapter summary. `state.events()` resolves chapters
- *  through to the originals. */
+/** Context-compaction marker. Replaces the chaptered event range in
+ *  the active event log; the originals stay at their state keys
+ *  (referenced via `eventRefs`) so they remain browseable through
+ *  the `/chapters/<slug>/` VFS overlay. */
 export interface ChapterEvent extends EventBase {
   readonly type: 'chapter'
   readonly name: string
   readonly message: string
-  /** State keys of the events this chapter summarizes (preserved). */
+  /** Slug used as the path segment in the VFS overlay
+   *  (`/chapters/<slug>/`). Stable across renders; computed once at
+   *  chapter creation with collision-handling against existing
+   *  chapters in the same log. */
+  readonly slug: string
+  /** State keys of the events this chapter summarizes — read by the
+   *  VFS overlay to materialize per-event markdown files. */
   readonly eventRefs: ReadonlyArray<string>
 }
 

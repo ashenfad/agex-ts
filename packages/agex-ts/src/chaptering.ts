@@ -31,6 +31,7 @@
 
 import type { Agent } from './agent'
 import type { EventLogImpl } from './event-log'
+import { slugify, uniqueSlug } from './slugify'
 import type { ActionEvent, AgentEvent, Chapter, ChapterEvent } from './types'
 
 /** True when the latest `ActionEvent.inputTokens` is at or above
@@ -117,22 +118,39 @@ export async function runChaptering(
   // Apply chapters in reverse order so earlier indices remain valid
   // as we mutate the log (mirrors agex-py's reverse-application).
   const sorted = [...chapters].sort((a, b) => b.start - a.start)
+
+  // Collect existing slugs from the parent log so new chapters don't
+  // collide on path. `parentEvents` is the snapshot from the trigger
+  // point, which already contains any prior chapters in this session.
+  const takenSlugs = new Set<string>()
+  for (const e of parentEvents) {
+    if (e.type === 'chapter') takenSlugs.add(e.slug)
+  }
+
   let applied = 0
   for (const ch of sorted) {
     // Translate 1-based inclusive positions to a slice of state keys.
     const refs = refsAtTrigger.slice(ch.start - 1, ch.end)
     if (refs.length === 0) continue
+    const slug = uniqueSlug(slugify(ch.name), takenSlugs)
+    takenSlugs.add(slug)
     const ev: ChapterEvent = {
       type: 'chapter',
       timestamp: new Date().toISOString(),
       agentName: agent.name,
       name: ch.name,
       message: ch.message,
+      slug,
       eventRefs: refs,
     }
     await parentEventLog.replaceRange(refs, ev)
     await notify(ev)
     applied++
+  }
+  // Refresh the `/chapters/` overlay for the parent session so the
+  // newly applied chapters are browseable on the agent's next FS read.
+  if (applied > 0) {
+    await agent.refreshChaptersOverlay(parentSession)
   }
   return applied
 }

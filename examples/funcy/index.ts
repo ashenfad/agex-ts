@@ -12,9 +12,8 @@
  */
 
 import { Anthropic } from 'agex-anthropic'
-import { createAgent } from 'agex-ts'
+import { createAgent, prettyTokens } from 'agex-ts'
 import { evalRuntime } from 'agex-ts/runtime-eval'
-import type { AgentEvent } from 'agex-ts/types'
 
 const apiKey = process.env.ANTHROPIC_API_KEY
 if (apiKey === undefined || apiKey.length === 0) {
@@ -47,45 +46,21 @@ const fnBuilder = agent.task<string, GeneratedFn>({
   description: 'Build a callable JS function from a text prompt and return it via taskSuccess.',
 })
 
-function logEvent(e: AgentEvent): void {
-  if (e.type === 'action') {
-    for (const em of e.emissions) {
-      if (em.type === 'ts') console.log(`  [ts]\n${indent(em.code)}`)
-      else if (em.type === 'thinking') console.log(`  [thinking] ${em.text}`)
-      else if (em.type === 'text') console.log(`  [text] ${em.text}`)
-      else if (em.type === 'terminal') console.log(`  [terminal] ${em.commands}`)
-      else if (em.type === 'fileWrite') console.log(`  [fileWrite] ${em.path}`)
-      else if (em.type === 'fileEdit') console.log(`  [fileEdit] ${em.path}`)
-    }
-  } else if (e.type === 'output') {
-    for (const p of e.parts) {
-      if (p.type === 'text') console.log(`  [stdout] ${p.text.trim().slice(0, 200)}`)
-      else console.log(`  [stdout] <image ${p.format}>`)
-    }
-  } else if (e.type === 'fail') console.log(`  [fail] ${e.message}`)
-  else if (e.type === 'success') console.log('  [success]')
-  else console.log(`  [${e.type}]`)
-}
-
-function indent(s: string, by = '    '): string {
-  return s
-    .split('\n')
-    .map((l) => by + l)
-    .join('\n')
-}
-
 async function buildAndCall(prompt: string, callWith: number): Promise<void> {
   console.log(`\nPROMPT: ${prompt}`)
   try {
-    const fn = await fnBuilder(prompt, { onEvent: logEvent })
+    // prettyTokens streams the model's thinking + code character-by-
+    // character as it arrives — the same role pprint_tokens plays in
+    // agex-py.
+    const fn = await fnBuilder(prompt, { onToken: prettyTokens })
     if (typeof fn !== 'function') {
-      console.log(`Returned value isn't a function: ${typeof fn}`)
+      console.log(`\nReturned value isn't a function: ${typeof fn}`)
       return
     }
     const result = await fn(callWith)
-    console.log(`fn(${callWith}) = ${JSON.stringify(result)}`)
+    console.log(`\nfn(${callWith}) = ${JSON.stringify(result)}`)
   } catch (err) {
-    console.log(`FAILED: ${err instanceof Error ? err.message : String(err)}`)
+    console.log(`\nFAILED: ${err instanceof Error ? err.message : String(err)}`)
   }
 }
 

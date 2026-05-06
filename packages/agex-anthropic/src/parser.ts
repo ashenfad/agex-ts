@@ -212,14 +212,41 @@ export async function* parseToolEvents(
 ): AsyncIterable<TokenChunk> {
   const calls = new Map<string, CallState>()
   let nextIndex = 0
+  // Track the currently-streaming thinking / text block's emission
+  // index so per-delta TokenChunks share an index with the final
+  // emission TokenChunk that closes the block. Anthropic streams
+  // content blocks one at a time (start → deltas → stop) without
+  // interleaving per-index, so a single "currently open" slot is
+  // sufficient. Both reset to null at the closing *Part event.
+  let currentThinkingIdx: number | null = null
+  let currentTextIdx: number | null = null
 
   for await (const event of events) {
+    if (event.type === 'thinkingDelta') {
+      if (currentThinkingIdx === null) currentThinkingIdx = nextIndex++
+      yield {
+        type: 'thinking',
+        content: event.content,
+        done: false,
+        emissionIndex: currentThinkingIdx,
+      }
+      continue
+    }
+    if (event.type === 'textDelta') {
+      if (currentTextIdx === null) currentTextIdx = nextIndex++
+      yield { type: 'text', content: event.content, done: false, emissionIndex: currentTextIdx }
+      continue
+    }
     if (event.type === 'textPart') {
       // Whitespace-only text is noise (providers occasionally emit a
       // lone newline between content blocks); drop it.
       const text = event.text
-      if (text.trim().length === 0) continue
-      const idx = nextIndex++
+      if (text.trim().length === 0) {
+        currentTextIdx = null
+        continue
+      }
+      const idx = currentTextIdx ?? nextIndex++
+      currentTextIdx = null
       const emission: TextEmission = { type: 'text', text }
       yield { type: 'emission', content: '', done: true, emissionIndex: idx, emission }
       continue
@@ -228,8 +255,12 @@ export async function* parseToolEvents(
       const hasText = event.text !== undefined && event.text.length > 0
       const hasSig = event.signature !== undefined
       const isRedacted = event.redacted === true
-      if (!hasText && !hasSig && !isRedacted) continue
-      const idx = nextIndex++
+      if (!hasText && !hasSig && !isRedacted) {
+        currentThinkingIdx = null
+        continue
+      }
+      const idx = currentThinkingIdx ?? nextIndex++
+      currentThinkingIdx = null
       const emission: ThinkingEmission = {
         type: 'thinking',
         text: event.text ?? '',

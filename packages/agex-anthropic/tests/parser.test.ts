@@ -214,6 +214,46 @@ describe('parseToolEvents — TextPart / ThinkingPart events', () => {
       redacted: true,
     })
   })
+
+  it('streams thinking deltas as TokenChunks before the final emission', async () => {
+    const sig = new TextEncoder().encode('opaque')
+    const events: ToolCallEvent[] = [
+      { type: 'thinkingDelta', content: 'Step ' },
+      { type: 'thinkingDelta', content: 'one.' },
+      { type: 'thinkingPart', text: 'Step one.', signature: sig },
+    ]
+    const tokens = await collect(parseToolEvents(fromArray(events)))
+    // Two streaming chunks (done=false) sharing the emission index of
+    // the eventual final emission, then the final emission token.
+    const thinkingChunks = tokens.filter((t) => t.type === 'thinking')
+    expect(thinkingChunks).toHaveLength(2)
+    expect(thinkingChunks[0]?.content).toBe('Step ')
+    expect(thinkingChunks[1]?.content).toBe('one.')
+    const idx = thinkingChunks[0]?.emissionIndex
+    expect(thinkingChunks.every((t) => t.emissionIndex === idx)).toBe(true)
+    const final = tokens.at(-1)
+    expect(final?.type).toBe('emission')
+    expect(final?.emissionIndex).toBe(idx)
+    expect(final?.emission).toEqual({ type: 'thinking', text: 'Step one.', signature: sig })
+  })
+
+  it('streams text deltas as TokenChunks sharing the final emission index', async () => {
+    const events: ToolCallEvent[] = [
+      { type: 'textDelta', content: 'aside ' },
+      { type: 'textDelta', content: 'to user' },
+      { type: 'textPart', text: 'aside to user' },
+    ]
+    const tokens = await collect(parseToolEvents(fromArray(events)))
+    const textChunks = tokens.filter((t) => t.type === 'text')
+    expect(textChunks).toHaveLength(2)
+    expect(textChunks[0]?.content).toBe('aside ')
+    expect(textChunks[1]?.content).toBe('to user')
+    const idx = textChunks[0]?.emissionIndex
+    expect(textChunks.every((t) => t.emissionIndex === idx)).toBe(true)
+    const final = tokens.at(-1)
+    expect(final?.emissionIndex).toBe(idx)
+    expect(final?.emission).toEqual({ type: 'text', text: 'aside to user' })
+  })
 })
 
 describe('parseToolEvents — invariants', () => {

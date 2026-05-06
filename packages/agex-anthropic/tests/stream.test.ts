@@ -94,7 +94,7 @@ describe('translateAnthropicStream — tool_use blocks', () => {
 })
 
 describe('translateAnthropicStream — thinking blocks', () => {
-  it('accumulates thinking_delta + signature_delta into one ThinkingPart', async () => {
+  it('streams thinking_delta as ThinkingDelta events; final ThinkingPart carries the full text + signature', async () => {
     const events = [
       {
         type: 'content_block_start',
@@ -124,8 +124,13 @@ describe('translateAnthropicStream — thinking blocks', () => {
       { type: 'content_block_stop', index: 0 },
     ]
     const out = await collect(translateAnthropicStream(fromArray(events)))
-    expect(out.length).toBe(1)
-    const part = out[0]
+    // Two delta events (one per thinking_delta), then the final
+    // ThinkingPart at content_block_stop carrying the accumulated
+    // text + signature.
+    expect(out.length).toBe(3)
+    expect(out[0]).toEqual({ type: 'thinkingDelta', content: 'Step ' })
+    expect(out[1]).toEqual({ type: 'thinkingDelta', content: 'one.' })
+    const part = out[2]
     if (part?.type !== 'thinkingPart') throw new Error('expected thinkingPart')
     expect(part.text).toBe('Step one.')
     expect(part.redacted).toBeUndefined()
@@ -162,7 +167,7 @@ describe('translateAnthropicStream — thinking blocks', () => {
 })
 
 describe('translateAnthropicStream — text blocks', () => {
-  it('accumulates text_delta into a single TextPart', async () => {
+  it('streams text_delta as TextDelta events; final TextPart carries the full text', async () => {
     const events = [
       { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
       { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'aside ' } },
@@ -170,7 +175,11 @@ describe('translateAnthropicStream — text blocks', () => {
       { type: 'content_block_stop', index: 0 },
     ]
     const out = await collect(translateAnthropicStream(fromArray(events)))
-    expect(out).toEqual([{ type: 'textPart', text: 'aside to user' }])
+    expect(out).toEqual([
+      { type: 'textDelta', content: 'aside ' },
+      { type: 'textDelta', content: 'to user' },
+      { type: 'textPart', text: 'aside to user' },
+    ])
   })
 
   it('skips empty text blocks at close', async () => {

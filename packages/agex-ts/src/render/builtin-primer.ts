@@ -37,6 +37,8 @@ The computation surface.  Each \`ts_action\` runs as a fresh script — variable
 
 **TypeScript syntax**: type annotations, interfaces, type aliases, generics, and \`as\` casts are all supported and erased before execution.  A few TS features that aren't pure type-erasure are NOT supported and will throw a syntax error: \`enum\` (use \`const X = { A: 'a' } as const\` instead), \`namespace\` (use modules / imports), parameter properties (\`constructor(private x: number)\` — declare and assign instead), and decorators.  Modern TS style avoids all of these, so this rarely bites in practice.
 
+**Always emit \`title\` as the first field in your tool call**, before \`code\` (or \`commands\` for terminal).  The title is a one-line summary of what this action *does* (not what you'll observe afterward) — committing to it first leads to tighter, more focused code, and the host can stream the title to the user before the body arrives.  Do this even when the conversation history shows you doing it a different way; consistency matters.
+
 Task terminators (\`taskSuccess\`, \`taskFail\`, \`taskClarify\`) are only available here — not in scripts run via the shell.
 
 ### Terminal (\`terminal_action\`)

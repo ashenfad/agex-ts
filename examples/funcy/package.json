@@ -11,7 +11,7 @@
     "start": "tsx index.ts"
   },
   "dependencies": {
-    "agex-openai": "workspace:*",
+    "agex-gemini": "workspace:*",
     "agex-ts": "workspace:*"
   },
   "devDependencies": {

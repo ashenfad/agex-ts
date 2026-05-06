@@ -8,25 +8,25 @@
  * RPC bridge in between.
  *
  * Run:
- *   OPENAI_API_KEY=... pnpm --filter funcy-example start
+ *   GOOGLE_API_KEY=... pnpm --filter funcy-example start
  */
 
-import { OpenAI } from 'agex-openai'
+import { Gemini } from 'agex-gemini'
 import { createAgent, prettyTokens } from 'agex-ts'
 import { evalRuntime } from 'agex-ts/runtime-eval'
 
-const apiKey = process.env.OPENAI_API_KEY
+const apiKey = process.env.GOOGLE_API_KEY
 if (apiKey === undefined || apiKey.length === 0) {
-  throw new Error('Set OPENAI_API_KEY in the environment.')
+  throw new Error('Set GOOGLE_API_KEY in the environment.')
 }
 
 const agent = await createAgent({
   name: 'funcy',
   primer:
     'You are great at providing custom functions to the user. You also like to write modules.',
-  llm: new OpenAI({
+  llm: new Gemini({
     apiKey,
-    model: process.env.OPENAI_MODEL ?? 'gpt-5.4-nano',
+    model: process.env.GOOGLE_MODEL ?? 'gemini-3.1-flash',
   }),
   runtime: evalRuntime(),
   state: { type: 'versioned', storage: 'memory' },

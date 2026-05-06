@@ -20,9 +20,9 @@ importers:
 
   examples/funcy:
     dependencies:
-      agex-openai:
+      agex-gemini:
         specifier: workspace:*
-        version: link:../../packages/agex-openai
+        version: link:../../packages/agex-gemini
       agex-ts:
         specifier: workspace:*
         version: link:../../packages/agex-ts
@@ -39,9 +39,9 @@ importers:
 
   examples/mathy:
     dependencies:
-      agex-openai:
+      agex-gemini:
         specifier: workspace:*
-        version: link:../../packages/agex-openai
+        version: link:../../packages/agex-gemini
       agex-ts:
         specifier: workspace:*
         version: link:../../packages/agex-ts
@@ -57,6 +57,21 @@ importers:
         version: 5.9.3
 
   packages/agex-anthropic:
+    devDependencies:
+      agex-ts:
+        specifier: workspace:*
+        version: link:../agex-ts
+      tsup:
+        specifier: ^8.3.5
+        version: 8.5.1(postcss@8.5.13)(tsx@4.21.0)(typescript@5.9.3)
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.19.17)(@vitest/browser@2.1.9)(msw@2.14.2(@types/node@22.19.17)(typescript@5.9.3))
+
+  packages/agex-gemini:
     devDependencies:
       agex-ts:
         specifier: workspace:*

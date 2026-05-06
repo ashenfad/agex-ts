@@ -72,12 +72,16 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
       // on the host's first `await rt.init(...)` rather than on
       // the next execute (which would be more confusing).
       const tasks: Promise<void>[] = []
-      const queue = (name: string, url: string, exp: string | undefined): void => {
+      // `key === undefined` is the namespace whole-module signal —
+      // mirrors workerRuntime's wire shape after `buildConfigure`
+      // resolves fn / cls defaults to the registration name. Using
+      // the same convention here keeps the two runtimes
+      // semantically identical.
+      const queue = (name: string, url: string, key: string | undefined): void => {
         tasks.push(
           (async () => {
             const mod = (await import(url)) as Record<string, unknown>
-            const key = exp ?? name
-            const value = mod[key]
+            const value = key === undefined ? mod : mod[key]
             if (value === undefined) {
               throw new Error(
                 `evalRuntime URL import '${url}': module has no '${key}' export (named exports: ${Object.keys(mod).join(', ') || '<none>'})`,
@@ -87,14 +91,16 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
           })(),
         )
       }
+      // fn / cls default to plucking by the registration name;
+      // namespace defaults to the whole module.
       for (const [name, reg] of p.fns) {
-        if (reg.url !== undefined) queue(name, reg.url, reg.export)
+        if (reg.url !== undefined) queue(name, reg.url, reg.export ?? name)
       }
       for (const [name, reg] of p.namespaces) {
         if (reg.url !== undefined) queue(name, reg.url, reg.export)
       }
       for (const [name, reg] of p.classes) {
-        if (reg.url !== undefined) queue(name, reg.url, reg.export)
+        if (reg.url !== undefined) queue(name, reg.url, reg.export ?? name)
       }
       await Promise.all(tasks)
     },

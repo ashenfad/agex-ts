@@ -789,7 +789,11 @@ function buildConfigure(policy: Policy): ConfigureMessage {
 
   for (const [name, reg] of policy.fns) {
     if (reg.url !== undefined) {
-      urlModules.push(urlSpec(name, reg.url, reg.export))
+      // fn / cls default to plucking `mod[name]` when no explicit
+      // export is given. Resolve that here so the worker can treat
+      // a missing `export` field uniformly as "use whole module"
+      // (which is what we want for namespace).
+      urlModules.push(urlSpec(name, reg.url, reg.export ?? name))
       continue
     }
     fns.push(name)
@@ -797,6 +801,9 @@ function buildConfigure(policy: Policy): ConfigureMessage {
 
   for (const [name, reg] of policy.namespaces) {
     if (reg.url !== undefined) {
+      // namespace default is the whole module — `import * as foo
+      // from '...'` semantics. Pass `reg.export` through unresolved
+      // so an absent value stays absent on the wire.
       urlModules.push(urlSpec(name, reg.url, reg.export))
       continue
     }
@@ -813,7 +820,9 @@ function buildConfigure(policy: Policy): ConfigureMessage {
 
   for (const [name, reg] of policy.classes) {
     if (reg.url !== undefined) {
-      urlModules.push(urlSpec(name, reg.url, reg.export))
+      // Same default as fn — pluck `mod[name]` unless the embedder
+      // named a different export.
+      urlModules.push(urlSpec(name, reg.url, reg.export ?? name))
       continue
     }
     if (reg.cls === undefined) continue // host xor url enforces this

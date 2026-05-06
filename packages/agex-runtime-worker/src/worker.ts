@@ -279,6 +279,21 @@ class BridgeChannel {
     if (msg.ok) slot.resolve(msg.value)
     else slot.reject(rebuildError(msg.error))
   }
+
+  /** Reject any still-pending calls with `reason`, then clear the
+   *  pending map. Called when the owning `execute` settles so that
+   *  Promises orphaned by user code (e.g. `void slow(); taskSuccess()`,
+   *  or a `setTimeout` that fires after `taskSuccess`) don't pin the
+   *  channel + their closures in memory across emissions. Without
+   *  this, a never-resolved `await` in a `setTimeout` callback would
+   *  retain a frame indefinitely until the worker is finally
+   *  terminated. */
+  cancelPending(reason: Error): void {
+    if (this.pending.size === 0) return
+    const entries = [...this.pending.values()]
+    this.pending.clear()
+    for (const slot of entries) slot.reject(reason)
+  }
 }
 
 function rebuildError(s: SerializedError): Error {
@@ -377,8 +392,25 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
       error = serializeError(e)
     }
   }
+  // Reject any orphan bridge Promises (user code dispatched a call
+  // without awaiting it before unwinding) so their `await`-side
+  // closures release rather than retaining the channel forever.
+  // Done before nulling `activeBridge` so any in-flight catch
+  // handlers triggered by the rejection still see the right channel.
+  bridge.cancelPending(makeCancelledError('execute settled with pending bridge calls'))
   activeBridge = null
   post({ type: 'result', executeId, outcome, error })
+}
+
+/** Local mirror of agex-ts's `CancelledError`. Built here (rather
+ *  than imported) so the worker bundle stays free of agex-ts itself
+ *  — only the type sub-paths cross this boundary. The host side
+ *  doesn't need to instanceof-check this; it's purely the message
+ *  the agent code sees in its `catch` clause. */
+function makeCancelledError(message: string): Error {
+  const e = new Error(message)
+  e.name = 'CancelledError'
+  return e
 }
 
 self.addEventListener('message', (ev: MessageEvent<Host2WorkerMessage>) => {

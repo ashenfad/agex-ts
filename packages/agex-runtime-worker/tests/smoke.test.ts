@@ -603,6 +603,39 @@ describe('workerRuntime — fn / namespace bridge', () => {
     expect(r2.outcome).toEqual({ kind: 'success', value: 2 })
   })
 
+  it('rejects orphan bridge Promises when an execute settles (no leak across executes)', async () => {
+    // Execute #1's user code dispatches `slow()` and pins the
+    // Promise on globalThis (which persists across executes in the
+    // reused worker scope), then taskSuccess'es without awaiting.
+    // The orphan Promise lives in the old BridgeChannel's pending
+    // map. Without `cancelPending`, an `await` on it in any
+    // subsequent execute would hang forever; with the fix, the
+    // worker rejects it at settle time so the await observes a
+    // CancelledError immediately.
+    const rt = runtime()
+    await rt.init(
+      makePolicy({
+        fns: {
+          slow: () => new Promise<number>((r) => setTimeout(() => r(1), 50)),
+        },
+      }),
+    )
+    const r1 = await rt.execute('globalThis.__orphan = slow(); taskSuccess("first")', makeCtx())
+    expect(r1.outcome).toEqual({ kind: 'success', value: 'first' })
+    const r2 = await rt.execute(
+      `
+      try {
+        await globalThis.__orphan
+        taskFail('expected orphan to be rejected')
+      } catch (e) {
+        taskSuccess(e.name)
+      }
+    `,
+      makeCtx(),
+    )
+    expect(r2.outcome).toEqual({ kind: 'success', value: 'CancelledError' })
+  })
+
   it("ignores live: true namespaces in PR 3 (the worker simply doesn't see them)", async () => {
     // Live-instance proxying lands in the next PR; until then the
     // configure step skips them. The agent-side reference just

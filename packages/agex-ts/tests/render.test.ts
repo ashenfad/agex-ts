@@ -268,7 +268,11 @@ const action = (idx: number, code: string): ActionEvent => ({
 })
 
 describe('renderEvents', () => {
-  it('skips TaskStartEvent (handled by buildTaskMessage)', () => {
+  it('renders TaskStartEvent as a user turn with the stored task message', () => {
+    // The message stamped at task launch (buildTaskMessage output)
+    // gets emitted at its actual position in the timeline, not floated
+    // to the front by a caller-side prepend. This keeps multi-task
+    // sessions from putting task 2's prompt before task 1's actions.
     const events: AgentEvent[] = [
       {
         type: 'taskStart',
@@ -276,9 +280,31 @@ describe('renderEvents', () => {
         agentName: 'a',
         taskName: 't',
         inputs: null,
+        message: 'Task: do a thing.',
       } as TaskStartEvent,
     ]
-    expect(renderEvents(events)).toEqual([])
+    const turns = renderEvents(events)
+    expect(turns).toEqual([
+      { role: 'user', content: [{ type: 'text', text: 'Task: do a thing.' }] },
+    ])
+  })
+
+  it('falls back to a stub for TaskStartEvents without a stored message', () => {
+    // Older event logs (or chapter/replay paths) might not carry the
+    // message field; the stub keeps alternation valid without leaking
+    // gibberish to the model.
+    const events: AgentEvent[] = [
+      {
+        type: 'taskStart',
+        timestamp: ts,
+        agentName: 'a',
+        taskName: 'mytask',
+        inputs: null,
+      } as TaskStartEvent,
+    ]
+    const turns = renderEvents(events)
+    if (turns[0]?.content[0]?.type !== 'text') throw new Error('expected text')
+    expect(turns[0].content[0].text).toBe('Task: mytask')
   })
 
   it('renders ActionEvent as an assistant turn with toolUse parts + synth tool_result', () => {
@@ -371,17 +397,53 @@ describe('renderEvents', () => {
     }
   })
 
-  it('skips terminal/metadata events', () => {
+  it('renders terminal task events (success/fail/clarify/cancelled) as closing assistant turns', () => {
+    // These mark the end of a task. Without explicit closure, two
+    // tasks back-to-back would look like the model started a new
+    // task mid-action — confusing it about its own history.
     const events: AgentEvent[] = [
       { type: 'success', timestamp: ts, agentName: 'a', result: 1 },
       { type: 'fail', timestamp: ts, agentName: 'a', message: 'nope' },
-      { type: 'systemNote', timestamp: ts, agentName: 'a', message: 'noted' },
+      { type: 'clarify', timestamp: ts, agentName: 'a', message: 'huh?' },
       {
         type: 'cancelled',
         timestamp: ts,
         agentName: 'a',
         taskName: 't',
-        iterationsCompleted: 0,
+        iterationsCompleted: 3,
+      },
+    ]
+    const turns = renderEvents(events)
+    expect(turns.map((t) => t.role)).toEqual(['assistant', 'assistant', 'assistant', 'assistant'])
+    const texts = turns.map((t) => (t.content[0]?.type === 'text' ? t.content[0].text : ''))
+    expect(texts[0]).toBe('[Task complete]')
+    expect(texts[1]).toContain('Task failed')
+    expect(texts[1]).toContain('nope')
+    expect(texts[2]).toContain('clarification')
+    expect(texts[2]).toContain('huh?')
+    expect(texts[3]).toContain("'t' cancelled")
+    expect(texts[3]).toContain('3 iterations')
+  })
+
+  it('skips framework-only events (error / file / systemNote)', () => {
+    const events: AgentEvent[] = [
+      {
+        type: 'error',
+        timestamp: ts,
+        agentName: 'a',
+        errorName: 'X',
+        errorMessage: 'y',
+        recoverable: true,
+      },
+      { type: 'systemNote', timestamp: ts, agentName: 'a', message: 'noted' },
+      {
+        type: 'file',
+        timestamp: ts,
+        agentName: 'a',
+        source: 'agent',
+        added: [],
+        modified: [],
+        removed: [],
       },
     ]
     expect(renderEvents(events)).toEqual([])

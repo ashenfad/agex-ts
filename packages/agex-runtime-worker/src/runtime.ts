@@ -48,12 +48,13 @@ import type {
   RuntimeAdapter,
   TaskOutcome,
 } from 'agex-ts/types'
-import type {
-  BridgeTarget,
-  ConfigureMessage,
-  Host2WorkerMessage,
-  SerializedError,
-  Worker2HostMessage,
+import {
+  type BridgeTarget,
+  type ConfigureMessage,
+  type Host2WorkerMessage,
+  INSTANCE_HANDLE_KEY,
+  type SerializedError,
+  type Worker2HostMessage,
 } from './messages'
 import { type TransformFn, defaultTransform } from './transform'
 
@@ -298,7 +299,7 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
             return
           }
           if (m?.type === 'bridgeCall' && m.executeId === executeId) {
-            void handleBridgeCall(m, ctx, policyRef, w)
+            void handleBridgeCall(m, ctx, policyRef, instances, w)
             return
           }
           if (m?.type === 'newInstance' && m.executeId === executeId) {
@@ -416,13 +417,14 @@ async function handleBridgeCall(
   msg: Extract<Worker2HostMessage, { type: 'bridgeCall' }>,
   ctx: ExecuteContext,
   policy: Policy | null,
+  instances: Map<number, unknown>,
   w: Worker,
 ): Promise<void> {
   const { executeId, callId } = msg
   let value: unknown
   let error: SerializedError | null = null
   try {
-    value = await dispatch(msg, ctx, policy)
+    value = await dispatch(msg, ctx, policy, instances)
   } catch (e) {
     error = serializeError(e)
   }
@@ -458,8 +460,10 @@ async function dispatch(
   msg: Extract<Worker2HostMessage, { type: 'bridgeCall' }>,
   ctx: ExecuteContext,
   policy: Policy | null,
+  instances: Map<number, unknown>,
 ): Promise<unknown> {
-  const { target, method, args } = msg
+  const { target, method } = msg
+  const args = unpackArgs(msg.args, instances)
   switch (target) {
     case 'fs':
     case 'cache': {
@@ -475,7 +479,7 @@ async function dispatch(
           `workerRuntime bridge: '${target}.${method}' is not callable on this context`,
         )
       }
-      return await fn.apply(surface, args as unknown[])
+      return await fn.apply(surface, args)
     }
     case 'fn': {
       if (policy === null) {
@@ -485,7 +489,7 @@ async function dispatch(
       if (reg === undefined) {
         throw new Error(`workerRuntime bridge: no registered fn named '${method}'`)
       }
-      return await reg.fn(...(args as unknown[]))
+      return await reg.fn(...args)
     }
     case 'namespace': {
       if (policy === null) {
@@ -517,7 +521,7 @@ async function dispatch(
           `workerRuntime bridge: '${subject}.${method}' is not callable (non-function members aren't bridged in this PR)`,
         )
       }
-      return await fn.apply(target, args as unknown[])
+      return await fn.apply(target, args)
     }
     case 'cls': {
       if (policy === null) {
@@ -545,7 +549,7 @@ async function dispatch(
           `workerRuntime bridge: '${subject}.${method}' is not callable (non-function statics aren't bridged in this PR)`,
         )
       }
-      return await fn.apply(cls, args as unknown[])
+      return await fn.apply(cls, args)
     }
   }
 }
@@ -560,7 +564,7 @@ async function handleNewInstance(
   nextId: () => number,
   w: Worker,
 ): Promise<void> {
-  const { executeId, callId, clsName, args } = msg
+  const { executeId, callId, clsName } = msg
   let value: { instanceId: number } | null = null
   let error: SerializedError | null = null
   try {
@@ -577,7 +581,8 @@ async function handleNewInstance(
       )
     }
     const Cls = reg.cls
-    const instance = new Cls(...(args as unknown[]))
+    const args = unpackArgs(msg.args, instances)
+    const instance = new Cls(...args)
     const instanceId = nextId()
     instances.set(instanceId, instance)
     value = { instanceId }
@@ -596,7 +601,7 @@ async function handleInstanceCall(
   instances: Map<number, unknown>,
   w: Worker,
 ): Promise<void> {
-  const { executeId, callId, instanceId, method, args } = msg
+  const { executeId, callId, instanceId, method } = msg
   let value: unknown
   let error: SerializedError | null = null
   try {
@@ -612,11 +617,62 @@ async function handleInstanceCall(
     if (typeof fn !== 'function') {
       throw new Error(`workerRuntime bridge: instance method '${method}' is not callable`)
     }
-    value = await fn.apply(target, args as unknown[])
+    const args = unpackArgs(msg.args, instances)
+    value = await fn.apply(target, args)
   } catch (e) {
     error = serializeError(e)
   }
   postBridgeResponse(w, executeId, callId, value, error)
+}
+
+/** Walk the wire-form args and rehydrate `INSTANCE_HANDLE_KEY`
+ *  markers back into the live host instances they refer to. The
+ *  worker's `packArgs` produced these markers when the agent
+ *  passed an instance Proxy to a bridged call (top-level, in an
+ *  array, or in a plain object); this is the inverse step that
+ *  lets the host method see the actual instance instead of a
+ *  cloned empty shell.
+ *
+ *  Unrecognized references (id not in the instance table) throw —
+ *  the agent likely passed a stale handle from a prior execute, or
+ *  fabricated a marker by hand. Both are mistakes the host should
+ *  surface, not paper over. */
+function unpackArgs(args: ReadonlyArray<unknown>, instances: Map<number, unknown>): unknown[] {
+  const visited = new WeakSet<object>()
+  const unpack = (v: unknown): unknown => {
+    if (v === null || typeof v !== 'object') return v
+    // Marker detection — must be a plain object whose handle key
+    // carries a `{ id: number }` payload. Anything else (different
+    // shape, or the same key on a non-plain object) passes through.
+    if (Object.getPrototypeOf(v) === Object.prototype) {
+      const handle = (v as Record<string, unknown>)[INSTANCE_HANDLE_KEY]
+      if (
+        handle !== undefined &&
+        typeof handle === 'object' &&
+        handle !== null &&
+        typeof (handle as { id: unknown }).id === 'number'
+      ) {
+        const id = (handle as { id: number }).id
+        const inst = instances.get(id)
+        if (inst === undefined) {
+          throw new Error(
+            `workerRuntime bridge: stale instance handle id=${id} (created in a prior emission, or fabricated)`,
+          )
+        }
+        return inst
+      }
+    }
+    if (visited.has(v)) return v
+    visited.add(v)
+    if (Array.isArray(v)) return v.map(unpack)
+    if (Object.getPrototypeOf(v) !== Object.prototype) return v
+    const out: Record<string, unknown> = {}
+    for (const k of Object.keys(v)) {
+      out[k] = unpack((v as Record<string, unknown>)[k])
+    }
+    return out
+  }
+  return args.map(unpack)
 }
 
 /** Common reply path for `newInstance` and `instanceCall`. Mirrors

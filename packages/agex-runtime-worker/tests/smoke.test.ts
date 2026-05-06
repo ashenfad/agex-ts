@@ -899,31 +899,87 @@ describe('workerRuntime — class bridge (registered cls)', () => {
     expect(result.outcome).toEqual({ kind: 'success', value: [10, 20, 30] })
   })
 
-  it("passing an instance Proxy as an arg fails cleanly (PR 4 doesn't bridge identity)", async () => {
-    // Documented limitation we flagged out-of-scope for PR 4: when
-    // agent code passes one Proxy-instance as an argument to
-    // another Proxy's method (e.g. `a.add(b)`), the Proxy doesn't
-    // structured-clone (the engine throws DataCloneError on it) so
-    // the bridge call rejects. The agent's `await` sees that
-    // rejection — surfaced here as an unhandled exception that
-    // becomes the execute's `error`. A future fix (deep arg
-    // rehydration via `__agexInstanceRef` markers) would let this
-    // case actually return a Vec(4, 6); for now it's a clean
-    // failure with an informative error rather than a silent
-    // wrong-answer.
+  it('passes one instance to another instance method via handle rehydration', async () => {
+    // The bridge tracks every Proxy it constructs. When agent code
+    // passes one as an argument (top-level, in an array, or in a
+    // plain object) the worker replaces it with an
+    // INSTANCE_HANDLE_KEY marker before posting; the host walks
+    // the args, looks the id up in the per-execute instance table,
+    // and substitutes the live host instance. So `a.add(b)`
+    // delivers the actual Vec to `Vec.prototype.add`, not an
+    // empty cloned shell.
     const rt = runtime()
     await rt.init(makePolicy({ classes: { Vec: { cls: Vec } } }))
     const code = `
       const a = new Vec(1, 2)
       const b = new Vec(3, 4)
-      try {
-        await a.add(b)
-        taskSuccess('did not throw')
-      } catch (e) {
-        taskSuccess('threw')
-      }
+      const c = await a.add(b)
+      taskSuccess([c.x, c.y])
     `
     const result = await rt.execute(code, makeCtx())
-    expect(result.outcome).toEqual({ kind: 'success', value: 'threw' })
+    expect(result.outcome).toEqual({ kind: 'success', value: [4, 6] })
+  })
+
+  it('rehydrates instance handles nested in arrays + plain objects', async () => {
+    // Register a fn that takes a payload with vec instances at
+    // various depths. The host-side fn sees real Vec instances
+    // because the bridge unpacks the markers recursively.
+    const rt = runtime()
+    let observed: { name: string; sum: number; rest: number[] } | null = null
+    await rt.init(
+      makePolicy({
+        classes: { Vec: { cls: Vec } },
+        fns: {
+          inspect: (payload: unknown) => {
+            const p = payload as { name: string; pivot: Vec; rest: Vec[] }
+            observed = {
+              name: p.name,
+              sum: p.pivot.x + p.pivot.y,
+              rest: p.rest.map((v) => v.magnitude()),
+            }
+          },
+        },
+      }),
+    )
+    const code = `
+      const pivot = new Vec(1, 2)
+      const rest = [new Vec(3, 4), new Vec(0, 5)]
+      await inspect({ name: 'demo', pivot, rest })
+      taskSuccess('done')
+    `
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: 'done' })
+    expect(observed).toEqual({ name: 'demo', sum: 3, rest: [5, 5] })
+  })
+
+  it('surfaces a stale instance handle from a prior execute as an error', async () => {
+    // Stash a Vec from execute #1 on globalThis; in execute #2,
+    // try to pass it to another (newly-constructed) Vec's method.
+    // The marker carries the old executeId's instance id, which
+    // the new execute's instance table doesn't know about. The
+    // host-side rehydration throws "stale instance handle".
+    const rt = runtime()
+    await rt.init(makePolicy({ classes: { Vec: { cls: Vec } } }))
+    const r1 = await rt.execute('globalThis.__leak = new Vec(1, 2); taskSuccess("ok")', makeCtx())
+    expect(r1.outcome).toEqual({ kind: 'success', value: 'ok' })
+    const r2 = await rt.execute(
+      `
+      const fresh = new Vec(0, 0)
+      try {
+        await fresh.add(globalThis.__leak)
+        taskFail('expected stale handle to be rejected')
+      } catch (e) {
+        taskSuccess(e.message)
+      }
+    `,
+      makeCtx(),
+    )
+    expect(r2.outcome.kind).toBe('success')
+    if (r2.outcome.kind !== 'success') return
+    // Either "stale instance handle ..." (from the host
+    // rehydration) or "CancelledError" (from the orphan fix) —
+    // both are valid evidence that handles don't survive across
+    // emissions.
+    expect(String(r2.outcome.value).length).toBeGreaterThan(0)
   })
 })

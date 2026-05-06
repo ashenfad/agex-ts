@@ -182,4 +182,38 @@ describe('workerRuntime', () => {
     await rt.dispose()
     await expect(rt.execute('taskSuccess(1)', makeCtx())).rejects.toThrow(/dispose/)
   })
+
+  it('settles a pending execute() immediately when dispose() is called mid-flight', async () => {
+    // Without the dispose-time settle path, this test would hang
+    // for ~timeoutMs (1.5s here) before the per-emission timer
+    // fired. The harness's per-test deadline catches that.
+    const rt = workerRuntime({ workerUrl: TEST_WORKER_URL, timeoutMs: 1_500 })
+    disposers.push(() => rt.dispose())
+    await rt.init(EMPTY_POLICY)
+    const promise = rt.execute('while (true) {}', makeCtx())
+    // Give the worker a moment to actually start running before we
+    // dispose — proves the settle path isn't just the pre-spawn
+    // abort branch.
+    await new Promise((r) => setTimeout(r, 50))
+    const t0 = performance.now()
+    await rt.dispose()
+    const result = await promise
+    const elapsed = performance.now() - t0
+    expect(result.error).toBeInstanceOf(CancelledError)
+    expect(elapsed).toBeLessThan(500) // far below timeoutMs
+  })
+
+  it('throws on concurrent execute() calls against the same runtime', async () => {
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    // Kick off a long-running emission and, before it settles, try
+    // to start a second one. The second call should reject loudly
+    // — the agent loop is sequential per emission, so a concurrent
+    // call indicates a misuse.
+    const slow = rt.execute('await new Promise(r => setTimeout(r, 200))', makeCtx())
+    await expect(rt.execute('taskSuccess(1)', makeCtx())).rejects.toThrow(/concurrent/)
+    // The first call must still complete cleanly.
+    const r1 = await slow
+    expect(r1.error).toBeNull()
+  })
 })

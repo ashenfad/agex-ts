@@ -20,9 +20,9 @@ importers:
 
   examples/funcy:
     dependencies:
-      agex-anthropic:
+      agex-openai:
         specifier: workspace:*
-        version: link:../../packages/agex-anthropic
+        version: link:../../packages/agex-openai
       agex-ts:
         specifier: workspace:*
         version: link:../../packages/agex-ts
@@ -39,9 +39,9 @@ importers:
 
   examples/mathy:
     dependencies:
-      agex-anthropic:
+      agex-openai:
         specifier: workspace:*
-        version: link:../../packages/agex-anthropic
+        version: link:../../packages/agex-openai
       agex-ts:
         specifier: workspace:*
         version: link:../../packages/agex-ts

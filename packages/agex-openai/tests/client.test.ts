@@ -142,6 +142,30 @@ describe('OpenAI — request body shape', () => {
     expect(body.max_tokens).toBe(2048)
     expect(body.response_format).toEqual({ type: 'text' })
   })
+
+  it('uses max_tokens for legacy / non-reasoning models', async () => {
+    const { fn, calls } = recordingFetch(happyPathEvents)
+    const client = new OpenAI({ apiKey: 'sk-test', model: 'gpt-4o-mini', fetchImpl: fn })
+    await collect(client.complete(trivialRequest))
+    const body = JSON.parse(String(calls[0]?.init.body)) as Record<string, unknown>
+    expect(body.max_tokens).toBeDefined()
+    expect(body.max_completion_tokens).toBeUndefined()
+  })
+
+  it('uses max_completion_tokens for gpt-5* and o-series reasoning models', async () => {
+    // gpt-5* and o-series reject max_tokens — they require
+    // max_completion_tokens to disambiguate visible-output tokens
+    // from internal reasoning tokens. We detect on model name.
+    const { fn, calls } = recordingFetch(happyPathEvents)
+    for (const model of ['gpt-5.4-nano', 'gpt-5', 'o1-mini', 'o3']) {
+      calls.length = 0
+      const client = new OpenAI({ apiKey: 'sk-test', model, fetchImpl: fn })
+      await collect(client.complete(trivialRequest))
+      const body = JSON.parse(String(calls[0]?.init.body)) as Record<string, unknown>
+      expect(body.max_completion_tokens).toBeDefined()
+      expect(body.max_tokens).toBeUndefined()
+    }
+  })
 })
 
 describe('OpenAI — baseUrl override (local models / proxies)', () => {

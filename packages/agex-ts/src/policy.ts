@@ -82,6 +82,15 @@ export class PolicyBuilder {
     this.#assertNameValid(name, 'fn')
     this.#assertNameAvailable(name)
     this.#assertHostXorUrl(name, 'fn', opts.fn !== undefined, opts.url)
+    if (opts.url !== undefined && opts.paramsSchema !== undefined) {
+      // `paramsSchema` is enforced by the host-side agent loop
+      // before calling a registered fn — it has no hook into a
+      // worker-realm callable. Combining the two would silently
+      // ignore the schema; reject loudly instead.
+      throw new RegistrationError(
+        `fn '${name}': paramsSchema can't be combined with { url } — URL-shipped fns are called natively in the worker realm where the host-side schema check doesn't apply. If you need validation, fold it into the imported function.`,
+      )
+    }
     this.#fns.set(name, omitUndefined({ kind: 'fn', name, ...opts }) as RegisteredFn)
   }
 
@@ -91,6 +100,18 @@ export class PolicyBuilder {
     this.#assertHostXorUrl(name, 'cls', opts.cls !== undefined, opts.url)
     if (opts.url !== undefined) {
       this.#assertNoFiltersWithUrl(name, 'cls', opts)
+      if (opts.constructable === false) {
+        // `constructable: false` only manifests as a primer hint
+        // ("use as a type / static surface only") — it's not
+        // enforced anywhere. With a URL-shipped class the worker
+        // imports the real constructor and the agent can `new` it
+        // regardless of what the primer says. Reject the
+        // combination so the embedder doesn't ship a misleading
+        // primer.
+        throw new RegistrationError(
+          `cls '${name}': constructable: false can't be combined with { url } — the URL-shipped class is constructable in the worker realm regardless. Pre-wrap the export in a non-constructable facade if you want the agent locked out.`,
+        )
+      }
     }
     this.#classes.set(name, omitUndefined({ kind: 'cls', name, ...opts }) as RegisteredCls)
   }

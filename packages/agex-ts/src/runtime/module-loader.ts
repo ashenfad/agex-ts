@@ -615,8 +615,6 @@ function rewriteAsRegisteredAccess(
   // name) only makes sense in main code where the value is already
   // there as a global. In helper context we always need the const
   // declaration so the local binding lands in helper scope.
-  const elide = (msg: string): string => (helperContext ? `${msg.replace('elide', 'bind')}` : msg)
-  void elide
   switch (binding.kind) {
     case 'sideEffect':
       return `/* import '${name}' (already in scope) */`

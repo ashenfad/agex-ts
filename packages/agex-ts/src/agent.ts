@@ -107,10 +107,6 @@ export interface NsRegistration {
   readonly include?: MemberFilter
   readonly exclude?: MemberFilter
   readonly configure?: Readonly<Record<string, MemberConfig>>
-  /** True if the target is a live host instance whose state can't
-   *  cross the worker boundary; the runtime adapter will expose it
-   *  as a Proxy that round-trips method calls back to the host. */
-  readonly live?: boolean
   readonly hostFsAccess?: boolean
   readonly networkAccess?: boolean
 }

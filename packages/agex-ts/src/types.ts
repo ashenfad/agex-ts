@@ -435,10 +435,11 @@ export interface RegisteredCls extends RegistrationCommon {
   readonly configure?: Readonly<Record<string, MemberConfig>>
 }
 
-/** A namespace is either a module-shaped object, an ESM namespace
- *  imported by the host, or a live instance whose methods will be
- *  proxied back across the worker boundary. The runtime decides how
- *  each type is exposed. */
+/** A namespace exposes the visible members of `target` to the agent
+ *  under the registered name. The runtime decides how to bridge
+ *  method calls — same-realm runtimes call directly, the worker
+ *  runtime routes each call back to the host. From the agent's
+ *  perspective the surface is the same: `name.method(args)`. */
 export interface RegisteredNs extends RegistrationCommon {
   readonly kind: 'namespace'
   readonly name: string
@@ -447,10 +448,6 @@ export interface RegisteredNs extends RegistrationCommon {
   readonly include?: MemberFilter
   readonly exclude?: MemberFilter
   readonly configure?: Readonly<Record<string, MemberConfig>>
-  /** True if `target` is a live instance whose state can't cross the
-   *  worker boundary; the runtime adapter will expose it as a Proxy
-   *  that round-trips method calls back to the host. */
-  readonly live?: boolean
 }
 
 export interface RegisteredSkill {

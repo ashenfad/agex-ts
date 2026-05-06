@@ -36,8 +36,8 @@
  *     / continue) plus an optional unexpected error (parse
  *     failure, uncaught exception that wasn't a task-control raise).
  *
- *  Bridges for registered classes (`agent.cls`) + live namespaces
- *  share an instance-handle protocol that lands in the next PR;
+ *  Bridges for registered classes (`agent.cls`) use an
+ *  instance-handle protocol that lands in the next PR;
  *  importmap-based module policy is the PR after that.
  */
 
@@ -57,13 +57,14 @@ export interface SerializedError {
  *   - `fs` / `cache` — the per-execute `ExecuteContext` surfaces.
  *   - `fn` — a registered host function (`agent.fn(name, ...)`).
  *     `method` carries the registered name; `subject` is unused.
- *   - `namespace` — a registered non-live namespace
+ *   - `namespace` — a registered namespace
  *     (`agent.namespace(name, target)`). `subject` is the namespace
  *     name, `method` is the visible member.
  *
- *  Live namespaces (`live: true`) and registered classes
- *  (`agent.cls`) get an instance-handle protocol in the next PR;
- *  they aren't represented here yet. */
+ *  Registered classes (`agent.cls`) get a separate instance-handle
+ *  protocol in the next PR (agent-side `new` returns a Proxy whose
+ *  method calls round-trip via instanceId); they aren't represented
+ *  here yet. */
 export type BridgeTarget = 'fs' | 'cache' | 'fn' | 'namespace'
 
 /** Sent once after the worker reports `ready`, before the first
@@ -75,7 +76,7 @@ export interface ConfigureMessage {
   readonly type: 'configure'
   /** Names registered via `agent.fn(...)`. */
   readonly fns: ReadonlyArray<string>
-  /** Non-live namespaces and the visible (post-include/exclude)
+  /** Registered namespaces and the visible (post-include/exclude)
    *  function-member names per namespace. */
   readonly namespaces: ReadonlyArray<{
     readonly name: string

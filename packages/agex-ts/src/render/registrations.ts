@@ -73,9 +73,6 @@ function renderNamespaces(namespaces: ReadonlyMap<string, RegisteredNs>): string
   const lines = ['## Namespaces', '']
   for (const r of sorted(visible)) {
     lines.push(`- \`${r.name}\` — ${r.description as string}`)
-    if (r.live === true) {
-      lines.push('  - *(live host instance; methods round-trip back to the host and are async)*')
-    }
     const members = enumerateMembers(r.target, r.include, r.exclude)
     appendMemberLines(lines, members, r.configure ?? {})
   }

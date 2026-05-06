@@ -25,9 +25,9 @@
  * budgets and external aborts.
  *
  * What gets bridged today: `fs` / `cache` (per-execute context),
- * registered fns, registered non-live namespaces. Registered classes
- * (`agent.cls`) and live namespaces (instance proxies with
- * per-emission lifecycle) are the next slice.
+ * registered fns, and registered namespaces. Registered classes
+ * (`agent.cls`) — agent-side `new` returning per-emission instance
+ * handles whose method calls round-trip — are the next slice.
  */
 
 import { CancelledError } from 'agex-ts/errors'
@@ -471,16 +471,6 @@ async function dispatch(
       if (reg === undefined) {
         throw new Error(`workerRuntime bridge: no registered namespace named '${subject}'`)
       }
-      if (reg.live === true) {
-        // Live-instance proxying lands in PR 4 (instance handles +
-        // method dispatch by handle). For now we don't expose live
-        // namespaces to the worker at all — `buildConfigure` skips
-        // them — so this branch should be unreachable. If it does
-        // fire, surface a clear error.
-        throw new Error(
-          `workerRuntime bridge: namespace '${subject}' is registered as live; live-instance proxies are not yet implemented in this runtime`,
-        )
-      }
       const visible = visibleNamespaceMembers(reg)
       if (!visible.has(method)) {
         throw new Error(
@@ -508,14 +498,12 @@ async function dispatch(
  *  namespace members are pre-filtered through include/exclude here
  *  so the worker never sees names that policy excluded — defense
  *  in depth, paired with the host-side allowlist re-check in
- *  `dispatch`. Live namespaces are skipped (PR 4 territory).
- *  Non-function members are skipped too — they aren't bridged in
- *  this PR. */
+ *  `dispatch`. Non-function members are skipped — they aren't
+ *  bridged in this PR. */
 function buildConfigure(policy: Policy): ConfigureMessage {
   const fns = [...policy.fns.keys()]
   const namespaces: Array<{ name: string; members: ReadonlyArray<string> }> = []
   for (const [name, reg] of policy.namespaces) {
-    if (reg.live === true) continue
     const visible = visibleNamespaceMembers(reg)
     const callable = [...visible].filter((m) => {
       // biome-ignore lint/suspicious/noExplicitAny: dynamic introspection

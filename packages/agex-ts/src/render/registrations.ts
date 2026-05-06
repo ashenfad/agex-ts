@@ -61,8 +61,15 @@ function renderClasses(classes: ReadonlyMap<string, RegisteredCls>): string {
     if (r.constructable === false) {
       lines.push('  - *(not constructable; use as a type / static surface only)*')
     }
-    const members = enumerateMembers(r.cls.prototype as object, r.include, r.exclude)
-    appendMemberLines(lines, members, r.configure ?? {})
+    if (r.cls !== undefined) {
+      // Host-bound — introspect the prototype for the member list.
+      const members = enumerateMembers(r.cls.prototype as object, r.include, r.exclude)
+      appendMemberLines(lines, members, r.configure ?? {})
+    }
+    // URL-shipped: we don't have the constructor host-side to
+    // introspect. The embedder's `description` is the source of
+    // truth for what's available; if they want a method list in
+    // the primer, they put it in the description.
   }
   return lines.join('\n')
 }
@@ -73,8 +80,11 @@ function renderNamespaces(namespaces: ReadonlyMap<string, RegisteredNs>): string
   const lines = ['## Namespaces', '']
   for (const r of sorted(visible)) {
     lines.push(`- \`${r.name}\` — ${r.description as string}`)
-    const members = enumerateMembers(r.target, r.include, r.exclude)
-    appendMemberLines(lines, members, r.configure ?? {})
+    if (r.target !== undefined) {
+      const members = enumerateMembers(r.target, r.include, r.exclude)
+      appendMemberLines(lines, members, r.configure ?? {})
+    }
+    // URL-shipped: same reasoning as `renderClasses`.
   }
   return lines.join('\n')
 }

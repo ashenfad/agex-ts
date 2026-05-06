@@ -605,6 +605,60 @@ let activeBridge: BridgeChannel | null = null
  *  (matches the empty-policy case). */
 let configured: ConfigureMessage | null = null
 
+/** Loaded modules from URL-shipped registrations, keyed by the
+ *  registered name. Populated lazily — `handleConfigure` kicks off
+ *  imports, and `urlReady` resolves once they all complete (or
+ *  rejects if any fail). The execute handler awaits this before
+ *  building the agent scope so URL-shipped names are guaranteed
+ *  available. Cleared and rebuilt on respawn (configure may
+ *  arrive again with the same payload, but we re-import in case
+ *  the host changed something). */
+const urlModuleRefs = new Map<string, unknown>()
+let urlReady: Promise<void> = Promise.resolve()
+
+/** Build a raw `import(url)` indirection that bypasses any
+ *  bundler-side dynamic-import wrapping (notably Vite's
+ *  `wrapDynamicImport`, which assumes a main-thread runtime that
+ *  doesn't exist inside a Worker). The `new Function` form keeps
+ *  the call site opaque to static analysis; the result is the
+ *  native `import()` exactly as the engine implements it.
+ *
+ *  Constructed once at module load — the Function constructor's
+ *  cost is paid at boot, not per import. */
+const rawImport = new Function('url', 'return import(url)') as (url: string) => Promise<unknown>
+
+/** Process a `configure` message: store the payload + kick off
+ *  dynamic imports for any URL-shipped registrations. We resolve
+ *  one Promise per import in parallel (`Promise.all`) and surface
+ *  failure on `urlReady` so a later `execute` sees a clean
+ *  rejection rather than a hung await on a name that never
+ *  populates. */
+function handleConfigure(msg: ConfigureMessage): void {
+  configured = msg
+  urlModuleRefs.clear()
+  if (msg.urlModules.length === 0) {
+    urlReady = Promise.resolve()
+    return
+  }
+  urlReady = Promise.all(
+    msg.urlModules.map(async (spec) => {
+      const mod = (await rawImport(spec.url)) as Record<string, unknown>
+      const exportName = spec.export ?? spec.name
+      const value = mod[exportName]
+      if (value === undefined) {
+        throw new Error(
+          `workerRuntime URL import '${spec.url}': module has no '${exportName}' export (named exports: ${Object.keys(mod).join(', ') || '<none>'})`,
+        )
+      }
+      urlModuleRefs.set(spec.name, value)
+    }),
+  ).then(() => undefined)
+  // Tag a `.catch` that swallows the unhandled-rejection warning
+  // when nothing's awaiting yet — the actual error still surfaces
+  // through the next `await urlReady` in `handleExecute`.
+  urlReady.catch(() => undefined)
+}
+
 async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' }>): Promise<void> {
   const { code, executeId } = msg
 
@@ -620,6 +674,24 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
 
   const bridge = new BridgeChannel(executeId)
   activeBridge = bridge
+
+  // Block until URL-shipped imports have all resolved (or one
+  // failed). This is the natural place to await — it lets `execute`
+  // messages arrive during boot's import phase and just queue
+  // behind. If `urlReady` rejects, surface as a normal execute
+  // error result so the agent loop sees a clean failure.
+  try {
+    await urlReady
+  } catch (e) {
+    activeBridge = null
+    post({
+      type: 'result',
+      executeId,
+      outcome: { kind: 'continue' },
+      error: serializeError(e),
+    })
+    return
+  }
 
   const injected: Record<string, unknown> = {
     taskSuccess,
@@ -654,6 +726,15 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
     for (const cls of configured.classes) {
       if (cls.name in injected) continue
       injected[cls.name] = bridge.buildClass(cls)
+    }
+    // URL-shipped registrations: the dynamic imports are already
+    // resolved (the `await urlReady` above blocked until they
+    // were). Inject the live module exports directly — no proxy,
+    // no RPC. Subclassing, `instanceof`, static access, etc. all
+    // just work because these are real worker-realm references.
+    for (const [name, value] of urlModuleRefs) {
+      if (name in injected) continue
+      injected[name] = value
     }
   }
 
@@ -700,7 +781,7 @@ function makeCancelledError(message: string): Error {
 self.addEventListener('message', (ev: MessageEvent<Host2WorkerMessage>) => {
   const msg = ev.data
   if (msg?.type === 'configure') {
-    configured = msg
+    handleConfigure(msg)
     return
   }
   if (msg?.type === 'execute') {

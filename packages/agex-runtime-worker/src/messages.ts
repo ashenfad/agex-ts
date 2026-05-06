@@ -131,6 +131,23 @@ export interface ConfigureMessage {
     readonly instanceMethods: ReadonlyArray<string>
     readonly staticMethods: ReadonlyArray<string>
   }>
+  /** URL-shipped registrations (from `agent.fn / .cls / .namespace`
+   *  passed a `{ url, export? }` spec rather than a live value).
+   *  At configure time the worker dynamic-imports each URL in
+   *  parallel, then exposes `mod[export ?? name]` to the agent
+   *  under `name`. Same-realm semantics — the imported module
+   *  lives in the worker realm, so subclassing, `instanceof`,
+   *  static access, etc. all just work without RPC. The host's
+   *  per-method visibility filter doesn't apply here (URL
+   *  registrations are exposed whole; combining is rejected at
+   *  registration time). */
+  readonly urlModules: ReadonlyArray<{
+    readonly name: string
+    readonly url: string
+    /** Defaults to `name` when omitted. Worker uses
+     *  `mod[export]` to pluck the value. */
+    readonly export?: string
+  }>
 }
 
 export type Host2WorkerMessage =

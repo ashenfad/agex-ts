@@ -410,11 +410,41 @@ export interface RegistrationCommon {
   readonly networkAccess?: boolean
 }
 
+/** A registered fn / cls / namespace can either be **host-bound**
+ *  (the embedder hands us a live JS reference and the runtime
+ *  bridges calls to it) or **URL-shipped** (the embedder hands us
+ *  a module URL and the runtime imports it into the worker realm
+ *  for the agent to use natively).
+ *
+ *  Mutual exclusivity: exactly one of the bound-value field
+ *  (`fn` / `cls` / `target`) and `url` is present. The
+ *  `PolicyBuilder.registerX` methods enforce this at registration
+ *  time. Per-method visibility filters (`include` / `exclude` /
+ *  `configure`) only apply to host-bound registrations — URL
+ *  modules are exposed whole, no per-export gating (the entire
+ *  module is in the worker realm; runtime filtering would be
+ *  enforcement-by-not-exposing rather than real isolation).
+ *
+ *  See agex-runtime-worker for the configure-time URL handling
+ *  that ships these specs to the worker for `await import(url)`. */
+
 export interface RegisteredFn extends RegistrationCommon {
   readonly kind: 'fn'
   readonly name: string
-  readonly fn: (...args: unknown[]) => unknown | Promise<unknown>
-  /** Optional Standard Schema for runtime parameter validation. */
+  /** Host-bound: the live function the bridge calls. Mutually
+   *  exclusive with `url`. */
+  readonly fn?: (...args: unknown[]) => unknown | Promise<unknown>
+  /** URL-shipped: the worker imports this module and pulls
+   *  `mod[export ?? name]` into the agent's scope under `name`.
+   *  Mutually exclusive with `fn`. */
+  readonly url?: string
+  /** Named export to pluck from the URL-shipped module. Defaults
+   *  to the registration `name`; pass `'default'` for default
+   *  exports. Ignored when `url` is absent. */
+  readonly export?: string
+  /** Optional Standard Schema for runtime parameter validation
+   *  (host-bound only — URL-shipped fns are agent-callable
+   *  natively in the worker realm). */
   readonly paramsSchema?: StandardSchemaV1
 }
 
@@ -428,8 +458,24 @@ export interface MemberConfig extends RegistrationCommon {}
 export interface RegisteredCls extends RegistrationCommon {
   readonly kind: 'cls'
   readonly name: string
-  readonly cls: new (...args: unknown[]) => unknown
+  /** Host-bound: live constructor the bridge constructs through.
+   *  Mutually exclusive with `url`. */
+  readonly cls?: new (
+    ...args: unknown[]
+  ) => unknown
+  /** URL-shipped: worker imports the module and pulls
+   *  `mod[export ?? name]` into the agent's scope under `name`.
+   *  Mutually exclusive with `cls`. The agent gets the real class
+   *  (subclass-able, `instanceof` works natively, no per-call RPC). */
+  readonly url?: string
+  /** Named export to pluck from the URL-shipped module. Defaults
+   *  to the registration `name`; pass `'default'` for default
+   *  exports. Ignored when `url` is absent. */
+  readonly export?: string
   readonly constructable?: boolean
+  /** Per-method visibility filters apply to host-bound classes
+   *  only. URL-shipped classes are exposed whole. Combining `url`
+   *  with these throws `RegistrationError` at registration time. */
   readonly include?: MemberFilter
   readonly exclude?: MemberFilter
   readonly configure?: Readonly<Record<string, MemberConfig>>
@@ -443,8 +489,21 @@ export interface RegisteredCls extends RegistrationCommon {
 export interface RegisteredNs extends RegistrationCommon {
   readonly kind: 'namespace'
   readonly name: string
-  readonly target: object
+  /** Host-bound: live object whose visible members the bridge
+   *  exposes. Mutually exclusive with `url`. */
+  readonly target?: object
+  /** URL-shipped: worker imports the module and pulls
+   *  `mod[export ?? name]` (or the whole namespace object when
+   *  `export` is absent) into the agent's scope under `name`.
+   *  Mutually exclusive with `target`. */
+  readonly url?: string
+  /** Named export to pluck from the URL-shipped module. Defaults
+   *  to the registration `name`; pass `'default'` for default
+   *  exports. Ignored when `url` is absent. */
+  readonly export?: string
   readonly recursive?: boolean
+  /** Per-member visibility filters apply to host-bound namespaces
+   *  only. URL-shipped modules are exposed whole. */
   readonly include?: MemberFilter
   readonly exclude?: MemberFilter
   readonly configure?: Readonly<Record<string, MemberConfig>>

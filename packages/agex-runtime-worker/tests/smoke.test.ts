@@ -50,7 +50,8 @@ const EMPTY_POLICY: Policy = {
  *  compilation) since these tests are about the runtime adapter,
  *  not the registration system. */
 function makePolicy(args: {
-  fns?: Record<string, RegisteredFn['fn']>
+  fns?: Record<string, (...callArgs: unknown[]) => unknown | Promise<unknown>>
+  fnUrls?: Record<string, { url: string; export?: string }>
   namespaces?: Record<
     string,
     {
@@ -59,6 +60,7 @@ function makePolicy(args: {
       exclude?: RegisteredNs['exclude']
     }
   >
+  namespaceUrls?: Record<string, { url: string; export?: string }>
   classes?: Record<
     string,
     {
@@ -68,10 +70,14 @@ function makePolicy(args: {
       exclude?: RegisteredCls['exclude']
     }
   >
+  classUrls?: Record<string, { url: string; export?: string }>
 }): Policy {
   const fns = new Map<string, RegisteredFn>()
   for (const [name, fn] of Object.entries(args.fns ?? {})) {
     fns.set(name, { kind: 'fn', name, fn })
+  }
+  for (const [name, spec] of Object.entries(args.fnUrls ?? {})) {
+    fns.set(name, urlEntry('fn', name, spec))
   }
   const namespaces = new Map<string, RegisteredNs>()
   for (const [name, spec] of Object.entries(args.namespaces ?? {})) {
@@ -84,6 +90,9 @@ function makePolicy(args: {
     }
     namespaces.set(name, reg)
   }
+  for (const [name, spec] of Object.entries(args.namespaceUrls ?? {})) {
+    namespaces.set(name, urlEntry('namespace', name, spec))
+  }
   const classes = new Map<string, RegisteredCls>()
   for (const [name, spec] of Object.entries(args.classes ?? {})) {
     const reg: RegisteredCls = {
@@ -94,12 +103,15 @@ function makePolicy(args: {
       // `RegisteredCls.cls`'s wide `new (...args: unknown[]) => unknown`.
       // The cast is safe because the runtime treats args opaquely
       // (passes them through as the agent provided them).
-      cls: spec.cls as RegisteredCls['cls'],
+      cls: spec.cls as NonNullable<RegisteredCls['cls']>,
       ...(spec.constructable === false && { constructable: false }),
       ...(spec.include !== undefined && { include: spec.include }),
       ...(spec.exclude !== undefined && { exclude: spec.exclude }),
     }
     classes.set(name, reg)
+  }
+  for (const [name, spec] of Object.entries(args.classUrls ?? {})) {
+    classes.set(name, urlEntry('cls', name, spec))
   }
   return {
     fns,
@@ -108,6 +120,20 @@ function makePolicy(args: {
     skills: new Map(),
     terminals: new Map(),
   }
+}
+
+/** Helper to build a URL-shipped registration entry, conditionally
+ *  including the `export` field so `exactOptionalPropertyTypes`
+ *  doesn't complain. */
+function urlEntry<K extends 'fn' | 'cls' | 'namespace'>(
+  kind: K,
+  name: string,
+  spec: { url: string; export?: string },
+): K extends 'fn' ? RegisteredFn : K extends 'cls' ? RegisteredCls : RegisteredNs {
+  const base = { kind, name, url: spec.url } as { kind: K; name: string; url: string }
+  const withExport = spec.export !== undefined ? { ...base, export: spec.export } : base
+  // biome-ignore lint/suspicious/noExplicitAny: union return type
+  return withExport as any
 }
 
 /** Map-backed `Cache` implementation matching `agex-ts/types`. The
@@ -1049,5 +1075,140 @@ describe('workerRuntime — class bridge (registered cls)', () => {
     // both are valid evidence that handles don't survive across
     // emissions.
     expect(String(r2.outcome.value).length).toBeGreaterThan(0)
+  })
+})
+
+describe('workerRuntime — URL-shipped registrations', () => {
+  let disposers: Array<() => Promise<void>> = []
+  afterEach(async () => {
+    await Promise.all(disposers.map((d) => d()))
+    disposers = []
+  })
+
+  function runtime() {
+    const rt = workerRuntime({ workerUrl: TEST_WORKER_URL, timeoutMs: 2_000 })
+    disposers.push(() => rt.dispose())
+    return rt
+  }
+
+  // The fixture module ships at this URL; Vite (Vitest browser mode)
+  // serves it directly from the source tree.
+  const FIXTURE_URL = new URL('./fixtures/url-module.ts', import.meta.url).href
+
+  it('imports a class from a URL and exposes it natively (full JS semantics)', async () => {
+    const rt = runtime()
+    await rt.init(makePolicy({ classUrls: { Vec: { url: FIXTURE_URL } } }))
+    // The agent gets the *real* worker-realm class — not a Proxy.
+    // Construction is sync, methods are sync, no `await` needed.
+    const code = `
+      const a = new Vec(1, 2)
+      const b = new Vec(3, 4)
+      const c = a.add(b)
+      taskSuccess([c.x, c.y, c instanceof Vec])
+    `
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: [4, 6, true] })
+  })
+
+  it('supports subclassing a URL-shipped class', async () => {
+    // The whole reason URL mode exists. The agent's V3 extends Vec,
+    // calls super(), adds its own state — all worker-realm, no host
+    // round-trip.
+    const rt = runtime()
+    await rt.init(makePolicy({ classUrls: { Vec: { url: FIXTURE_URL } } }))
+    const code = `
+      class V3 extends Vec {
+        z
+        constructor(x, y, z) { super(x, y); this.z = z }
+        magnitude() {
+          return Math.sqrt(this.x * this.x + this.y * this.y + this.z * this.z)
+        }
+      }
+      const v = new V3(2, 3, 6)
+      taskSuccess([v.magnitude(), v instanceof V3, v instanceof Vec])
+    `
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: [7, true, true] })
+  })
+
+  it('imports a fn from a URL and calls it natively (no RPC round-trip)', async () => {
+    const rt = runtime()
+    await rt.init(makePolicy({ fnUrls: { double: { url: FIXTURE_URL } } }))
+    // Note: no `await` needed — the imported fn is a direct reference,
+    // not an async stub.
+    const code = 'taskSuccess(double(21))'
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: 42 })
+  })
+
+  it('imports a namespace object from a URL', async () => {
+    const rt = runtime()
+    await rt.init(makePolicy({ namespaceUrls: { utils: { url: FIXTURE_URL } } }))
+    const code = `taskSuccess([utils.greet('world'), utils.shout('quiet')])`
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: ['hello world', 'QUIET'] })
+  })
+
+  it('honors the export option to rename what the agent sees', async () => {
+    const rt = runtime()
+    await rt.init(makePolicy({ classUrls: { Vector: { url: FIXTURE_URL, export: 'Vec' } } }))
+    // The fixture exports `Vec`; the agent sees it as `Vector`.
+    const code = `
+      const v = new Vector(3, 4)
+      taskSuccess([v.magnitude(), v instanceof Vector])
+    `
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: [5, true] })
+  })
+
+  it("supports export: 'default' for default-exported modules", async () => {
+    const rt = runtime()
+    await rt.init(
+      makePolicy({
+        namespaceUrls: { fixture: { url: FIXTURE_URL, export: 'default' } },
+      }),
+    )
+    const code = 'taskSuccess(fixture.marker)'
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: 'default-export-payload' })
+  })
+
+  it('reports a clear error when the named export is missing', async () => {
+    const rt = runtime()
+    await rt.init(makePolicy({ classUrls: { Missing: { url: FIXTURE_URL, export: 'NotThere' } } }))
+    const result = await rt.execute('taskSuccess("unreached")', makeCtx())
+    expect(result.outcome).toEqual({ kind: 'continue' })
+    expect(result.error?.message).toMatch(/no 'NotThere' export/)
+  })
+
+  it('reports a clear error when the URL itself fails to import', async () => {
+    const rt = runtime()
+    await rt.init(makePolicy({ classUrls: { Bad: { url: '/this-does-not-exist.js' } } }))
+    const result = await rt.execute('taskSuccess("unreached")', makeCtx())
+    expect(result.outcome).toEqual({ kind: 'continue' })
+    expect(result.error).not.toBeNull()
+  })
+
+  it('mixes URL and host-bound registrations cleanly', async () => {
+    // Real-world case: some libs come from URLs (worker-realm,
+    // subclassable), some are host-bound (RPC for closures over
+    // host state). Both should coexist in one configure round.
+    let counter = 0
+    const rt = runtime()
+    await rt.init(
+      makePolicy({
+        classUrls: { Vec: { url: FIXTURE_URL } },
+        fns: {
+          tick: () => ++counter,
+        },
+      }),
+    )
+    const code = `
+      const v = new Vec(3, 4)
+      const t = await tick()
+      taskSuccess([v.magnitude(), t])
+    `
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: [5, 1] })
   })
 })

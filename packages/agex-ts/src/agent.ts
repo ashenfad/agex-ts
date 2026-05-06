@@ -140,6 +140,52 @@ export interface SkillRegistration {
   readonly name: string
 }
 
+/** URL-shipped registration spec — pass as the first positional
+ *  arg to `agent.fn` / `.cls` / `.namespace` instead of a live JS
+ *  reference. The runtime adapter (worker, Node) imports the
+ *  module via dynamic `import(url)` and exposes `mod[export ??
+ *  name]` to the agent under `name`.
+ *
+ *  Per-export visibility gating doesn't apply to URL-shipped
+ *  registrations — the module ships into the agent's realm whole.
+ *  Combining `include` / `exclude` / `configure` with this spec
+ *  throws `RegistrationError` at registration time. */
+export interface UrlSpec {
+  readonly url: string
+  /** Named export to pluck from the module. Defaults to the
+   *  registration `name`; pass `'default'` for default exports. */
+  readonly export?: string
+}
+
+/** Build the `{ url, export?, ...rest }` shape `PolicyBuilder`
+ *  expects, conditionally including `export` so `exactOptional
+ *  PropertyTypes` doesn't complain about `export: undefined`. */
+function urlReg<T extends object>(spec: UrlSpec, rest: T): T & { url: string; export?: string } {
+  return spec.export !== undefined
+    ? { url: spec.url, export: spec.export, ...rest }
+    : { url: spec.url, ...rest }
+}
+
+/** Type guard distinguishing a URL spec from a host-bound value.
+ *  A URL spec is an object whose only own properties are `url`
+ *  (required, non-empty string) and optionally `export`. We don't
+ *  require a brand symbol — the strict shape match keeps namespace
+ *  targets that happen to have a `url` member from being mistaken
+ *  for URL specs (those would have other own properties too). */
+function isUrlSpec(v: unknown): v is UrlSpec {
+  if (v === null || typeof v !== 'object') return false
+  const obj = v as Record<string, unknown>
+  // `typeof obj.url === 'string'` (no empty-string check) — we want
+  // `{ url: '' }` to register as a URL spec so PolicyBuilder can
+  // throw a clear "url must be a non-empty string" rather than
+  // falling through to the more generic "missing registered value".
+  if (typeof obj.url !== 'string') return false
+  for (const k of Object.keys(obj)) {
+    if (k !== 'url' && k !== 'export') return false
+  }
+  return true
+}
+
 const DEFAULT_SESSION = 'default'
 const DEFAULT_MAX_ITERATIONS = 10
 
@@ -258,22 +304,39 @@ export class Agent {
   // plain objects, markdown blobs, and handlers don't carry a
   // useful identifier.
 
-  fn(fn: (...args: unknown[]) => unknown | Promise<unknown>, opts: FnRegistration = {}): this {
-    const name = resolveName(opts.name, fn.name, 'fn')
+  fn(
+    fn: ((...args: unknown[]) => unknown | Promise<unknown>) | UrlSpec,
+    opts: FnRegistration = {},
+  ): this {
     const { name: _drop, ...rest } = opts
+    if (isUrlSpec(fn)) {
+      const name = resolveName(opts.name, fn.export, 'fn')
+      this.#policy.registerFn(name, urlReg(fn, rest))
+      return this
+    }
+    const name = resolveName(opts.name, fn.name, 'fn')
     this.#policy.registerFn(name, { fn, ...rest })
     return this
   }
 
-  cls(cls: new (...args: unknown[]) => unknown, opts: ClsRegistration = {}): this {
-    const name = resolveName(opts.name, cls.name, 'cls')
+  cls(cls: (new (...args: unknown[]) => unknown) | UrlSpec, opts: ClsRegistration = {}): this {
     const { name: _drop, ...rest } = opts
+    if (isUrlSpec(cls)) {
+      const name = resolveName(opts.name, cls.export, 'cls')
+      this.#policy.registerCls(name, urlReg(cls, rest))
+      return this
+    }
+    const name = resolveName(opts.name, cls.name, 'cls')
     this.#policy.registerCls(name, { cls, ...rest })
     return this
   }
 
-  namespace(target: object, opts: NsRegistration): this {
+  namespace(target: object | UrlSpec, opts: NsRegistration): this {
     const { name, ...rest } = opts
+    if (isUrlSpec(target)) {
+      this.#policy.registerNamespace(name, urlReg(target, rest))
+      return this
+    }
     this.#policy.registerNamespace(name, { target, ...rest })
     return this
   }

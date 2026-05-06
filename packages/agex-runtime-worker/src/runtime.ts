@@ -507,6 +507,15 @@ async function dispatch(
       if (reg === undefined) {
         throw new Error(`workerRuntime bridge: no registered fn named '${method}'`)
       }
+      if (reg.fn === undefined) {
+        // URL-shipped — the worker resolves these natively from
+        // its dynamic-imported module table; there's no host-side
+        // function to invoke. If we got here, the worker stub
+        // builder mis-routed.
+        throw new Error(
+          `workerRuntime bridge: fn '${method}' is URL-shipped; should not see RPC traffic`,
+        )
+      }
       return await reg.fn(...args)
     }
     case 'namespace': {
@@ -520,6 +529,11 @@ async function dispatch(
       const reg = policy.namespaces.get(subject)
       if (reg === undefined) {
         throw new Error(`workerRuntime bridge: no registered namespace named '${subject}'`)
+      }
+      if (reg.target === undefined) {
+        throw new Error(
+          `workerRuntime bridge: namespace '${subject}' is URL-shipped; should not see RPC traffic`,
+        )
       }
       const visible = visibleNamespaceMembers(reg)
       if (!visible.has(method)) {
@@ -552,6 +566,11 @@ async function dispatch(
       const reg = policy.classes.get(subject)
       if (reg === undefined) {
         throw new Error(`workerRuntime bridge: no registered class named '${subject}'`)
+      }
+      if (reg.cls === undefined) {
+        throw new Error(
+          `workerRuntime bridge: class '${subject}' is URL-shipped; should not see RPC traffic`,
+        )
       }
       const visible = visibleClassStatics(reg)
       if (!visible.has(method)) {
@@ -597,6 +616,11 @@ async function handleNewInstance(
     if (reg.constructable === false) {
       throw new Error(
         `workerRuntime bridge: class '${clsName}' is registered with constructable: false`,
+      )
+    }
+    if (reg.cls === undefined) {
+      throw new Error(
+        `workerRuntime bridge: class '${clsName}' is URL-shipped; should not see RPC traffic`,
       )
     }
     const Cls = reg.cls
@@ -743,41 +767,80 @@ function postBridgeResponse(
   }
 }
 
-/** Build the `configure` payload from a `Policy`. Visible
+/** Build the `configure` payload from a `Policy`. Each registration
+ *  is classified as either **host-bound** (RPC-bridged via fns /
+ *  namespaces / classes arrays — the worker's stub builder produces
+ *  proxies that round-trip every call) or **URL-shipped** (routed
+ *  through the `urlModules` array — the worker dynamic-imports the
+ *  URL and exposes the named export natively, no RPC). Visible
  *  namespace and class members are pre-filtered through include/
  *  exclude here so the worker never sees names that policy
- *  excluded — defense in depth, paired with the host-side
- *  allowlist re-check in `dispatch`. Non-function members are
- *  skipped — they aren't bridged in this PR. */
+ *  excluded; URL registrations skip that filter entirely (whole-
+ *  module exposure is the semantic of URL mode). */
 function buildConfigure(policy: Policy): ConfigureMessage {
-  const fns = [...policy.fns.keys()]
+  const fns: string[] = []
   const namespaces: Array<{ name: string; members: ReadonlyArray<string> }> = []
-  for (const [name, reg] of policy.namespaces) {
-    const visible = visibleNamespaceMembers(reg)
-    const callable = [...visible].filter((m) => {
-      // biome-ignore lint/suspicious/noExplicitAny: dynamic introspection
-      const v = (reg.target as any)[m]
-      return typeof v === 'function'
-    })
-    namespaces.push({ name, members: callable })
-  }
   const classes: Array<{
     name: string
     instanceMethods: ReadonlyArray<string>
     staticMethods: ReadonlyArray<string>
   }> = []
+  const urlModules: Array<{ name: string; url: string; export?: string }> = []
+
+  for (const [name, reg] of policy.fns) {
+    if (reg.url !== undefined) {
+      urlModules.push(urlSpec(name, reg.url, reg.export))
+      continue
+    }
+    fns.push(name)
+  }
+
+  for (const [name, reg] of policy.namespaces) {
+    if (reg.url !== undefined) {
+      urlModules.push(urlSpec(name, reg.url, reg.export))
+      continue
+    }
+    if (reg.target === undefined) continue // host xor url enforces this
+    const visible = visibleNamespaceMembers(reg)
+    const target = reg.target
+    const callable = [...visible].filter((m) => {
+      // biome-ignore lint/suspicious/noExplicitAny: dynamic introspection
+      const v = (target as any)[m]
+      return typeof v === 'function'
+    })
+    namespaces.push({ name, members: callable })
+  }
+
   for (const [name, reg] of policy.classes) {
+    if (reg.url !== undefined) {
+      urlModules.push(urlSpec(name, reg.url, reg.export))
+      continue
+    }
+    if (reg.cls === undefined) continue // host xor url enforces this
+    const cls = reg.cls
     const instanceMethods = [...visibleClassInstanceMethods(reg)].filter((m) => {
       // biome-ignore lint/suspicious/noExplicitAny: dynamic introspection
-      return typeof (reg.cls.prototype as any)[m] === 'function'
+      return typeof (cls.prototype as any)[m] === 'function'
     })
     const staticMethods = [...visibleClassStatics(reg)].filter((m) => {
       // biome-ignore lint/suspicious/noExplicitAny: dynamic introspection
-      return typeof (reg.cls as any)[m] === 'function'
+      return typeof (cls as any)[m] === 'function'
     })
     classes.push({ name, instanceMethods, staticMethods })
   }
-  return { type: 'configure', fns, namespaces, classes }
+
+  return { type: 'configure', fns, namespaces, classes, urlModules }
+}
+
+/** Build a `urlModules` entry, conditionally including `export` so
+ *  `exactOptionalPropertyTypes` doesn't complain about
+ *  `export: undefined`. */
+function urlSpec(
+  name: string,
+  url: string,
+  exportName: string | undefined,
+): { name: string; url: string; export?: string } {
+  return exportName !== undefined ? { name, url, export: exportName } : { name, url }
 }
 
 /** Visible instance-method names on a registered class. Walks the
@@ -786,6 +849,10 @@ function buildConfigure(policy: Policy): ConfigureMessage {
  *  namespace case, just rooted at `cls.prototype` instead of the
  *  registered target. */
 function visibleClassInstanceMethods(reg: RegisteredCls): Set<string> {
+  // URL-shipped classes never reach this code path — `buildConfigure`
+  // routes them through `urlModules` rather than the host-bound
+  // `classes` array, so callers always have `reg.cls` defined.
+  if (reg.cls === undefined) return new Set()
   return walkPrototypeChain(reg.cls.prototype as object, reg.include, reg.exclude)
 }
 
@@ -796,6 +863,7 @@ function visibleClassInstanceMethods(reg: RegisteredCls): Set<string> {
  *  user-meaningful. */
 function visibleClassStatics(reg: RegisteredCls): Set<string> {
   const seen = new Set<string>()
+  if (reg.cls === undefined) return seen
   const skip = new Set(['prototype', 'name', 'length'])
   const test = (k: string): boolean => {
     if (skip.has(k)) return false
@@ -819,6 +887,7 @@ function visibleClassStatics(reg: RegisteredCls): Set<string> {
  *  semantics here track the registration system's source of truth
  *  — no parallel glob implementation to drift. */
 function visibleNamespaceMembers(reg: RegisteredNs): Set<string> {
+  if (reg.target === undefined) return new Set()
   return walkPrototypeChain(reg.target, reg.include, reg.exclude)
 }
 

@@ -34,8 +34,35 @@ import type {
   RuntimeAdapter,
   TaskOutcome,
 } from 'agex-ts/types'
-import type { Host2WorkerMessage, SerializedError, Worker2HostMessage } from './messages'
+import type {
+  BridgeTarget,
+  Host2WorkerMessage,
+  SerializedError,
+  Worker2HostMessage,
+} from './messages'
 import { type TransformFn, defaultTransform } from './transform'
+
+// Methods we accept on each bridged surface. Matching the worker's
+// proxy whitelist so a typo / hostile worker can't reach
+// prototype-chain methods (`toString`, `__proto__`, etc.). Kept in
+// sync with `worker.ts`'s `FS_METHODS` / `CACHE_METHODS`.
+const FS_METHODS: ReadonlySet<string> = new Set([
+  'getcwd',
+  'chdir',
+  'read',
+  'write',
+  'exists',
+  'isFile',
+  'isDir',
+  'stat',
+  'mkdir',
+  'remove',
+  'rmdir',
+  'rename',
+  'list',
+  'listDetailed',
+])
+const CACHE_METHODS: ReadonlySet<string> = new Set(['set', 'get', 'has', 'delete', 'keys'])
 
 export interface WorkerRuntimeOptions {
   /** URL the host should hand to `new Worker(...)`. Defaults to the
@@ -223,6 +250,10 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
             outputs.push(m.part)
             return
           }
+          if (m?.type === 'bridgeCall' && m.executeId === executeId) {
+            void handleBridgeCall(m, ctx, w)
+            return
+          }
           if (m?.type === 'result' && m.executeId === executeId) {
             outcome = m.outcome
             if (m.error !== null) error = rebuildError(m.error)
@@ -296,4 +327,87 @@ function rebuildError(s: SerializedError): Error {
   e.name = s.name
   if (s.stack !== undefined) e.stack = s.stack
   return e
+}
+
+function serializeError(e: unknown): SerializedError {
+  if (e instanceof Error) {
+    const out: SerializedError = { name: e.name, message: e.message }
+    if (e.stack !== undefined) return { ...out, stack: e.stack }
+    return out
+  }
+  return { name: 'Error', message: String(e) }
+}
+
+/** Dispatch a `bridgeCall` from the worker against the live
+ *  `ExecuteContext`. Reply with a `bridgeResponse` carrying either
+ *  the awaited return value or a serialized error.
+ *
+ *  Two failure modes worth distinguishing:
+ *
+ *    1. The host method itself throws (e.g. `fs.read('/missing')`
+ *       on a strict backend) — caught and serialized as `ok: false`.
+ *    2. The successful return value isn't structured-cloneable
+ *       (e.g. a `cache.get(...)` value containing a function). The
+ *       outer `try/catch` around `postMessage` catches the
+ *       `DataCloneError` and re-emits it as `ok: false` so the
+ *       worker's awaiting promise rejects rather than hangs.
+ *
+ *  If the worker has been terminated between the call and the
+ *  response (timeout / abort fired during the await), `postMessage`
+ *  is a no-op or throws — either way, no one is listening, so we
+ *  swallow any failure on this final send. */
+function allowedFor(target: BridgeTarget): ReadonlySet<string> {
+  return target === 'fs' ? FS_METHODS : CACHE_METHODS
+}
+
+async function handleBridgeCall(
+  msg: Extract<Worker2HostMessage, { type: 'bridgeCall' }>,
+  ctx: ExecuteContext,
+  w: Worker,
+): Promise<void> {
+  const { executeId, callId, target, method, args } = msg
+  const allowed = allowedFor(target)
+  // biome-ignore lint/suspicious/noExplicitAny: dynamic dispatch over the bridged contract
+  const surface: any = target === 'fs' ? ctx.fs : ctx.cache
+
+  let value: unknown
+  let error: SerializedError | null = null
+  try {
+    if (!allowed.has(method)) {
+      throw new Error(`workerRuntime bridge: method '${method}' not allowed on '${target}'`)
+    }
+    const fn = surface[method]
+    if (typeof fn !== 'function') {
+      throw new Error(`workerRuntime bridge: '${target}.${method}' is not callable on this context`)
+    }
+    value = await fn.apply(surface, args)
+  } catch (e) {
+    error = serializeError(e)
+  }
+
+  // Final reply. Wrapped in try/catch because the value might not
+  // structured-clone, and because the worker may have been
+  // terminated mid-call (timeout / abort) — both cases would
+  // otherwise crash the host.
+  try {
+    if (error !== null) {
+      w.postMessage({ type: 'bridgeResponse', executeId, callId, ok: false, error })
+    } else {
+      w.postMessage({ type: 'bridgeResponse', executeId, callId, ok: true, value })
+    }
+  } catch (cloneErr) {
+    // Successful host call but result wasn't cloneable. Try once
+    // more with the failure encoded so the worker's await rejects.
+    try {
+      w.postMessage({
+        type: 'bridgeResponse',
+        executeId,
+        callId,
+        ok: false,
+        error: serializeError(cloneErr),
+      })
+    } catch {
+      // Worker is gone. Nothing to deliver to.
+    }
+  }
 }

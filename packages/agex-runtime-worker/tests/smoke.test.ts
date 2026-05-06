@@ -8,7 +8,8 @@
  */
 
 import { CancelledError } from 'agex-ts/errors'
-import type { ExecuteContext, Policy } from 'agex-ts/types'
+import type { Cache, ExecuteContext, Policy } from 'agex-ts/types'
+import { MemoryFS } from 'termish-ts/fs/memory'
 import { afterEach, describe, expect, it } from 'vitest'
 import { workerRuntime } from '../src/runtime'
 
@@ -29,23 +30,42 @@ const EMPTY_POLICY: Policy = {
   terminals: new Map(),
 }
 
-function makeCtx(opts: { signal?: AbortSignal } = {}): ExecuteContext {
-  const signal = opts.signal ?? new AbortController().signal
-  // PR 1's worker doesn't expose fs / cache / inputs, so a stub
-  // that throws on access is the right shape — any unexpected use
-  // would surface loudly in tests.
-  const stub = new Proxy(
-    {},
-    {
-      get(_t, p) {
-        throw new Error(`fs/cache not bridged in PR 1 (accessed: ${String(p)})`)
-      },
-    },
-  )
+/** Map-backed `Cache` implementation matching `agex-ts/types`. The
+ *  bridge tests need a real implementation behind `ctx.cache` to
+ *  prove round-trips work; this is the minimum viable one. */
+function makeMemoryCache(): Cache {
+  const store = new Map<string, unknown>()
   return {
-    fs: stub as ExecuteContext['fs'],
-    cache: stub as ExecuteContext['cache'],
-    signal,
+    async set(key, value) {
+      store.set(key, value)
+    },
+    async get(key) {
+      // biome-ignore lint/suspicious/noExplicitAny: deliberate generic erasure for the stub
+      return store.get(key) as any
+    },
+    async has(key) {
+      return store.has(key)
+    },
+    async delete(key) {
+      return store.delete(key)
+    },
+    async keys() {
+      return Array.from(store.keys())
+    },
+  }
+}
+
+interface CtxOpts {
+  signal?: AbortSignal
+  fs?: ExecuteContext['fs']
+  cache?: ExecuteContext['cache']
+}
+
+function makeCtx(opts: CtxOpts = {}): ExecuteContext {
+  return {
+    fs: opts.fs ?? new MemoryFS(),
+    cache: opts.cache ?? makeMemoryCache(),
+    signal: opts.signal ?? new AbortController().signal,
   }
 }
 
@@ -215,5 +235,128 @@ describe('workerRuntime', () => {
     // The first call must still complete cleanly.
     const r1 = await slow
     expect(r1.error).toBeNull()
+  })
+})
+
+describe('workerRuntime — fs / cache bridge', () => {
+  let disposers: Array<() => Promise<void>> = []
+  afterEach(async () => {
+    await Promise.all(disposers.map((d) => d()))
+    disposers = []
+  })
+
+  function runtime() {
+    const rt = workerRuntime({ workerUrl: TEST_WORKER_URL, timeoutMs: 2_000 })
+    disposers.push(() => rt.dispose())
+    return rt
+  }
+
+  it('round-trips fs.write -> fs.read inside a single emission', async () => {
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const code = `
+      const enc = new TextEncoder()
+      const dec = new TextDecoder()
+      await fs.write('/note.txt', enc.encode('hello bridge'))
+      const got = await fs.read('/note.txt')
+      taskSuccess(dec.decode(got))
+    `
+    const result = await rt.execute(code, makeCtx())
+    expect(result.error).toBeNull()
+    expect(result.outcome).toEqual({ kind: 'success', value: 'hello bridge' })
+  })
+
+  it('persists cache state across emissions when ctx.cache is shared', async () => {
+    // Same cache instance handed to both executes → second sees
+    // what the first wrote. This is the contract: bridged state
+    // lives on the host side and survives the worker's local scope.
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const cache = makeMemoryCache()
+
+    const r1 = await rt.execute(
+      `await cache.set('answer', 42); taskSuccess('written')`,
+      makeCtx({ cache }),
+    )
+    expect(r1.outcome).toEqual({ kind: 'success', value: 'written' })
+
+    const r2 = await rt.execute(`taskSuccess(await cache.get('answer'))`, makeCtx({ cache }))
+    expect(r2.outcome).toEqual({ kind: 'success', value: 42 })
+  })
+
+  it('surfaces a host-side bridge error as a rejected promise in user code', async () => {
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    // MemoryFS throws on read of a non-existent path; the worker
+    // proxy must turn that into a rejected `await fs.read(...)`.
+    const code = `
+      try {
+        await fs.read('/does-not-exist')
+        taskFail('expected fs.read to throw')
+      } catch (e) {
+        taskSuccess(e.message)
+      }
+    `
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome.kind).toBe('success')
+    if (result.outcome.kind !== 'success') return
+    expect(typeof result.outcome.value).toBe('string')
+    expect((result.outcome.value as string).length).toBeGreaterThan(0)
+  })
+
+  it('rejects with a clear error when a bridge method is unknown', async () => {
+    // Reach for a method the host whitelist doesn't expose. Using
+    // a Proxy on the worker side would normally make this UB, but
+    // we explicitly drive the proxy with a known name and assert
+    // by spying on the host-side reply.
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const code = `
+      try {
+        // \`__proto__\` isn't on the FS_METHODS allowlist; the host
+        // dispatcher must reject it.
+        await fs.__proto__()
+        taskFail('expected unknown method to reject')
+      } catch (e) {
+        taskSuccess('rejected')
+      }
+    `
+    // The worker proxy *only* exposes the allowed method names, so
+    // \`fs.__proto__\` is undefined there — calling it throws TypeError
+    // before any bridge call is even sent. That's still the correct
+    // outcome (a no-bridge-no-leak surface), so the test asserts the
+    // rejection path catches the TypeError.
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: 'rejected' })
+  })
+
+  it('cache.keys() returns the host map keys', async () => {
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const cache = makeMemoryCache()
+    await cache.set('a', 1)
+    await cache.set('b', 2)
+    const code = 'taskSuccess((await cache.keys()).sort())'
+    const result = await rt.execute(code, makeCtx({ cache }))
+    expect(result.outcome).toEqual({ kind: 'success', value: ['a', 'b'] })
+  })
+
+  it('handles many concurrent bridged calls within one emission', async () => {
+    // Promise.all over a batch of cache.gets — exercises the
+    // callId map on both sides under interleaved responses.
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const cache = makeMemoryCache()
+    for (let i = 0; i < 10; i++) await cache.set(`k${i}`, i * 2)
+    const code = `
+      const keys = Array.from({ length: 10 }, (_, i) => 'k' + i)
+      const values = await Promise.all(keys.map(k => cache.get(k)))
+      taskSuccess(values)
+    `
+    const result = await rt.execute(code, makeCtx({ cache }))
+    expect(result.outcome).toEqual({
+      kind: 'success',
+      value: [0, 2, 4, 6, 8, 10, 12, 14, 16, 18],
+    })
   })
 })

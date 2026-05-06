@@ -7,11 +7,12 @@
  *      `new AsyncFunction(...)` so it can use `await` and the
  *      injected names land directly in scope. Same shape as
  *      `evalRuntime`, just inside a Worker realm.
- *   2. Inject the v1-minimum surface: `taskSuccess`, `taskFail`,
- *      `taskClarify`, `viewImage`, plus a captured `console`. PR 1
- *      does not bridge `fs`, `cache`, `inputs`, or registered
- *      fns / namespaces — those are explicit follow-up PRs and
- *      simply aren't in scope yet.
+ *   2. Inject the v1 surface: `taskSuccess`, `taskFail`,
+ *      `taskClarify`, `viewImage`, a captured `console`, and proxy
+ *      objects for `fs` / `cache` whose methods round-trip through
+ *      the host via `bridgeCall` / `bridgeResponse` (see the
+ *      `BridgeChannel` class below). `inputs`, registered
+ *      fns / classes, and namespace proxies are still follow-up PRs.
  *   3. Resolve the emission's outcome from the way the AsyncFunction
  *      settles: a `taskSuccess` raise → success; a `TaskFailError` /
  *      `TaskClarifyError` raise → fail / clarify; clean return →
@@ -30,7 +31,12 @@
  */
 
 import type { OutputPart, TaskOutcome } from 'agex-ts/types'
-import type { Host2WorkerMessage, SerializedError, Worker2HostMessage } from './messages'
+import type {
+  BridgeTarget,
+  Host2WorkerMessage,
+  SerializedError,
+  Worker2HostMessage,
+} from './messages'
 
 // ---------------------------------------------------------------------------
 // Task-control sentinels
@@ -133,6 +139,115 @@ function viewImageFor(executeId: number) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// fs / cache bridge: per-execute call table
+// ---------------------------------------------------------------------------
+
+/** Methods we expose on the worker-side `fs` proxy. Mirrors
+ *  termish-ts's `FileSystem` surface. The same list is enforced on
+ *  the host so an unrecognized method name throws cleanly instead
+ *  of reaching for a prototype-chain method. Note that `getcwd` is
+ *  sync host-side but becomes `Promise<string>` here — it has to
+ *  cross a postMessage boundary like every other bridged call. */
+const FS_METHODS = [
+  'getcwd',
+  'chdir',
+  'read',
+  'write',
+  'exists',
+  'isFile',
+  'isDir',
+  'stat',
+  'mkdir',
+  'remove',
+  'rmdir',
+  'rename',
+  'list',
+  'listDetailed',
+] as const
+
+/** Methods we expose on the worker-side `cache` proxy. Mirrors
+ *  agex-ts's `Cache` interface from `agex-ts/types`. */
+const CACHE_METHODS = ['set', 'get', 'has', 'delete', 'keys'] as const
+
+interface PendingBridgeCall {
+  resolve: (value: unknown) => void
+  reject: (error: Error) => void
+}
+
+/** Per-execute bridge — owns the callId counter and the pending-call
+ *  table. Callers in user code do `await fs.read('/x')`; that builds
+ *  a `bridgeCall`, posts it, parks the resolver in `pending`, and
+ *  resolves when the matching `bridgeResponse` arrives at the
+ *  module-level message listener (which dispatches into here via
+ *  `handleResponse`).
+ *
+ *  When an emission's AsyncFunction settles, any still-parked calls
+ *  are stranded — but that only happens if the user code ignored
+ *  pending fs/cache promises (e.g. fired and forgot, or raced them
+ *  against `taskSuccess`). The orphans never see a resolver, no one
+ *  awaits them, the message channel closes when the next `execute`
+ *  starts. Harmless. */
+class BridgeChannel {
+  private nextCallId = 1
+  private readonly pending = new Map<number, PendingBridgeCall>()
+
+  constructor(private readonly executeId: number) {}
+
+  /** Build the worker-side `fs` or `cache` object. Each method is a
+   *  thin wrapper that posts a `bridgeCall` and returns a Promise. */
+  build<T extends string>(target: BridgeTarget, methods: ReadonlyArray<T>): Record<T, unknown> {
+    const out = {} as Record<T, unknown>
+    for (const method of methods) {
+      out[method] = (...args: unknown[]): Promise<unknown> => this.call(target, method, args)
+    }
+    return out
+  }
+
+  private call(target: BridgeTarget, method: string, args: unknown[]): Promise<unknown> {
+    return new Promise<unknown>((resolve, reject) => {
+      const callId = this.nextCallId++
+      this.pending.set(callId, { resolve, reject })
+      try {
+        post({
+          type: 'bridgeCall',
+          executeId: this.executeId,
+          callId,
+          target,
+          method,
+          args,
+        })
+      } catch (e) {
+        // postMessage threw — typically a DataCloneError because an
+        // arg wasn't structured-cloneable. Surface it on the
+        // returned Promise so the agent code sees a real error
+        // rather than a hung await.
+        this.pending.delete(callId)
+        reject(e instanceof Error ? e : new Error(String(e)))
+      }
+    })
+  }
+
+  /** Called by the module-level message listener when a
+   *  `bridgeResponse` arrives. Looks up the parked resolver and
+   *  settles it. Unknown callIds are ignored (e.g. a late response
+   *  for a previous emission whose worker scope was reused). */
+  handleResponse(msg: Extract<Host2WorkerMessage, { type: 'bridgeResponse' }>): void {
+    const slot = this.pending.get(msg.callId)
+    if (slot === undefined) return
+    this.pending.delete(msg.callId)
+    if (msg.ok) slot.resolve(msg.value)
+    else slot.reject(rebuildError(msg.error))
+  }
+}
+
+function rebuildError(s: SerializedError): Error {
+  const e = new Error(s.message)
+  e.name = s.name
+  if (s.stack !== undefined) e.stack = s.stack
+  return e
+}
+
 function serializeError(e: unknown): SerializedError {
   if (e instanceof Error) {
     const out: SerializedError = { name: e.name, message: e.message }
@@ -146,7 +261,13 @@ function serializeError(e: unknown): SerializedError {
 // Execute loop
 // ---------------------------------------------------------------------------
 
-async function handleExecute(msg: Host2WorkerMessage): Promise<void> {
+/** Currently-running execute's bridge channel, looked up by the
+ *  module-level message listener on every `bridgeResponse`. Only
+ *  one execute runs at a time (host-side guard), so a single slot is
+ *  enough. Cleared when the AsyncFunction settles. */
+let activeBridge: BridgeChannel | null = null
+
+async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' }>): Promise<void> {
   const { code, executeId } = msg
 
   const taskSuccess = (value: unknown): never => {
@@ -159,12 +280,17 @@ async function handleExecute(msg: Host2WorkerMessage): Promise<void> {
     throw new TaskClarifySignal(message)
   }
 
+  const bridge = new BridgeChannel(executeId)
+  activeBridge = bridge
+
   const injected: Record<string, unknown> = {
     taskSuccess,
     taskFail,
     taskClarify,
     viewImage: viewImageFor(executeId),
     console: makeConsole(executeId),
+    fs: bridge.build('fs', FS_METHODS),
+    cache: bridge.build('cache', CACHE_METHODS),
   }
 
   const names = Object.keys(injected)
@@ -186,6 +312,7 @@ async function handleExecute(msg: Host2WorkerMessage): Promise<void> {
       error = serializeError(e)
     }
   }
+  activeBridge = null
   post({ type: 'result', executeId, outcome, error })
 }
 
@@ -193,6 +320,11 @@ self.addEventListener('message', (ev: MessageEvent<Host2WorkerMessage>) => {
   const msg = ev.data
   if (msg?.type === 'execute') {
     void handleExecute(msg)
+    return
+  }
+  if (msg?.type === 'bridgeResponse') {
+    activeBridge?.handleResponse(msg)
+    return
   }
 })
 

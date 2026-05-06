@@ -145,6 +145,21 @@ describe('translateOpenAIStream — usage capture', () => {
     expect(usage.inputTokens).toBeNull()
     expect(usage.outputTokens).toBeNull()
   })
+
+  it('tolerates usage: null on non-final chunks (OpenAI sends it)', async () => {
+    // OpenAI sends `usage: null` on every chunk except the final
+    // usage-chunk. Tripped a real failure on gpt-5.4-nano because
+    // `as Record<...>` doesn't narrow away null.
+    const events = [
+      { choices: [{ delta: { content: 'hi' } }], usage: null },
+      { choices: [{ delta: {}, finish_reason: 'stop' }], usage: null },
+      { choices: [], usage: { prompt_tokens: 7, completion_tokens: 2 } },
+    ]
+    const usage: UsageHolder = { inputTokens: null, outputTokens: null }
+    await collect(translateOpenAIStream(fromArray(events), usage))
+    expect(usage.inputTokens).toBe(7)
+    expect(usage.outputTokens).toBe(2)
+  })
 })
 
 describe('translateOpenAIStream — error events', () => {

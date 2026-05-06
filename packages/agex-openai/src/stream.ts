@@ -188,9 +188,13 @@ function* close(state: StreamState): Iterable<ToolCallEvent> {
 
 function captureUsage(ev: Record<string, unknown>, usage: UsageHolder | undefined): void {
   if (usage === undefined) return
-  // Final chunk carries `usage` when stream_options.include_usage=true.
-  const u = ev.usage as Record<string, unknown> | undefined
-  if (u === undefined) return
+  // OpenAI sends `usage: null` on every non-final chunk and the
+  // populated object only on the final usage chunk (when
+  // `stream_options.include_usage = true`). Guard against null
+  // explicitly — the `as` cast doesn't narrow it away.
+  const raw = ev.usage
+  if (raw === undefined || raw === null || typeof raw !== 'object') return
+  const u = raw as Record<string, unknown>
   const promptTokens = u.prompt_tokens
   const completionTokens = u.completion_tokens
   if (typeof promptTokens === 'number') usage.inputTokens = promptTokens

@@ -145,7 +145,13 @@ export class OpenAI implements LLMClient {
       model: this.model,
       messages,
       tools,
-      max_tokens: this.maxTokens,
+      // gpt-5* and o-series reasoning models reject `max_tokens` and
+      // require `max_completion_tokens` instead (it disambiguates
+      // visible-output tokens from internal reasoning tokens). Older
+      // models accept either; we send the right one based on model
+      // name. Local servers (ollama, vLLM, etc.) using older model
+      // names get `max_tokens` and stay happy.
+      [tokenLimitField(this.model)]: this.maxTokens,
       stream: true,
       // include_usage = true makes the final chunk carry the
       // prompt/completion token counts so the chaptering trigger
@@ -253,6 +259,15 @@ async function safeReadText(response: Response): Promise<string> {
   } catch {
     return ''
   }
+}
+
+/** OpenAI's reasoning models (gpt-5, o-series) require
+ *  `max_completion_tokens` instead of `max_tokens`. Detect on the
+ *  model name prefix; everything else (gpt-4*, claude-via-OR, local
+ *  models) gets the legacy `max_tokens`. */
+function tokenLimitField(model: string): 'max_tokens' | 'max_completion_tokens' {
+  if (/^(gpt-5|o[1-9])/.test(model)) return 'max_completion_tokens'
+  return 'max_tokens'
 }
 
 function isTransientNetworkError(err: unknown): boolean {

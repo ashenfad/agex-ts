@@ -6,24 +6,24 @@
  * that transforms a list of numbers based on a prompt.
  *
  * Run:
- *   ANTHROPIC_API_KEY=... pnpm --filter mathy-example start
+ *   OPENAI_API_KEY=... pnpm --filter mathy-example start
  */
 
-import { Anthropic } from 'agex-anthropic'
+import { OpenAI } from 'agex-openai'
 import { createAgent, prettyEvents } from 'agex-ts'
 import { evalRuntime } from 'agex-ts/runtime-eval'
 
-const apiKey = process.env.ANTHROPIC_API_KEY
+const apiKey = process.env.OPENAI_API_KEY
 if (apiKey === undefined || apiKey.length === 0) {
-  throw new Error('Set ANTHROPIC_API_KEY in the environment.')
+  throw new Error('Set OPENAI_API_KEY in the environment.')
 }
 
 const agent = await createAgent({
   name: 'mathy_agent',
   primer: 'You are an expert at solving math problems.',
-  llm: new Anthropic({
+  llm: new OpenAI({
     apiKey,
-    model: process.env.ANTHROPIC_MODEL ?? 'claude-haiku-4-5',
+    model: process.env.OPENAI_MODEL ?? 'gpt-5.4-nano',
   }),
   runtime: evalRuntime(),
 })

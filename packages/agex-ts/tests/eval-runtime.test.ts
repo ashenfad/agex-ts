@@ -224,3 +224,101 @@ describe('evalRuntime — TypeScript syntax (ts-blank-space)', () => {
     expect(result.error).not.toBeNull()
   })
 })
+
+describe('evalRuntime — URL-shipped registrations', () => {
+  // Plain JS fixture so Node's native dynamic `import()` can load
+  // it without a TS loader. Vitest's Node mode doesn't transform
+  // dynamic imports — they pass through to the runtime.
+  const FIXTURE_URL = new URL('./fixtures/url-runtime-fixture.js', import.meta.url).href
+
+  it('imports a class from a URL and exposes it natively', async () => {
+    const r = evalRuntime()
+    const policy: Policy = {
+      ...emptyPolicy,
+      classes: new Map([['Vec', { kind: 'cls' as const, name: 'Vec', url: FIXTURE_URL }]]),
+    }
+    await r.init(policy)
+    const result = await r.execute(
+      'taskSuccess([new Vec(3, 4).magnitude(), new Vec(1, 2) instanceof Vec])',
+      makeContext(),
+    )
+    expect(result.outcome).toEqual({ kind: 'success', value: [5, true] })
+  })
+
+  it('imports a fn from a URL', async () => {
+    const r = evalRuntime()
+    const policy: Policy = {
+      ...emptyPolicy,
+      fns: new Map([['double', { kind: 'fn' as const, name: 'double', url: FIXTURE_URL }]]),
+    }
+    await r.init(policy)
+    const result = await r.execute('taskSuccess(double(21))', makeContext())
+    expect(result.outcome).toEqual({ kind: 'success', value: 42 })
+  })
+
+  it('imports a namespace from a URL', async () => {
+    const r = evalRuntime()
+    const policy: Policy = {
+      ...emptyPolicy,
+      namespaces: new Map([
+        ['utils', { kind: 'namespace' as const, name: 'utils', url: FIXTURE_URL }],
+      ]),
+    }
+    await r.init(policy)
+    const result = await r.execute('taskSuccess(utils.greet("world"))', makeContext())
+    expect(result.outcome).toEqual({ kind: 'success', value: 'hello world' })
+  })
+
+  it("supports export: 'default' for default-exported modules", async () => {
+    const r = evalRuntime()
+    const policy: Policy = {
+      ...emptyPolicy,
+      namespaces: new Map([
+        [
+          'fixture',
+          { kind: 'namespace' as const, name: 'fixture', url: FIXTURE_URL, export: 'default' },
+        ],
+      ]),
+    }
+    await r.init(policy)
+    const result = await r.execute('taskSuccess(fixture.marker)', makeContext())
+    expect(result.outcome).toEqual({ kind: 'success', value: 'default-payload' })
+  })
+
+  it('rejects with a clear error when the named export is missing', async () => {
+    const r = evalRuntime()
+    const policy: Policy = {
+      ...emptyPolicy,
+      classes: new Map([
+        [
+          'Missing',
+          { kind: 'cls' as const, name: 'Missing', url: FIXTURE_URL, export: 'NotThere' },
+        ],
+      ]),
+    }
+    await expect(r.init(policy)).rejects.toThrow(/no 'NotThere' export/)
+  })
+
+  it('supports subclassing a URL-shipped class (full JS semantics)', async () => {
+    const r = evalRuntime()
+    const policy: Policy = {
+      ...emptyPolicy,
+      classes: new Map([['Vec', { kind: 'cls' as const, name: 'Vec', url: FIXTURE_URL }]]),
+    }
+    await r.init(policy)
+    const result = await r.execute(
+      `
+      class V3 extends Vec {
+        constructor(x, y, z) { super(x, y); this.z = z }
+        magnitude() {
+          return Math.sqrt(this.x * this.x + this.y * this.y + this.z * this.z)
+        }
+      }
+      const v = new V3(2, 3, 6)
+      taskSuccess([v.magnitude(), v instanceof V3, v instanceof Vec])
+    `,
+      makeContext(),
+    )
+    expect(result.outcome).toEqual({ kind: 'success', value: [7, true, true] })
+  })
+})

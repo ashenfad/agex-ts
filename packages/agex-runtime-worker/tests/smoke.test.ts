@@ -848,6 +848,74 @@ describe('workerRuntime — class bridge (registered cls)', () => {
     expect(result.outcome).toEqual({ kind: 'success', value: ['add'] })
   })
 
+  it('rejects a fabricated instanceCall for an excluded method (host-side defense)', async () => {
+    // Defense-in-depth check: the worker's Proxy whitelist hides
+    // 'magnitude' via `exclude`, but a misbehaving worker could
+    // fabricate the message directly via `self.postMessage`. The
+    // host must re-validate visibility in handleInstanceCall.
+    //
+    // Side-channel observation: the registered class records every
+    // call to `magnitude` on a host-side counter. If the host
+    // dispatches the fabricated call, the counter increments. If
+    // it correctly rejects, the counter stays 0.
+    let magnitudeInvocations = 0
+    class Watched {
+      constructor(
+        public x: number,
+        public y: number,
+      ) {}
+      add(other: Watched) {
+        return new Watched(this.x + other.x, this.y + other.y)
+      }
+      magnitude() {
+        magnitudeInvocations++
+        return Math.sqrt(this.x * this.x + this.y * this.y)
+      }
+    }
+    const rt = runtime()
+    await rt.init(
+      makePolicy({
+        classes: { Watched: { cls: Watched, exclude: ['magnitude'] } },
+      }),
+    )
+    const code = `
+      const v = new Watched(3, 4)
+      // Sniff the executeId from a legitimate bridgeCall (the
+      // fs.exists below) so the fabricated message's executeId
+      // matches the host's per-execute listener filter. Without
+      // this, the host's executeId guard would silently drop the
+      // fabricated message — defense-by-not-listening rather than
+      // the visibility check we're verifying.
+      const original = self.postMessage.bind(self)
+      let capturedExecId = 0
+      self.postMessage = (msg) => {
+        if (msg && typeof msg.executeId === 'number') capturedExecId = msg.executeId
+        original(msg)
+      }
+      await fs.exists('/probe')
+      self.postMessage = original
+      // Fabricate an instanceCall that the worker's Proxy never
+      // would have produced — instanceId 1 is our v, method
+      // 'magnitude' is excluded. Use a callId we know isn't in
+      // pending so the host's reject doesn't accidentally settle
+      // a real promise.
+      original({
+        type: 'instanceCall',
+        executeId: capturedExecId,
+        callId: 99999,
+        instanceId: 1,
+        method: 'magnitude',
+        args: [],
+      })
+      // Give the host a moment to process before settling.
+      await new Promise(r => setTimeout(r, 50))
+      taskSuccess('done')
+    `
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: 'done' })
+    expect(magnitudeInvocations).toBe(0)
+  })
+
   it('releases instance handles across executes (per-emission lifecycle)', async () => {
     const rt = runtime()
     await rt.init(makePolicy({ classes: { Vec: { cls: Vec } } }))

@@ -260,6 +260,16 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
       // message routing ensures stale messages from a prior execute
       // can't accidentally reach into the current table.
       const instances = new Map<number, unknown>()
+      // Parallel map: instanceId → the `RegisteredCls` it was
+      // constructed from. Lets `handleInstanceCall` re-validate
+      // method visibility against the policy before dispatching,
+      // mirroring the host-side allowlist check on fs / cache / fn
+      // / namespace / static dispatch. Without this re-check, a
+      // worker that fabricated an `instanceCall` message (or an
+      // agent that bypassed our Proxy whitelist via direct
+      // `self.postMessage`) could invoke methods the
+      // include/exclude filter was supposed to hide.
+      const instanceClasses = new Map<number, RegisteredCls>()
       let nextInstanceId = 1
 
       let outcome: TaskOutcome = { kind: 'continue' }
@@ -283,11 +293,12 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
           ctx.signal.removeEventListener('abort', onAbort)
           clearTimeout(timer)
           activeExecute = null
-          // Drop instance handles — agent's "fresh slate per
-          // emission" model. Real release happens when no other
-          // closure retains a reference; the Map clear is the host
-          // letting go of its hold.
+          // Drop instance handles + their class registrations —
+          // agent's "fresh slate per emission" model. Real release
+          // happens when no other closure retains a reference; the
+          // Map clear is the host letting go of its hold.
           instances.clear()
+          instanceClasses.clear()
           resolve()
         }
         activeExecute = { settle }
@@ -303,11 +314,18 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
             return
           }
           if (m?.type === 'newInstance' && m.executeId === executeId) {
-            void handleNewInstance(m, policyRef, instances, () => nextInstanceId++, w)
+            void handleNewInstance(
+              m,
+              policyRef,
+              instances,
+              instanceClasses,
+              () => nextInstanceId++,
+              w,
+            )
             return
           }
           if (m?.type === 'instanceCall' && m.executeId === executeId) {
-            void handleInstanceCall(m, instances, w)
+            void handleInstanceCall(m, instances, instanceClasses, w)
             return
           }
           if (m?.type === 'result' && m.executeId === executeId) {
@@ -561,6 +579,7 @@ async function handleNewInstance(
   msg: Extract<Worker2HostMessage, { type: 'newInstance' }>,
   policy: Policy | null,
   instances: Map<number, unknown>,
+  instanceClasses: Map<number, RegisteredCls>,
   nextId: () => number,
   w: Worker,
 ): Promise<void> {
@@ -585,6 +604,9 @@ async function handleNewInstance(
     const instance = new Cls(...args)
     const instanceId = nextId()
     instances.set(instanceId, instance)
+    // Pair the registration with the instance so `handleInstanceCall`
+    // can re-validate visibility on subsequent method dispatches.
+    instanceClasses.set(instanceId, reg)
     value = { instanceId }
   } catch (e) {
     error = serializeError(e)
@@ -599,6 +621,7 @@ async function handleNewInstance(
 async function handleInstanceCall(
   msg: Extract<Worker2HostMessage, { type: 'instanceCall' }>,
   instances: Map<number, unknown>,
+  instanceClasses: Map<number, RegisteredCls>,
   w: Worker,
 ): Promise<void> {
   const { executeId, callId, instanceId, method } = msg
@@ -606,9 +629,22 @@ async function handleInstanceCall(
   let error: SerializedError | null = null
   try {
     const instance = instances.get(instanceId)
-    if (instance === undefined) {
+    const reg = instanceClasses.get(instanceId)
+    if (instance === undefined || reg === undefined) {
       throw new Error(
         `workerRuntime bridge: no live instance with id ${instanceId} (was it created in a different emission?)`,
+      )
+    }
+    // Re-validate method visibility against the registration, the
+    // same check `buildConfigure` applied to populate the worker's
+    // method-name allowlist. Defense-in-depth against a fabricated
+    // `instanceCall` (hostile worker, agent-side `self.postMessage`
+    // bypassing the Proxy whitelist) trying to invoke an excluded
+    // method that the host's prototype walk would otherwise resolve.
+    const visible = visibleClassInstanceMethods(reg)
+    if (!visible.has(method)) {
+      throw new Error(
+        `workerRuntime bridge: instance method '${method}' not visible on class '${reg.name}'`,
       )
     }
     // biome-ignore lint/suspicious/noExplicitAny: dynamic dispatch

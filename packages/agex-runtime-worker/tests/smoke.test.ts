@@ -1141,9 +1141,23 @@ describe('workerRuntime — URL-shipped registrations', () => {
     expect(result.outcome).toEqual({ kind: 'success', value: 42 })
   })
 
-  it('imports a namespace object from a URL', async () => {
+  it('imports a namespace from a URL — whole module by default', async () => {
+    // No `export` on a namespace spec means "expose the whole
+    // module namespace object" (matches `import * as lib from
+    // '...'`). Different from fn / cls, which default to plucking
+    // by registration name.
     const rt = runtime()
-    await rt.init(makePolicy({ namespaceUrls: { utils: { url: FIXTURE_URL } } }))
+    await rt.init(makePolicy({ namespaceUrls: { lib: { url: FIXTURE_URL } } }))
+    const code = `taskSuccess([lib.double(21), lib.utils.greet('world')])`
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: [42, 'hello world'] })
+  })
+
+  it('imports a namespace from a URL — explicit export plucks the named field', async () => {
+    // With `export: 'utils'`, the agent sees just the `utils` const
+    // from the module rather than the whole namespace object.
+    const rt = runtime()
+    await rt.init(makePolicy({ namespaceUrls: { utils: { url: FIXTURE_URL, export: 'utils' } } }))
     const code = `taskSuccess([utils.greet('world'), utils.shout('quiet')])`
     const result = await rt.execute(code, makeCtx())
     expect(result.outcome).toEqual({ kind: 'success', value: ['hello world', 'QUIET'] })

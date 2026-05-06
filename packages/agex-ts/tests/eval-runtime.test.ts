@@ -256,12 +256,29 @@ describe('evalRuntime — URL-shipped registrations', () => {
     expect(result.outcome).toEqual({ kind: 'success', value: 42 })
   })
 
-  it('imports a namespace from a URL', async () => {
+  it('imports a namespace from a URL — whole module by default', async () => {
+    // No `export` on a namespace spec means "expose the whole
+    // module namespace object" — different from fn / cls which
+    // pluck by registration name.
+    const r = evalRuntime()
+    const policy: Policy = {
+      ...emptyPolicy,
+      namespaces: new Map([['lib', { kind: 'namespace' as const, name: 'lib', url: FIXTURE_URL }]]),
+    }
+    await r.init(policy)
+    const result = await r.execute(
+      'taskSuccess([lib.double(21), lib.utils.greet("world")])',
+      makeContext(),
+    )
+    expect(result.outcome).toEqual({ kind: 'success', value: [42, 'hello world'] })
+  })
+
+  it('imports a namespace from a URL — explicit export plucks the named field', async () => {
     const r = evalRuntime()
     const policy: Policy = {
       ...emptyPolicy,
       namespaces: new Map([
-        ['utils', { kind: 'namespace' as const, name: 'utils', url: FIXTURE_URL }],
+        ['utils', { kind: 'namespace' as const, name: 'utils', url: FIXTURE_URL, export: 'utils' }],
       ]),
     }
     await r.init(policy)

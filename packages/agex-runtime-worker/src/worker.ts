@@ -643,11 +643,17 @@ function handleConfigure(msg: ConfigureMessage): void {
   urlReady = Promise.all(
     msg.urlModules.map(async (spec) => {
       const mod = (await rawImport(spec.url)) as Record<string, unknown>
-      const exportName = spec.export ?? spec.name
-      const value = mod[exportName]
+      // Missing `export` on the wire means "use the whole module
+      // namespace object" — agex-runtime-worker.ts buildConfigure
+      // resolves the fn / cls default to the registration name
+      // before posting, so an absent field here always carries the
+      // namespace whole-module semantic. With an export set, pluck
+      // it (the same code path serves explicit `export: 'Vec'` and
+      // `export: 'default'`).
+      const value = spec.export === undefined ? mod : mod[spec.export]
       if (value === undefined) {
         throw new Error(
-          `workerRuntime URL import '${spec.url}': module has no '${exportName}' export (named exports: ${Object.keys(mod).join(', ') || '<none>'})`,
+          `workerRuntime URL import '${spec.url}': module has no '${spec.export}' export (named exports: ${Object.keys(mod).join(', ') || '<none>'})`,
         )
       }
       urlModuleRefs.set(spec.name, value)

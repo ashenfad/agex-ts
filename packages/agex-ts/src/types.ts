@@ -439,8 +439,10 @@ export interface RegisteredFn extends RegistrationCommon {
    *  Mutually exclusive with `fn`. */
   readonly url?: string
   /** Named export to pluck from the URL-shipped module. Defaults
-   *  to the registration `name`; pass `'default'` for default
-   *  exports. Ignored when `url` is absent. */
+   *  to the registration `name` for fn / cls (e.g. `agent.fn({
+   *  url: '/m.js' }, { name: 'compute' })` looks up `mod.compute`).
+   *  Pass `'default'` for default-exported modules. Ignored when
+   *  `url` is absent. */
   readonly export?: string
   /** Optional Standard Schema for runtime parameter validation
    *  (host-bound only — URL-shipped fns are agent-callable
@@ -492,14 +494,19 @@ export interface RegisteredNs extends RegistrationCommon {
   /** Host-bound: live object whose visible members the bridge
    *  exposes. Mutually exclusive with `url`. */
   readonly target?: object
-  /** URL-shipped: worker imports the module and pulls
-   *  `mod[export ?? name]` (or the whole namespace object when
-   *  `export` is absent) into the agent's scope under `name`.
-   *  Mutually exclusive with `target`. */
+  /** URL-shipped: worker imports the module and exposes it under
+   *  the registration `name`. Mutually exclusive with `target`.
+   *  Default behavior (no `export` field) is to bind the **whole
+   *  module namespace object** — same semantic as `import * as
+   *  name from '...'`. With `export` set, pluck `mod[export]`
+   *  instead. */
   readonly url?: string
-  /** Named export to pluck from the URL-shipped module. Defaults
-   *  to the registration `name`; pass `'default'` for default
-   *  exports. Ignored when `url` is absent. */
+  /** Named export to pluck from the URL-shipped module. When
+   *  absent, the agent sees the whole module namespace object —
+   *  this is the namespace-import default and differs from the
+   *  fn / cls default of plucking by registration name. Pass
+   *  `'default'` for default-exported modules, or any other
+   *  named export string. Ignored when `url` is absent. */
   readonly export?: string
   readonly recursive?: boolean
   /** Per-member visibility filters apply to host-bound namespaces

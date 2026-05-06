@@ -21,6 +21,17 @@ export {
   type TerminalRegistration,
 } from './agent'
 export { shouldTriggerChaptering } from './chaptering'
+export {
+  AgentError,
+  CancelledError,
+  FatalError,
+  RegistrationError,
+  SchemaError,
+  TaskClarifyError,
+  TaskFailError,
+  TransientError,
+  isTaskControlError,
+} from './errors'
 export { prettyEvents, prettyTokens } from './pretty'
 export type { TaskDefinition } from './task'
 export * from './types'

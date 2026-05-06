@@ -16,6 +16,10 @@
       "types": "./dist/types.d.ts",
       "import": "./dist/types.js"
     },
+    "./errors": {
+      "types": "./dist/errors.d.ts",
+      "import": "./dist/errors.js"
+    },
     "./state": {
       "types": "./dist/state/index.d.ts",
       "import": "./dist/state/index.js"

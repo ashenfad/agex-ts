@@ -1,7 +1,7 @@
-import type { Emission, TokenChunk } from 'agex-ts/types'
 import { describe, expect, it } from 'vitest'
-import { parseToolEvents } from '../src/parser'
-import type { ToolCallEvent } from '../src/stream'
+import type { ToolCallEvent } from '../../src/providers/events'
+import { parseToolEvents } from '../../src/providers/parser'
+import type { Emission, TokenChunk } from '../../src/types'
 
 async function* fromArray<T>(items: ReadonlyArray<T>): AsyncIterable<T> {
   for (const x of items) yield x

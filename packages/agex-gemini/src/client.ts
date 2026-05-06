@@ -22,6 +22,15 @@
  *   - Multimodal tool outputs (images flatten to placeholders)
  */
 
+import {
+  type UsageHolder,
+  isTransientNetworkError,
+  parseSseEvents,
+  parseToolEvents,
+  safeReadText,
+  sleep,
+  sseLinesToEventDicts,
+} from 'agex-ts/providers'
 import { toolSchemas } from 'agex-ts/render'
 import type { LLMClient, LLMConfig, LLMRequest, TokenChunk } from 'agex-ts/types'
 import {
@@ -30,9 +39,7 @@ import {
   lowerNeutralTurns,
   schemasToGeminiFunctionDeclarations,
 } from './adapter'
-import { parseToolEvents } from './parser'
-import { parseSseEvents } from './sse'
-import { type UsageHolder, translateGeminiStream } from './stream'
+import { translateGeminiStream } from './stream'
 
 const DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta'
 const DEFAULT_MODEL = 'gemini-2.5-flash'
@@ -223,60 +230,4 @@ export class Gemini implements LLMClient {
       ...(usage.outputTokens !== null && { outputTokens: usage.outputTokens }),
     }
   }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers (mirrors the other providers — duplicated until we extract
-// a shared providers module)
-// ---------------------------------------------------------------------------
-
-async function* sseLinesToEventDicts(lines: AsyncIterable<string>): AsyncIterable<unknown> {
-  for await (const payload of lines) {
-    if (payload.length === 0) continue
-    try {
-      yield JSON.parse(payload)
-    } catch {
-      // Skip unparseable payloads.
-    }
-  }
-}
-
-async function safeReadText(response: Response): Promise<string> {
-  try {
-    return await response.text()
-  } catch {
-    return ''
-  }
-}
-
-function isTransientNetworkError(err: unknown): boolean {
-  if (err instanceof Error) {
-    if (err.name === 'AbortError') return false
-    if (err.name === 'TypeError') return true
-    const msg = err.message.toLowerCase()
-    if (msg.includes('network') || msg.includes('socket') || msg.includes('econnreset')) {
-      return true
-    }
-  }
-  return false
-}
-
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(new Error('aborted'))
-      return
-    }
-    const t = setTimeout(resolve, ms)
-    if (signal !== undefined) {
-      signal.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(t)
-          reject(new Error('aborted'))
-        },
-        { once: true },
-      )
-    }
-  })
 }

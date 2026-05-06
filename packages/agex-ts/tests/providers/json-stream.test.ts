@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { type JsonStringDelta, JsonStringExtractor } from '../src/json-stream'
+import { type JsonStringDelta, JsonStringExtractor } from '../../src/providers/json-stream'
 
 function feedAll(json: string, chunkSize?: number): JsonStringDelta[] {
   const ex = new JsonStringExtractor()

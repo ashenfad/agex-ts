@@ -1,6 +1,7 @@
 /**
- * Translate Anthropic Messages-API SSE event dicts into a small
- * provider-agnostic vocabulary the tool-call parser consumes.
+ * Translate Anthropic Messages-API SSE event dicts into the
+ * provider-agnostic `ToolCallEvent` vocabulary defined in
+ * `agex-ts/providers`.
  *
  * Anthropic streams structured events:
  *   - `message_start` — carries initial `usage` (input/output tokens)
@@ -18,77 +19,14 @@
  * tool_use) or accumulated text/signature (for thinking/text).
  *
  * The translator is bytes-agnostic: it accepts already-parsed JSON
- * dicts. SSE byte parsing happens upstream in `sse.ts`.
+ * dicts. SSE byte parsing happens upstream in `parseSseEvents`
+ * (also in `agex-ts/providers`).
  */
 
+import type { ThinkingPartEvent, ToolCallEvent, UsageHolder } from 'agex-ts/providers'
 import type { ToolName } from 'agex-ts/render'
 
-// ---------------------------------------------------------------------------
-// Output vocabulary — what the tool-call parser consumes
-// ---------------------------------------------------------------------------
-
-export interface ToolCallStart {
-  readonly type: 'toolCallStart'
-  readonly callId: string
-  readonly toolName: ToolName
-  /** Per-call opaque signature for round-trip on subsequent turns.
-   *  Anthropic doesn't sign tool_use blocks (signatures live on
-   *  separate thinking blocks), so this stays `undefined` here.
-   *  Defined for vocabulary parity with Gemini, which DOES use it. */
-  readonly signature?: Uint8Array
-}
-
-export interface ToolCallArgDelta {
-  readonly type: 'toolCallArgDelta'
-  readonly callId: string
-  readonly argumentChunk: string
-}
-
-export interface ToolCallEnd {
-  readonly type: 'toolCallEnd'
-  readonly callId: string
-}
-
-export interface TextDelta {
-  readonly type: 'textDelta'
-  readonly content: string
-}
-
-export interface TextPartEvent {
-  readonly type: 'textPart'
-  readonly text: string
-}
-
-export interface ThinkingDelta {
-  readonly type: 'thinkingDelta'
-  readonly content: string
-}
-
-export interface ThinkingPartEvent {
-  readonly type: 'thinkingPart'
-  readonly text?: string
-  readonly signature?: Uint8Array
-  readonly redacted?: boolean
-}
-
-export type ToolCallEvent =
-  | ToolCallStart
-  | ToolCallArgDelta
-  | ToolCallEnd
-  | TextDelta
-  | TextPartEvent
-  | ThinkingDelta
-  | ThinkingPartEvent
-
-// ---------------------------------------------------------------------------
-// Usage holder — populated by the translator from message_start /
-// message_delta events. The client reads it after the stream closes.
-// ---------------------------------------------------------------------------
-
-export interface UsageHolder {
-  inputTokens: number | null
-  outputTokens: number | null
-}
+export type { ToolCallEvent, UsageHolder }
 
 // ---------------------------------------------------------------------------
 // Per-stream state

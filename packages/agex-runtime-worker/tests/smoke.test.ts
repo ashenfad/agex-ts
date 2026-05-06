@@ -1393,3 +1393,139 @@ describe('workerRuntime — /helpers/*.ts ESM', () => {
     expect(result.outcome).toEqual({ kind: 'success', value: 22 })
   })
 })
+
+describe('workerRuntime — import syntax for registered names', () => {
+  let disposers: Array<() => Promise<void>> = []
+  afterEach(async () => {
+    await Promise.all(disposers.map((d) => d()))
+    disposers = []
+  })
+
+  function runtime() {
+    const rt = workerRuntime({ workerUrl: TEST_WORKER_URL, timeoutMs: 2_000 })
+    disposers.push(() => rt.dispose())
+    return rt
+  }
+
+  /** Same VFS-seeding helper as the helpers-ESM block. */
+  async function withFiles(files: Record<string, string>): Promise<ExecuteContext['fs']> {
+    const fs = new MemoryFS()
+    const enc = new TextEncoder()
+    for (const [path, content] of Object.entries(files)) {
+      await fs.mkdir('/helpers', { parents: true, existOk: true })
+      await fs.write(path, enc.encode(content))
+    }
+    return fs
+  }
+
+  it("accepts `import * as X from 'name'` for a registered namespace", async () => {
+    const rt = runtime()
+    await rt.init(
+      makePolicy({
+        namespaces: {
+          math: {
+            target: {
+              add: (a: unknown, b: unknown) => (a as number) + (b as number),
+            },
+          },
+        },
+      }),
+    )
+    // The `import` makes `math` available as a local binding
+    // (which happens to point at the same global). Agent then
+    // calls a method through it.
+    const code = `
+      import * as math from 'math'
+      taskSuccess(await math.add(2, 3))
+    `
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: 5 })
+  })
+
+  it("accepts `import { method } from 'name'` and pulls the static / member", async () => {
+    // Registered namespace destructure in main code: `const { add }
+    // = math` after rewrite — pulls the bridged member function.
+    const rt = runtime()
+    await rt.init(
+      makePolicy({
+        namespaces: {
+          math: {
+            target: {
+              add: (a: unknown, b: unknown) => (a as number) + (b as number),
+            },
+          },
+        },
+      }),
+    )
+    const code = `
+      import { add } from 'math'
+      taskSuccess(await add(7, 8))
+    `
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: 15 })
+  })
+
+  it("`import { Vec } from 'Vec'` (self-named) elides — Vec already in scope", async () => {
+    // Common LLM reflex; should be a harmless no-op rather than
+    // a runtime error.
+    class Vec {
+      constructor(
+        public x: number,
+        public y: number,
+      ) {}
+      magnitude() {
+        return Math.sqrt(this.x * this.x + this.y * this.y)
+      }
+    }
+    const rt = runtime()
+    await rt.init(makePolicy({ classes: { Vec: { cls: Vec } } }))
+    const code = `
+      import { Vec } from 'Vec'
+      taskSuccess(await new Vec(3, 4).magnitude())
+    `
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: 5 })
+  })
+
+  it('helpers can also import registered names', async () => {
+    // Helpers see registered names through the `__registered`
+    // parameter the worker injects when evaluating helper bodies.
+    // Same import syntax as agent main code.
+    const rt = runtime()
+    await rt.init(
+      makePolicy({
+        fns: { triple: (x) => (x as number) * 3 },
+      }),
+    )
+    const fs = await withFiles({
+      '/helpers/calc.ts': `
+        import { triple } from 'triple'
+        export async function tripleAndAddOne(value: number): Promise<number> {
+          return (await triple(value)) + 1
+        }
+      `,
+    })
+    const code = `
+      import { tripleAndAddOne } from '/helpers/calc'
+      taskSuccess(await tripleAndAddOne(7))
+    `
+    const result = await rt.execute(code, makeCtx({ fs }))
+    expect(result.outcome).toEqual({ kind: 'success', value: 22 })
+  })
+
+  it('passes through (and breaks) imports of unregistered specifiers', async () => {
+    // `import 'react'` doesn't match any registered name and isn't
+    // a VFS path — passes through unchanged. AsyncFunction throws
+    // SyntaxError, which surfaces as a clean execute error. The
+    // message points the agent at what they tried to import.
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const code = `
+      import * as react from 'react'
+      taskSuccess(react)
+    `
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'continue' })
+    expect(result.error?.message).toMatch(/import statement/)
+  })
+})

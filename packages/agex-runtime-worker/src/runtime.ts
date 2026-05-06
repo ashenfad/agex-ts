@@ -246,7 +246,19 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
       let preparedCode: string
       let helpers: ReadonlyArray<{ path: string; body: string }>
       try {
-        const prepared = await prepareScriptForWire(transformed, ctx.fs, transform)
+        // Registered names give the agent (and its helpers) the
+        // ability to reach the runtime-injected fns / cls /
+        // namespaces via natural `import` syntax. Build the set
+        // from the policy at execute time — registrations are
+        // immutable per runtime instance, so this could be cached,
+        // but the cost is trivial.
+        const registeredNames = new Set<string>()
+        if (policyRef !== null) {
+          for (const n of policyRef.fns.keys()) registeredNames.add(n)
+          for (const n of policyRef.namespaces.keys()) registeredNames.add(n)
+          for (const n of policyRef.classes.keys()) registeredNames.add(n)
+        }
+        const prepared = await prepareScriptForWire(transformed, ctx.fs, transform, registeredNames)
         preparedCode = prepared.code
         helpers = prepared.helpers
       } catch (e) {

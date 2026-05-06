@@ -746,18 +746,31 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
 
   // Evaluate any agent-authored helpers shipped in the execute
   // message. Each helper body is `async function(__exports,
-  // __modules)` — produced by `prepareScriptForWire` on the host
-  // side. We iterate in dependency order (the host emits them
-  // that way), populate a local `__modules` map, then pass it to
-  // the user's main code (which has had its imports rewritten
-  // into `__modules['/path']` lookups).
+  // __modules, __registered)` — produced by `prepareScriptForWire`
+  // on the host side. We iterate in dependency order (the host
+  // emits them that way), populate a local `__modules` map, then
+  // pass it to the user's main code (which has had its imports
+  // rewritten into `__modules['/path']` / `__registered['name']`
+  // lookups). The `__registered` map mirrors the agent's main
+  // scope: registered fn / cls / namespace stubs (RPC bridges
+  // for host-bound, direct values for URL-shipped) under their
+  // registered names. Helpers reach them through the map; agent
+  // main code reaches them through the global injection.
   const __modules: Record<string, Readonly<Record<string, unknown>>> = {}
+  const __registered: Record<string, unknown> = {}
+  if (configured !== null) {
+    for (const fnName of configured.fns) __registered[fnName] = bridge.buildFn(fnName)
+    for (const ns of configured.namespaces)
+      __registered[ns.name] = bridge.buildNamespace(ns.name, ns.members)
+    for (const cls of configured.classes) __registered[cls.name] = bridge.buildClass(cls)
+    for (const [name, value] of urlModuleRefs) __registered[name] = value
+  }
   if (msg.helpers !== undefined && msg.helpers.length > 0) {
     try {
       for (const h of msg.helpers) {
-        const fn = new AsyncFunction('__exports', '__modules', h.body)
+        const fn = new AsyncFunction('__exports', '__modules', '__registered', h.body)
         const exports: Record<string, unknown> = {}
-        await fn(exports, __modules)
+        await fn(exports, __modules, __registered)
         ;(__modules as Record<string, Readonly<Record<string, unknown>>>)[h.path] = exports
       }
     } catch (e) {

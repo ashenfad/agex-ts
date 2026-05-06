@@ -24,13 +24,14 @@
  * **Trade-offs vs real ESM (data: URLs in a Worker realm):**
  *   - ✅ Works everywhere, no Node version gates
  *   - ✅ No engine module context required
+ *   - ✅ Full re-export shapes supported: `export { x }`,
+ *     `export { x as y }`, `export * from '...'`, `export * as ns
+ *     from '...'`, default re-exports
  *   - ❌ No live bindings (helpers can't mutate exports after load —
  *     not a pattern agents use)
  *   - ❌ No top-level `await` coordination across helper graph
  *     (each helper is a single async function; module-evaluation
  *     ordering is straightforward request-order)
- *   - ❌ Re-exports limited (`export { x } from '...'` needs to be
- *     resolved by us; `export * from '...'` not yet supported)
  *
  * **Stack traces:** every helper script gets a `//# sourceURL=`
  * pragma so engine-reported file names use the agent's original
@@ -263,6 +264,17 @@ function rewriteHelperReexports(code: string, dirOfHelper: string): string {
         )
       }
       return `${lead}${lines.join('\n')}`
+    },
+  )
+  // export * as NS from '/path' — bind the whole module's exports
+  // as a namespace property. Must come BEFORE the bare `export *`
+  // pattern so the more specific match wins.
+  out = out.replace(
+    /(^|[\n;])[ \t]*export\s*\*\s+as\s+([A-Za-z_$][\w$]*)\s+from\s*['"]([^'"]+)['"][ \t]*;?[ \t]*(?=$|\n)/gm,
+    (_m, lead: string, name: string, path: string) => {
+      const resolved =
+        isVfsPath(path) || path.startsWith('.') ? resolveVfsPath(path, dirOfHelper) : path
+      return `${lead}__exports[${JSON.stringify(name)}] = __modules[${JSON.stringify(resolved)}];`
     },
   )
   // export * from '/path' — copy all exports onto __exports

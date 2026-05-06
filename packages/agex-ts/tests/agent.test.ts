@@ -75,6 +75,57 @@ describe('Agent — registration delegation', () => {
   })
 })
 
+describe('Agent — URL-shipped registrations', () => {
+  it('accepts { url, export } as the first arg of fn / cls / namespace', async () => {
+    const a = await createAgent({ name: 't' })
+    a.fn({ url: 'https://example.com/m.js', export: 'compute' }, { name: 'compute' })
+    a.cls({ url: 'https://example.com/m.js', export: 'Vec' }, { name: 'Vec' })
+    a.namespace({ url: 'https://example.com/m.js' }, { name: 'utils' })
+    const p = a.policy()
+    expect(p.fns.get('compute')?.url).toBe('https://example.com/m.js')
+    expect(p.fns.get('compute')?.export).toBe('compute')
+    expect(p.classes.get('Vec')?.url).toBe('https://example.com/m.js')
+    expect(p.namespaces.get('utils')?.url).toBe('https://example.com/m.js')
+  })
+
+  it('infers name from the export when no opts.name is given', async () => {
+    const a = await createAgent({ name: 't' })
+    a.cls({ url: 'https://example.com/m.js', export: 'Vec' })
+    expect([...a.policy().classes.keys()]).toEqual(['Vec'])
+  })
+
+  it('rejects URL combined with include/exclude/configure on cls', async () => {
+    const a = await createAgent({ name: 't' })
+    expect(() =>
+      a.cls({ url: 'https://example.com/m.js' }, { name: 'Vec', exclude: ['secret'] }),
+    ).toThrow(/can't be combined with \{ url \}/)
+  })
+
+  it('rejects URL combined with include on namespace', async () => {
+    const a = await createAgent({ name: 't' })
+    expect(() =>
+      a.namespace({ url: 'https://example.com/m.js' }, { name: 'utils', include: ['safe*'] }),
+    ).toThrow(/can't be combined with \{ url \}/)
+  })
+
+  it('rejects an empty URL string', async () => {
+    const a = await createAgent({ name: 't' })
+    expect(() => a.fn({ url: '' }, { name: 'broken' })).toThrow(/url must be a non-empty string/)
+  })
+
+  it("doesn't mistake a namespace target with a `url` member for a URL spec", async () => {
+    // A real namespace target can have a `url` field — as long as
+    // it has *other* properties too, the type guard treats it as a
+    // host-bound target, not a URL spec.
+    const a = await createAgent({ name: 't' })
+    const target = { url: 'http://api.example.com', call: () => 'ok' }
+    a.namespace(target, { name: 'api' })
+    const reg = a.policy().namespaces.get('api')
+    expect(reg?.target).toBe(target)
+    expect(reg?.url).toBeUndefined()
+  })
+})
+
 describe('Agent — per-session host APIs', () => {
   it('fs(session) returns the same instance across calls', async () => {
     const a = await createAgent({ name: 't' })

@@ -37,12 +37,16 @@ import type {
 } from './types'
 
 interface FnRegistration extends RegistrationCommon {
-  readonly fn: RegisteredFn['fn']
+  readonly fn?: RegisteredFn['fn']
+  readonly url?: string
+  readonly export?: string
   readonly paramsSchema?: RegisteredFn['paramsSchema']
 }
 
 interface ClsRegistration extends RegistrationCommon {
-  readonly cls: RegisteredCls['cls']
+  readonly cls?: RegisteredCls['cls']
+  readonly url?: string
+  readonly export?: string
   readonly constructable?: boolean
   readonly include?: MemberFilter
   readonly exclude?: MemberFilter
@@ -50,7 +54,9 @@ interface ClsRegistration extends RegistrationCommon {
 }
 
 interface NsRegistration extends RegistrationCommon {
-  readonly target: object
+  readonly target?: object
+  readonly url?: string
+  readonly export?: string
   readonly recursive?: boolean
   readonly include?: MemberFilter
   readonly exclude?: MemberFilter
@@ -75,18 +81,27 @@ export class PolicyBuilder {
   registerFn(name: string, opts: FnRegistration): void {
     this.#assertNameValid(name, 'fn')
     this.#assertNameAvailable(name)
+    this.#assertHostXorUrl(name, 'fn', opts.fn !== undefined, opts.url)
     this.#fns.set(name, omitUndefined({ kind: 'fn', name, ...opts }) as RegisteredFn)
   }
 
   registerCls(name: string, opts: ClsRegistration): void {
     this.#assertNameValid(name, 'cls')
     this.#assertNameAvailable(name)
+    this.#assertHostXorUrl(name, 'cls', opts.cls !== undefined, opts.url)
+    if (opts.url !== undefined) {
+      this.#assertNoFiltersWithUrl(name, 'cls', opts)
+    }
     this.#classes.set(name, omitUndefined({ kind: 'cls', name, ...opts }) as RegisteredCls)
   }
 
   registerNamespace(name: string, opts: NsRegistration): void {
     this.#assertNameValid(name, 'namespace')
     this.#assertNameAvailable(name)
+    this.#assertHostXorUrl(name, 'namespace', opts.target !== undefined, opts.url)
+    if (opts.url !== undefined) {
+      this.#assertNoFiltersWithUrl(name, 'namespace', opts)
+    }
     this.#namespaces.set(name, omitUndefined({ kind: 'namespace', name, ...opts }) as RegisteredNs)
   }
 
@@ -151,6 +166,54 @@ export class PolicyBuilder {
     if (!NAME_RE.test(name)) {
       throw new RegistrationError(
         `${kind} ${name}: name must match /^[A-Za-z_][A-Za-z0-9_]*$/ (valid JS identifier)`,
+      )
+    }
+  }
+
+  /** Enforce mutual exclusivity between host-bound and URL-shipped
+   *  forms. Exactly one must be present — registering an fn / cls /
+   *  namespace with both a live value and a `url` (or with neither)
+   *  is a programming error. */
+  #assertHostXorUrl(
+    name: string,
+    kind: 'fn' | 'cls' | 'namespace',
+    hasHost: boolean,
+    url: string | undefined,
+  ): void {
+    const hasUrl = url !== undefined
+    if (hasHost && hasUrl) {
+      throw new RegistrationError(
+        `${kind} '${name}': pass either the live value or { url, export? }, not both`,
+      )
+    }
+    if (!hasHost && !hasUrl) {
+      throw new RegistrationError(
+        `${kind} '${name}': missing the registered value (pass a function / class / object, or a { url, export? } spec)`,
+      )
+    }
+    if (hasUrl && url.length === 0) {
+      throw new RegistrationError(`${kind} '${name}': url must be a non-empty string`)
+    }
+  }
+
+  /** Per-method visibility filters (`include` / `exclude` /
+   *  `configure`) only make sense for host-bound registrations.
+   *  URL-shipped modules ship into the worker realm whole — there
+   *  is no per-export gating point on the host side. Ban the
+   *  combination at registration time so the embedder gets a
+   *  clear error instead of silently ignored options. */
+  #assertNoFiltersWithUrl(
+    name: string,
+    kind: 'cls' | 'namespace',
+    opts: { include?: MemberFilter; exclude?: MemberFilter; configure?: object },
+  ): void {
+    const offending: string[] = []
+    if (opts.include !== undefined) offending.push('include')
+    if (opts.exclude !== undefined) offending.push('exclude')
+    if (opts.configure !== undefined) offending.push('configure')
+    if (offending.length > 0) {
+      throw new RegistrationError(
+        `${kind} '${name}': ${offending.join(' / ')} can't be combined with { url } — URL-shipped registrations are exposed whole. Pre-wrap the export in a thinner module if you need a narrower surface.`,
       )
     }
   }

@@ -46,7 +46,7 @@ function logEvent(e: AgentEvent): void {
     for (const em of e.emissions) {
       if (em.type === 'ts') console.log(`  [ts]\n${indent(em.code)}`)
       else if (em.type === 'terminal') console.log(`  [terminal] ${em.commands}`)
-      else if (em.type === 'thinking') console.log(`  [thinking] ${em.text.slice(0, 120)}`)
+      else if (em.type === 'thinking') console.log(`  [thinking] ${em.text}`)
       else if (em.type === 'text') console.log(`  [text] ${em.text}`)
       else if (em.type === 'fileWrite') console.log(`  [fileWrite] ${em.path}`)
       else if (em.type === 'fileEdit') console.log(`  [fileEdit] ${em.path}`)

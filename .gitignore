@@ -9,6 +9,9 @@ coverage/
 .tsbuildinfo
 *.tsbuildinfo
 
+# Vitest browser-mode failure screenshots (per-run; not source).
+__screenshots__/
+
 # Editor
 .vscode/
 .idea/

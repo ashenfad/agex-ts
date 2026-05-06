@@ -15,6 +15,7 @@
 
 import type { CommitInfo } from 'kvgit-ts'
 import { CacheManager } from './cache'
+import { RegistrationError } from './errors'
 import { EventLogImpl } from './event-log'
 import { PolicyBuilder, memberAllowed } from './policy'
 import { KvgitState, type StateBackend, connectState, isVersioned } from './state'
@@ -81,16 +82,24 @@ export async function createAgent(opts: AgentOptions): Promise<Agent> {
   return new Agent(opts, state)
 }
 
-/** Options accepted by `agent.fn()`. */
+/** Options accepted by `agent.fn()`. The function is the first
+ *  positional arg; everything below is metadata. `name` defaults to
+ *  the function's `.name` property — supply explicitly when
+ *  registering an arrow / anonymous / bound function (whose `.name`
+ *  is empty or non-identifier-shaped). */
 export interface FnRegistration {
+  readonly name?: string
   readonly description?: string
   readonly hostFsAccess?: boolean
   readonly networkAccess?: boolean
   readonly paramsSchema?: import('@standard-schema/spec').StandardSchemaV1
 }
 
-/** Options accepted by `agent.cls()`. */
+/** Options accepted by `agent.cls()`. The class is the first
+ *  positional arg; `name` defaults to `cls.name` (override for
+ *  anonymous classes or when re-naming the agent-facing identifier). */
 export interface ClsRegistration {
+  readonly name?: string
   readonly description?: string
   readonly constructable?: boolean
   readonly include?: MemberFilter
@@ -100,8 +109,11 @@ export interface ClsRegistration {
   readonly networkAccess?: boolean
 }
 
-/** Options accepted by `agent.namespace()`. */
+/** Options accepted by `agent.namespace()`. The target object is
+ *  the first positional arg; `name` is required because plain
+ *  objects don't carry a useful name property. */
 export interface NsRegistration {
+  readonly name: string
   readonly description?: string
   readonly recursive?: boolean
   readonly include?: MemberFilter
@@ -111,16 +123,45 @@ export interface NsRegistration {
   readonly networkAccess?: boolean
 }
 
-/** Options accepted by `agent.terminal()`. */
+/** Options accepted by `agent.terminal()`. The handler is the
+ *  first positional arg; `name` and `description` are required
+ *  (the agent surfaces these in the rendered tool list). */
 export interface TerminalRegistration {
+  readonly name: string
   readonly description: string
-  readonly handler: TerminalCommandHandler
   readonly hostFsAccess?: boolean
   readonly networkAccess?: boolean
 }
 
+/** Options accepted by `agent.skill()`. The markdown content is
+ *  the first positional arg; `name` is required (it's the
+ *  identifier the agent uses to look the skill up). */
+export interface SkillRegistration {
+  readonly name: string
+}
+
 const DEFAULT_SESSION = 'default'
 const DEFAULT_MAX_ITERATIONS = 10
+
+/** Resolve a registration's identifier: prefer the explicit
+ *  `opts.name`, fall back to the value's intrinsic name (e.g.
+ *  `fn.name` / `cls.name`), throw a helpful error when neither
+ *  yields a non-empty identifier. The full validity check (must
+ *  match the `[A-Za-z_][A-Za-z0-9_]*` identifier shape) lives in
+ *  `PolicyBuilder` — we only catch the empty-name case here so the
+ *  embedder gets a message that points at the registration call
+ *  site rather than a generic "name must be a non-empty string". */
+function resolveName(
+  explicit: string | undefined,
+  intrinsic: string | undefined,
+  kind: string,
+): string {
+  if (explicit !== undefined && explicit.length > 0) return explicit
+  if (intrinsic !== undefined && intrinsic.length > 0) return intrinsic
+  throw new RegistrationError(
+    `agent.${kind}(): no name available — the value has no usable .name property (anonymous / arrow / bound function?). Pass \`{ name: '...' }\` explicitly.`,
+  )
+}
 
 /** Options accepted by `agent.chapterTask()`. The chapter task uses
  *  fixed input/output shapes (numbered event index → `Chapter[]`)
@@ -206,33 +247,45 @@ export class Agent {
   }
 
   // -- Registration -------------------------------------------------------
+  //
+  // All registration methods follow the same shape: the *thing being
+  // registered* is the first positional arg, and a single options
+  // object holds everything else (name override, description,
+  // visibility filters, etc.). Mirrors agex-py's
+  // `agent.cls(MyClass, name="...")` style. Where a name can be
+  // inferred from the value (`fn.name`, `cls.name`) it's optional;
+  // namespace / skill / terminal require explicit `name` since
+  // plain objects, markdown blobs, and handlers don't carry a
+  // useful identifier.
 
-  fn(
-    name: string,
-    fn: (...args: unknown[]) => unknown | Promise<unknown>,
-    opts: FnRegistration = {},
-  ): this {
-    this.#policy.registerFn(name, { fn, ...opts })
+  fn(fn: (...args: unknown[]) => unknown | Promise<unknown>, opts: FnRegistration = {}): this {
+    const name = resolveName(opts.name, fn.name, 'fn')
+    const { name: _drop, ...rest } = opts
+    this.#policy.registerFn(name, { fn, ...rest })
     return this
   }
 
-  cls(name: string, cls: new (...args: unknown[]) => unknown, opts: ClsRegistration = {}): this {
-    this.#policy.registerCls(name, { cls, ...opts })
+  cls(cls: new (...args: unknown[]) => unknown, opts: ClsRegistration = {}): this {
+    const name = resolveName(opts.name, cls.name, 'cls')
+    const { name: _drop, ...rest } = opts
+    this.#policy.registerCls(name, { cls, ...rest })
     return this
   }
 
-  namespace(name: string, target: object, opts: NsRegistration = {}): this {
-    this.#policy.registerNamespace(name, { target, ...opts })
+  namespace(target: object, opts: NsRegistration): this {
+    const { name, ...rest } = opts
+    this.#policy.registerNamespace(name, { target, ...rest })
     return this
   }
 
-  skill(name: string, content: string): this {
-    this.#policy.registerSkill(name, content)
+  skill(content: string, opts: SkillRegistration): this {
+    this.#policy.registerSkill(opts.name, content)
     return this
   }
 
-  terminal(name: string, opts: TerminalRegistration): this {
-    this.#policy.registerTerminal(name, opts)
+  terminal(handler: TerminalCommandHandler, opts: TerminalRegistration): this {
+    const { name, ...rest } = opts
+    this.#policy.registerTerminal(name, { handler, ...rest })
     return this
   }
 

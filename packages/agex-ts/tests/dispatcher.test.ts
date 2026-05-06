@@ -112,13 +112,13 @@ describe('emission dispatch — terminal', () => {
         { type: 'ts', code: 'taskSuccess(null)' },
       ),
     ])
-    agent.terminal('beep', {
-      description: 'Emit "BEEP".',
-      handler: async (ctx) => {
+    agent.terminal(
+      async (ctx) => {
         ctx.stdout.write('BEEP\n')
         return undefined
       },
-    })
+      { name: 'beep', description: 'Emit "BEEP".' },
+    )
     const fn = agent.task<undefined, null>({ description: 'Beep.' })
     await fn(undefined)
     expect(dec.decode(await agent.fs().read('/out.txt'))).toBe('BEEP\n')

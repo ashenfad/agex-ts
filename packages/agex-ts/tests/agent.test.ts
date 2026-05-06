@@ -20,10 +20,10 @@ describe('createAgent — defaults', () => {
 describe('Agent — registration delegation', () => {
   it('records fn / namespace / skill / terminal in the policy', async () => {
     const a = await createAgent({ name: 't' })
-    a.fn('greet', () => 'hi', { description: 'Greet.' })
-    a.namespace('utils', { add: (x: number, y: number) => x + y }, { description: 'Math.' })
-    a.skill('basics', '# Basics\nDo X then Y.')
-    a.terminal('beep', { description: 'Beep loudly.', handler: async () => undefined })
+    a.fn(() => 'hi', { name: 'greet', description: 'Greet.' })
+    a.namespace({ add: (x: number, y: number) => x + y }, { name: 'utils', description: 'Math.' })
+    a.skill('# Basics\nDo X then Y.', { name: 'basics' })
+    a.terminal(async () => undefined, { name: 'beep', description: 'Beep loudly.' })
     const p = a.policy()
     expect([...p.fns.keys()]).toEqual(['greet'])
     expect([...p.namespaces.keys()]).toEqual(['utils'])
@@ -33,22 +33,45 @@ describe('Agent — registration delegation', () => {
 
   it('returns this for chaining', async () => {
     const a = await createAgent({ name: 't' })
-    expect(a.fn('a', () => null)).toBe(a)
-    expect(a.skill('s', 'doc')).toBe(a)
+    expect(a.fn(() => null, { name: 'a' })).toBe(a)
+    expect(a.skill('doc', { name: 's' })).toBe(a)
   })
 
   it('fingerprint shifts as registrations land', async () => {
     const a = await createAgent({ name: 't' })
     const fp0 = a.fingerprint
-    a.fn('greet', () => 'hi')
+    a.fn(() => 'hi', { name: 'greet' })
     const fp1 = a.fingerprint
     expect(fp1).not.toBe(fp0)
   })
 
   it('cross-kind name collision throws RegistrationError', async () => {
     const a = await createAgent({ name: 't' })
-    a.fn('shared', () => null)
-    expect(() => a.skill('shared', 'doc')).toThrow(RegistrationError)
+    a.fn(() => null, { name: 'shared' })
+    expect(() => a.skill('doc', { name: 'shared' })).toThrow(RegistrationError)
+  })
+
+  it('infers fn name from .name when no explicit name is given', async () => {
+    const a = await createAgent({ name: 't' })
+    function greet() {
+      return 'hi'
+    }
+    a.fn(greet)
+    expect([...a.policy().fns.keys()]).toEqual(['greet'])
+  })
+
+  it('infers cls name from .name when no explicit name is given', async () => {
+    const a = await createAgent({ name: 't' })
+    class Vec {}
+    a.cls(Vec)
+    expect([...a.policy().classes.keys()]).toEqual(['Vec'])
+  })
+
+  it('throws a clear error when fn has no inferable name', async () => {
+    const a = await createAgent({ name: 't' })
+    // An anonymous arrow function has fn.name === '' — must supply
+    // an explicit name.
+    expect(() => a.fn(() => null)).toThrow(/no name available/)
   })
 })
 

@@ -70,7 +70,7 @@ describe('renderSkillsListing', () => {
 describe('agent.fs(session) mounts the skills overlay', () => {
   it('a registered skill is readable at /skills/<name>/SKILL.md after refresh', async () => {
     const agent = await createAgent({ name: 'A' })
-    agent.skill('howto', '# How To\n\nDo X.')
+    agent.skill('# How To\n\nDo X.', { name: 'howto' })
     agent.refreshSkillsOverlay()
     const fs = agent.fs()
     expect(await fs.exists('/skills/howto/SKILL.md')).toBe(true)

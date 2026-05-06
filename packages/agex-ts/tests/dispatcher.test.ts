@@ -213,3 +213,52 @@ describe('emission dispatch — text/thinking are no-ops', () => {
     expect(await fn(undefined)).toBe('ok')
   })
 })
+
+describe('emission dispatch — TypeScript syntax in agent emissions', () => {
+  // Higher-level pin on top of evalRuntime's TS tests: scripted
+  // emissions carrying TS syntax (annotations, interfaces, generics,
+  // `as` casts, returning a typed function) flow through the full
+  // agent loop and produce the right outcome. Catches regressions in
+  // the dispatcher -> runtime -> emission path that the unit-level
+  // runtime tests would miss.
+  it('runs typed emissions and returns a callable function back to the host', async () => {
+    const { agent } = await makeAgent([
+      r({
+        type: 'ts',
+        code: `
+          interface PrimeFinder { (n: number): number }
+          function isPrime(n: number): boolean {
+            if (n < 2) return false
+            for (let i = 2; i * i <= n; i++) if (n % i === 0) return false
+            return true
+          }
+          const nextPrime: PrimeFinder = (n) => {
+            let c = n + 1
+            while (!isPrime(c)) c++
+            return c
+          }
+          taskSuccess(nextPrime as unknown)
+        `,
+      }),
+    ])
+    const fn = agent.task<undefined, (n: number) => number>({
+      description: 'Build a next-prime function.',
+    })
+    const result = await fn(undefined)
+    expect(typeof result).toBe('function')
+    expect(result(10)).toBe(11)
+    expect(result(500_000)).toBe(500_009)
+  })
+
+  it('surfaces a clear error when the agent emits non-erasable TS', async () => {
+    // ts-blank-space refuses enum / namespace / decorators / parameter
+    // properties. The agent loop treats that as a normal failure so
+    // the next turn's primer/feedback can teach the agent to use
+    // modern alternatives (`as const`, modules, etc.).
+    const { agent } = await makeAgent([
+      r({ type: 'ts', code: 'enum Color { Red } taskSuccess(Color.Red)' }),
+    ])
+    const fn = agent.task<undefined, string>({ description: 'Bad TS.' })
+    await expect(fn(undefined)).rejects.toThrow()
+  })
+})

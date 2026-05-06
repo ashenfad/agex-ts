@@ -110,6 +110,24 @@ describe('prettyEvents', () => {
     ])
   })
 
+  it('surfaces ts/terminal titles when present', () => {
+    const action: ActionEvent = {
+      type: 'action',
+      timestamp: ts,
+      agentName: 'a',
+      emissions: [
+        { type: 'ts', code: 'taskSuccess(1)', title: 'Compute answer' },
+        { type: 'terminal', commands: 'ls /', title: 'Glance at root' },
+      ],
+    }
+    const { write, lines } = captureLines()
+    prettyEvents(action, { write })
+    expect(lines()).toEqual([
+      '[ts] Compute answer\n  taskSuccess(1)',
+      '[terminal] Glance at root ls /',
+    ])
+  })
+
   it('formats output text and image parts', () => {
     const { write, lines } = captureLines()
     prettyEvents(

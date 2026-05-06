@@ -105,12 +105,19 @@ export function prettyEvents(event: AgentEvent, opts: PrettyEventOptions = {}): 
     case 'action':
       for (const em of event.emissions) {
         switch (em.type) {
-          case 'ts':
-            write(`[ts]\n${indent(cap(em.code, maxBody))}`)
+          case 'ts': {
+            const head = em.title !== undefined && em.title.length > 0 ? `[ts] ${em.title}` : '[ts]'
+            write(`${head}\n${indent(cap(em.code, maxBody))}`)
             break
-          case 'terminal':
-            write(`[terminal] ${cap(em.commands, maxBody)}`)
+          }
+          case 'terminal': {
+            const head =
+              em.title !== undefined && em.title.length > 0
+                ? `[terminal] ${em.title}`
+                : '[terminal]'
+            write(`${head} ${cap(em.commands, maxBody)}`)
             break
+          }
           case 'thinking':
             write(`[thinking] ${cap(em.text, maxBody)}`)
             break

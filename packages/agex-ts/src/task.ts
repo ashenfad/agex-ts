@@ -23,13 +23,7 @@ import type { Agent } from './agent'
 import { runChaptering, shouldTriggerChaptering } from './chaptering'
 import { dispatchFileEdit, dispatchFileWrite, dispatchTerminal } from './dispatcher'
 import { CancelledError, SchemaError, TaskClarifyError, TaskFailError } from './errors'
-import {
-  type NeutralTurn,
-  buildSystemMessage,
-  buildTaskMessage,
-  makeToolUseId,
-  renderEvents,
-} from './render'
+import { buildSystemMessage, buildTaskMessage, makeToolUseId, renderEvents } from './render'
 import type {
   ActionEvent,
   AgentEvent,
@@ -105,12 +99,19 @@ export function makeTask<I, O>(agent: Agent, def: TaskDefinition<I, O>): TaskFn<
     agent.refreshSkillsOverlay(session)
 
     // -- Log TaskStartEvent ----------------------------------------------
+    // The full task message lives on the event so renderEvents can
+    // place it correctly in the conversation. Without this, sessions
+    // that span multiple tasks would render task 2's prompt before
+    // task 1's actions — confusing the model into thinking it
+    // misread the task.
+    const taskMessage = buildTaskMessage(def, validatedInput)
     const startEvent: TaskStartEvent = {
       type: 'taskStart',
       timestamp: new Date().toISOString(),
       agentName: agent.name,
       taskName: deriveTaskName(def),
       inputs: validatedInput,
+      message: taskMessage,
     }
     await emit(startEvent, eventLog, options.onEvent)
 
@@ -129,12 +130,6 @@ export function makeTask<I, O>(agent: Agent, def: TaskDefinition<I, O>): TaskFn<
       }),
       ...(agent.primer !== undefined && { agentPrimer: agent.primer }),
     })
-    // The opening per-task user turn — also stable across the loop.
-    const taskMessage = buildTaskMessage(def, validatedInput)
-    const taskTurn: NeutralTurn = {
-      role: 'user',
-      content: [{ type: 'text', text: taskMessage }],
-    }
 
     try {
       while (iter < maxIter) {
@@ -143,7 +138,12 @@ export function makeTask<I, O>(agent: Agent, def: TaskDefinition<I, O>): TaskFn<
 
         // Stream + assemble emissions
         const events = await collectEvents(eventLog)
-        const turns = [taskTurn, ...renderEvents(events)]
+        // renderEvents emits the TaskStartEvent as a user turn (using
+        // the message stamped on the event), so we don't prepend
+        // anything — the current task's opening message lands at the
+        // correct position in the conversation, after any prior
+        // task's events.
+        const turns = renderEvents(events)
         const emissions: Emission[] = []
         let inputTokens: number | undefined
         let outputTokens: number | undefined

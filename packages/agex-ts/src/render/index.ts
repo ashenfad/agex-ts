@@ -118,17 +118,17 @@ export interface NeutralTurn {
 /** Render a sequence of events as a neutral conversation. The
  *  returned turns are ordered chronologically. Skipped events:
  *
- *    - `TaskStartEvent` — the per-task opening user message is
- *      reconstructed from the live `TaskDefinition` + input via
- *      `buildTaskMessage`, not from this audit-trail event
- *    - `success` / `fail` / `clarify` / `cancelled` — terminal
- *      markers; the loop has already exited
  *    - `error` / `file` / `systemNote` — framework metadata, not
  *      conversation
  *
- * Tool-use pairing (the part most providers care about):
+ * Rendered events:
  *
- *    - Each `ActionEvent` becomes one assistant turn. Tool-call
+ *    - `TaskStartEvent` becomes a user turn with the stored task
+ *      message (the message stamped at task launch by
+ *      `buildTaskMessage`). For multi-task sessions, this places
+ *      each task's opening prompt at its actual position in the
+ *      timeline, not floating at the front of the request.
+ *    - `ActionEvent` becomes one assistant turn. Tool-call
  *      emissions (`ts` / `terminal` / `fileWrite` / `fileEdit`)
  *      become `tool_use` parts. `text` / `thinking` become
  *      text / thinking parts inline in the same assistant turn.
@@ -141,6 +141,11 @@ export interface NeutralTurn {
  *      when present, a synthesized "wrote /path" line for file
  *      emissions on success, or "(no observation)" for silent
  *      `ts` / `terminal` blocks.
+ *    - `success` / `fail` / `clarify` / `cancelled` become brief
+ *      assistant text turns ("[Task 'X' complete]" etc.) so the
+ *      model sees prior tasks closing out before the next one
+ *      opens. Without this, two consecutive task starts in the
+ *      same session would look like the model went rogue mid-task.
  *    - `ChapterEvent` becomes its own assistant turn (with the
  *      `/chapters/<slug>/` hint) and forces a flush of any pending
  *      user content first.
@@ -175,9 +180,15 @@ export function renderEvents(events: ReadonlyArray<AgentEvent>): NeutralTurn[] {
 
   for (const event of events) {
     switch (event.type) {
-      case 'taskStart':
-        // Skipped — buildTaskMessage handles the opening user turn
+      case 'taskStart': {
+        flushUser()
+        // Fall back to a stub if no message was stamped (legacy event
+        // logs from before the message field landed). Using just the
+        // task name keeps the conversation alternating cleanly.
+        const text = event.message ?? `Task: ${event.taskName}`
+        turns.push({ role: 'user', content: [{ type: 'text', text }] })
         break
+      }
       case 'action': {
         flushUser()
         turns.push(renderActionTurn(event, toolUseOrder, synthByEmission))
@@ -208,10 +219,30 @@ export function renderEvents(events: ReadonlyArray<AgentEvent>): NeutralTurn[] {
         turns.push(renderChapterTurn(event))
         break
       }
-      case 'success':
-      case 'fail':
-      case 'clarify':
-      case 'cancelled':
+      case 'success': {
+        flushUser()
+        turns.push(closingAssistantTurn('[Task complete]'))
+        break
+      }
+      case 'fail': {
+        flushUser()
+        turns.push(closingAssistantTurn(`[Task failed: ${event.message}]`))
+        break
+      }
+      case 'clarify': {
+        flushUser()
+        turns.push(closingAssistantTurn(`[Task needs clarification: ${event.message}]`))
+        break
+      }
+      case 'cancelled': {
+        flushUser()
+        turns.push(
+          closingAssistantTurn(
+            `[Task '${event.taskName}' cancelled after ${event.iterationsCompleted} iterations]`,
+          ),
+        )
+        break
+      }
       case 'error':
       case 'file':
       case 'systemNote':
@@ -420,4 +451,11 @@ function renderChapterTurn(event: ChapterEvent): NeutralTurn {
     role: 'assistant',
     content: [{ type: 'text', text: renderChapterText(event) }],
   }
+}
+
+/** A short assistant turn marking the end of a task. Surfaces
+ *  prior-task closure to the model so a subsequent task start
+ *  doesn't read like the model went off-script mid-task. */
+function closingAssistantTurn(text: string): NeutralTurn {
+  return { role: 'assistant', content: [{ type: 'text', text }] }
 }

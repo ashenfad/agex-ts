@@ -261,4 +261,55 @@ describe('emission dispatch — TypeScript syntax in agent emissions', () => {
     const fn = agent.task<undefined, string>({ description: 'Bad TS.' })
     await expect(fn(undefined)).rejects.toThrow()
   })
+
+  it('imports helper modules from the VFS and uses them across actions', async () => {
+    // End-to-end pin on the module-loader path: the agent writes a
+    // helper to /helpers/, then in a follow-up action imports from
+    // it. This is the "/helpers/" workflow the BUILTIN_PRIMER
+    // promises — without the loader, the second action's `import`
+    // statement throws `Cannot use import statement outside a
+    // module`.
+    const enc = new TextEncoder()
+    const { agent } = await makeAgent([
+      // Action 1: write the helper, return continue
+      r(
+        {
+          type: 'fileWrite',
+          path: '/helpers/primeUtils.ts',
+          mode: 'write',
+          content: `
+export function isPrime(n: number): boolean {
+  if (n < 2) return false
+  for (let i = 2; i * i <= n; i++) if (n % i === 0) return false
+  return true
+}
+export function nextPrime(n: number): number {
+  let c = Math.floor(n) + 1
+  while (!isPrime(c)) c++
+  return c
+}
+          `,
+        },
+        { type: 'ts', code: '/* keep going */' },
+      ),
+      // Action 2: import + call the helper
+      r({
+        type: 'ts',
+        code: `
+import { nextPrime } from '/helpers/primeUtils'
+taskSuccess(nextPrime(500_000))
+        `,
+      }),
+    ])
+    const fn = agent.task<undefined, number>({
+      description: 'Use a helper to find a prime.',
+    })
+    const result = await fn(undefined)
+    expect(result).toBe(500_009)
+    // Helper is genuinely persisted in the VFS for inspection /
+    // future tasks.
+    const bytes = await agent.fs().read('/helpers/primeUtils.ts')
+    expect(new TextDecoder().decode(bytes)).toContain('nextPrime')
+    void enc
+  })
 })

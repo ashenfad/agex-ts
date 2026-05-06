@@ -36,6 +36,10 @@
       "types": "./dist/runtime/eval.d.ts",
       "import": "./dist/runtime/eval.js"
     },
+    "./module-loader": {
+      "types": "./dist/runtime/module-loader.d.ts",
+      "import": "./dist/runtime/module-loader.js"
+    },
     "./render": {
       "types": "./dist/render/index.d.ts",
       "import": "./dist/render/index.js"

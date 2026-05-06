@@ -9,6 +9,7 @@ export default defineConfig({
     'src/state/index.ts',
     'src/llm/dummy.ts',
     'src/runtime/eval.ts',
+    'src/runtime/module-loader.ts',
     'src/render/index.ts',
     'src/providers/index.ts',
   ],

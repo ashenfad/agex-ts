@@ -155,8 +155,22 @@ export type Host2WorkerMessage =
   | {
       readonly type: 'execute'
       /** Already-transformed JavaScript (TS types stripped on the
-       *  host side via the configured `transform` hook). */
+       *  host side via the configured `transform` hook). User
+       *  `import` statements that reach the agent's VFS-mounted
+       *  helpers have been rewritten into `__modules['/path']`
+       *  lookups — see `helpers` below for the actual bodies. */
       readonly code: string
+      /** Helpers in dependency order (deps first). Each entry is
+       *  the body of an `async function(__exports, __modules)`
+       *  produced by `agex-ts/module-loader`'s
+       *  `prepareScriptForWire`. The worker AsyncFunction-evaluates
+       *  each in order, registering its `__exports` under `path`
+       *  in the local `__modules` map, then runs the agent's
+       *  rewritten `code` with `__modules` injected. */
+      readonly helpers?: ReadonlyArray<{
+        readonly path: string
+        readonly body: string
+      }>
       /** Echoed back on the matching `result` so the host can
        *  correlate even if `execute` calls overlap (currently they
        *  don't — one outstanding execute at a time — but the field

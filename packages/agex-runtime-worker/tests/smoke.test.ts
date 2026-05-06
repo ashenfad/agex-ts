@@ -1226,3 +1226,170 @@ describe('workerRuntime — URL-shipped registrations', () => {
     expect(result.outcome).toEqual({ kind: 'success', value: [5, 1] })
   })
 })
+
+describe('workerRuntime — /helpers/*.ts ESM', () => {
+  let disposers: Array<() => Promise<void>> = []
+  afterEach(async () => {
+    await Promise.all(disposers.map((d) => d()))
+    disposers = []
+  })
+
+  function runtime() {
+    const rt = workerRuntime({ workerUrl: TEST_WORKER_URL, timeoutMs: 2_000 })
+    disposers.push(() => rt.dispose())
+    return rt
+  }
+
+  /** Seed the agent's VFS with a helper file. */
+  async function withHelpers(files: Record<string, string>): Promise<ExecuteContext['fs']> {
+    const fs = new MemoryFS()
+    const enc = new TextEncoder()
+    for (const [path, content] of Object.entries(files)) {
+      // Make sure parent dirs exist (MemoryFS auto-creates them
+      // through write, but extension-less paths under /helpers/
+      // need /helpers explicitly).
+      await fs.mkdir('/helpers', { parents: true, existOk: true })
+      await fs.write(path, enc.encode(content))
+    }
+    return fs
+  }
+
+  it('agent imports a function from /helpers/utils', async () => {
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const fs = await withHelpers({
+      '/helpers/utils.ts': `
+        export function double(x: number): number {
+          return x * 2
+        }
+      `,
+    })
+    const code = `
+      import { double } from '/helpers/utils'
+      taskSuccess(double(21))
+    `
+    const result = await rt.execute(code, makeCtx({ fs }))
+    expect(result.outcome).toEqual({ kind: 'success', value: 42 })
+  })
+
+  it('handles helpers that import other helpers (chain)', async () => {
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const fs = await withHelpers({
+      '/helpers/base.ts': 'export const PI = 3.14',
+      '/helpers/area.ts': `
+        import { PI } from '/helpers/base'
+        export function circle(r: number): number {
+          return PI * r * r
+        }
+      `,
+    })
+    const code = `
+      import { circle } from '/helpers/area'
+      taskSuccess(circle(10))
+    `
+    const result = await rt.execute(code, makeCtx({ fs }))
+    expect(result.outcome).toEqual({ kind: 'success', value: 314 })
+  })
+
+  it('supports default exports from helpers', async () => {
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const fs = await withHelpers({
+      '/helpers/cfg.ts': `export default { greeting: 'hi' }`,
+    })
+    const code = `
+      import cfg from '/helpers/cfg'
+      taskSuccess(cfg.greeting)
+    `
+    const result = await rt.execute(code, makeCtx({ fs }))
+    expect(result.outcome).toEqual({ kind: 'success', value: 'hi' })
+  })
+
+  it('supports namespace imports from helpers (`import * as X`)', async () => {
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const fs = await withHelpers({
+      '/helpers/m.ts': `
+        export const a = 1
+        export const b = 2
+        export function sum() { return a + b }
+      `,
+    })
+    const code = `
+      import * as m from '/helpers/m'
+      taskSuccess([m.a, m.b, m.sum()])
+    `
+    const result = await rt.execute(code, makeCtx({ fs }))
+    expect(result.outcome).toEqual({ kind: 'success', value: [1, 2, 3] })
+  })
+
+  it('agent code without imports still works (no-helpers fast path)', async () => {
+    // Verifies the new helpers wiring doesn't break the existing
+    // no-import path — execute message ships without a helpers
+    // field and the worker skips the eval loop.
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const result = await rt.execute('taskSuccess(2 + 2)', makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: 4 })
+  })
+
+  it('reports a clear error when a helper file is missing from the VFS', async () => {
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const code = `
+      import { x } from '/helpers/nope'
+      taskSuccess(x)
+    `
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'continue' })
+    expect(result.error).not.toBeNull()
+    expect(result.error?.message).toMatch(/helper not found/)
+  })
+
+  it('rejects cyclic helper imports with a clear error', async () => {
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const fs = await withHelpers({
+      '/helpers/a.ts': `
+        import { b } from '/helpers/b'
+        export const a = 1 + b
+      `,
+      '/helpers/b.ts': `
+        import { a } from '/helpers/a'
+        export const b = 1 + a
+      `,
+    })
+    const code = `
+      import { a } from '/helpers/a'
+      taskSuccess(a)
+    `
+    const result = await rt.execute(code, makeCtx({ fs }))
+    expect(result.outcome).toEqual({ kind: 'continue' })
+    expect(result.error?.message).toMatch(/cyclic helper import/)
+  })
+
+  it('helper functions can call host-bridged registered fns', async () => {
+    // Helpers run in the worker realm but the host-bridged stubs
+    // for registered fns are injected into the agent's scope, NOT
+    // the helper's. So a helper can't see them directly. This
+    // test confirms that limit and points at the workaround:
+    // pass values from agent code to the helper.
+    const rt = runtime()
+    await rt.init(makePolicy({ fns: { triple: (x) => (x as number) * 3 } }))
+    const fs = await withHelpers({
+      '/helpers/calc.ts': `
+        export function applyAndAddOne(value: number): number {
+          return value + 1
+        }
+      `,
+    })
+    const code = `
+      import { applyAndAddOne } from '/helpers/calc'
+      const tripled = await triple(7)
+      taskSuccess(applyAndAddOne(tripled))
+    `
+    const result = await rt.execute(code, makeCtx({ fs }))
+    expect(result.outcome).toEqual({ kind: 'success', value: 22 })
+  })
+})

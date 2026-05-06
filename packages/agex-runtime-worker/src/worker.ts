@@ -744,6 +744,35 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
     }
   }
 
+  // Evaluate any agent-authored helpers shipped in the execute
+  // message. Each helper body is `async function(__exports,
+  // __modules)` — produced by `prepareScriptForWire` on the host
+  // side. We iterate in dependency order (the host emits them
+  // that way), populate a local `__modules` map, then pass it to
+  // the user's main code (which has had its imports rewritten
+  // into `__modules['/path']` lookups).
+  const __modules: Record<string, Readonly<Record<string, unknown>>> = {}
+  if (msg.helpers !== undefined && msg.helpers.length > 0) {
+    try {
+      for (const h of msg.helpers) {
+        const fn = new AsyncFunction('__exports', '__modules', h.body)
+        const exports: Record<string, unknown> = {}
+        await fn(exports, __modules)
+        ;(__modules as Record<string, Readonly<Record<string, unknown>>>)[h.path] = exports
+      }
+    } catch (e) {
+      activeBridge = null
+      post({
+        type: 'result',
+        executeId,
+        outcome: { kind: 'continue' },
+        error: serializeError(e),
+      })
+      return
+    }
+  }
+  injected.__modules = __modules
+
   const names = Object.keys(injected)
   const values = names.map((n) => injected[n])
 

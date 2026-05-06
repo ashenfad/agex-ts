@@ -99,6 +99,30 @@ export interface PreparedScript {
   readonly modules: Readonly<Record<string, Readonly<Record<string, unknown>>>>
 }
 
+/** Wire-friendly form of a prepared script — same import-rewriting
+ *  but helpers are returned as JS source strings rather than
+ *  pre-evaluated exports objects. The worker runtime ships these
+ *  across the postMessage boundary (function exports don't
+ *  structured-clone, but strings do) and AsyncFunction-evaluates
+ *  each helper in its own realm to populate the modules map. */
+export interface PreparedForWire {
+  /** Same as `PreparedScript.code`. */
+  readonly code: string
+  /** Helpers in dependency order — each entry's body may reference
+   *  earlier entries via `__modules['/path']`. The worker iterates
+   *  in order, evaluating each into a fresh `__exports` object,
+   *  registering it under `path`. */
+  readonly helpers: ReadonlyArray<{
+    /** Resolved VFS path (without extension if the user code
+     *  imported without one) — the key the agent's rewritten code
+     *  uses to look this module up in `__modules`. */
+    readonly path: string
+    /** Body of an `async function(__exports, __modules) { ... }`
+     *  that populates `__exports` and returns it. */
+    readonly body: string
+  }>
+}
+
 /** Top-level JS/TS imports we recognize and rewrite. */
 interface ImportStatement {
   /** Char-offset start in the source. */
@@ -127,15 +151,6 @@ type ImportBinding =
     }
   | { kind: 'sideEffect' }
 
-/** Per-call state — caches loaded helpers and tracks the
- *  in-progress set for cycle detection. */
-interface LoadContext {
-  /** Resolved VFS path → exports object. */
-  readonly cache: Map<string, Readonly<Record<string, unknown>>>
-  /** Resolved paths currently being loaded (for cycle detection). */
-  readonly seen: Set<string>
-}
-
 const AsyncFunction = Object.getPrototypeOf(async () => undefined).constructor as new (
   ...args: string[]
 ) => (...args: unknown[]) => Promise<unknown>
@@ -153,16 +168,93 @@ export async function prepareScript(
   source: string,
   fs: VirtualFileSystem,
 ): Promise<PreparedScript> {
-  const imports = parseImports(source)
-  if (imports.length === 0) return { code: source, modules: {} }
+  // Reuse the wire path then evaluate each helper locally — same
+  // semantics as before, just a different output shape on the
+  // far side. The dual-key aliasing (resolved + sourcePath) that
+  // the previous direct implementation did is preserved here.
+  const prepared = await prepareScriptForWire(source, fs, tsBlankSpace)
+  if (prepared.helpers.length === 0) return { code: prepared.code, modules: {} }
+  const modules: Record<string, Readonly<Record<string, unknown>>> = {}
+  for (const h of prepared.helpers) {
+    const fn = new AsyncFunction('__exports', '__modules', h.body)
+    const exports: Record<string, unknown> = {}
+    await fn(exports, modules)
+    modules[h.path] = exports
+  }
+  return { code: prepared.code, modules }
+}
 
-  const ctx: LoadContext = { cache: new Map(), seen: new Set() }
-  for (const imp of imports) {
-    if (!isVfsPath(imp.path)) continue
-    await loadHelper(imp.path, '/', fs, ctx)
+/** Wire-friendly variant of `prepareScript`: same rewriting +
+ *  recursive helper resolution, but each helper body is returned as
+ *  a string instead of evaluated locally. The runtime adapter on
+ *  the receiving side (today: `agex-runtime-worker`) iterates the
+ *  list in order, AsyncFunction-evaluates each body to get its
+ *  exports, and registers them under `path` in its own
+ *  `__modules` map.
+ *
+ *  The `transform` parameter handles TS → JS conversion of helper
+ *  source files. evalRuntime passes `tsBlankSpace`; workerRuntime
+ *  passes its configurable transform (default ts-blank-space, can
+ *  be swapped for esbuild-wasm). */
+export async function prepareScriptForWire(
+  source: string,
+  fs: VirtualFileSystem,
+  transform: (src: string) => string | Promise<string>,
+): Promise<PreparedForWire> {
+  const imports = parseImports(source)
+  if (imports.length === 0) return { code: source, helpers: [] }
+
+  // Collect helpers in dependency order. A helper's body references
+  // its dependencies' exports through `__modules`, so deps must be
+  // evaluated first (worker-side eval iterates this list in order).
+  const helpers: Array<{ path: string; body: string }> = []
+  const compiled = new Set<string>()
+  const inFlight = new Set<string>()
+
+  async function walk(importPath: string, baseDir: string): Promise<void> {
+    const resolved = resolveVfsPath(importPath, baseDir)
+    if (compiled.has(resolved)) return
+    if (inFlight.has(resolved)) {
+      throw new Error(
+        `module loader: cyclic helper import — '${resolved}' is already being loaded. Helper cycles are unsupported; refactor the shared bits into a third file.`,
+      )
+    }
+    inFlight.add(resolved)
+
+    const sourcePath = await findFile(resolved, fs)
+    const bytes = await fs.read(sourcePath)
+    const raw = new TextDecoder('utf-8', { fatal: false }).decode(bytes)
+    const stripped = await transform(raw)
+
+    // Recurse into this helper's own imports first so its body's
+    // `__modules` lookups land on already-evaluated entries.
+    const subImports = parseImports(stripped)
+    const dirOfHelper = dirname(sourcePath)
+    for (const sub of subImports) {
+      if (!isVfsPath(sub.path) && !sub.path.startsWith('.')) continue
+      await walk(sub.path, dirOfHelper)
+    }
+
+    const body = compileHelperBody(stripped, sourcePath, dirOfHelper)
+    helpers.push({ path: resolved, body })
+    compiled.add(resolved)
+    // Aliases: if the file was found with an extension, register
+    // that path too (a sub-helper that imported with the explicit
+    // extension would otherwise miss). Same body is reused; the
+    // worker assigns the same exports to both keys at eval time.
+    if (sourcePath !== resolved && !compiled.has(sourcePath)) {
+      helpers.push({ path: sourcePath, body: aliasBody(resolved, sourcePath) })
+      compiled.add(sourcePath)
+    }
+    inFlight.delete(resolved)
   }
 
-  // Rewrite from end to start so earlier offsets don't shift.
+  for (const imp of imports) {
+    if (!isVfsPath(imp.path)) continue
+    await walk(imp.path, '/')
+  }
+
+  // Rewrite the user code's imports to `__modules` lookups.
   let out = source
   for (const imp of [...imports].reverse()) {
     if (!isVfsPath(imp.path)) continue
@@ -172,67 +264,35 @@ export async function prepareScript(
       continue
     }
     const resolved = resolveVfsPath(imp.path, '/')
-    if (!ctx.cache.has(resolved)) continue
+    if (!compiled.has(resolved)) continue
     const replacement = rewriteAsLookup(imp.binding, resolved)
     out = out.slice(0, imp.start) + replacement + out.slice(imp.end)
   }
-  // Convert the cache to a plain object for injection.
-  const modules: Record<string, Readonly<Record<string, unknown>>> = {}
-  for (const [k, v] of ctx.cache) modules[k] = v
-  return { code: out, modules }
+  return { code: out, helpers }
+}
+
+/** Body for an alias entry — when the same helper file should be
+ *  reachable under two paths (e.g. `/helpers/foo` and the
+ *  with-extension form `/helpers/foo.ts`), the alias just copies
+ *  the already-evaluated module's exports rather than re-running
+ *  the helper. Worker iterates helpers in order, so by the time
+ *  this body runs, `__modules[primary]` is populated. */
+function aliasBody(primaryPath: string, aliasPath: string): string {
+  void aliasPath
+  return `Object.assign(__exports, __modules[${JSON.stringify(primaryPath)}]); return __exports;\n`
 }
 
 // ---------------------------------------------------------------------------
 // Helper loading
 // ---------------------------------------------------------------------------
 
-async function loadHelper(
-  importPath: string,
-  baseDir: string,
-  fs: VirtualFileSystem,
-  ctx: LoadContext,
-): Promise<Readonly<Record<string, unknown>>> {
-  const resolved = resolveVfsPath(importPath, baseDir)
-  const cached = ctx.cache.get(resolved)
-  if (cached !== undefined) return cached
-  if (ctx.seen.has(resolved)) {
-    throw new Error(
-      `module loader: cyclic helper import — '${resolved}' is already being loaded. Helper cycles are unsupported; refactor the shared bits into a third file.`,
-    )
-  }
-  ctx.seen.add(resolved)
-
-  const sourcePath = await findFile(resolved, fs)
-  const bytes = await fs.read(sourcePath)
-  const raw = new TextDecoder('utf-8', { fatal: false }).decode(bytes)
-  const stripped = tsBlankSpace(raw)
-
-  // Recursively load this helper's own imports first so they're
-  // available when its body executes.
-  const subImports = parseImports(stripped)
-  const dirOfHelper = dirname(sourcePath)
-  for (const sub of subImports) {
-    if (!isVfsPath(sub.path) && !sub.path.startsWith('.')) continue
-    await loadHelper(sub.path, dirOfHelper, fs, ctx)
-  }
-
-  // Rewrite the helper into an async function that:
-  //   - replaces `export` declarations with plain ones + `__exports.X = X`
-  //   - replaces `import` statements with `const ... = __modules['/path']`
-  //   - returns `__exports` at the end
-  const exports = await runHelper(stripped, sourcePath, dirOfHelper, ctx)
-  ctx.cache.set(resolved, exports)
-  ctx.cache.set(sourcePath, exports)
-  ctx.seen.delete(resolved)
-  return exports
-}
-
-async function runHelper(
-  stripped: string,
-  sourcePath: string,
-  dirOfHelper: string,
-  ctx: LoadContext,
-): Promise<Readonly<Record<string, unknown>>> {
+/** Compile a helper's transformed source into the body of an
+ *  `async function(__exports, __modules) { ... }`. No evaluation —
+ *  the result is a string that callers can `new AsyncFunction(...)`
+ *  themselves, either in the host realm (evalRuntime, via
+ *  `prepareScript`) or in the worker realm after shipping over
+ *  postMessage (workerRuntime, via `prepareScriptForWire`). */
+function compileHelperBody(stripped: string, sourcePath: string, dirOfHelper: string): string {
   // Pass 1: rewrite re-exports first (`export { x } from '/path'`,
   // `export * from '/path'`). They become `__exports.X = __modules['/path'].X`
   // assignments. Has to happen BEFORE rewriteHelperExports so the
@@ -255,13 +315,7 @@ async function runHelper(
   const exportAssignments = exportNames
     .map((n) => `__exports[${JSON.stringify(n)}] = ${n};`)
     .join('\n')
-  const wrapped = `${body}\n${exportAssignments}\nreturn __exports;\n//# sourceURL=${sourcePath}\n`
-  const fn = new AsyncFunction('__exports', '__modules', wrapped)
-  const exports: Record<string, unknown> = {}
-  const modules: Record<string, unknown> = {}
-  for (const [k, v] of ctx.cache) modules[k] = v
-  await fn(exports, modules)
-  return exports
+  return `${body}\n${exportAssignments}\nreturn __exports;\n//# sourceURL=${sourcePath}\n`
 }
 
 // ---------------------------------------------------------------------------

@@ -196,6 +196,28 @@ import '/helpers/d'
     expect((out.modules['/helpers/foo'] as { x: number }).x).toBe(1)
   })
 
+  it("supports `export * from '/path'` (re-export all)", async () => {
+    const fs = await fsWith({
+      '/helpers/leaf.ts': 'export const a = 1; export const b = 2',
+      '/helpers/all.ts': "export * from '/helpers/leaf'",
+    })
+    const out = await prepareScript("import { a, b } from '/helpers/all'", fs)
+    const all = out.modules['/helpers/all'] as { a: number; b: number }
+    expect(all.a).toBe(1)
+    expect(all.b).toBe(2)
+  })
+
+  it("supports `export * as ns from '/path'` (namespace re-export)", async () => {
+    const fs = await fsWith({
+      '/helpers/leaf.ts': 'export const a = 1; export const b = 2',
+      '/helpers/wrap.ts': "export * as utils from '/helpers/leaf'",
+    })
+    const out = await prepareScript("import { utils } from '/helpers/wrap'", fs)
+    const wrap = out.modules['/helpers/wrap'] as { utils: { a: number; b: number } }
+    expect(wrap.utils?.a).toBe(1)
+    expect(wrap.utils?.b).toBe(2)
+  })
+
   it('runs a real end-to-end helper that exports multiple functions', async () => {
     // Concrete proof that the userspace ESM emulation produces a
     // working module — exports are real JS values that callers can

@@ -29,8 +29,12 @@ export async function* parseSseEvents(body: ReadableStream<Uint8Array>): AsyncIt
         while (nl !== -1) {
           const line = buffer.slice(0, nl).replace(/\r$/, '')
           buffer = buffer.slice(nl + 1)
-          if (line.startsWith('data: ')) {
-            const payload = line.slice(6)
+          // SSE spec: the space after `data:` is optional. Anthropic
+          // always sends it, but other providers / proxies sometimes
+          // don't. Strip it defensively.
+          if (line.startsWith('data:')) {
+            let payload = line.slice(5)
+            if (payload.startsWith(' ')) payload = payload.slice(1)
             if (payload === '[DONE]') return
             yield payload
           }
@@ -43,8 +47,9 @@ export async function* parseSseEvents(body: ReadableStream<Uint8Array>): AsyncIt
     // Flush a final line not terminated by a newline.
     buffer += decoder.decode()
     const tail = buffer.replace(/\r$/, '')
-    if (tail.startsWith('data: ')) {
-      const payload = tail.slice(6)
+    if (tail.startsWith('data:')) {
+      let payload = tail.slice(5)
+      if (payload.startsWith(' ')) payload = payload.slice(1)
       if (payload !== '[DONE]') yield payload
     }
   } finally {

@@ -110,21 +110,41 @@ class CallState {
   }
 
   /** Build the authoritative Emission from the buffered raw JSON.
-   *  Returns `null` if the JSON is invalid or the args don't carry
-   *  the required fields — the agent will see a no-tool-called turn
-   *  and re-prompt, which is the right behavior. */
-  finalize(): TokenChunk | null {
+   *
+   *  On any parse / shape failure, returns a synthetic `TextEmission`
+   *  describing what went wrong — never `null`. Two reasons:
+   *
+   *    1. An empty assistant turn (no emissions) makes Anthropic
+   *       400 on the next request.
+   *    2. The text shows up as a `[text]` part in the action's
+   *       conversation history, so the model can read its own
+   *       error and adjust on the next turn. */
+  finalize(): TokenChunk {
     const raw = this.rawBuf.join('')
-    let args: Record<string, unknown>
+    const fallback = (reason: string): TokenChunk => ({
+      type: 'emission',
+      content: '',
+      done: true,
+      emissionIndex: this.emissionIndex,
+      emission: {
+        type: 'text',
+        text: `(${this.toolName} call dropped: ${reason})`,
+      },
+    })
+    let parsed: unknown
     try {
-      const parsed = JSON.parse(raw) as unknown
-      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null
-      args = parsed as Record<string, unknown>
-    } catch {
-      return null
+      parsed = JSON.parse(raw)
+    } catch (e) {
+      return fallback(`invalid JSON args — ${e instanceof Error ? e.message : 'unknown'}`)
     }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+      return fallback('args were not a JSON object')
+    }
+    const args = parsed as Record<string, unknown>
     const emission = this.buildEmission(args)
-    if (emission === null) return null
+    if (emission === null) {
+      return fallback('required fields missing (e.g. path / search)')
+    }
     return {
       type: 'emission',
       content: '',
@@ -238,13 +258,14 @@ export async function* parseToolEvents(
       continue
     }
     if (event.type === 'textPart') {
-      // Whitespace-only text is noise (providers occasionally emit a
-      // lone newline between content blocks); drop it.
+      // Don't drop whitespace-only text. Earlier we filtered it out
+      // ("noise from providers between content blocks"), but if the
+      // model's *only* output is a whitespace text block, dropping
+      // it leaves the action with no emissions — which renders as an
+      // empty assistant turn and Anthropic 400s on the next request.
+      // A whitespace text part in the log is harmless; an empty
+      // assistant turn is not.
       const text = event.text
-      if (text.trim().length === 0) {
-        currentTextIdx = null
-        continue
-      }
       const idx = currentTextIdx ?? nextIndex++
       currentTextIdx = null
       const emission: TextEmission = { type: 'text', text }
@@ -293,8 +314,7 @@ export async function* parseToolEvents(
       const state = calls.get(event.callId)
       if (state === undefined) continue
       calls.delete(event.callId)
-      const final = state.finalize()
-      if (final !== null) yield final
+      yield state.finalize()
     }
   }
 }

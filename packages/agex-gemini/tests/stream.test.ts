@@ -21,7 +21,7 @@ function b64(s: string): string {
 }
 
 describe('translateGeminiStream — function calls', () => {
-  it('emits Start + ArgDelta(stringified) + End for a single function_call', async () => {
+  it('emits Start (with signature) + ArgDelta(stringified) + End for a single function_call', async () => {
     const events = [
       {
         candidates: [
@@ -43,17 +43,23 @@ describe('translateGeminiStream — function calls', () => {
       },
     ]
     const out = await collect(translateGeminiStream(fromArray(events)))
-    // Start, ArgDelta, End — then a synthetic ThinkingPart carrying
-    // the signature so the renderer can replay it on the next turn.
+    // The signature rides on toolCallStart so the parser can attach
+    // it to the built Emission. The Gemini adapter then places it as
+    // a sibling field of `functionCall` on the same Part on replay
+    // — exactly what the API requires.
     expect(out).toEqual([
-      { type: 'toolCallStart', callId: 'tu_1', toolName: 'ts_action' },
+      {
+        type: 'toolCallStart',
+        callId: 'tu_1',
+        toolName: 'ts_action',
+        signature: enc.encode('opaque-sig'),
+      },
       {
         type: 'toolCallArgDelta',
         callId: 'tu_1',
         argumentChunk: JSON.stringify({ code: 'taskSuccess(1)', title: 't' }),
       },
       { type: 'toolCallEnd', callId: 'tu_1' },
-      { type: 'thinkingPart', signature: enc.encode('opaque-sig') },
     ])
   })
 
@@ -115,15 +121,13 @@ describe('translateGeminiStream — function calls', () => {
       },
     ]
     const out = await collect(translateGeminiStream(fromArray(events)))
-    // One Start (deduped), one ArgDelta, one End, plus the latest
-    // signature on the ThinkingPart.
+    // Latest-seen signature wins on the toolCallStart event.
     const starts = out.filter((e) => e.type === 'toolCallStart')
     expect(starts).toHaveLength(1)
-    const sig = out.find((e) => e.type === 'thinkingPart')
-    expect(sig?.signature).toEqual(enc.encode('late-sig'))
+    expect(starts[0]?.signature).toEqual(enc.encode('late-sig'))
   })
 
-  it('applies the documented dummy signature when the first function_call has none', async () => {
+  it('applies the documented dummy signature on toolCallStart when the first function_call has none', async () => {
     // Gemini 3's validator rejects subsequent turns when the first
     // function_call lacks a thoughtSignature. agex-py's escape
     // hatch (and ours) is a literal sentinel that bypasses
@@ -144,23 +148,31 @@ describe('translateGeminiStream — function calls', () => {
       },
     ]
     const out = await collect(translateGeminiStream(fromArray(events)))
-    const sig = out.find((e) => e.type === 'thinkingPart')
-    expect(sig?.signature).toBeDefined()
-    expect(new TextDecoder().decode(sig?.signature)).toBe('context_engineering_is_the_way_to_go')
+    const start = out.find((e) => e.type === 'toolCallStart')
+    expect(start?.signature).toBeDefined()
+    expect(new TextDecoder().decode(start?.signature)).toBe('context_engineering_is_the_way_to_go')
   })
 })
 
 describe('translateGeminiStream — text + thought parts', () => {
-  it('concatenates consecutive text parts across chunks and emits one TextPart', async () => {
+  it('concatenates text across chunks and emits a delta + final TextPart', async () => {
+    // Gemini buffers across chunks (because of the late-sig case for
+    // fcs), so individual deltas don't flow per-chunk. At flush we
+    // emit a single TextDelta with the full content (so prettyTokens
+    // / onToken consumers see something) and the canonical TextPart
+    // (so the parser builds the final TextEmission).
     const events = [
       { candidates: [{ content: { parts: [{ text: 'one ' }] } }] },
       { candidates: [{ content: { parts: [{ text: 'two ' }, { text: 'three' }] } }] },
     ]
     const out = await collect(translateGeminiStream(fromArray(events)))
-    expect(out).toEqual([{ type: 'textPart', text: 'one two three' }])
+    expect(out).toEqual([
+      { type: 'textDelta', content: 'one two three' },
+      { type: 'textPart', text: 'one two three' },
+    ])
   })
 
-  it('round-trips signed thought parts (no function_call) as ThinkingParts', async () => {
+  it('round-trips signed thought parts as ThinkingDelta + ThinkingPart', async () => {
     const events = [
       {
         candidates: [
@@ -179,8 +191,12 @@ describe('translateGeminiStream — text + thought parts', () => {
       },
     ]
     const out = await collect(translateGeminiStream(fromArray(events)))
-    expect(out).toHaveLength(1)
-    const part = out[0]
+    // ThinkingDelta surfaces the text for streaming consumers; the
+    // canonical ThinkingPart carries text + signature for the
+    // parser to build the final ThinkingEmission.
+    expect(out).toHaveLength(2)
+    expect(out[0]).toEqual({ type: 'thinkingDelta', content: 'planning' })
+    const part = out[1]
     if (part?.type !== 'thinkingPart') throw new Error('expected thinkingPart')
     expect(part.text).toBe('planning')
     expect(new TextDecoder().decode(part.signature)).toBe('sig-1')

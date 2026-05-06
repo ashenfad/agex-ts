@@ -26,7 +26,7 @@ const agent = await createAgent({
     'You are great at providing custom functions to the user. You also like to write modules.',
   llm: new Gemini({
     apiKey,
-    model: process.env.GEMINI_MODEL ?? 'gemini-3.1-flash',
+    model: process.env.GEMINI_MODEL ?? 'gemini-3-flash-preview',
   }),
   runtime: evalRuntime(),
   state: { type: 'versioned', storage: 'memory' },

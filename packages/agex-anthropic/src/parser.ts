@@ -83,13 +83,19 @@ function keyMapFor(toolName: ToolName): Readonly<Record<string, TokenChunkType>>
 class CallState {
   readonly toolName: ToolName
   readonly emissionIndex: number
+  /** Per-call opaque signature the provider wants round-tripped on
+   *  subsequent turns (Gemini's `thoughtSignature`). Threaded onto
+   *  the built Emission so the renderer can place it correctly on
+   *  the next request. `undefined` for providers that don't sign. */
+  readonly signature?: Uint8Array
   private readonly extractor = new JsonStringExtractor()
   private readonly rawBuf: string[] = []
   private readonly keyMap: Readonly<Record<string, TokenChunkType>>
 
-  constructor(toolName: ToolName, emissionIndex: number) {
+  constructor(toolName: ToolName, emissionIndex: number, signature?: Uint8Array) {
     this.toolName = toolName
     this.emissionIndex = emissionIndex
+    if (signature !== undefined) this.signature = signature
     this.keyMap = keyMapFor(toolName)
   }
 
@@ -157,18 +163,18 @@ class CallState {
   private buildEmission(args: Record<string, unknown>): Emission | null {
     switch (this.toolName) {
       case TOOL_TS:
-        return buildTsEmission(args)
+        return buildTsEmission(args, this.signature)
       case TOOL_TERMINAL:
-        return buildTerminalEmission(args)
+        return buildTerminalEmission(args, this.signature)
       case TOOL_WRITE_FILE:
-        return buildWriteFileEmission(args)
+        return buildWriteFileEmission(args, this.signature)
       case TOOL_EDIT_FILE:
-        return buildEditFileEmission(args)
+        return buildEditFileEmission(args, this.signature)
     }
   }
 }
 
-function buildTsEmission(args: Record<string, unknown>): TsEmission | null {
+function buildTsEmission(args: Record<string, unknown>, signature?: Uint8Array): TsEmission | null {
   const code = strOr(args.code, '')
   // Permit empty code — the model occasionally calls ts_action with
   // just thinking + title to "comment out" a turn. Surfaces as a
@@ -178,20 +184,28 @@ function buildTsEmission(args: Record<string, unknown>): TsEmission | null {
     code,
     ...(args.thinking !== undefined && { thinking: strOr(args.thinking, '') }),
     ...(args.title !== undefined && { title: strOr(args.title, '') }),
+    ...(signature !== undefined && { signature }),
   }
 }
 
-function buildTerminalEmission(args: Record<string, unknown>): TerminalEmission | null {
+function buildTerminalEmission(
+  args: Record<string, unknown>,
+  signature?: Uint8Array,
+): TerminalEmission | null {
   const commands = strOr(args.commands, '')
   return {
     type: 'terminal',
     commands,
     ...(args.thinking !== undefined && { thinking: strOr(args.thinking, '') }),
     ...(args.title !== undefined && { title: strOr(args.title, '') }),
+    ...(signature !== undefined && { signature }),
   }
 }
 
-function buildWriteFileEmission(args: Record<string, unknown>): FileWriteEmission | null {
+function buildWriteFileEmission(
+  args: Record<string, unknown>,
+  signature?: Uint8Array,
+): FileWriteEmission | null {
   const path = strOr(args.path, '')
   if (path.length === 0) return null
   const rawMode = args.mode
@@ -201,10 +215,14 @@ function buildWriteFileEmission(args: Record<string, unknown>): FileWriteEmissio
     path,
     content: strOr(args.content, ''),
     mode,
+    ...(signature !== undefined && { signature }),
   }
 }
 
-function buildEditFileEmission(args: Record<string, unknown>): FileEditEmission | null {
+function buildEditFileEmission(
+  args: Record<string, unknown>,
+  signature?: Uint8Array,
+): FileEditEmission | null {
   const path = strOr(args.path, '')
   if (path.length === 0) return null
   // Without `search`, the edit is incoherent — drop. `content` may be
@@ -216,6 +234,7 @@ function buildEditFileEmission(args: Record<string, unknown>): FileEditEmission 
     search: args.search,
     content: strOr(args.content, ''),
     ...(args.matchAll === true && { matchAll: true }),
+    ...(signature !== undefined && { signature }),
   }
 }
 
@@ -293,7 +312,7 @@ export async function* parseToolEvents(
     }
     if (event.type === 'toolCallStart') {
       const idx = nextIndex++
-      calls.set(event.callId, new CallState(event.toolName, idx))
+      calls.set(event.callId, new CallState(event.toolName, idx, event.signature))
       // toolStart token names the tool so the UI can show "calling
       // ts_action..." before any args have arrived.
       yield {

@@ -31,6 +31,11 @@ export interface ToolCallStart {
   readonly type: 'toolCallStart'
   readonly callId: string
   readonly toolName: ToolName
+  /** Per-call opaque signature for round-trip on subsequent turns.
+   *  Anthropic doesn't sign tool_use blocks (signatures live on
+   *  separate thinking blocks), so this stays `undefined` here.
+   *  Defined for vocabulary parity with Gemini, which DOES use it. */
+  readonly signature?: Uint8Array
 }
 
 export interface ToolCallArgDelta {

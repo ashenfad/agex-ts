@@ -163,22 +163,32 @@ const AsyncFunction = Object.getPrototypeOf(async () => undefined).constructor a
  *  __modules['/path']` lookups. Helpers (and helper-of-helpers,
  *  transitively) are pre-loaded; the returned `modules` map should
  *  be passed as the `__modules` parameter when invoking the
- *  resulting AsyncFunction. */
+ *  resulting AsyncFunction.
+ *
+ *  When `registeredValues` is supplied, agent code (and helpers)
+ *  can also write `import * as math from 'math'` for any name in
+ *  the registration table. The map's values are passed to helpers
+ *  as `__registered`; agent main code already has the values in
+ *  scope as globals (the runtime injects them), so no wiring is
+ *  needed there. */
 export async function prepareScript(
   source: string,
   fs: VirtualFileSystem,
+  registeredValues: ReadonlyMap<string, unknown> = new Map(),
 ): Promise<PreparedScript> {
   // Reuse the wire path then evaluate each helper locally — same
   // semantics as before, just a different output shape on the
-  // far side. The dual-key aliasing (resolved + sourcePath) that
-  // the previous direct implementation did is preserved here.
-  const prepared = await prepareScriptForWire(source, fs, tsBlankSpace)
+  // far side.
+  const registeredNames = new Set(registeredValues.keys())
+  const prepared = await prepareScriptForWire(source, fs, tsBlankSpace, registeredNames)
   if (prepared.helpers.length === 0) return { code: prepared.code, modules: {} }
   const modules: Record<string, Readonly<Record<string, unknown>>> = {}
+  const __registered: Record<string, unknown> = {}
+  for (const [k, v] of registeredValues) __registered[k] = v
   for (const h of prepared.helpers) {
-    const fn = new AsyncFunction('__exports', '__modules', h.body)
+    const fn = new AsyncFunction('__exports', '__modules', '__registered', h.body)
     const exports: Record<string, unknown> = {}
-    await fn(exports, modules)
+    await fn(exports, modules, __registered)
     modules[h.path] = exports
   }
   return { code: prepared.code, modules }
@@ -195,11 +205,20 @@ export async function prepareScript(
  *  The `transform` parameter handles TS → JS conversion of helper
  *  source files. evalRuntime passes `tsBlankSpace`; workerRuntime
  *  passes its configurable transform (default ts-blank-space, can
- *  be swapped for esbuild-wasm). */
+ *  be swapped for esbuild-wasm).
+ *
+ *  The optional `registeredNames` set lets agent code reach
+ *  registered fns / classes / namespaces via natural `import`
+ *  statements: `import * as math from 'math'` rewrites to
+ *  `const math = math` (a no-op rebind, since `math` is already
+ *  in scope). Without this set, `import` statements with
+ *  non-VFS specifiers pass through unchanged and fail at runtime
+ *  with `SyntaxError: Cannot use import statement outside a module`. */
 export async function prepareScriptForWire(
   source: string,
   fs: VirtualFileSystem,
   transform: (src: string) => string | Promise<string>,
+  registeredNames: ReadonlySet<string> = new Set(),
 ): Promise<PreparedForWire> {
   const imports = parseImports(source)
   if (imports.length === 0) return { code: source, helpers: [] }
@@ -235,7 +254,7 @@ export async function prepareScriptForWire(
       await walk(sub.path, dirOfHelper)
     }
 
-    const body = compileHelperBody(stripped, sourcePath, dirOfHelper)
+    const body = compileHelperBody(stripped, sourcePath, dirOfHelper, registeredNames)
     helpers.push({ path: resolved, body })
     compiled.add(resolved)
     // Aliases: if the file was found with an extension, register
@@ -254,19 +273,33 @@ export async function prepareScriptForWire(
     await walk(imp.path, '/')
   }
 
-  // Rewrite the user code's imports to `__modules` lookups.
+  // Rewrite the user code's imports. Two specifier kinds get
+  // rewritten; everything else passes through untouched (and
+  // typically throws at runtime with `Cannot use import statement
+  // outside a module` — a signal that the agent reached for a
+  // package the host hasn't exposed).
   let out = source
   for (const imp of [...imports].reverse()) {
-    if (!isVfsPath(imp.path)) continue
-    if (imp.isReexport) {
-      // Re-exports aren't valid in script context; strip them.
-      out = `${out.slice(0, imp.start)}/* re-export skipped */${out.slice(imp.end)}`
+    if (isVfsPath(imp.path)) {
+      if (imp.isReexport) {
+        // Re-exports aren't valid in script context; strip them.
+        out = `${out.slice(0, imp.start)}/* re-export skipped */${out.slice(imp.end)}`
+        continue
+      }
+      const resolved = resolveVfsPath(imp.path, '/')
+      if (!compiled.has(resolved)) continue
+      const replacement = rewriteAsLookup(imp.binding, resolved)
+      out = out.slice(0, imp.start) + replacement + out.slice(imp.end)
       continue
     }
-    const resolved = resolveVfsPath(imp.path, '/')
-    if (!compiled.has(resolved)) continue
-    const replacement = rewriteAsLookup(imp.binding, resolved)
-    out = out.slice(0, imp.start) + replacement + out.slice(imp.end)
+    if (registeredNames.has(imp.path)) {
+      if (imp.isReexport) {
+        out = `${out.slice(0, imp.start)}/* re-export skipped */${out.slice(imp.end)}`
+        continue
+      }
+      const replacement = rewriteAsRegisteredAccess(imp.binding, imp.path)
+      out = out.slice(0, imp.start) + replacement + out.slice(imp.end)
+    }
   }
   return { code: out, helpers }
 }
@@ -287,12 +320,29 @@ function aliasBody(primaryPath: string, aliasPath: string): string {
 // ---------------------------------------------------------------------------
 
 /** Compile a helper's transformed source into the body of an
- *  `async function(__exports, __modules) { ... }`. No evaluation —
- *  the result is a string that callers can `new AsyncFunction(...)`
- *  themselves, either in the host realm (evalRuntime, via
- *  `prepareScript`) or in the worker realm after shipping over
- *  postMessage (workerRuntime, via `prepareScriptForWire`). */
-function compileHelperBody(stripped: string, sourcePath: string, dirOfHelper: string): string {
+ *  `async function(__exports, __modules, __registered) { ... }`.
+ *  No evaluation — the result is a string that callers can
+ *  `new AsyncFunction(...)` themselves, either in the host realm
+ *  (evalRuntime, via `prepareScript`) or in the worker realm after
+ *  shipping over postMessage (workerRuntime, via
+ *  `prepareScriptForWire`).
+ *
+ *  Three import-specifier kinds are recognized:
+ *    - VFS paths (`/helpers/foo`, `./bar`) → rewritten to
+ *      `__modules['/path']` lookups.
+ *    - Names in `registeredNames` → rewritten to `__registered['name']`
+ *      lookups (registered fns / classes / namespaces are reachable
+ *      from helpers via this map, mirroring the agent's main scope).
+ *    - Anything else (npm packages, external URLs) → left untouched.
+ *      That's a syntax error at AsyncFunction-eval time; the
+ *      message points the agent at what they actually have access
+ *      to. */
+function compileHelperBody(
+  stripped: string,
+  sourcePath: string,
+  dirOfHelper: string,
+  registeredNames: ReadonlySet<string>,
+): string {
   // Pass 1: rewrite re-exports first (`export { x } from '/path'`,
   // `export * from '/path'`). They become `__exports.X = __modules['/path'].X`
   // assignments. Has to happen BEFORE rewriteHelperExports so the
@@ -301,16 +351,23 @@ function compileHelperBody(stripped: string, sourcePath: string, dirOfHelper: st
   // Pass 2: rewrite `export ...` declarations, tracking exported
   // names for the trailing assignment block.
   const { code, exportNames } = rewriteHelperExports(reexported)
-  // Pass 3: rewrite plain `import` statements (non-reexport) into
-  // lookups against the pre-loaded module cache.
+  // Pass 3: rewrite plain `import` statements (non-reexport) — VFS
+  // paths to `__modules` lookups, registered names to `__registered`
+  // lookups.
   const imports = parseImports(code)
   let body = code
   for (const imp of [...imports].reverse()) {
     if (imp.isReexport) continue // already handled in pass 1
-    if (!isVfsPath(imp.path) && !imp.path.startsWith('.')) continue
-    const resolved = resolveVfsPath(imp.path, dirOfHelper)
-    const replacement = rewriteAsLookup(imp.binding, resolved)
-    body = body.slice(0, imp.start) + replacement + body.slice(imp.end)
+    if (isVfsPath(imp.path) || imp.path.startsWith('.')) {
+      const resolved = resolveVfsPath(imp.path, dirOfHelper)
+      const replacement = rewriteAsLookup(imp.binding, resolved)
+      body = body.slice(0, imp.start) + replacement + body.slice(imp.end)
+      continue
+    }
+    if (registeredNames.has(imp.path)) {
+      const replacement = rewriteAsRegisteredAccess(imp.binding, imp.path, true)
+      body = body.slice(0, imp.start) + replacement + body.slice(imp.end)
+    }
   }
   const exportAssignments = exportNames
     .map((n) => `__exports[${JSON.stringify(n)}] = ${n};`)
@@ -531,6 +588,77 @@ function parseNamedEntries(inside: string): ReadonlyArray<{ source: string; loca
     }
   }
   return entries
+}
+
+/** Rewrite `import ... from 'name'` where `name` is a registered
+ *  resource (fn / cls / namespace) the runtime injects directly
+ *  into the agent's scope. The binding becomes a destructuring
+ *  pull from the in-scope `name`, or — when the agent's local
+ *  binding name already matches `name` — an elided no-op (the
+ *  global is already there).
+ *
+ *  This bridges the LLM reflex of writing `import` statements
+ *  with the agex injection model. The agent can write either
+ *  the named-import form or just use the global; both work. */
+function rewriteAsRegisteredAccess(
+  binding: ImportBinding,
+  name: string,
+  helperContext = false,
+): string {
+  // In the agent's main code, registered names are global identifiers
+  // (the runtime injects them into the AsyncFunction parameter list).
+  // Inside a helper, that scope isn't reachable — helpers get a
+  // separate `__registered` map parameter, indexed by name. The
+  // emitted access string differs per context.
+  const target = helperContext ? `__registered[${JSON.stringify(name)}]` : name
+  // The "elide" path (when a binding name matches the registered
+  // name) only makes sense in main code where the value is already
+  // there as a global. In helper context we always need the const
+  // declaration so the local binding lands in helper scope.
+  const elide = (msg: string): string => (helperContext ? `${msg.replace('elide', 'bind')}` : msg)
+  void elide
+  switch (binding.kind) {
+    case 'sideEffect':
+      return `/* import '${name}' (already in scope) */`
+    case 'namespace':
+      if (binding.local === name && !helperContext) return `/* import * as ${name} */`
+      return `const ${binding.local} = ${target};`
+    case 'default':
+      if (binding.local === name && !helperContext) return `/* import ${name} (already in scope) */`
+      return `const ${binding.local} = ${target}.default;`
+    case 'named': {
+      // Self-named import (`import { Vec } from 'Vec'`): in main
+      // code Vec is already global, elide. In helper context the
+      // helper does need the local binding — but destructuring
+      // `Vec.Vec` would resolve to undefined for cls / fn
+      // registrations (the registered value IS the thing, not a
+      // module wrapper around it). Bind directly to the value.
+      if (
+        binding.entries.length === 1 &&
+        binding.entries[0]?.source === name &&
+        binding.entries[0]?.local === name
+      ) {
+        if (!helperContext) return `/* import { ${name} } from '${name}' (already in scope) */`
+        return `const ${name} = ${target};`
+      }
+      if (binding.entries.length === 0) return `/* import '${name}' */`
+      const dest = binding.entries
+        .map((e) => (e.source === e.local ? e.source : `${e.source}: ${e.local}`))
+        .join(', ')
+      return `const { ${dest} } = ${target};`
+    }
+    case 'mixed': {
+      const named = binding.entries
+        .map((e) => (e.source === e.local ? e.source : `${e.source}: ${e.local}`))
+        .join(', ')
+      const defaultPart =
+        binding.defaultLocal === name && !helperContext
+          ? ''
+          : `const ${binding.defaultLocal} = ${target}.default;`
+      const namedPart = `const { ${named} } = ${target};`
+      return defaultPart === '' ? namedPart : `${defaultPart}\n${namedPart}`
+    }
+  }
 }
 
 /** Rewrite `import { ... } from '/path'` as a destructuring lookup

@@ -172,10 +172,18 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
         // runtime error so the agent can read the message and adjust.
         const erased = tsBlankSpace(code)
         // Resolve `import { x } from '/helpers/foo'` statements against
-        // the agent's VFS. Pre-loaded helpers come back via the
-        // `__modules` map injected as a function arg. See
-        // module-loader.ts for the userspace ESM strategy.
-        const prepared = await prepareScript(erased, ctx.fs)
+        // the agent's VFS, and `import * as foo from 'foo'` against
+        // the registered fn / cls / namespace table. Pre-loaded
+        // helpers come back via the `__modules` map; registered
+        // names are flowed to helpers via `__registered`. The
+        // agent's main code uses globals (already in `injected`)
+        // so registered-name imports just rebind in main scope.
+        const registeredValues = new Map<string, unknown>()
+        for (const [n, reg] of policy.fns) registeredValues.set(n, reg.fn ?? urlRefs.get(n))
+        for (const [n, reg] of policy.namespaces)
+          registeredValues.set(n, reg.target ?? urlRefs.get(n))
+        for (const [n, reg] of policy.classes) registeredValues.set(n, reg.cls ?? urlRefs.get(n))
+        const prepared = await prepareScript(erased, ctx.fs, registeredValues)
         injected.__modules = prepared.modules
         const names = Object.keys(injected)
         // Append a sourceURL pragma so AsyncFunction-emitted stack

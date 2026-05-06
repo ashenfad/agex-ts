@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { prettyTokens } from '../src/pretty'
-import type { TokenChunk } from '../src/types'
+import { prettyEvents, prettyTokens } from '../src/pretty'
+import type { ActionEvent, AgentEvent, TokenChunk } from '../src/types'
 
 function capture(): { write: (s: string) => void; out: () => string } {
   const buf: string[] = []
@@ -64,5 +64,113 @@ describe('prettyTokens', () => {
   it('uses the default writer when none is given', () => {
     // Just exercise the default path — proves no exception.
     expect(() => prettyTokens(tk({ type: 'emission', done: true, content: '' }))).not.toThrow()
+  })
+})
+
+describe('prettyEvents', () => {
+  function captureLines(): { write: (l: string) => void; lines: () => string[] } {
+    const out: string[] = []
+    return { write: (l: string) => out.push(l), lines: () => out }
+  }
+
+  const ts = '2026-05-05T00:00:00.000Z'
+
+  it('formats taskStart with the task name', () => {
+    const { write, lines } = captureLines()
+    prettyEvents(
+      { type: 'taskStart', timestamp: ts, agentName: 'a', taskName: 'compute', inputs: null },
+      { write },
+    )
+    expect(lines()).toEqual(['[taskStart] compute'])
+  })
+
+  it('formats action emissions per type with appropriate prefixes', () => {
+    const action: ActionEvent = {
+      type: 'action',
+      timestamp: ts,
+      agentName: 'a',
+      emissions: [
+        { type: 'thinking', text: 'plan' },
+        { type: 'ts', code: 'taskSuccess(1)' },
+        { type: 'terminal', commands: 'ls /' },
+        { type: 'fileWrite', path: '/n', content: 'hi', mode: 'append' },
+        { type: 'fileEdit', path: '/n', search: 'a', content: 'b' },
+        { type: 'text', text: 'aside' },
+      ],
+    }
+    const { write, lines } = captureLines()
+    prettyEvents(action, { write })
+    expect(lines()).toEqual([
+      '[thinking] plan',
+      '[ts]\n  taskSuccess(1)',
+      '[terminal] ls /',
+      '[fileWrite] /n (append)',
+      '[fileEdit] /n',
+      '[text] aside',
+    ])
+  })
+
+  it('formats output text and image parts', () => {
+    const { write, lines } = captureLines()
+    prettyEvents(
+      {
+        type: 'output',
+        timestamp: ts,
+        agentName: 'a',
+        parts: [
+          { type: 'text', text: 'hello' },
+          { type: 'image', format: 'png', data: 'b64' },
+        ],
+      },
+      { write },
+    )
+    expect(lines()).toEqual(['[stdout] hello', '[stdout] <image png>'])
+  })
+
+  it('formats terminal events (success/fail/clarify/cancelled/error)', () => {
+    const { write, lines } = captureLines()
+    const events: AgentEvent[] = [
+      { type: 'success', timestamp: ts, agentName: 'a', result: 1 },
+      { type: 'fail', timestamp: ts, agentName: 'a', message: 'nope' },
+      { type: 'clarify', timestamp: ts, agentName: 'a', message: 'huh?' },
+      {
+        type: 'cancelled',
+        timestamp: ts,
+        agentName: 'a',
+        taskName: 't',
+        iterationsCompleted: 3,
+      },
+      {
+        type: 'error',
+        timestamp: ts,
+        agentName: 'a',
+        errorName: 'TypeError',
+        errorMessage: 'bad',
+        recoverable: true,
+      },
+    ]
+    for (const e of events) prettyEvents(e, { write })
+    expect(lines()).toEqual([
+      '[success]',
+      '[fail] nope',
+      '[clarify] huh?',
+      '[cancelled] t after 3 iterations',
+      '[error] TypeError: bad',
+    ])
+  })
+
+  it('caps overly long bodies with a tail marker', () => {
+    const { write, lines } = captureLines()
+    const big = 'x'.repeat(50)
+    prettyEvents(
+      {
+        type: 'action',
+        timestamp: ts,
+        agentName: 'a',
+        emissions: [{ type: 'thinking', text: big }],
+      },
+      { write, maxBody: 10 },
+    )
+    expect(lines()[0]).toBe(`[thinking] xxxxxxxxxx…(${50 - 10} more)`)
   })
 })

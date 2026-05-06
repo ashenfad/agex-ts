@@ -21,6 +21,6 @@ export {
   type TerminalRegistration,
 } from './agent'
 export { shouldTriggerChaptering } from './chaptering'
-export { prettyTokens } from './pretty'
+export { prettyEvents, prettyTokens } from './pretty'
 export type { TaskDefinition } from './task'
 export * from './types'

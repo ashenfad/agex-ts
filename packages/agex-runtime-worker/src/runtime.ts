@@ -25,9 +25,14 @@
  * budgets and external aborts.
  *
  * What gets bridged today: `fs` / `cache` (per-execute context),
- * registered fns, and registered namespaces. Registered classes
- * (`agent.cls`) — agent-side `new` returning per-emission instance
- * handles whose method calls round-trip — are the next slice.
+ * registered fns, registered namespaces, and registered classes.
+ * For classes the agent sees a Proxy-backed constructor: `new
+ * MyClass(args)` posts `newInstance` to the host (which parks a
+ * real instance in the per-execute table), and method calls on the
+ * Proxy post `instanceCall` carrying the assigned `instanceId`.
+ * Static methods on the class itself dispatch through `target:
+ * 'cls'`. Instance state lives entirely host-side; per-emission
+ * cleanup releases everything when the execute settles.
  */
 
 import { CancelledError } from 'agex-ts/errors'
@@ -35,8 +40,10 @@ import { memberAllowed } from 'agex-ts/policy'
 import type {
   ExecResult,
   ExecuteContext,
+  MemberFilter,
   OutputPart,
   Policy,
+  RegisteredCls,
   RegisteredNs,
   RuntimeAdapter,
   TaskOutcome,
@@ -245,6 +252,14 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
 
       const executeId = nextExecuteId++
       const outputs: OutputPart[] = []
+      // Per-execute live instance table — populated by `newInstance`,
+      // looked up by `instanceCall`, dropped wholesale at settle so
+      // host instances don't leak across emissions. `instanceId`s
+      // restart at 1 each execute; the executeId guard on the
+      // message routing ensures stale messages from a prior execute
+      // can't accidentally reach into the current table.
+      const instances = new Map<number, unknown>()
+      let nextInstanceId = 1
 
       let outcome: TaskOutcome = { kind: 'continue' }
       let error: Error | null = null
@@ -267,6 +282,11 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
           ctx.signal.removeEventListener('abort', onAbort)
           clearTimeout(timer)
           activeExecute = null
+          // Drop instance handles — agent's "fresh slate per
+          // emission" model. Real release happens when no other
+          // closure retains a reference; the Map clear is the host
+          // letting go of its hold.
+          instances.clear()
           resolve()
         }
         activeExecute = { settle }
@@ -279,6 +299,14 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
           }
           if (m?.type === 'bridgeCall' && m.executeId === executeId) {
             void handleBridgeCall(m, ctx, policyRef, w)
+            return
+          }
+          if (m?.type === 'newInstance' && m.executeId === executeId) {
+            void handleNewInstance(m, policyRef, instances, () => nextInstanceId++, w)
+            return
+          }
+          if (m?.type === 'instanceCall' && m.executeId === executeId) {
+            void handleInstanceCall(m, instances, w)
             return
           }
           if (m?.type === 'result' && m.executeId === executeId) {
@@ -491,15 +519,144 @@ async function dispatch(
       }
       return await fn.apply(target, args as unknown[])
     }
+    case 'cls': {
+      if (policy === null) {
+        throw new Error("workerRuntime bridge: 'cls' call before init() / policy unavailable")
+      }
+      const subject = msg.subject
+      if (subject === undefined) {
+        throw new Error("workerRuntime bridge: 'cls' call missing required `subject`")
+      }
+      const reg = policy.classes.get(subject)
+      if (reg === undefined) {
+        throw new Error(`workerRuntime bridge: no registered class named '${subject}'`)
+      }
+      const visible = visibleClassStatics(reg)
+      if (!visible.has(method)) {
+        throw new Error(
+          `workerRuntime bridge: static member '${method}' not visible on class '${subject}'`,
+        )
+      }
+      // biome-ignore lint/suspicious/noExplicitAny: dynamic dispatch
+      const cls: any = reg.cls
+      const fn = cls[method]
+      if (typeof fn !== 'function') {
+        throw new Error(
+          `workerRuntime bridge: '${subject}.${method}' is not callable (non-function statics aren't bridged in this PR)`,
+        )
+      }
+      return await fn.apply(cls, args as unknown[])
+    }
+  }
+}
+
+/** Handle a `newInstance` message: invoke the registered class's
+ *  constructor with the given args, park the resulting instance in
+ *  the per-execute table, reply with the assigned `instanceId`. */
+async function handleNewInstance(
+  msg: Extract<Worker2HostMessage, { type: 'newInstance' }>,
+  policy: Policy | null,
+  instances: Map<number, unknown>,
+  nextId: () => number,
+  w: Worker,
+): Promise<void> {
+  const { executeId, callId, clsName, args } = msg
+  let value: { instanceId: number } | null = null
+  let error: SerializedError | null = null
+  try {
+    if (policy === null) {
+      throw new Error("workerRuntime bridge: 'newInstance' before init() / policy unavailable")
+    }
+    const reg = policy.classes.get(clsName)
+    if (reg === undefined) {
+      throw new Error(`workerRuntime bridge: no registered class named '${clsName}'`)
+    }
+    if (reg.constructable === false) {
+      throw new Error(
+        `workerRuntime bridge: class '${clsName}' is registered with constructable: false`,
+      )
+    }
+    const Cls = reg.cls
+    const instance = new Cls(...(args as unknown[]))
+    const instanceId = nextId()
+    instances.set(instanceId, instance)
+    value = { instanceId }
+  } catch (e) {
+    error = serializeError(e)
+  }
+  postBridgeResponse(w, executeId, callId, value, error)
+}
+
+/** Handle an `instanceCall` message: look up the live instance,
+ *  call the named method on it (validating against the same
+ *  visibility filter used at configure time), reply with the
+ *  return value. */
+async function handleInstanceCall(
+  msg: Extract<Worker2HostMessage, { type: 'instanceCall' }>,
+  instances: Map<number, unknown>,
+  w: Worker,
+): Promise<void> {
+  const { executeId, callId, instanceId, method, args } = msg
+  let value: unknown
+  let error: SerializedError | null = null
+  try {
+    const instance = instances.get(instanceId)
+    if (instance === undefined) {
+      throw new Error(
+        `workerRuntime bridge: no live instance with id ${instanceId} (was it created in a different emission?)`,
+      )
+    }
+    // biome-ignore lint/suspicious/noExplicitAny: dynamic dispatch
+    const target: any = instance
+    const fn = target[method]
+    if (typeof fn !== 'function') {
+      throw new Error(`workerRuntime bridge: instance method '${method}' is not callable`)
+    }
+    value = await fn.apply(target, args as unknown[])
+  } catch (e) {
+    error = serializeError(e)
+  }
+  postBridgeResponse(w, executeId, callId, value, error)
+}
+
+/** Common reply path for `newInstance` and `instanceCall`. Mirrors
+ *  the try-twice clone-failure handling used in `handleBridgeCall`
+ *  so a non-cloneable return value or a terminated worker doesn't
+ *  crash the host. */
+function postBridgeResponse(
+  w: Worker,
+  executeId: number,
+  callId: number,
+  value: unknown,
+  error: SerializedError | null,
+): void {
+  try {
+    if (error !== null) {
+      w.postMessage({ type: 'bridgeResponse', executeId, callId, ok: false, error })
+    } else {
+      w.postMessage({ type: 'bridgeResponse', executeId, callId, ok: true, value })
+    }
+  } catch (cloneErr) {
+    try {
+      w.postMessage({
+        type: 'bridgeResponse',
+        executeId,
+        callId,
+        ok: false,
+        error: serializeError(cloneErr),
+      })
+    } catch {
+      // Worker is gone.
+    }
   }
 }
 
 /** Build the `configure` payload from a `Policy`. Visible
- *  namespace members are pre-filtered through include/exclude here
- *  so the worker never sees names that policy excluded — defense
- *  in depth, paired with the host-side allowlist re-check in
- *  `dispatch`. Non-function members are skipped — they aren't
- *  bridged in this PR. */
+ *  namespace and class members are pre-filtered through include/
+ *  exclude here so the worker never sees names that policy
+ *  excluded — defense in depth, paired with the host-side
+ *  allowlist re-check in `dispatch`. Non-function members are
+ *  skipped — they aren't bridged in this PR. */
 function buildConfigure(policy: Policy): ConfigureMessage {
   const fns = [...policy.fns.keys()]
   const namespaces: Array<{ name: string; members: ReadonlyArray<string> }> = []
@@ -512,7 +669,55 @@ function buildConfigure(policy: Policy): ConfigureMessage {
     })
     namespaces.push({ name, members: callable })
   }
-  return { type: 'configure', fns, namespaces }
+  const classes: Array<{
+    name: string
+    instanceMethods: ReadonlyArray<string>
+    staticMethods: ReadonlyArray<string>
+  }> = []
+  for (const [name, reg] of policy.classes) {
+    const instanceMethods = [...visibleClassInstanceMethods(reg)].filter((m) => {
+      // biome-ignore lint/suspicious/noExplicitAny: dynamic introspection
+      return typeof (reg.cls.prototype as any)[m] === 'function'
+    })
+    const staticMethods = [...visibleClassStatics(reg)].filter((m) => {
+      // biome-ignore lint/suspicious/noExplicitAny: dynamic introspection
+      return typeof (reg.cls as any)[m] === 'function'
+    })
+    classes.push({ name, instanceMethods, staticMethods })
+  }
+  return { type: 'configure', fns, namespaces, classes }
+}
+
+/** Visible instance-method names on a registered class. Walks the
+ *  prototype chain so inherited methods are included; applies the
+ *  registration's include/exclude filters. Same machinery as the
+ *  namespace case, just rooted at `cls.prototype` instead of the
+ *  registered target. */
+function visibleClassInstanceMethods(reg: RegisteredCls): Set<string> {
+  return walkPrototypeChain(reg.cls.prototype as object, reg.include, reg.exclude)
+}
+
+/** Visible static-method names on a registered class — own
+ *  properties of the class function itself (plus inherited
+ *  statics if the registered class extends another). Skips
+ *  built-in `prototype` / `name` / `length` since those aren't
+ *  user-meaningful. */
+function visibleClassStatics(reg: RegisteredCls): Set<string> {
+  const seen = new Set<string>()
+  const skip = new Set(['prototype', 'name', 'length'])
+  const test = (k: string): boolean => {
+    if (skip.has(k)) return false
+    return memberAllowed(k, reg.include, reg.exclude)
+  }
+  // biome-ignore lint/suspicious/noExplicitAny: dynamic introspection
+  let level: any = reg.cls
+  while (level !== null && level !== Function.prototype && level !== Object.prototype) {
+    for (const k of Object.getOwnPropertyNames(level)) {
+      if (test(k)) seen.add(k)
+    }
+    level = Object.getPrototypeOf(level)
+  }
+  return seen
 }
 
 /** Compute the set of allowed member names on a namespace, applying
@@ -522,15 +727,29 @@ function buildConfigure(policy: Policy): ConfigureMessage {
  *  semantics here track the registration system's source of truth
  *  — no parallel glob implementation to drift. */
 function visibleNamespaceMembers(reg: RegisteredNs): Set<string> {
+  return walkPrototypeChain(reg.target, reg.include, reg.exclude)
+}
+
+/** Walk a prototype chain (own properties of `root` plus everything
+ *  reachable via `Object.getPrototypeOf` until `Object.prototype`),
+ *  collect member names that pass `memberAllowed(include, exclude)`,
+ *  skipping `'constructor'`. Shared by the namespace, class
+ *  instance, and any future surface that exposes "all reachable
+ *  members" with the same filter semantics. */
+function walkPrototypeChain(
+  root: object,
+  include: MemberFilter | undefined,
+  exclude: MemberFilter | undefined,
+): Set<string> {
   const seen = new Set<string>()
   const test = (k: string): boolean => {
     if (k === 'constructor') return false
-    return memberAllowed(k, reg.include, reg.exclude)
+    return memberAllowed(k, include, exclude)
   }
-  for (const k of Object.getOwnPropertyNames(reg.target)) {
+  for (const k of Object.getOwnPropertyNames(root)) {
     if (test(k)) seen.add(k)
   }
-  let proto: object | null = Object.getPrototypeOf(reg.target) as object | null
+  let proto: object | null = Object.getPrototypeOf(root) as object | null
   while (proto !== null && proto !== Object.prototype) {
     for (const k of Object.getOwnPropertyNames(proto)) {
       if (test(k)) seen.add(k)

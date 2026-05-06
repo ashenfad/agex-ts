@@ -25,20 +25,34 @@
  *     becomes one or more `OutputPart`s. Streamed live so the
  *     parent agent loop can forward through `onEvent` while the
  *     emission is still running.
- *   - `bridgeCall`   — RPC for `fs.*` / `cache.*` calls made by
- *     agent code. The host dispatches the call against the live
- *     `ExecuteContext.fs` / `ExecuteContext.cache` and replies with
- *     a `bridgeResponse`. Multiple bridge calls may be in flight
- *     concurrently within a single emission (the worker awaits
- *     them through the `callId` map).
- *   - `result`       — terminal message for an `execute` call.
+ *   - `bridgeCall`     — RPC for `fs.*` / `cache.*` / registered
+ *     fn / registered namespace member / static method on a
+ *     registered class. The host dispatches the call and replies
+ *     with a `bridgeResponse`. Multiple bridge calls may be in
+ *     flight concurrently within one emission.
+ *   - `newInstance`    — agent code did `new MyClass(...args)` for
+ *     a registered class. Host calls the real constructor, parks
+ *     the instance in a per-execute table, replies with the
+ *     `instanceId` carried by `bridgeResponse.value`.
+ *   - `instanceCall`   — method invocation on a previously-created
+ *     instance handle. Carries `instanceId` plus the method name.
+ *     Host looks up the live instance and calls the method against
+ *     it; reply is a normal `bridgeResponse`.
+ *   - `result`         — terminal message for an `execute` call.
  *     Carries the resolved `TaskOutcome` (success / fail / clarify
  *     / continue) plus an optional unexpected error (parse
  *     failure, uncaught exception that wasn't a task-control raise).
  *
- *  Bridges for registered classes (`agent.cls`) use an
- *  instance-handle protocol that lands in the next PR;
- *  importmap-based module policy is the PR after that.
+ *  Per-emission instance lifecycle: every instance the host parks
+ *  during one `execute` is released when that execute settles. The
+ *  agent's "fresh slate per turn" model means there's no need for
+ *  WeakRef-based cleanup or cross-emission identity. If the embedder
+ *  wants persistent state, that's `cache`.
+ *
+ *  Importmap-based URL-shipped registrations (subclassable, no RPC
+ *  for method calls) land in a follow-up PR. They'll add their own
+ *  field to `configure` and a worker-side dynamic-import path; the
+ *  RPC variants here keep working unchanged.
  */
 
 import type { OutputPart, TaskOutcome } from 'agex-ts/types'
@@ -60,12 +74,11 @@ export interface SerializedError {
  *   - `namespace` — a registered namespace
  *     (`agent.namespace(name, target)`). `subject` is the namespace
  *     name, `method` is the visible member.
- *
- *  Registered classes (`agent.cls`) get a separate instance-handle
- *  protocol in the next PR (agent-side `new` returns a Proxy whose
- *  method calls round-trip via instanceId); they aren't represented
- *  here yet. */
-export type BridgeTarget = 'fs' | 'cache' | 'fn' | 'namespace'
+ *   - `cls` — a static method on a registered class. `subject` is
+ *     the class name, `method` is the visible static-member name.
+ *     Instance method calls use `instanceCall` instead.
+ */
+export type BridgeTarget = 'fs' | 'cache' | 'fn' | 'namespace' | 'cls'
 
 /** Sent once after the worker reports `ready`, before the first
  *  `execute`. Tells the worker which registered names exist so it
@@ -81,6 +94,18 @@ export interface ConfigureMessage {
   readonly namespaces: ReadonlyArray<{
     readonly name: string
     readonly members: ReadonlyArray<string>
+  }>
+  /** Registered classes plus the visible instance-method names
+   *  (collected from the prototype chain, post-include/exclude) and
+   *  the visible static-method names (own properties of the class
+   *  itself, post-include/exclude). The same filter applies to
+   *  both lists — host-side `agent.cls(...)` policy doesn't
+   *  distinguish them today. Static *data* properties aren't
+   *  bridged in this PR; the agent sees only callable statics. */
+  readonly classes: ReadonlyArray<{
+    readonly name: string
+    readonly instanceMethods: ReadonlyArray<string>
+    readonly staticMethods: ReadonlyArray<string>
   }>
 }
 
@@ -128,20 +153,44 @@ export type Worker2HostMessage =
       readonly callId: number
       readonly target: BridgeTarget
       /** Identifies the dispatch root when one bridge target hosts
-       *  multiple distinct surfaces — only used for `target:
-       *  'namespace'`, where it carries the namespace name. Unused
-       *  (and ignored) for `fs` / `cache` / `fn`. */
+       *  multiple distinct surfaces — used for `target: 'namespace'`
+       *  (carries the namespace name) and `target: 'cls'` (carries
+       *  the class name). Unused (and ignored) for `fs` / `cache` /
+       *  `fn`. */
       readonly subject?: string
       /** What to invoke. For `fs` / `cache`: the method name on
        *  that surface. For `fn`: the registered function name. For
        *  `namespace`: the visible member name on the namespace
-       *  identified by `subject`. The host re-validates against
-       *  the allowlist established at configure time, so a typo /
-       *  hostile worker can't reach prototype-chain methods or
-       *  unregistered names. */
+       *  identified by `subject`. For `cls`: the visible static
+       *  member name. The host re-validates against the allowlist
+       *  established at configure time, so a typo / hostile worker
+       *  can't reach prototype-chain methods or unregistered names. */
       readonly method: string
       /** Positional args. Must structured-clone (Uint8Array / string
        *  / plain object / undefined are typical). */
+      readonly args: ReadonlyArray<unknown>
+    }
+  | {
+      /** Agent code did `new MyClass(...args)`. Host constructs a
+       *  real instance via the registered class, parks it in the
+       *  per-execute instance table, replies with the assigned
+       *  `instanceId` as `bridgeResponse.value: { instanceId }`. */
+      readonly type: 'newInstance'
+      readonly executeId: number
+      readonly callId: number
+      readonly clsName: string
+      readonly args: ReadonlyArray<unknown>
+    }
+  | {
+      /** Method call on a previously-constructed instance handle.
+       *  Host looks up `instanceId` in the per-execute instance
+       *  table and calls `method(...args)` against the live
+       *  instance. Reply is a normal `bridgeResponse`. */
+      readonly type: 'instanceCall'
+      readonly executeId: number
+      readonly callId: number
+      readonly instanceId: number
+      readonly method: string
       readonly args: ReadonlyArray<unknown>
     }
   | {

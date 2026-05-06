@@ -35,12 +35,21 @@ describe('prettyTokens', () => {
     expect(out()).toBe('plan first aside')
   })
 
-  it('emits a one-line title only on done', () => {
+  it('streams title content as deltas arrive and closes with a newline', () => {
+    // Mirrors how the JsonStringExtractor delivers string-valued
+    // tool args: per-chunk `done: false` deltas followed by an
+    // empty `done: true` closer.
     const { write, out } = capture()
-    prettyTokens(tk({ type: 'title', content: 'work' }), { write })
-    expect(out()).toBe('')
-    prettyTokens(tk({ type: 'title', content: 'work', done: true }), { write })
-    expect(out()).toBe('# work\n')
+    prettyTokens(tk({ type: 'title', content: 'Compute ' }), { write })
+    prettyTokens(tk({ type: 'title', content: 'answer' }), { write })
+    prettyTokens(tk({ type: 'title', content: '', done: true }), { write })
+    expect(out()).toBe('Compute answer\n')
+  })
+
+  it('handles an empty title (just the closer) without writing stray text', () => {
+    const { write, out } = capture()
+    prettyTokens(tk({ type: 'title', content: '', done: true }), { write })
+    expect(out()).toBe('\n')
   })
 
   it('labels filePath / fileSearch on done; streams fileContent inline', () => {

@@ -55,8 +55,13 @@ export function prettyTokens(token: TokenChunk, opts: PrettyOptions = {}): void 
       write(`\n[${token.content}]\n`)
       return
     case 'title':
-      // Title is one short string; print it whole when it lands.
-      if (token.done) write(`# ${token.content}\n`)
+      // Title chunks stream like other string values: content arrives
+      // in one or more `done: false` deltas, then a `done: true,
+      // content: ''` closes. Stream the content inline; close with a
+      // newline so the title sits on its own line right after the
+      // toolStart header.
+      if (token.done) write('\n')
+      else if (token.content.length > 0) write(token.content)
       return
     case 'thinking':
     case 'text':

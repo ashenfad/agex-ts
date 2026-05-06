@@ -339,3 +339,140 @@ describe('evalRuntime — URL-shipped registrations', () => {
     expect(result.outcome).toEqual({ kind: 'success', value: [7, true, true] })
   })
 })
+
+describe('evalRuntime — import syntax for registered names', () => {
+  // Mirrors the workerRuntime block of the same name. The same code
+  // path runs in evalRuntime via prepareScript(..., registeredValues);
+  // these tests guard against same-realm vs wire drift.
+
+  it("accepts `import * as X from 'name'` for a registered namespace", async () => {
+    const r = evalRuntime()
+    const policy: Policy = {
+      ...emptyPolicy,
+      namespaces: new Map([
+        [
+          'math',
+          {
+            kind: 'namespace' as const,
+            name: 'math',
+            target: { add: (a: number, b: number) => a + b },
+          },
+        ],
+      ]),
+    }
+    await r.init(policy)
+    const result = await r.execute(
+      `
+      import * as math from 'math'
+      taskSuccess(math.add(2, 3))
+    `,
+      makeContext(),
+    )
+    expect(result.outcome).toEqual({ kind: 'success', value: 5 })
+  })
+
+  it("accepts `import { method } from 'name'` and pulls the namespace member", async () => {
+    const r = evalRuntime()
+    const policy: Policy = {
+      ...emptyPolicy,
+      namespaces: new Map([
+        [
+          'math',
+          {
+            kind: 'namespace' as const,
+            name: 'math',
+            target: { add: (a: number, b: number) => a + b },
+          },
+        ],
+      ]),
+    }
+    await r.init(policy)
+    const result = await r.execute(
+      `
+      import { add } from 'math'
+      taskSuccess(add(7, 8))
+    `,
+      makeContext(),
+    )
+    expect(result.outcome).toEqual({ kind: 'success', value: 15 })
+  })
+
+  it("`import { Vec } from 'Vec'` (self-named) elides — Vec already in scope", async () => {
+    class Vec {
+      constructor(
+        public x: number,
+        public y: number,
+      ) {}
+      magnitude() {
+        return Math.sqrt(this.x * this.x + this.y * this.y)
+      }
+    }
+    const r = evalRuntime()
+    const policy: Policy = {
+      ...emptyPolicy,
+      classes: new Map([['Vec', { kind: 'cls' as const, name: 'Vec', cls: Vec }]]),
+    }
+    await r.init(policy)
+    const result = await r.execute(
+      `
+      import { Vec } from 'Vec'
+      taskSuccess(new Vec(3, 4).magnitude())
+    `,
+      makeContext(),
+    )
+    expect(result.outcome).toEqual({ kind: 'success', value: 5 })
+  })
+
+  it('helpers can also import registered names via __registered injection', async () => {
+    const r = evalRuntime()
+    const policy: Policy = {
+      ...emptyPolicy,
+      fns: new Map([
+        [
+          'triple',
+          {
+            kind: 'fn' as const,
+            name: 'triple',
+            fn: ((...args: unknown[]) => (args[0] as number) * 3) as (
+              ...args: unknown[]
+            ) => unknown,
+          },
+        ],
+      ]),
+    }
+    await r.init(policy)
+    const ctx = makeContext()
+    await ctx.fs.mkdir('/helpers', { parents: true, existOk: true })
+    await ctx.fs.write(
+      '/helpers/calc.ts',
+      new TextEncoder().encode(`
+        import { triple } from 'triple'
+        export function tripleAndAddOne(value: number): number {
+          return triple(value) + 1
+        }
+      `),
+    )
+    const result = await r.execute(
+      `
+      import { tripleAndAddOne } from '/helpers/calc'
+      taskSuccess(tripleAndAddOne(7))
+    `,
+      ctx,
+    )
+    expect(result.outcome).toEqual({ kind: 'success', value: 22 })
+  })
+
+  it('passes through (and breaks) imports of unregistered specifiers', async () => {
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const result = await r.execute(
+      `
+      import * as react from 'react'
+      taskSuccess(react)
+    `,
+      makeContext(),
+    )
+    expect(result.outcome).toEqual({ kind: 'continue' })
+    expect(result.error?.message).toMatch(/import statement/)
+  })
+})

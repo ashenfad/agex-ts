@@ -110,3 +110,101 @@ describe('memberAllowed — filter rules', () => {
     expect(memberAllowed('foooo', 'fo?', undefined)).toBe(false)
   })
 })
+
+describe('PolicyBuilder — URL-shipped registrations', () => {
+  it('registerFn rejects passing both fn and url (host xor url)', () => {
+    const p = new PolicyBuilder()
+    expect(() => p.registerFn('x', { fn: () => null, url: 'https://example.com/m.js' })).toThrow(
+      /pass either the live value or \{ url, export\? \}, not both/,
+    )
+  })
+
+  it('registerFn rejects passing neither fn nor url', () => {
+    const p = new PolicyBuilder()
+    expect(() => p.registerFn('x', {})).toThrow(/missing the registered value/)
+  })
+
+  it('registerFn rejects an empty-string url', () => {
+    const p = new PolicyBuilder()
+    expect(() => p.registerFn('x', { url: '' })).toThrow(/url must be a non-empty string/)
+  })
+
+  it('registerFn accepts a url-only registration', () => {
+    const p = new PolicyBuilder()
+    p.registerFn('x', { url: 'https://example.com/m.js' })
+    expect(p.snapshot().fns.get('x')?.url).toBe('https://example.com/m.js')
+    expect(p.snapshot().fns.get('x')?.fn).toBeUndefined()
+  })
+
+  it('registerFn rejects paramsSchema combined with url', () => {
+    const p = new PolicyBuilder()
+    expect(() =>
+      p.registerFn('x', {
+        url: 'https://example.com/m.js',
+        paramsSchema: { type: 'object' },
+      }),
+    ).toThrow(/paramsSchema can't be combined with \{ url \}/)
+  })
+
+  it('registerCls rejects passing both cls and url', () => {
+    const p = new PolicyBuilder()
+    class K {}
+    expect(() => p.registerCls('K', { cls: K, url: 'https://example.com/m.js' })).toThrow(
+      /pass either the live value or \{ url, export\? \}, not both/,
+    )
+  })
+
+  it('registerCls rejects passing neither cls nor url', () => {
+    const p = new PolicyBuilder()
+    expect(() => p.registerCls('K', {})).toThrow(/missing the registered value/)
+  })
+
+  it('registerCls rejects constructable:false combined with url', () => {
+    const p = new PolicyBuilder()
+    expect(() =>
+      p.registerCls('K', { url: 'https://example.com/m.js', constructable: false }),
+    ).toThrow(/constructable: false can't be combined with \{ url \}/)
+  })
+
+  it('registerCls rejects include / exclude / configure combined with url', () => {
+    const p = new PolicyBuilder()
+    expect(() => p.registerCls('K', { url: 'https://example.com/m.js', include: '*' })).toThrow(
+      /include.*can't be combined with \{ url \}/,
+    )
+    expect(() => p.registerCls('K2', { url: 'https://example.com/m.js', exclude: '_*' })).toThrow(
+      /exclude.*can't be combined with \{ url \}/,
+    )
+    expect(() =>
+      p.registerCls('K3', { url: 'https://example.com/m.js', configure: { foo: {} } }),
+    ).toThrow(/configure.*can't be combined with \{ url \}/)
+  })
+
+  it('registerNamespace rejects passing both target and url', () => {
+    const p = new PolicyBuilder()
+    expect(() =>
+      p.registerNamespace('ns', { target: {}, url: 'https://example.com/m.js' }),
+    ).toThrow(/pass either the live value or \{ url, export\? \}, not both/)
+  })
+
+  it('registerNamespace rejects passing neither target nor url', () => {
+    const p = new PolicyBuilder()
+    expect(() => p.registerNamespace('ns', {})).toThrow(/missing the registered value/)
+  })
+
+  it('registerNamespace rejects include / exclude combined with url', () => {
+    const p = new PolicyBuilder()
+    expect(() =>
+      p.registerNamespace('ns', { url: 'https://example.com/m.js', include: '*' }),
+    ).toThrow(/include.*can't be combined with \{ url \}/)
+    expect(() =>
+      p.registerNamespace('ns2', { url: 'https://example.com/m.js', exclude: '_*' }),
+    ).toThrow(/exclude.*can't be combined with \{ url \}/)
+  })
+
+  it('registerNamespace accepts url + optional export plucker', () => {
+    const p = new PolicyBuilder()
+    p.registerNamespace('ns', { url: 'https://example.com/m.js', export: 'utils' })
+    expect(p.snapshot().namespaces.get('ns')?.url).toBe('https://example.com/m.js')
+    expect(p.snapshot().namespaces.get('ns')?.export).toBe('utils')
+  })
+})

@@ -83,9 +83,16 @@ describe('memberAllowed — filter rules', () => {
     expect(memberAllowed('foo', '*', 'foo')).toBe(false)
   })
 
-  it('default exclude rule applied through opts: _*', () => {
+  it('exclude glob _* hides underscore-prefixed members when supplied', () => {
+    // Not a default — embedders pass `exclude: '_*'` explicitly if
+    // they want the Python-style "underscore = private" convention.
     expect(memberAllowed('_secret', undefined, '_*')).toBe(false)
     expect(memberAllowed('public', undefined, '_*')).toBe(true)
+  })
+
+  it('no exclude means everything passes (no _*-by-default)', () => {
+    expect(memberAllowed('_internal', undefined, undefined)).toBe(true)
+    expect(memberAllowed('public', undefined, undefined)).toBe(true)
   })
 
   it('predicate filter works', () => {

@@ -62,6 +62,28 @@
  * with a clear error. Real ESM allows synchronous cycles; userspace
  * emulation can't easily replicate the partial-evaluation semantics,
  * so we don't try.
+ *
+ * **Regex-vs-real-parser caveat:** the import/export rewriting is
+ * regex-based, not AST-based. This is fine in practice because
+ * agent-written helpers are short, idiomatic, and don't contain
+ * pathological cases — but a few fragile spots exist:
+ *
+ *   - An `import` or `export` statement appearing inside a string
+ *     literal or comment can fool the matcher. (`const s = "import
+ *     { x } from '/p'"` would attempt to load `/p` from the VFS.)
+ *   - Multi-line `export default` expressions truncate at the
+ *     first newline. Single-line forms — including IIFEs and
+ *     inline objects — work fine.
+ *   - Re-exports from non-VFS paths (`export { x } from 'react'`)
+ *     are rewritten to `__exports.X = __modules['react'].X`,
+ *     which throws at runtime since `react` isn't in the modules
+ *     map. Helpers that re-export from npm-style packages aren't
+ *     supported.
+ *
+ * If/when these bite real agent code, the answer is to swap the
+ * regex passes for an AST walk (e.g. via `oxc-parser` or
+ * `@babel/parser`'s lightweight estree mode). For now they
+ * haven't surfaced.
  */
 
 import tsBlankSpace from 'ts-blank-space'
@@ -255,9 +277,14 @@ async function runHelper(
 function rewriteHelperReexports(code: string, dirOfHelper: string): string {
   let out = code
   // export { a, b as c } from '/path'
+  // Uses lookbehind (?<=^|[\n;]) so the boundary char is NOT
+  // consumed — that way multi-statement-per-line forms like
+  // `export { a } from 'b'; export { c } from 'd';` work (after the
+  // first replacement the regex resumes scanning right after the
+  // semicolon and the lookbehind matches).
   out = out.replace(
-    /(^|[\n;])[ \t]*export\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"][ \t]*;?[ \t]*(?=$|\n)/gm,
-    (_m, lead: string, inside: string, path: string) => {
+    /(?<=^|[\n;])[ \t]*export\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"][ \t]*;?/gm,
+    (_m, inside: string, path: string) => {
       const resolved =
         isVfsPath(path) || path.startsWith('.') ? resolveVfsPath(path, dirOfHelper) : path
       const key = JSON.stringify(resolved)
@@ -272,92 +299,103 @@ function rewriteHelperReexports(code: string, dirOfHelper: string): string {
           `__exports[${JSON.stringify(exportName)}] = __modules[${key}][${JSON.stringify(sourceName)}];`,
         )
       }
-      return `${lead}${lines.join('\n')}`
+      return lines.join('\n')
     },
   )
   // export * as NS from '/path' — bind the whole module's exports
   // as a namespace property. Must come BEFORE the bare `export *`
   // pattern so the more specific match wins.
   out = out.replace(
-    /(^|[\n;])[ \t]*export\s*\*\s+as\s+([A-Za-z_$][\w$]*)\s+from\s*['"]([^'"]+)['"][ \t]*;?[ \t]*(?=$|\n)/gm,
-    (_m, lead: string, name: string, path: string) => {
+    /(?<=^|[\n;])[ \t]*export\s*\*\s+as\s+([A-Za-z_$][\w$]*)\s+from\s*['"]([^'"]+)['"][ \t]*;?/gm,
+    (_m, name: string, path: string) => {
       const resolved =
         isVfsPath(path) || path.startsWith('.') ? resolveVfsPath(path, dirOfHelper) : path
-      return `${lead}__exports[${JSON.stringify(name)}] = __modules[${JSON.stringify(resolved)}];`
+      return `__exports[${JSON.stringify(name)}] = __modules[${JSON.stringify(resolved)}];`
     },
   )
   // export * from '/path' — copy all exports onto __exports
   out = out.replace(
-    /(^|[\n;])[ \t]*export\s*\*\s*from\s*['"]([^'"]+)['"][ \t]*;?[ \t]*(?=$|\n)/gm,
-    (_m, lead: string, path: string) => {
+    /(?<=^|[\n;])[ \t]*export\s*\*\s*from\s*['"]([^'"]+)['"][ \t]*;?/gm,
+    (_m, path: string) => {
       const resolved =
         isVfsPath(path) || path.startsWith('.') ? resolveVfsPath(path, dirOfHelper) : path
-      return `${lead}Object.assign(__exports, __modules[${JSON.stringify(resolved)}]);`
+      return `Object.assign(__exports, __modules[${JSON.stringify(resolved)}]);`
     },
   )
   return out
 }
 
 /** Rewrite `export ...` declarations to plain ones; track exported
- *  names for the trailing `__exports.X = X` block. */
+ *  names for the trailing `__exports.X = X` block.
+ *
+ *  All four patterns use lookbehind `(?<=^|[\n;])` so the boundary
+ *  char (semicolon / newline / start-of-source) isn't consumed —
+ *  this lets multi-statement-per-line forms like
+ *  `const x = 1; export const y = 2;` work, since after replacing
+ *  the first match the regex resumes scanning right after the `;`
+ *  and the lookbehind matches.
+ *
+ *  Known limit: `export default <expr>` reads up to the next
+ *  newline OR end-of-source, not balanced parens/braces. So
+ *  `export default { a: 1, b: 2 }` written across multiple lines
+ *  truncates at the first `\n`. Single-line forms (including
+ *  IIFEs and inline objects) work fine. Agent helpers
+ *  overwhelmingly use single-line defaults; if we hit the limit
+ *  in practice we'd switch to a real expression parser. */
 function rewriteHelperExports(code: string): { code: string; exportNames: string[] } {
   const exportNames: string[] = []
   let out = code
 
-  // export default <expr>
-  // Tolerates `export default` after a leading `;` (single-line
-  // helpers like `const x = 1; export default x` are common).
-  // Captures up to the next `;`, newline, or end-of-string. The
-  // inline rewrite directly assigns to __exports.default — we
-  // don't add 'default' to exportNames (which would generate
-  // `__exports['default'] = default;` in the trailing block,
-  // and `default` is a reserved word).
+  // export default <expr> — captures to the next newline or
+  // end-of-source. Single-line form (the common case) handles
+  // arbitrary `;`s inside the expression (IIFE: `(() => { ... })()`,
+  // calls: `mkConfig(); …`). The inline rewrite assigns to
+  // __exports.default directly — we don't add 'default' to
+  // exportNames (the trailing block would emit
+  // `__exports['default'] = default;` and `default` is a reserved
+  // word).
   out = out.replace(
-    /(^|[\n;])[ \t]*export\s+default\s+([\s\S]*?)(?=[\n;]|$)/gm,
-    (_m, lead: string, expr: string) => `${lead}__exports.default = ${expr.trim()}`,
+    /(?<=^|[\n;])[ \t]*export\s+default\s+([\s\S]*?)(?=$|\n)/gm,
+    (_m, expr: string) => `__exports.default = ${expr.trim()}`,
   )
 
   // export function NAME / export async function NAME / export class NAME.
-  // Tolerates `export` after `;` (single-line form).
   out = out.replace(
-    /(^|[\n;])[ \t]*export\s+(async\s+function\b|function\b|class\b)\s+([A-Za-z_$][\w$]*)/gm,
-    (_m, lead: string, kind: string, name: string) => {
+    /(?<=^|[\n;])[ \t]*export\s+(async\s+function\b|function\b|class\b)\s+([A-Za-z_$][\w$]*)/gm,
+    (_m, kind: string, name: string) => {
       if (!exportNames.includes(name)) exportNames.push(name)
-      return `${lead}${kind} ${name}`
+      return `${kind} ${name}`
     },
   )
 
   // export const NAME = ... / export let NAME / export var NAME.
   out = out.replace(
-    /(^|[\n;])[ \t]*export\s+(const|let|var)\s+([A-Za-z_$][\w$]*)/gm,
-    (_m, lead: string, kind: string, name: string) => {
+    /(?<=^|[\n;])[ \t]*export\s+(const|let|var)\s+([A-Za-z_$][\w$]*)/gm,
+    (_m, kind: string, name: string) => {
       if (!exportNames.includes(name)) exportNames.push(name)
-      return `${lead}${kind} ${name}`
+      return `${kind} ${name}`
     },
   )
 
   // export { a, b as c } — track names + aliases.
-  out = out.replace(
-    /(^|[\n;])[ \t]*export\s*\{([^}]*)\}[ \t]*;?[ \t]*(?=$|\n)/gm,
-    (_m, lead: string, inside: string) => {
-      const lines: string[] = []
-      for (const part of inside.split(',')) {
-        const t = part.trim()
-        if (t.length === 0) continue
-        const aliased = t.match(/^([A-Za-z_$][\w$]*)\s+as\s+([A-Za-z_$][\w$]*)$/)
-        if (aliased !== null) {
-          const local = aliased[1] as string
-          const exported = aliased[2] as string
-          if (!exportNames.includes(exported)) exportNames.push(exported)
-          lines.push(`__exports[${JSON.stringify(exported)}] = ${local};`)
-        } else if (/^[A-Za-z_$][\w$]*$/.test(t)) {
-          if (!exportNames.includes(t)) exportNames.push(t)
-          // Will be assigned by the trailing __exports block.
-        }
+  out = out.replace(/(?<=^|[\n;])[ \t]*export\s*\{([^}]*)\}[ \t]*;?/gm, (_m, inside: string) => {
+    const lines: string[] = []
+    for (const part of inside.split(',')) {
+      const t = part.trim()
+      if (t.length === 0) continue
+      const aliased = t.match(/^([A-Za-z_$][\w$]*)\s+as\s+([A-Za-z_$][\w$]*)$/)
+      if (aliased !== null) {
+        const local = aliased[1] as string
+        const exported = aliased[2] as string
+        if (!exportNames.includes(exported)) exportNames.push(exported)
+        lines.push(`__exports[${JSON.stringify(exported)}] = ${local};`)
+      } else if (/^[A-Za-z_$][\w$]*$/.test(t)) {
+        if (!exportNames.includes(t)) exportNames.push(t)
+        // Will be assigned by the trailing __exports block.
       }
-      return `${lead}${lines.join('\n')}`
-    },
-  )
+    }
+    return lines.join('\n')
+  })
 
   return { code: out, exportNames }
 }

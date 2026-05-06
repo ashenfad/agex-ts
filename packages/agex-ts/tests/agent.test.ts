@@ -113,6 +113,33 @@ describe('Agent — URL-shipped registrations', () => {
     expect(() => a.fn({ url: '' }, { name: 'broken' })).toThrow(/url must be a non-empty string/)
   })
 
+  it('rejects URL combined with paramsSchema on fn', async () => {
+    // paramsSchema runs host-side via the agent loop; a URL-shipped
+    // fn is called natively in the worker, so the schema would
+    // silently never fire. Reject loudly instead.
+    const a = await createAgent({ name: 't' })
+    const fakeSchema = {
+      '~standard': {
+        version: 1 as const,
+        vendor: 'test',
+        validate: (v: unknown) => ({ value: v }),
+      },
+    }
+    expect(() =>
+      a.fn({ url: 'https://example.com/m.js' }, { name: 'compute', paramsSchema: fakeSchema }),
+    ).toThrow(/paramsSchema can't be combined with \{ url \}/)
+  })
+
+  it('rejects URL combined with constructable: false on cls', async () => {
+    // constructable: false manifests as a primer hint, but the
+    // URL-shipped class is the real constructor — the agent can
+    // `new` it regardless. Reject so the primer doesn't lie.
+    const a = await createAgent({ name: 't' })
+    expect(() =>
+      a.cls({ url: 'https://example.com/m.js' }, { name: 'Vec', constructable: false }),
+    ).toThrow(/constructable: false can't be combined with \{ url \}/)
+  })
+
   it("doesn't mistake a namespace target with a `url` member for a URL spec", async () => {
     // A real namespace target can have a `url` field — as long as
     // it has *other* properties too, the type guard treats it as a

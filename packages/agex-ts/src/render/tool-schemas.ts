@@ -23,10 +23,13 @@
 
 import type { ToolName } from './index'
 
-export const TOOL_TS: ToolName = 'ts_action'
-export const TOOL_TERMINAL: ToolName = 'terminal_action'
-export const TOOL_WRITE_FILE: ToolName = 'write_file'
-export const TOOL_EDIT_FILE: ToolName = 'edit_file'
+// `as const` so the constants are literal-typed (e.g. `'ts_action'`),
+// not widened to `ToolName`. That preserves narrowing when callers
+// switch on a tool name and compare against these constants.
+export const TOOL_TS = 'ts_action' as const
+export const TOOL_TERMINAL = 'terminal_action' as const
+export const TOOL_WRITE_FILE = 'write_file' as const
+export const TOOL_EDIT_FILE = 'edit_file' as const
 
 export interface ToolSchema {
   readonly name: ToolName

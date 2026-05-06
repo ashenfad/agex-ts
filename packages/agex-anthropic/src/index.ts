@@ -13,5 +13,4 @@
  * parsing.
  */
 
-// Re-exports land here as files arrive.
-export {}
+export { Anthropic, type AnthropicOptions } from './client'

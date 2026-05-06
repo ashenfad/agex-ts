@@ -70,11 +70,18 @@ export function prettyTokens(token: TokenChunk, opts: PrettyOptions = {}): void 
       write(token.content)
       return
     case 'filePath':
-      if (token.done) write(`\npath: ${token.content}\n`)
+    case 'fileSearch': {
+      // Content arrives in `done: false` chunks; the closing
+      // `done: true` carries empty content (same shape as `title`).
+      // Stream chunks with a one-time per-chunk label so the user
+      // can tell what they're looking at; close with a newline.
+      // Typical case (path fits one chunk): one labeled line.
+      // Split case: label repeats per chunk (rare; tolerable).
+      const label = token.type === 'filePath' ? 'path' : 'search'
+      if (token.done) write('\n')
+      else if (token.content.length > 0) write(`\n${label}: ${token.content}`)
       return
-    case 'fileSearch':
-      if (token.done) write(`\nsearch: ${token.content}\n`)
-      return
+    }
     case 'fileContent':
       // Streams as the model writes; print inline.
       write(token.content)

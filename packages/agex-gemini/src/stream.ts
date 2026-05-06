@@ -41,6 +41,13 @@ export interface ToolCallStart {
   readonly type: 'toolCallStart'
   readonly callId: string
   readonly toolName: ToolName
+  /** Per-call opaque signature the provider wants round-tripped on
+   *  subsequent turns. Currently only Gemini populates this — its
+   *  `thoughtSignature` MUST sit as a sibling of `functionCall` on
+   *  the same Part on replay or Gemini 400s. The parser threads
+   *  this through to the built Emission so the renderer can put it
+   *  back at the right position. */
+  readonly signature?: Uint8Array
 }
 
 export interface ToolCallArgDelta {
@@ -269,40 +276,62 @@ function* flush(pending: ReadonlyArray<Pending>): Iterable<ToolCallEvent> {
   let firstFcSeenWithoutSig = false
   for (const item of pending) {
     if (item.kind === 'fc') {
-      // Ensure the first function_call carries a signature (apply
-      // the documented dummy when Gemini didn't provide one — see
-      // top-of-file note).
+      // Gemini 3 requires the FIRST functionCall in each model turn
+      // to carry a `thoughtSignature` as a SIBLING field on the same
+      // Part. When the model's response itself omits one (it does
+      // sometimes), apply the documented sentinel — accepted
+      // model-quality cost, but keeps the next turn from 400ing
+      // with "Function call is missing a thought_signature".
       let sig = item.signature
       if (sig === undefined && !firstFcSeenWithoutSig) {
         sig = DUMMY_THOUGHT_SIGNATURE
         firstFcSeenWithoutSig = true
       }
-      // Gemini delivers args as a complete dict, not a JSON-string
-      // stream. We feed the parser one ArgDelta with the full
-      // serialized payload — the parser's JsonStringExtractor will
-      // surface per-key string values for streaming UI consumers.
-      yield { type: 'toolCallStart', callId: item.callId, toolName: item.toolName }
+      // Args arrive as a complete dict (not a JSON-string stream
+      // like the other providers), so we hand the parser one
+      // ArgDelta with the full serialized payload — its
+      // JsonStringExtractor surfaces per-key string values for any
+      // onToken consumer.
+      //
+      // The signature rides on toolCallStart (not on a separate
+      // ThinkingPart). The parser stores it on the built Emission;
+      // when the renderer replays the assistant turn next, the
+      // Gemini adapter places it as a sibling of functionCall on
+      // the same Part — exactly what the API requires.
+      yield {
+        type: 'toolCallStart',
+        callId: item.callId,
+        toolName: item.toolName,
+        ...(sig !== undefined && { signature: sig }),
+      }
       yield {
         type: 'toolCallArgDelta',
         callId: item.callId,
         argumentChunk: JSON.stringify(item.args ?? {}),
       }
       yield { type: 'toolCallEnd', callId: item.callId }
-      // Surface the signature as a synthetic ThinkingPart so the
-      // renderer can replay it as a thought_signature on a sibling
-      // Part next turn. (No model text — just the signature bytes.)
-      if (sig !== undefined) {
-        yield { type: 'thinkingPart', signature: sig }
-      }
       continue
     }
     if (item.kind === 'text') {
-      if (item.text.length > 0) yield { type: 'textPart', text: item.text }
+      if (item.text.length === 0) continue
+      // Stream the accumulated text as a single delta so onToken
+      // consumers (prettyTokens) see SOMETHING. We can't true-stream
+      // text from Gemini per-chunk because parts may repeat across
+      // chunks (the late-signature pairing case), but a one-shot
+      // delta at flush is still better than the parser's
+      // emission-only signal.
+      yield { type: 'textDelta', content: item.text }
+      yield { type: 'textPart', text: item.text }
       continue
     }
     if (item.kind === 'thought') {
       if (item.signature === undefined && (item.text === undefined || item.text.length === 0)) {
         continue
+      }
+      // Same reason: surface the thought text via a delta so
+      // prettyTokens shows it before the final ThinkingPart fires.
+      if (item.text !== undefined && item.text.length > 0) {
+        yield { type: 'thinkingDelta', content: item.text }
       }
       yield {
         type: 'thinkingPart',

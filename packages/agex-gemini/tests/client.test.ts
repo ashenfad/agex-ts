@@ -175,15 +175,20 @@ describe('Gemini — request body shape', () => {
 })
 
 describe('Gemini — response streaming', () => {
-  it('builds the right Emission and surfaces token usage', async () => {
+  it('builds the right Emission with signature attached and surfaces token usage', async () => {
     const { fn } = recordingFetch(happyPathEvents)
     const client = new Gemini({ apiKey: 'k', fetchImpl: fn })
     const tokens = await collect(client.complete(trivialRequest))
     const emissions = emissionsOf(tokens)
-    // The function_call becomes a TsEmission; the (auto-)signature
-    // becomes a separate ThinkingEmission emitted by the parser.
+    // The function_call becomes a TsEmission; the thoughtSignature
+    // rides directly on the emission so the renderer can place it
+    // as a sibling of `functionCall` on the same Part on replay.
     const ts = emissions.find((e) => e.type === 'ts')
-    expect(ts).toEqual({ type: 'ts', code: 'taskSuccess(1)', title: 'x' })
+    if (ts?.type !== 'ts') throw new Error('expected ts emission')
+    expect(ts.code).toBe('taskSuccess(1)')
+    expect(ts.title).toBe('x')
+    expect(ts.signature).toBeDefined()
+    expect(new TextDecoder().decode(ts.signature)).toBe('opaque-sig')
     const trailer = tokens.at(-1)
     expect(trailer?.inputTokens).toBe(50)
     expect(trailer?.outputTokens).toBe(10)

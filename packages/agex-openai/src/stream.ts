@@ -42,6 +42,11 @@ export interface ToolCallStart {
   readonly type: 'toolCallStart'
   readonly callId: string
   readonly toolName: ToolName
+  /** Per-call opaque signature for round-trip on subsequent turns.
+   *  OpenAI Chat Completions doesn't sign tool calls (Responses API
+   *  has reasoning_signatures but that's deferred), so this stays
+   *  `undefined` here. Defined for vocabulary parity with Gemini. */
+  readonly signature?: Uint8Array
 }
 
 export interface ToolCallArgDelta {

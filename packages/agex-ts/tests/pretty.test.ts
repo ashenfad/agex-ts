@@ -52,10 +52,14 @@ describe('prettyTokens', () => {
     expect(out()).toBe('\n')
   })
 
-  it('labels filePath / fileSearch on done; streams fileContent inline', () => {
+  it('labels filePath / fileSearch as content streams; closes with newline; streams fileContent inline', () => {
     const { write, out } = capture()
-    prettyTokens(tk({ type: 'filePath', content: '/n.txt', done: true }), { write })
-    prettyTokens(tk({ type: 'fileSearch', content: 'old', done: true }), { write })
+    // filePath streams as a single content chunk (Gemini sends the
+    // whole JSON in one ArgDelta) followed by a done:true closer.
+    prettyTokens(tk({ type: 'filePath', content: '/n.txt' }), { write })
+    prettyTokens(tk({ type: 'filePath', content: '', done: true }), { write })
+    prettyTokens(tk({ type: 'fileSearch', content: 'old' }), { write })
+    prettyTokens(tk({ type: 'fileSearch', content: '', done: true }), { write })
     prettyTokens(tk({ type: 'fileContent', content: 'new ' }), { write })
     prettyTokens(tk({ type: 'fileContent', content: 'value' }), { write })
     expect(out()).toBe('\npath: /n.txt\n\nsearch: old\nnew value')

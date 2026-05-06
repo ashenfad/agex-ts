@@ -29,9 +29,22 @@ export async function dispatchFileWrite(
   emission: FileWriteEmission,
   fs: VirtualFileSystem,
 ): Promise<void> {
+  // Auto-create the parent directory (mkdir -p semantics). The
+  // primer points the agent at /helpers/ for reusable code, so it
+  // routinely writes the first file under a directory that doesn't
+  // exist yet — making the agent run an explicit `mkdir` first
+  // would be busywork.
+  await ensureParentDir(emission.path, fs)
   const bytes = encoder.encode(emission.content)
   const mode = emission.mode === 'append' ? 'a' : 'w'
   await fs.write(emission.path, bytes, mode)
+}
+
+async function ensureParentDir(path: string, fs: VirtualFileSystem): Promise<void> {
+  const slash = path.lastIndexOf('/')
+  if (slash <= 0) return // root-level file; nothing to create
+  const parent = path.slice(0, slash)
+  await fs.mkdir(parent, { parents: true, existOk: true })
 }
 
 export async function dispatchFileEdit(

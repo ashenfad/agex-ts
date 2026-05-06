@@ -23,7 +23,7 @@ const agent = await createAgent({
   primer: 'You are an expert at solving math problems.',
   llm: new Gemini({
     apiKey,
-    model: process.env.GEMINI_MODEL ?? 'gemini-3.1-flash',
+    model: process.env.GEMINI_MODEL ?? 'gemini-3-flash-preview',
   }),
   runtime: evalRuntime(),
 })

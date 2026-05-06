@@ -23,13 +23,7 @@
  *  ride alongside tool calls in the order the model produced them.
  */
 
-import {
-  TOOL_EDIT_FILE,
-  TOOL_TERMINAL,
-  TOOL_TS,
-  TOOL_WRITE_FILE,
-  type ToolName,
-} from 'agex-ts/render'
+import { TOOL_EDIT_FILE, TOOL_TERMINAL, TOOL_TS, TOOL_WRITE_FILE, type ToolName } from '../render'
 import type {
   Emission,
   FileEditEmission,
@@ -40,9 +34,9 @@ import type {
   TokenChunk,
   TokenChunkType,
   TsEmission,
-} from 'agex-ts/types'
+} from '../types'
+import type { ToolCallEvent } from './events'
 import { JsonStringExtractor } from './json-stream'
-import type { ToolCallEvent } from './stream'
 
 // JSON-arg key → TokenChunk.type per tool. Streaming chunks for keys
 // not in the map are dropped (e.g. `mode` on write_file is non-string

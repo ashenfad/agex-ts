@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { parseSseEvents } from '../src/sse'
+import { parseSseEvents } from '../../src/providers/sse'
 
 const enc = new TextEncoder()
 

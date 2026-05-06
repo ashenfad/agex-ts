@@ -29,72 +29,10 @@
  *     `function.arguments` (no `input_json_delta` wrapper).
  */
 
+import type { ToolCallEvent, UsageHolder } from 'agex-ts/providers'
 import type { ToolName } from 'agex-ts/render'
 
-// ---------------------------------------------------------------------------
-// Output vocabulary — must match agex-anthropic's, so the shared
-// tool-call parser can consume it. Kept duplicated for now (one
-// source of truth per provider package); fold into a shared module
-// once the third provider lands.
-// ---------------------------------------------------------------------------
-
-export interface ToolCallStart {
-  readonly type: 'toolCallStart'
-  readonly callId: string
-  readonly toolName: ToolName
-  /** Per-call opaque signature for round-trip on subsequent turns.
-   *  OpenAI Chat Completions doesn't sign tool calls (Responses API
-   *  has reasoning_signatures but that's deferred), so this stays
-   *  `undefined` here. Defined for vocabulary parity with Gemini. */
-  readonly signature?: Uint8Array
-}
-
-export interface ToolCallArgDelta {
-  readonly type: 'toolCallArgDelta'
-  readonly callId: string
-  readonly argumentChunk: string
-}
-
-export interface ToolCallEnd {
-  readonly type: 'toolCallEnd'
-  readonly callId: string
-}
-
-export interface TextDelta {
-  readonly type: 'textDelta'
-  readonly content: string
-}
-
-export interface TextPartEvent {
-  readonly type: 'textPart'
-  readonly text: string
-}
-
-export interface ThinkingDelta {
-  readonly type: 'thinkingDelta'
-  readonly content: string
-}
-
-export interface ThinkingPartEvent {
-  readonly type: 'thinkingPart'
-  readonly text?: string
-  readonly signature?: Uint8Array
-  readonly redacted?: boolean
-}
-
-export type ToolCallEvent =
-  | ToolCallStart
-  | ToolCallArgDelta
-  | ToolCallEnd
-  | TextDelta
-  | TextPartEvent
-  | ThinkingDelta
-  | ThinkingPartEvent
-
-export interface UsageHolder {
-  inputTokens: number | null
-  outputTokens: number | null
-}
+export type { ToolCallEvent, UsageHolder }
 
 // ---------------------------------------------------------------------------
 // Per-stream state

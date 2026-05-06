@@ -28,74 +28,10 @@
  * signature seen wins.
  */
 
+import type { ToolCallEvent, UsageHolder } from 'agex-ts/providers'
 import type { ToolName } from 'agex-ts/render'
 
-// ---------------------------------------------------------------------------
-// Output vocabulary — must match the other providers' so the shared
-// tool-call parser consumes it. Duplicated for now; lift to a shared
-// module once we extract sse/json-stream/parser/events to agex-ts/
-// providers.
-// ---------------------------------------------------------------------------
-
-export interface ToolCallStart {
-  readonly type: 'toolCallStart'
-  readonly callId: string
-  readonly toolName: ToolName
-  /** Per-call opaque signature the provider wants round-tripped on
-   *  subsequent turns. Currently only Gemini populates this — its
-   *  `thoughtSignature` MUST sit as a sibling of `functionCall` on
-   *  the same Part on replay or Gemini 400s. The parser threads
-   *  this through to the built Emission so the renderer can put it
-   *  back at the right position. */
-  readonly signature?: Uint8Array
-}
-
-export interface ToolCallArgDelta {
-  readonly type: 'toolCallArgDelta'
-  readonly callId: string
-  readonly argumentChunk: string
-}
-
-export interface ToolCallEnd {
-  readonly type: 'toolCallEnd'
-  readonly callId: string
-}
-
-export interface TextDelta {
-  readonly type: 'textDelta'
-  readonly content: string
-}
-
-export interface TextPartEvent {
-  readonly type: 'textPart'
-  readonly text: string
-}
-
-export interface ThinkingDelta {
-  readonly type: 'thinkingDelta'
-  readonly content: string
-}
-
-export interface ThinkingPartEvent {
-  readonly type: 'thinkingPart'
-  readonly text?: string
-  readonly signature?: Uint8Array
-  readonly redacted?: boolean
-}
-
-export type ToolCallEvent =
-  | ToolCallStart
-  | ToolCallArgDelta
-  | ToolCallEnd
-  | TextDelta
-  | TextPartEvent
-  | ThinkingDelta
-  | ThinkingPartEvent
-
-export interface UsageHolder {
-  inputTokens: number | null
-  outputTokens: number | null
-}
+export type { ToolCallEvent, UsageHolder }
 
 // ---------------------------------------------------------------------------
 // Internal pending-buffer entries. We can't emit anything until the

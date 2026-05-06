@@ -22,6 +22,15 @@
  *   - OpenRouter `reasoning_details` round-trip.
  */
 
+import {
+  type UsageHolder,
+  isTransientNetworkError,
+  parseSseEvents,
+  parseToolEvents,
+  safeReadText,
+  sleep,
+  sseLinesToEventDicts,
+} from 'agex-ts/providers'
 import { toolSchemas } from 'agex-ts/render'
 import type { LLMClient, LLMConfig, LLMRequest, TokenChunk } from 'agex-ts/types'
 import {
@@ -30,9 +39,7 @@ import {
   lowerNeutralTurns,
   schemasToOpenAITools,
 } from './adapter'
-import { parseToolEvents } from './parser'
-import { parseSseEvents } from './sse'
-import { type UsageHolder, translateOpenAIStream } from './stream'
+import { translateOpenAIStream } from './stream'
 
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1'
 const DEFAULT_MODEL = 'gpt-4o-mini'
@@ -238,28 +245,8 @@ export class OpenAI implements LLMClient {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers (mirrors agex-anthropic — duplicated until we have a shared
-// providers module worth extracting)
+// OpenAI-specific helpers
 // ---------------------------------------------------------------------------
-
-async function* sseLinesToEventDicts(lines: AsyncIterable<string>): AsyncIterable<unknown> {
-  for await (const payload of lines) {
-    if (payload.length === 0) continue
-    try {
-      yield JSON.parse(payload)
-    } catch {
-      // Skip unparseable payloads.
-    }
-  }
-}
-
-async function safeReadText(response: Response): Promise<string> {
-  try {
-    return await response.text()
-  } catch {
-    return ''
-  }
-}
 
 /** OpenAI's reasoning models (gpt-5, o-series) require
  *  `max_completion_tokens` instead of `max_tokens`. Detect on the
@@ -268,36 +255,4 @@ async function safeReadText(response: Response): Promise<string> {
 function tokenLimitField(model: string): 'max_tokens' | 'max_completion_tokens' {
   if (/^(gpt-5|o[1-9])/.test(model)) return 'max_completion_tokens'
   return 'max_tokens'
-}
-
-function isTransientNetworkError(err: unknown): boolean {
-  if (err instanceof Error) {
-    if (err.name === 'AbortError') return false
-    if (err.name === 'TypeError') return true
-    const msg = err.message.toLowerCase()
-    if (msg.includes('network') || msg.includes('socket') || msg.includes('econnreset')) {
-      return true
-    }
-  }
-  return false
-}
-
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(new Error('aborted'))
-      return
-    }
-    const t = setTimeout(resolve, ms)
-    if (signal !== undefined) {
-      signal.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(t)
-          reject(new Error('aborted'))
-        },
-        { once: true },
-      )
-    }
-  })
 }

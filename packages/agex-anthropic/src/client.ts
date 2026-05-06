@@ -11,6 +11,15 @@
  * (Node 20+, browsers, edge runtimes).
  */
 
+import {
+  type UsageHolder,
+  isTransientNetworkError,
+  parseSseEvents,
+  parseToolEvents,
+  safeReadText,
+  sleep,
+  sseLinesToEventDicts,
+} from 'agex-ts/providers'
 import { toolSchemas } from 'agex-ts/render'
 import type { LLMClient, LLMConfig, LLMRequest, TokenChunk } from 'agex-ts/types'
 import {
@@ -20,9 +29,7 @@ import {
   lowerNeutralTurns,
   schemasToAnthropicTools,
 } from './adapter'
-import { parseToolEvents } from './parser'
-import { parseSseEvents } from './sse'
-import { type UsageHolder, translateAnthropicStream } from './stream'
+import { translateAnthropicStream } from './stream'
 
 const ANTHROPIC_VERSION = '2023-06-01'
 const DEFAULT_BASE_URL = 'https://api.anthropic.com/v1'
@@ -246,65 +253,4 @@ export class Anthropic implements LLMClient {
       ...(usage.outputTokens !== null && { outputTokens: usage.outputTokens }),
     }
   }
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-async function* sseLinesToEventDicts(lines: AsyncIterable<string>): AsyncIterable<unknown> {
-  for await (const payload of lines) {
-    if (payload.length === 0) continue
-    try {
-      yield JSON.parse(payload)
-    } catch {
-      // Skip unparseable payloads — Anthropic occasionally emits a
-      // keep-alive comment that the SSE parser strips, but if a
-      // non-JSON payload slips through it's safer to drop than crash.
-    }
-  }
-}
-
-async function safeReadText(response: Response): Promise<string> {
-  try {
-    return await response.text()
-  } catch {
-    return ''
-  }
-}
-
-function isTransientNetworkError(err: unknown): boolean {
-  // Best-effort heuristic — `fetch` rejects on connection errors with
-  // a `TypeError` whose message names the cause, and `AbortError` is
-  // raised on timeout (handled separately). DNS failures, RST
-  // resets, and TLS errors all surface as TypeError.
-  if (err instanceof Error) {
-    if (err.name === 'AbortError') return false
-    if (err.name === 'TypeError') return true
-    const msg = err.message.toLowerCase()
-    if (msg.includes('network') || msg.includes('socket') || msg.includes('econnreset')) {
-      return true
-    }
-  }
-  return false
-}
-
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(new Error('aborted'))
-      return
-    }
-    const t = setTimeout(resolve, ms)
-    if (signal !== undefined) {
-      signal.addEventListener(
-        'abort',
-        () => {
-          clearTimeout(t)
-          reject(new Error('aborted'))
-        },
-        { once: true },
-      )
-    }
-  })
 }

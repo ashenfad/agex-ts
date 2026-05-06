@@ -14,7 +14,14 @@
  * should re-snapshot after each registration burst.
  */
 
-import { globMatch as termishGlobMatch } from 'termish-ts'
+// Pull glob matching from termish-ts's narrow `./glob` sub-path
+// rather than the package main — main bundles the shell builtins
+// (notably the archive command pulling fflate, which uses
+// `createRequire('module')` and trips Vite's browser-externals
+// shim). The sub-path stays browser-safe so anyone importing
+// `agex-ts/policy` from a Worker / browser context can do so
+// without dragging the shell layer.
+import { globMatch as termishGlobMatch } from 'termish-ts/glob'
 import { RegistrationError } from './errors'
 import type {
   MemberConfig,

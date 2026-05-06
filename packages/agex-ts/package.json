@@ -20,6 +20,10 @@
       "types": "./dist/errors.d.ts",
       "import": "./dist/errors.js"
     },
+    "./policy": {
+      "types": "./dist/policy.d.ts",
+      "import": "./dist/policy.js"
+    },
     "./state": {
       "types": "./dist/state/index.d.ts",
       "import": "./dist/state/index.js"

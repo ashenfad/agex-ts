@@ -39,6 +39,7 @@ import type {
   RuntimeAdapter,
   TaskOutcome,
 } from '../types'
+import { prepareScript } from './module-loader'
 import { safeStringifyArgs } from './safe-stringify'
 
 export interface EvalRuntimeOptions {
@@ -113,13 +114,22 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
       ctx.signal.addEventListener('abort', linkedAbort)
 
       try {
-        const names = Object.keys(injected)
         // Strip TS type annotations before AsyncFunction sees the code.
         // ts-blank-space throws on non-erasable TS (enum, namespace,
         // decorators, parameter properties); that surfaces as a normal
         // runtime error so the agent can read the message and adjust.
         const erased = tsBlankSpace(code)
-        const fn = new AsyncFunction(...names, erased)
+        // Resolve `import { x } from '/helpers/foo'` statements against
+        // the agent's VFS. Pre-loaded helpers come back via the
+        // `__modules` map injected as a function arg. See
+        // module-loader.ts for the userspace ESM strategy.
+        const prepared = await prepareScript(erased, ctx.fs)
+        injected.__modules = prepared.modules
+        const names = Object.keys(injected)
+        // Append a sourceURL pragma so AsyncFunction-emitted stack
+        // traces refer to "<ts_action>" instead of "<anonymous>".
+        const annotated = `${prepared.code}\n//# sourceURL=<ts_action>\n`
+        const fn = new AsyncFunction(...names, annotated)
         const userPromise = fn(...names.map((n) => injected[n]))
 
         // Race the user code against the abort signal.

@@ -44,9 +44,19 @@ export interface ToolCallEnd {
   readonly callId: string
 }
 
+export interface TextDelta {
+  readonly type: 'textDelta'
+  readonly content: string
+}
+
 export interface TextPartEvent {
   readonly type: 'textPart'
   readonly text: string
+}
+
+export interface ThinkingDelta {
+  readonly type: 'thinkingDelta'
+  readonly content: string
 }
 
 export interface ThinkingPartEvent {
@@ -60,7 +70,9 @@ export type ToolCallEvent =
   | ToolCallStart
   | ToolCallArgDelta
   | ToolCallEnd
+  | TextDelta
   | TextPartEvent
+  | ThinkingDelta
   | ThinkingPartEvent
 
 // ---------------------------------------------------------------------------
@@ -173,14 +185,20 @@ function* handleEvent(state: StreamState, ev: Record<string, unknown>): Iterable
       }
     } else if (dtype === 'thinking_delta') {
       const t = state.thinkingByIndex.get(idx)
-      if (t !== undefined) t.text += (delta.thinking as string | undefined) ?? ''
+      if (t !== undefined) {
+        const chunk = (delta.thinking as string | undefined) ?? ''
+        t.text += chunk
+        if (chunk.length > 0) yield { type: 'thinkingDelta', content: chunk }
+      }
     } else if (dtype === 'signature_delta') {
       const t = state.thinkingByIndex.get(idx)
       if (t !== undefined) t.signature += (delta.signature as string | undefined) ?? ''
     } else if (dtype === 'text_delta') {
       const cur = state.textByIndex.get(idx)
       if (cur !== undefined) {
-        state.textByIndex.set(idx, cur + ((delta.text as string | undefined) ?? ''))
+        const chunk = (delta.text as string | undefined) ?? ''
+        state.textByIndex.set(idx, cur + chunk)
+        if (chunk.length > 0) yield { type: 'textDelta', content: chunk }
       }
     }
     return

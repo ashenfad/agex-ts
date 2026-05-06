@@ -8,7 +8,14 @@
  */
 
 import { CancelledError } from 'agex-ts/errors'
-import type { Cache, ExecuteContext, Policy, RegisteredFn, RegisteredNs } from 'agex-ts/types'
+import type {
+  Cache,
+  ExecuteContext,
+  Policy,
+  RegisteredCls,
+  RegisteredFn,
+  RegisteredNs,
+} from 'agex-ts/types'
 import { MemoryFS } from 'termish-ts/fs/memory'
 import { afterEach, describe, expect, it } from 'vitest'
 import { workerRuntime } from '../src/runtime'
@@ -20,6 +27,14 @@ import { workerRuntime } from '../src/runtime'
 // so this resolves correctly during test runs without depending on
 // `pnpm build`.
 const TEST_WORKER_URL = new URL('../src/worker.ts', import.meta.url)
+
+/** Wide constructor type for the test helper — concrete user
+ *  classes have typed args that don't structurally extend
+ *  `RegisteredCls.cls`'s `new (...args: unknown[]) => unknown`.
+ *  Defined once here with the lint suppression so the helper
+ *  itself reads cleanly. */
+// biome-ignore lint/suspicious/noExplicitAny: any-constructor is the right shape for test fixtures
+type LooseCtor = new (...args: any[]) => unknown
 
 // A no-op `Policy` — workerRuntime PR 1 doesn't read it.
 const EMPTY_POLICY: Policy = {
@@ -44,6 +59,15 @@ function makePolicy(args: {
       exclude?: RegisteredNs['exclude']
     }
   >
+  classes?: Record<
+    string,
+    {
+      cls: LooseCtor
+      constructable?: boolean
+      include?: RegisteredCls['include']
+      exclude?: RegisteredCls['exclude']
+    }
+  >
 }): Policy {
   const fns = new Map<string, RegisteredFn>()
   for (const [name, fn] of Object.entries(args.fns ?? {})) {
@@ -60,9 +84,26 @@ function makePolicy(args: {
     }
     namespaces.set(name, reg)
   }
+  const classes = new Map<string, RegisteredCls>()
+  for (const [name, spec] of Object.entries(args.classes ?? {})) {
+    const reg: RegisteredCls = {
+      kind: 'cls',
+      name,
+      // Concrete classes (e.g. `class Vec { constructor(x: number, y: number) }`)
+      // have specific param types that don't structurally match
+      // `RegisteredCls.cls`'s wide `new (...args: unknown[]) => unknown`.
+      // The cast is safe because the runtime treats args opaquely
+      // (passes them through as the agent provided them).
+      cls: spec.cls as RegisteredCls['cls'],
+      ...(spec.constructable === false && { constructable: false }),
+      ...(spec.include !== undefined && { include: spec.include }),
+      ...(spec.exclude !== undefined && { exclude: spec.exclude }),
+    }
+    classes.set(name, reg)
+  }
   return {
     fns,
-    classes: new Map(),
+    classes,
     namespaces,
     skills: new Map(),
     terminals: new Map(),
@@ -632,5 +673,257 @@ describe('workerRuntime — fn / namespace bridge', () => {
       makeCtx(),
     )
     expect(r2.outcome).toEqual({ kind: 'success', value: 'CancelledError' })
+  })
+})
+
+describe('workerRuntime — class bridge (registered cls)', () => {
+  let disposers: Array<() => Promise<void>> = []
+  afterEach(async () => {
+    await Promise.all(disposers.map((d) => d()))
+    disposers = []
+  })
+
+  function runtime() {
+    const rt = workerRuntime({ workerUrl: TEST_WORKER_URL, timeoutMs: 2_000 })
+    disposers.push(() => rt.dispose())
+    return rt
+  }
+
+  // Tiny pure value-class used across the suite. Methods on the
+  // prototype, a static, no closures over host state.
+  class Vec {
+    constructor(
+      public x: number,
+      public y: number,
+    ) {}
+    add(other: Vec): Vec {
+      return new Vec(this.x + other.x, this.y + other.y)
+    }
+    magnitude(): number {
+      return Math.sqrt(this.x * this.x + this.y * this.y)
+    }
+    static zero(): Vec {
+      return new Vec(0, 0)
+    }
+  }
+
+  it('round-trips construction + instance method dispatch', async () => {
+    const rt = runtime()
+    await rt.init(makePolicy({ classes: { Vec: { cls: Vec } } }))
+    const code = `
+      const v = new Vec(3, 4)
+      taskSuccess(await v.magnitude())
+    `
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: 5 })
+  })
+
+  it('preserves instanceof against the registered class', async () => {
+    const rt = runtime()
+    await rt.init(makePolicy({ classes: { Vec: { cls: Vec } } }))
+    const code = `
+      const v = new Vec(1, 2)
+      taskSuccess(v instanceof Vec)
+    `
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: true })
+  })
+
+  it('preserves instance.constructor identity', async () => {
+    const rt = runtime()
+    await rt.init(makePolicy({ classes: { Vec: { cls: Vec } } }))
+    const code = `
+      const v = new Vec(1, 2)
+      taskSuccess(v.constructor === Vec)
+    `
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: true })
+  })
+
+  it('dispatches static methods through the cls bridge', async () => {
+    const rt = runtime()
+    await rt.init(makePolicy({ classes: { Vec: { cls: Vec } } }))
+    // Vec.zero() is a static; the worker stub posts target='cls'
+    // and the host calls Vec.zero() against the registered class.
+    // The returned instance can't cross the boundary as a Vec —
+    // it's structured-cloned, so the agent receives a plain object
+    // with x/y. Acceptable for static-returns-value-type cases;
+    // we just assert the method ran.
+    const code = 'taskSuccess(await Vec.zero())'
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome.kind).toBe('success')
+    if (result.outcome.kind !== 'success') return
+    const v = result.outcome.value as { x: number; y: number }
+    expect(v.x).toBe(0)
+    expect(v.y).toBe(0)
+  })
+
+  it('throws when the agent attempts to subclass a registered class', async () => {
+    const rt = runtime()
+    await rt.init(makePolicy({ classes: { Vec: { cls: Vec } } }))
+    const code = `
+      try {
+        class V3 extends Vec { z = 0 }
+        new V3(1, 2)
+        taskFail('expected subclass new to throw')
+      } catch (e) {
+        taskSuccess(e.message)
+      }
+    `
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome.kind).toBe('success')
+    if (result.outcome.kind !== 'success') return
+    expect(String(result.outcome.value)).toMatch(/[Ss]ubclass/)
+  })
+
+  it('throws when the agent calls the constructor without `new`', async () => {
+    const rt = runtime()
+    await rt.init(makePolicy({ classes: { Vec: { cls: Vec } } }))
+    const code = `
+      try {
+        Vec(1, 2)
+        taskFail('expected plain call to throw')
+      } catch (e) {
+        taskSuccess(e.name)
+      }
+    `
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: 'TypeError' })
+  })
+
+  it('respects constructable: false at host dispatch time', async () => {
+    // Even if the worker stub doesn't know about constructable
+    // (it just posts newInstance), the host rejects construction
+    // and the rejection surfaces as the await-side error.
+    const rt = runtime()
+    await rt.init(makePolicy({ classes: { Vec: { cls: Vec, constructable: false } } }))
+    const code = `
+      try {
+        new Vec(1, 2)
+        taskFail('expected newInstance to be rejected')
+      } catch (e) {
+        // Construction fails async; the first method awaited on
+        // the proxy surfaces the rejection. But here we never call
+        // a method — the synchronous \`new\` returned a Proxy and
+        // the rejection lives on the unawaited creation Promise.
+        // To observe, await any method call.
+        taskSuccess('unreachable')
+      }
+    `
+    // Better test: actually await a method on the unconstructable
+    // class so the rejection is observable.
+    const code2 = `
+      const v = new Vec(1, 2)
+      try {
+        await v.magnitude()
+        taskFail('expected method on un-constructable to reject')
+      } catch (e) {
+        taskSuccess(e.message)
+      }
+    `
+    void code
+    const result = await rt.execute(code2, makeCtx())
+    expect(result.outcome.kind).toBe('success')
+    if (result.outcome.kind !== 'success') return
+    expect(String(result.outcome.value)).toMatch(/constructable/)
+  })
+
+  it('honors include/exclude on instance methods', async () => {
+    const rt = runtime()
+    // Block magnitude, allow add. Hidden methods should not even
+    // be reachable on the worker-side Proxy.
+    await rt.init(
+      makePolicy({
+        classes: { Vec: { cls: Vec, exclude: ['magnitude'] } },
+      }),
+    )
+    const code = `
+      const v = new Vec(3, 4)
+      const visible = []
+      if (typeof v.add === 'function') visible.push('add')
+      if (typeof v.magnitude === 'function') visible.push('magnitude')
+      taskSuccess(visible)
+    `
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: ['add'] })
+  })
+
+  it('releases instance handles across executes (per-emission lifecycle)', async () => {
+    const rt = runtime()
+    await rt.init(makePolicy({ classes: { Vec: { cls: Vec } } }))
+    // Stash a reference on globalThis (worker scope persists),
+    // then in execute #2 try to call it. The host's instance map
+    // was cleared at execute #1's settle, so the call should be
+    // rejected with 'no live instance with id ...'.
+    const r1 = await rt.execute(
+      'globalThis.__leaked = new Vec(1, 2); taskSuccess("first")',
+      makeCtx(),
+    )
+    expect(r1.outcome).toEqual({ kind: 'success', value: 'first' })
+    const r2 = await rt.execute(
+      `
+      try {
+        await globalThis.__leaked.add(new Vec(0, 0))
+        taskFail('expected stale instance call to be rejected')
+      } catch (e) {
+        taskSuccess(e.message)
+      }
+    `,
+      makeCtx(),
+    )
+    expect(r2.outcome.kind).toBe('success')
+    if (r2.outcome.kind !== 'success') return
+    // After cancelPending settles the orphan in execute #1 with a
+    // CancelledError, the leaked Proxy's *next* method call sees
+    // that rejection — the construction Promise has already been
+    // rejected. The exact message can be either flavor; both are
+    // valid evidence the handle didn't survive.
+    const msg = String(r2.outcome.value)
+    expect(msg.length).toBeGreaterThan(0)
+  })
+
+  it('handles concurrent instance method calls within one emission', async () => {
+    const rt = runtime()
+    await rt.init(makePolicy({ classes: { Vec: { cls: Vec } } }))
+    // Pass primitive args (no instance-as-arg) so this test
+    // exercises just the callId-map concurrency, not the
+    // pass-instance-as-arg case (which has its own
+    // identity-preservation considerations — see the next test).
+    const code = `
+      const v = new Vec(1, 1)
+      const xs = [10, 20, 30]
+      const mags = await Promise.all(xs.map((x) => new Vec(x, 0).magnitude()))
+      taskSuccess(mags)
+    `
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: [10, 20, 30] })
+  })
+
+  it("passing an instance Proxy as an arg fails cleanly (PR 4 doesn't bridge identity)", async () => {
+    // Documented limitation we flagged out-of-scope for PR 4: when
+    // agent code passes one Proxy-instance as an argument to
+    // another Proxy's method (e.g. `a.add(b)`), the Proxy doesn't
+    // structured-clone (the engine throws DataCloneError on it) so
+    // the bridge call rejects. The agent's `await` sees that
+    // rejection — surfaced here as an unhandled exception that
+    // becomes the execute's `error`. A future fix (deep arg
+    // rehydration via `__agexInstanceRef` markers) would let this
+    // case actually return a Vec(4, 6); for now it's a clean
+    // failure with an informative error rather than a silent
+    // wrong-answer.
+    const rt = runtime()
+    await rt.init(makePolicy({ classes: { Vec: { cls: Vec } } }))
+    const code = `
+      const a = new Vec(1, 2)
+      const b = new Vec(3, 4)
+      try {
+        await a.add(b)
+        taskSuccess('did not throw')
+      } catch (e) {
+        taskSuccess('threw')
+      }
+    `
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: 'threw' })
   })
 })

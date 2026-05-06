@@ -10,13 +10,16 @@
  *   2. Inject the v1 surface: `taskSuccess`, `taskFail`,
  *      `taskClarify`, `viewImage`, a captured `console`, proxy
  *      objects for `fs` / `cache`, registered host functions
- *      (`agent.fn`), and registered namespaces (`agent.namespace`).
- *      All of those round-trip through the host via `bridgeCall` /
- *      `bridgeResponse` (see the `BridgeChannel` class below). The
- *      registered names come from a one-time `configure` message
- *      the host posts after worker boot. `inputs` and registered
- *      classes (agent-side `new` returning per-emission instance
- *      handles) are still follow-up PRs.
+ *      (`agent.fn`), registered namespaces (`agent.namespace`),
+ *      and registered classes (`agent.cls`). Functions and
+ *      namespaces round-trip through the host via `bridgeCall`;
+ *      classes use a Proxy-backed constructor that posts
+ *      `newInstance` and exposes per-instance handles whose
+ *      method calls round-trip via `instanceCall`. Registered
+ *      names come from a one-time `configure` message the host
+ *      posts after worker boot. `inputs` and URL-shipped
+ *      registrations (worker-side imports, no RPC) are still
+ *      follow-up PRs.
  *   3. Resolve the emission's outcome from the way the AsyncFunction
  *      settles: a `taskSuccess` raise → success; a `TaskFailError` /
  *      `TaskClarifyError` raise → fail / clarify; clean return →
@@ -227,6 +230,169 @@ class BridgeChannel {
     return out
   }
 
+  /** Build the worker-side stub for a registered class. The returned
+   *  function is what the agent sees as `MyClass`:
+   *
+   *    - Called with `new MyClass(...args)` → posts `newInstance`
+   *      and returns a Proxy synchronously. The Proxy carries a
+   *      pending-creation Promise; method calls on it await that
+   *      Promise before posting `instanceCall`. The constructor
+   *      *throws* if it's invoked without `new` or via subclass
+   *      `super(...)` (`new.target !== WorkerStub`), since the
+   *      host can't model an agent-defined subclass that adds its
+   *      own state.
+   *
+   *    - Property access for static methods returns a stub function
+   *      that posts a `bridgeCall { target: 'cls' }`. Same dispatch
+   *      shape as namespace members — the host treats the class as
+   *      a namespace for static dispatch.
+   *
+   *    - `instance instanceof WorkerStub` works because the Proxy's
+   *      `getPrototypeOf` trap returns `WorkerStub.prototype` (a
+   *      sentinel object we control). `instance.constructor`
+   *      returns `WorkerStub`. Subclassing in agent code is not
+   *      supported — see the `new.target` check inside the
+   *      constructor below. */
+  buildClass(spec: {
+    name: string
+    instanceMethods: ReadonlyArray<string>
+    staticMethods: ReadonlyArray<string>
+  }): unknown {
+    const channel = this
+    const { name, instanceMethods, staticMethods } = spec
+    const instanceMethodSet = new Set(instanceMethods)
+    // Sentinel prototype object — gives `instanceof` a target to
+    // chain through. The actual method stubs live on the per-instance
+    // Proxy's `get` trap, not here, so the prototype itself stays
+    // empty + identifiable.
+    const sentinelProto = Object.create(null) as object
+
+    function WorkerStub(this: unknown, ...args: unknown[]): unknown {
+      // `new.target` is the constructor that was actually invoked
+      // with `new`. If it's `undefined`, we were called as a plain
+      // function (`MyClass()` not `new MyClass()`). If it's anything
+      // other than this stub, the agent did `class Sub extends
+      // MyClass {}` and called `super(...)`. Both paths can't be
+      // honored host-side — the host owns the instance state and
+      // doesn't know about agent-defined fields/methods.
+      if (new.target === undefined) {
+        throw new TypeError(`Class constructor ${name} cannot be invoked without 'new'`)
+      }
+      if (new.target !== WorkerStub) {
+        throw new Error(
+          `Subclassing registered class '${name}' isn't supported in this runtime; instances live host-side and can't carry agent-defined state. Define worker-realm hierarchies in /helpers (or in a class you compose, not extend).`,
+        )
+      }
+      const idPromise = channel.newInstance(name, args)
+      // Surface synchronous construction failures (DataCloneError on
+      // args, etc.) by letting `idPromise` reject; method calls on
+      // the returned Proxy will reject in turn.
+      const proxy: unknown = new Proxy(Object.create(sentinelProto), {
+        getPrototypeOf(): object {
+          // `instance instanceof WorkerStub` walks the prototype
+          // chain via this trap. We hand back our sentinel which
+          // is *also* `WorkerStub.prototype`, so the standard
+          // `Symbol.hasInstance` resolves to `true`.
+          return sentinelProto
+        },
+        get(_t, prop) {
+          if (prop === 'constructor') return WorkerStub
+          if (typeof prop !== 'string') return undefined
+          if (!instanceMethodSet.has(prop)) return undefined
+          return (...callArgs: unknown[]): Promise<unknown> => {
+            // Wait for construction to complete before dispatching;
+            // method calls fire-and-forget across the boundary
+            // are fine because the host's instance map is keyed
+            // by id and the host won't accept calls for unknown
+            // ids. If construction failed (e.g. DataCloneError on
+            // args), `idPromise` rejects and so does the method
+            // call.
+            return idPromise.then((id) => channel.instanceCall(id, prop, callArgs))
+          }
+        },
+      })
+      // ECMAScript: if the constructor returns a non-primitive,
+      // that object is what `new` evaluates to. We rely on this so
+      // the agent gets the Proxy, not whatever `this` happens to
+      // be in here.
+      return proxy
+    }
+
+    // Give the stub the right `name` + the sentinel as its
+    // `prototype`. Functions are configurable here.
+    Object.defineProperty(WorkerStub, 'name', { value: name, configurable: true })
+    Object.defineProperty(WorkerStub, 'prototype', {
+      value: sentinelProto,
+      writable: false,
+      enumerable: false,
+      configurable: false,
+    })
+
+    // Attach static-method stubs directly on the function. These
+    // dispatch through `target: 'cls'` so the host can call
+    // `MyClass.staticName(...)` against the registered class
+    // itself (not an instance).
+    for (const m of staticMethods) {
+      ;(WorkerStub as unknown as Record<string, unknown>)[m] = (
+        ...args: unknown[]
+      ): Promise<unknown> => this.call('cls', m, args, name)
+    }
+
+    return WorkerStub
+  }
+
+  /** Wrappers around `call()` that produce alternate outbound
+   *  message shapes — `newInstance` and `instanceCall` aren't
+   *  `bridgeCall` variants on the wire (the host needs to dispatch
+   *  them differently), but they share the same callId/pending
+   *  bookkeeping since responses come back as `bridgeResponse`
+   *  regardless of which outbound shape created them. */
+  newInstance(clsName: string, args: unknown[]): Promise<number> {
+    return new Promise<number>((resolve, reject) => {
+      const callId = this.nextCallId++
+      // The host replies with `bridgeResponse.value: { instanceId }`.
+      // Wrap the resolver to unpack it so the caller gets a bare
+      // number. If the response carries an error, the reject path
+      // fires unchanged.
+      this.pending.set(callId, {
+        resolve: (v) => resolve((v as { instanceId: number }).instanceId),
+        reject,
+      })
+      try {
+        post({
+          type: 'newInstance',
+          executeId: this.executeId,
+          callId,
+          clsName,
+          args,
+        })
+      } catch (e) {
+        this.pending.delete(callId)
+        reject(e instanceof Error ? e : new Error(String(e)))
+      }
+    })
+  }
+
+  instanceCall(instanceId: number, method: string, args: unknown[]): Promise<unknown> {
+    return new Promise<unknown>((resolve, reject) => {
+      const callId = this.nextCallId++
+      this.pending.set(callId, { resolve, reject })
+      try {
+        post({
+          type: 'instanceCall',
+          executeId: this.executeId,
+          callId,
+          instanceId,
+          method,
+          args,
+        })
+      } catch (e) {
+        this.pending.delete(callId)
+        reject(e instanceof Error ? e : new Error(String(e)))
+      }
+    })
+  }
+
   private call(
     target: BridgeTarget,
     method: string,
@@ -370,6 +536,14 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
     for (const ns of configured.namespaces) {
       if (ns.name in injected) continue
       injected[ns.name] = bridge.buildNamespace(ns.name, ns.members)
+    }
+    // Each registered class becomes a constructor stub the agent
+    // can `new`. See `BridgeChannel.buildClass` for what the stub
+    // actually does (newInstance round-trip, Proxy with method
+    // dispatch + instanceof support, static-method stubs).
+    for (const cls of configured.classes) {
+      if (cls.name in injected) continue
+      injected[cls.name] = bridge.buildClass(cls)
     }
   }
 

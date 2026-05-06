@@ -96,30 +96,28 @@ describe('E2E smoke — full agent pipeline', () => {
     // a custom terminal command that helps it inspect.
     agent
       .fn(
-        'readFile',
         async (...args: unknown[]) => {
           const path = args[0] as string
           const bytes = await agent.fs().read(path)
           return dec.decode(bytes)
         },
-        { description: 'Read a file from the VFS as text.' },
+        { name: 'readFile', description: 'Read a file from the VFS as text.' },
       )
       .fn(
-        'summarize',
         (...args: unknown[]) => {
           const text = args[0] as string
           const lines = text.split('\n').filter((l) => l.length > 0)
           return { lineCount: lines.length, first: lines[0] }
         },
-        { description: 'Summarize a text blob.' },
+        { name: 'summarize', description: 'Summarize a text blob.' },
       )
-      .terminal('beep', {
-        description: 'Used in tests; emits BEEP.',
-        handler: async (ctx) => {
+      .terminal(
+        async (ctx) => {
           ctx.stdout.write('BEEP\n')
           return undefined
         },
-      })
+        { name: 'beep', description: 'Used in tests; emits BEEP.' },
+      )
 
     // Capture the event stream in real time
     const onEvent: AgentEvent[] = []
@@ -307,8 +305,8 @@ describe('E2E smoke — full agent pipeline', () => {
     })
     const agent = await createAgent({ name: 'nested', llm, runtime: evalRuntime() })
     agent
-      .fn('double', (...a: unknown[]) => (a[0] as number) * 2)
-      .fn('add', (...a: unknown[]) => (a[0] as number) + (a[1] as number))
+      .fn((...a: unknown[]) => (a[0] as number) * 2, { name: 'double' })
+      .fn((...a: unknown[]) => (a[0] as number) + (a[1] as number), { name: 'add' })
     const fn = agent.task<undefined, number>({ description: 'X.' })
     expect(await fn(undefined)).toBe(12) // 2+4+6
   })

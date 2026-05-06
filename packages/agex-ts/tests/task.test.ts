@@ -102,7 +102,8 @@ describe('task — maxIterations safeguard', () => {
 describe('task — registered fn reachable from emission code', () => {
   it('agent.fn becomes a callable identifier in ts emissions', async () => {
     const { agent } = await makeAgent([r({ type: 'ts', code: 'taskSuccess(double(7))' })])
-    agent.fn('double', (...args: unknown[]) => (args[0] as number) * 2, {
+    agent.fn((...args: unknown[]) => (args[0] as number) * 2, {
+      name: 'double',
       description: 'Double a number.',
     })
     const fn = agent.task<undefined, number>({ description: 'Double 7.' })

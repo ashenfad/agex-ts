@@ -28,7 +28,8 @@ const agent = await createAgent({
   runtime: evalRuntime(),
 })
 
-agent.namespace('Math', Math, {
+agent.namespace(Math, {
+  name: 'Math',
   description: "JavaScript's standard library of math functions and constants.",
 })
 

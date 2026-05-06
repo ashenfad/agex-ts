@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { prettyEvents, prettyTokens } from '../src/pretty'
+import { createPrettyTokens, prettyEvents, prettyTokens } from '../src/pretty'
 import type { ActionEvent, AgentEvent, TokenChunk } from '../src/types'
 
 function capture(): { write: (s: string) => void; out: () => string } {
@@ -203,5 +203,62 @@ describe('prettyEvents', () => {
       { write, maxBody: 10 },
     )
     expect(lines()[0]).toBe(`[thinking] xxxxxxxxxx…(${50 - 10} more)`)
+  })
+})
+
+describe('createPrettyTokens (stateful: labels print once per emission)', () => {
+  function captureBuf(): { write: (s: string) => void; out: () => string } {
+    const buf: string[] = []
+    return { write: (s: string) => buf.push(s), out: () => buf.join('') }
+  }
+
+  function tk(t: Partial<TokenChunk> & { type: TokenChunk['type'] }): TokenChunk {
+    return { content: '', done: false, emissionIndex: 0, ...t }
+  }
+
+  it('emits the title label once even when content streams in many chunks', () => {
+    const { write, out } = captureBuf()
+    const cb = createPrettyTokens({ write })
+    // Simulate a title that streams as 4 separate chunks (something
+    // Anthropic / OpenAI absolutely do for longer args).
+    cb(tk({ type: 'title', content: 'Compute ' }))
+    cb(tk({ type: 'title', content: 'and re' }))
+    cb(tk({ type: 'title', content: 'turn ans' }))
+    cb(tk({ type: 'title', content: 'wer' }))
+    cb(tk({ type: 'title', content: '', done: true }))
+    expect(out()).toBe('Compute and return answer\n')
+  })
+
+  it('emits the path label once across multi-chunk filePath streams', () => {
+    const { write, out } = captureBuf()
+    const cb = createPrettyTokens({ write })
+    cb(tk({ type: 'filePath', content: '/help' }))
+    cb(tk({ type: 'filePath', content: 'ers/util' }))
+    cb(tk({ type: 'filePath', content: 's.ts' }))
+    cb(tk({ type: 'filePath', content: '', done: true }))
+    expect(out()).toBe('\npath: /helpers/utils.ts\n')
+  })
+
+  it('keeps streaming content fields (ts / fileContent / thinking) live', () => {
+    const { write, out } = captureBuf()
+    const cb = createPrettyTokens({ write })
+    cb(tk({ type: 'thinking', content: 'plan ' }))
+    cb(tk({ type: 'thinking', content: 'first' }))
+    cb(tk({ type: 'ts', content: 'task' }))
+    cb(tk({ type: 'ts', content: 'Success(1)' }))
+    cb(tk({ type: 'emission', content: '', done: true }))
+    expect(out()).toBe('plan firsttaskSuccess(1)\n')
+  })
+
+  it('isolates state per emissionIndex (concurrent streaming of two emissions)', () => {
+    const { write, out } = captureBuf()
+    const cb = createPrettyTokens({ write })
+    // Interleave chunks for two different emissions; final emit
+    // events flush each independently.
+    cb(tk({ type: 'title', content: 'Alpha', emissionIndex: 0 }))
+    cb(tk({ type: 'filePath', content: '/a.ts', emissionIndex: 1 }))
+    cb(tk({ type: 'title', content: '', done: true, emissionIndex: 0 }))
+    cb(tk({ type: 'filePath', content: '', done: true, emissionIndex: 1 }))
+    expect(out()).toBe('Alpha\n\npath: /a.ts\n')
   })
 })

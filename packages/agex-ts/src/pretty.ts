@@ -3,12 +3,19 @@
  * `TaskCallOptions.onEvent`, mirroring agex-py's `pprint_tokens` and
  * `pprint_events`.
  *
- *   - `prettyTokens` — streams a `TokenChunk` (per-character flow as
- *     the model writes); use when you want to watch the model
- *     thinking and coding live.
+ *   - `prettyTokens` — stateless callback that streams a
+ *     `TokenChunk` (per-character flow as the model writes). Use
+ *     when you want a fire-and-forget streaming view and don't
+ *     mind the occasional repeated label on `filePath` /
+ *     `fileSearch` if a value spans multiple chunks.
+ *   - `createPrettyTokens()` — factory returning a stateful
+ *     callback that buffers single-line fields (`title` /
+ *     `filePath` / `fileSearch`) so labels emit once per emission
+ *     even when content streams in many chunks. Better default
+ *     for production console output.
  *   - `prettyEvents` — formats a discrete `AgentEvent` (one section
- *     per action / output / outcome); use when you want a chunkier
- *     after-the-fact log.
+ *     per action / output / outcome). Use when you want a chunkier
+ *     after-the-fact log instead of streaming.
  *
  * Pass either directly to the corresponding callback. For UIs that
  * want different formatting (HTML, color, etc.) write your own
@@ -92,6 +99,87 @@ export function prettyTokens(token: TokenChunk, opts: PrettyOptions = {}): void 
     case 'signature':
       // Opaque round-trip blob; not human-readable.
       return
+  }
+}
+
+/** Factory returning a stateful version of `prettyTokens` that
+ *  buffers single-line fields (`title` / `filePath` / `fileSearch`)
+ *  per emission so labels like `path:` only print once even when
+ *  the value streams across multiple chunks.
+ *
+ *  Stateless `prettyTokens` repeats the label on every chunk for
+ *  these fields (visible regression when a path streams in pieces);
+ *  the factory variant is the cleaner default for production
+ *  console output. Trade-off: titles / paths land at the close of
+ *  the field rather than streaming character-by-character — fine
+ *  because they're short. Streaming fields (`thinking`, `text`,
+ *  `ts`, `terminal`, `fileContent`) still flow live.
+ *
+ *  Use one factory per task call (state is per-emission keyed by
+ *  emissionIndex; running multiple agents through the same callback
+ *  would interleave).
+ */
+export function createPrettyTokens(opts: PrettyOptions = {}): (token: TokenChunk) => void {
+  const write = opts.write ?? defaultWrite
+  // Per-emission buffers for fields where we want the label to
+  // appear once. Keyed by emissionIndex so concurrent streaming of
+  // multiple emissions doesn't conflict.
+  const buffered = new Map<number, { title: string; filePath: string; fileSearch: string }>()
+  function slot(idx: number) {
+    let s = buffered.get(idx)
+    if (s === undefined) {
+      s = { title: '', filePath: '', fileSearch: '' }
+      buffered.set(idx, s)
+    }
+    return s
+  }
+  return (token: TokenChunk): void => {
+    switch (token.type) {
+      case 'toolStart':
+        write(`\n[${token.content}]\n`)
+        return
+      case 'thinking':
+      case 'text':
+      case 'ts':
+      case 'terminal':
+      case 'fileContent':
+        write(token.content)
+        return
+      case 'title': {
+        const s = slot(token.emissionIndex)
+        if (token.done) {
+          if (s.title.length > 0) write(`${s.title}\n`)
+          buffered.delete(token.emissionIndex)
+        } else {
+          s.title += token.content
+        }
+        return
+      }
+      case 'filePath': {
+        const s = slot(token.emissionIndex)
+        if (token.done) {
+          if (s.filePath.length > 0) write(`\npath: ${s.filePath}\n`)
+        } else {
+          s.filePath += token.content
+        }
+        return
+      }
+      case 'fileSearch': {
+        const s = slot(token.emissionIndex)
+        if (token.done) {
+          if (s.fileSearch.length > 0) write(`\nsearch: ${s.fileSearch}\n`)
+        } else {
+          s.fileSearch += token.content
+        }
+        return
+      }
+      case 'emission':
+        write('\n')
+        buffered.delete(token.emissionIndex)
+        return
+      case 'signature':
+        return
+    }
   }
 }
 

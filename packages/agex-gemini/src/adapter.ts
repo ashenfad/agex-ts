@@ -147,8 +147,14 @@ function bytesToBase64(bytes: Uint8Array): string {
   // biome-ignore lint/suspicious/noExplicitAny: Node-only fallback
   const Buf = (globalThis as any).Buffer
   if (Buf !== undefined) return Buf.from(bytes).toString('base64')
-  // Last resort: decode as UTF-8 and hope for the best.
-  return _dec.decode(bytes)
+  // Throw rather than silently corrupt — Gemini would 400 on the
+  // mangled signature anyway, and the error here is more
+  // actionable than the API's. (Both Node 16+ and every modern
+  // browser ship `btoa`; this branch shouldn't fire in practice.)
+  throw new Error(
+    'agex-gemini: no base64 encoder available — neither btoa() nor globalThis.Buffer ' +
+      'exists in this runtime. Cannot encode thoughtSignature for the Gemini API.',
+  )
 }
 
 /** Lower a sequence of `NeutralTurn`s into Gemini `Content[]`. */

@@ -138,10 +138,16 @@ describe('PolicyBuilder — URL-shipped registrations', () => {
 
   it('registerFn rejects paramsSchema combined with url', () => {
     const p = new PolicyBuilder()
+    // The schema shape doesn't matter for this guard — the rejection
+    // fires on `paramsSchema !== undefined`. Use a stub that satisfies
+    // the StandardSchemaV1 interface just enough to typecheck.
+    const stubSchema = {
+      '~standard': { version: 1, vendor: 'test', validate: (v: unknown) => ({ value: v }) },
+    } as unknown as NonNullable<Parameters<PolicyBuilder['registerFn']>[1]['paramsSchema']>
     expect(() =>
       p.registerFn('x', {
         url: 'https://example.com/m.js',
-        paramsSchema: { type: 'object' },
+        paramsSchema: stubSchema,
       }),
     ).toThrow(/paramsSchema can't be combined with \{ url \}/)
   })

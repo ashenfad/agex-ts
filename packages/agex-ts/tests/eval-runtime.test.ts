@@ -410,7 +410,16 @@ describe('evalRuntime — import syntax for registered names', () => {
     const r = evalRuntime()
     const policy: Policy = {
       ...emptyPolicy,
-      classes: new Map([['Vec', { kind: 'cls' as const, name: 'Vec', cls: Vec }]]),
+      classes: new Map([
+        [
+          'Vec',
+          {
+            kind: 'cls' as const,
+            name: 'Vec',
+            cls: Vec as unknown as new (...args: unknown[]) => unknown,
+          },
+        ],
+      ]),
     }
     await r.init(policy)
     const result = await r.execute(

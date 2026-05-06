@@ -36,10 +36,9 @@
  *     / continue) plus an optional unexpected error (parse
  *     failure, uncaught exception that wasn't a task-control raise).
  *
- *  Bridges for registered functions, namespace proxies, and the
- *  importmap-based module policy are follow-up PRs and will add
- *  their own message variants here without changing the existing
- *  ones.
+ *  Bridges for registered classes (`agent.cls`) + live namespaces
+ *  share an instance-handle protocol that lands in the next PR;
+ *  importmap-based module policy is the PR after that.
  */
 
 import type { OutputPart, TaskOutcome } from 'agex-ts/types'
@@ -53,11 +52,39 @@ export interface SerializedError {
   readonly stack?: string
 }
 
-/** Which side-effect surface a `bridgeCall` targets. Mirrors the
- *  host-side names on `ExecuteContext`. */
-export type BridgeTarget = 'fs' | 'cache'
+/** Which surface a `bridgeCall` targets.
+ *
+ *   - `fs` / `cache` — the per-execute `ExecuteContext` surfaces.
+ *   - `fn` — a registered host function (`agent.fn(name, ...)`).
+ *     `method` carries the registered name; `subject` is unused.
+ *   - `namespace` — a registered non-live namespace
+ *     (`agent.namespace(name, target)`). `subject` is the namespace
+ *     name, `method` is the visible member.
+ *
+ *  Live namespaces (`live: true`) and registered classes
+ *  (`agent.cls`) get an instance-handle protocol in the next PR;
+ *  they aren't represented here yet. */
+export type BridgeTarget = 'fs' | 'cache' | 'fn' | 'namespace'
+
+/** Sent once after the worker reports `ready`, before the first
+ *  `execute`. Tells the worker which registered names exist so it
+ *  can build the matching stubs in the per-execute injected scope.
+ *  Re-sent on respawn (timeout / abort kills the worker), which is
+ *  fine — the policy is fixed for the runtime's lifetime. */
+export interface ConfigureMessage {
+  readonly type: 'configure'
+  /** Names registered via `agent.fn(...)`. */
+  readonly fns: ReadonlyArray<string>
+  /** Non-live namespaces and the visible (post-include/exclude)
+   *  function-member names per namespace. */
+  readonly namespaces: ReadonlyArray<{
+    readonly name: string
+    readonly members: ReadonlyArray<string>
+  }>
+}
 
 export type Host2WorkerMessage =
+  | ConfigureMessage
   | {
       readonly type: 'execute'
       /** Already-transformed JavaScript (TS types stripped on the
@@ -99,10 +126,18 @@ export type Worker2HostMessage =
       readonly executeId: number
       readonly callId: number
       readonly target: BridgeTarget
-      /** Method name to invoke on the host-side `fs` / `cache`. The
-       *  host validates the name is one of a small allowlist (see
-       *  `runtime.ts`) so a typo / hostile worker can't reach
-       *  prototype-chain methods. */
+      /** Identifies the dispatch root when one bridge target hosts
+       *  multiple distinct surfaces — only used for `target:
+       *  'namespace'`, where it carries the namespace name. Unused
+       *  (and ignored) for `fs` / `cache` / `fn`. */
+      readonly subject?: string
+      /** What to invoke. For `fs` / `cache`: the method name on
+       *  that surface. For `fn`: the registered function name. For
+       *  `namespace`: the visible member name on the namespace
+       *  identified by `subject`. The host re-validates against
+       *  the allowlist established at configure time, so a typo /
+       *  hostile worker can't reach prototype-chain methods or
+       *  unregistered names. */
       readonly method: string
       /** Positional args. Must structured-clone (Uint8Array / string
        *  / plain object / undefined are typical). */

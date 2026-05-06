@@ -20,22 +20,30 @@
  *      `Error` (for the budget). The next `execute` spawns a fresh
  *      worker.
  *
- * Cooperative cancellation is a follow-up. PR 1 only does the
- * hard-terminate path, which is enough to honor wall-clock budgets
- * and external aborts.
+ * Cooperative cancellation is a follow-up — today the adapter only
+ * does the hard-terminate path, which is enough to honor wall-clock
+ * budgets and external aborts.
+ *
+ * What gets bridged today: `fs` / `cache` (per-execute context),
+ * registered fns, registered non-live namespaces. Registered classes
+ * (`agent.cls`) and live namespaces (instance proxies with
+ * per-emission lifecycle) are the next slice.
  */
 
 import { CancelledError } from 'agex-ts/errors'
+import { memberAllowed } from 'agex-ts/policy'
 import type {
   ExecResult,
   ExecuteContext,
   OutputPart,
   Policy,
+  RegisteredNs,
   RuntimeAdapter,
   TaskOutcome,
 } from 'agex-ts/types'
 import type {
   BridgeTarget,
+  ConfigureMessage,
   Host2WorkerMessage,
   SerializedError,
   Worker2HostMessage,
@@ -110,6 +118,12 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
   // future cancellation point) can settle a hung execute
   // immediately rather than waiting for `timeoutMs` to fire.
   let activeExecute: { settle: (reason: Error) => void } | null = null
+  // Captured at `init()` and re-shipped on every spawn (the worker
+  // is recreated after timeout / abort kills it). Holds the
+  // RegisteredFn / RegisteredNs entries the bridge dispatcher needs
+  // and the matching wire-form the worker's stub builder expects.
+  let policyRef: Policy | null = null
+  let configurePayload: ConfigureMessage | null = null
 
   function spawn(): void {
     const w = new Worker(workerUrl, { type: 'module' })
@@ -119,6 +133,12 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
         if (ev.data?.type === 'ready') {
           w.removeEventListener('message', onMsg)
           w.removeEventListener('error', onErr)
+          // Configure must arrive before the first `execute` so the
+          // worker's stub builder can populate fn / namespace
+          // bindings. postMessage delivery is FIFO, so posting it
+          // here (before `execute` is sent) is enough — no
+          // round-trip needed.
+          if (configurePayload !== null) w.postMessage(configurePayload)
           resolve()
         }
       }
@@ -141,12 +161,19 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
   }
 
   return {
-    async init(_policy: Policy): Promise<void> {
-      // Policy is intentionally unused in PR 1 — module-resolution
-      // and the registered-fns / namespace-proxy bridges land in
-      // follow-up PRs. Keeping init() in the contract so the agent
-      // loop's existing call site doesn't change.
-      void _policy
+    async init(policy: Policy): Promise<void> {
+      // Capture the policy so:
+      //   1. `handleBridgeCall` can dispatch `fn` / `namespace`
+      //      calls against the live registrations.
+      //   2. `spawn()` (lazy + on respawn after a hard-kill) can
+      //      ship the matching `configure` message to the worker
+      //      so its stub builder knows what names to expose.
+      //
+      // The configure payload is fixed at init time — no in-flight
+      // policy mutation. If the embedder wants new registrations,
+      // they need a fresh runtime instance.
+      policyRef = policy
+      configurePayload = buildConfigure(policy)
     },
 
     async execute(code: string, ctx: ExecuteContext): Promise<ExecResult> {
@@ -251,7 +278,7 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
             return
           }
           if (m?.type === 'bridgeCall' && m.executeId === executeId) {
-            void handleBridgeCall(m, ctx, w)
+            void handleBridgeCall(m, ctx, policyRef, w)
             return
           }
           if (m?.type === 'result' && m.executeId === executeId) {
@@ -339,16 +366,17 @@ function serializeError(e: unknown): SerializedError {
 }
 
 /** Dispatch a `bridgeCall` from the worker against the live
- *  `ExecuteContext`. Reply with a `bridgeResponse` carrying either
- *  the awaited return value or a serialized error.
+ *  `ExecuteContext` / `Policy`. Reply with a `bridgeResponse`
+ *  carrying either the awaited return value or a serialized error.
  *
  *  Two failure modes worth distinguishing:
  *
- *    1. The host method itself throws (e.g. `fs.read('/missing')`
- *       on a strict backend) — caught and serialized as `ok: false`.
+ *    1. The host call itself throws (e.g. `fs.read('/missing')` on
+ *       a strict backend, or a registered fn that rejects) —
+ *       caught and serialized as `ok: false`.
  *    2. The successful return value isn't structured-cloneable
- *       (e.g. a `cache.get(...)` value containing a function). The
- *       outer `try/catch` around `postMessage` catches the
+ *       (e.g. a registered fn returns another function). The outer
+ *       `try/catch` around `postMessage` catches the
  *       `DataCloneError` and re-emits it as `ok: false` so the
  *       worker's awaiting promise rejects rather than hangs.
  *
@@ -356,31 +384,17 @@ function serializeError(e: unknown): SerializedError {
  *  response (timeout / abort fired during the await), `postMessage`
  *  is a no-op or throws — either way, no one is listening, so we
  *  swallow any failure on this final send. */
-function allowedFor(target: BridgeTarget): ReadonlySet<string> {
-  return target === 'fs' ? FS_METHODS : CACHE_METHODS
-}
-
 async function handleBridgeCall(
   msg: Extract<Worker2HostMessage, { type: 'bridgeCall' }>,
   ctx: ExecuteContext,
+  policy: Policy | null,
   w: Worker,
 ): Promise<void> {
-  const { executeId, callId, target, method, args } = msg
-  const allowed = allowedFor(target)
-  // biome-ignore lint/suspicious/noExplicitAny: dynamic dispatch over the bridged contract
-  const surface: any = target === 'fs' ? ctx.fs : ctx.cache
-
+  const { executeId, callId } = msg
   let value: unknown
   let error: SerializedError | null = null
   try {
-    if (!allowed.has(method)) {
-      throw new Error(`workerRuntime bridge: method '${method}' not allowed on '${target}'`)
-    }
-    const fn = surface[method]
-    if (typeof fn !== 'function') {
-      throw new Error(`workerRuntime bridge: '${target}.${method}' is not callable on this context`)
-    }
-    value = await fn.apply(surface, args)
+    value = await dispatch(msg, ctx, policy)
   } catch (e) {
     error = serializeError(e)
   }
@@ -410,4 +424,132 @@ async function handleBridgeCall(
       // Worker is gone. Nothing to deliver to.
     }
   }
+}
+
+async function dispatch(
+  msg: Extract<Worker2HostMessage, { type: 'bridgeCall' }>,
+  ctx: ExecuteContext,
+  policy: Policy | null,
+): Promise<unknown> {
+  const { target, method, args } = msg
+  switch (target) {
+    case 'fs':
+    case 'cache': {
+      const allowed = target === 'fs' ? FS_METHODS : CACHE_METHODS
+      if (!allowed.has(method)) {
+        throw new Error(`workerRuntime bridge: method '${method}' not allowed on '${target}'`)
+      }
+      // biome-ignore lint/suspicious/noExplicitAny: dynamic dispatch over the bridged contract
+      const surface: any = target === 'fs' ? ctx.fs : ctx.cache
+      const fn = surface[method]
+      if (typeof fn !== 'function') {
+        throw new Error(
+          `workerRuntime bridge: '${target}.${method}' is not callable on this context`,
+        )
+      }
+      return await fn.apply(surface, args as unknown[])
+    }
+    case 'fn': {
+      if (policy === null) {
+        throw new Error("workerRuntime bridge: 'fn' call before init() / policy unavailable")
+      }
+      const reg = policy.fns.get(method)
+      if (reg === undefined) {
+        throw new Error(`workerRuntime bridge: no registered fn named '${method}'`)
+      }
+      return await reg.fn(...(args as unknown[]))
+    }
+    case 'namespace': {
+      if (policy === null) {
+        throw new Error("workerRuntime bridge: 'namespace' call before init() / policy unavailable")
+      }
+      const subject = msg.subject
+      if (subject === undefined) {
+        throw new Error("workerRuntime bridge: 'namespace' call missing required `subject`")
+      }
+      const reg = policy.namespaces.get(subject)
+      if (reg === undefined) {
+        throw new Error(`workerRuntime bridge: no registered namespace named '${subject}'`)
+      }
+      if (reg.live === true) {
+        // Live-instance proxying lands in PR 4 (instance handles +
+        // method dispatch by handle). For now we don't expose live
+        // namespaces to the worker at all — `buildConfigure` skips
+        // them — so this branch should be unreachable. If it does
+        // fire, surface a clear error.
+        throw new Error(
+          `workerRuntime bridge: namespace '${subject}' is registered as live; live-instance proxies are not yet implemented in this runtime`,
+        )
+      }
+      const visible = visibleNamespaceMembers(reg)
+      if (!visible.has(method)) {
+        throw new Error(
+          `workerRuntime bridge: member '${method}' not visible on namespace '${subject}'`,
+        )
+      }
+      // Functions can live anywhere on the prototype chain. Use
+      // bracket access (NOT Object.getOwnPropertyDescriptor) so
+      // we get inherited methods too. The visibility check above
+      // already enforced that the name is allowed.
+      // biome-ignore lint/suspicious/noExplicitAny: dynamic dispatch over the bridged contract
+      const target: any = reg.target
+      const fn = target[method]
+      if (typeof fn !== 'function') {
+        throw new Error(
+          `workerRuntime bridge: '${subject}.${method}' is not callable (non-function members aren't bridged in this PR)`,
+        )
+      }
+      return await fn.apply(target, args as unknown[])
+    }
+  }
+}
+
+/** Build the `configure` payload from a `Policy`. Visible
+ *  namespace members are pre-filtered through include/exclude here
+ *  so the worker never sees names that policy excluded — defense
+ *  in depth, paired with the host-side allowlist re-check in
+ *  `dispatch`. Live namespaces are skipped (PR 4 territory).
+ *  Non-function members are skipped too — they aren't bridged in
+ *  this PR. */
+function buildConfigure(policy: Policy): ConfigureMessage {
+  const fns = [...policy.fns.keys()]
+  const namespaces: Array<{ name: string; members: ReadonlyArray<string> }> = []
+  for (const [name, reg] of policy.namespaces) {
+    if (reg.live === true) continue
+    const visible = visibleNamespaceMembers(reg)
+    const callable = [...visible].filter((m) => {
+      // biome-ignore lint/suspicious/noExplicitAny: dynamic introspection
+      const v = (reg.target as any)[m]
+      return typeof v === 'function'
+    })
+    namespaces.push({ name, members: callable })
+  }
+  return { type: 'configure', fns, namespaces }
+}
+
+/** Compute the set of allowed member names on a namespace, applying
+ *  `_*`-by-default exclusion and any include/exclude filters from
+ *  the registration. Walks the prototype chain so methods defined
+ *  on a class's `.prototype` get listed too. Uses agex-ts's
+ *  `memberAllowed` directly so the visibility semantics here track
+ *  the registration system's source of truth — no parallel glob
+ *  implementation to drift. */
+function visibleNamespaceMembers(reg: RegisteredNs): Set<string> {
+  const seen = new Set<string>()
+  const effectiveExclude = reg.exclude ?? '_*'
+  const test = (k: string): boolean => {
+    if (k === 'constructor') return false
+    return memberAllowed(k, reg.include, effectiveExclude)
+  }
+  for (const k of Object.getOwnPropertyNames(reg.target)) {
+    if (test(k)) seen.add(k)
+  }
+  let proto: object | null = Object.getPrototypeOf(reg.target) as object | null
+  while (proto !== null && proto !== Object.prototype) {
+    for (const k of Object.getOwnPropertyNames(proto)) {
+      if (test(k)) seen.add(k)
+    }
+    proto = Object.getPrototypeOf(proto) as object | null
+  }
+  return seen
 }

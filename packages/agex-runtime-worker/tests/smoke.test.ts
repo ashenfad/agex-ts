@@ -1,14 +1,14 @@
 /**
  * Browser-mode smoke tests for `workerRuntime`.
  *
- * Each test stubs an `ExecuteContext` directly rather than going
- * through the full agent loop — PR 1 doesn't bridge `fs` / `cache`
- * yet, so a contrived in-memory context is enough to exercise the
- * worker's execute / output / result protocol.
+ * Each test stubs an `ExecuteContext` (with a `MemoryFS` + Map-
+ * backed `Cache`) and a `Policy` directly rather than going through
+ * the full agent loop. The boundary under test is just the runtime
+ * adapter and its wire protocol, so a contrived context is enough.
  */
 
 import { CancelledError } from 'agex-ts/errors'
-import type { Cache, ExecuteContext, Policy } from 'agex-ts/types'
+import type { Cache, ExecuteContext, Policy, RegisteredFn, RegisteredNs } from 'agex-ts/types'
 import { MemoryFS } from 'termish-ts/fs/memory'
 import { afterEach, describe, expect, it } from 'vitest'
 import { workerRuntime } from '../src/runtime'
@@ -28,6 +28,47 @@ const EMPTY_POLICY: Policy = {
   namespaces: new Map(),
   skills: new Map(),
   terminals: new Map(),
+}
+
+/** Build a `Policy` shape from a friendly description. Skips the
+ *  `PolicyBuilder` machinery (validation, name collisions, schema
+ *  compilation) since these tests are about the runtime adapter,
+ *  not the registration system. */
+function makePolicy(args: {
+  fns?: Record<string, RegisteredFn['fn']>
+  namespaces?: Record<
+    string,
+    {
+      target: object
+      live?: boolean
+      include?: RegisteredNs['include']
+      exclude?: RegisteredNs['exclude']
+    }
+  >
+}): Policy {
+  const fns = new Map<string, RegisteredFn>()
+  for (const [name, fn] of Object.entries(args.fns ?? {})) {
+    fns.set(name, { kind: 'fn', name, fn })
+  }
+  const namespaces = new Map<string, RegisteredNs>()
+  for (const [name, spec] of Object.entries(args.namespaces ?? {})) {
+    const reg: RegisteredNs = {
+      kind: 'namespace',
+      name,
+      target: spec.target,
+      ...(spec.live === true && { live: true }),
+      ...(spec.include !== undefined && { include: spec.include }),
+      ...(spec.exclude !== undefined && { exclude: spec.exclude }),
+    }
+    namespaces.set(name, reg)
+  }
+  return {
+    fns,
+    classes: new Map(),
+    namespaces,
+    skills: new Map(),
+    terminals: new Map(),
+  }
 }
 
 /** Map-backed `Cache` implementation matching `agex-ts/types`. The
@@ -358,5 +399,176 @@ describe('workerRuntime — fs / cache bridge', () => {
       kind: 'success',
       value: [0, 2, 4, 6, 8, 10, 12, 14, 16, 18],
     })
+  })
+})
+
+describe('workerRuntime — fn / namespace bridge', () => {
+  let disposers: Array<() => Promise<void>> = []
+  afterEach(async () => {
+    await Promise.all(disposers.map((d) => d()))
+    disposers = []
+  })
+
+  function runtime() {
+    const rt = workerRuntime({ workerUrl: TEST_WORKER_URL, timeoutMs: 2_000 })
+    disposers.push(() => rt.dispose())
+    return rt
+  }
+
+  it('exposes registered fns; calling them round-trips through the host', async () => {
+    const rt = runtime()
+    await rt.init(
+      makePolicy({
+        fns: {
+          double: (x) => (x as number) * 2,
+          greet: (name) => `hello ${name}`,
+        },
+      }),
+    )
+    const code = `taskSuccess([await double(5), await greet('world')])`
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: [10, 'hello world'] })
+  })
+
+  it('preserves host-side closures in fn calls (the whole point of host-RPC)', async () => {
+    // The closure over `counter` is exactly the case host-RPC
+    // exists for — source-shipping would lose it.
+    let counter = 0
+    const rt = runtime()
+    await rt.init(makePolicy({ fns: { next: () => ++counter } }))
+    const code = 'taskSuccess([await next(), await next(), await next()])'
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: [1, 2, 3] })
+    expect(counter).toBe(3)
+  })
+
+  it('surfaces a registered fn throw as a rejected promise in user code', async () => {
+    const rt = runtime()
+    await rt.init(
+      makePolicy({
+        fns: {
+          boom: () => {
+            throw new Error('intentional')
+          },
+        },
+      }),
+    )
+    const code = `
+      try {
+        await boom()
+        taskFail('expected boom() to throw')
+      } catch (e) {
+        taskSuccess(e.message)
+      }
+    `
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: 'intentional' })
+  })
+
+  it("rejects a call to a name that wasn't registered as a fn", async () => {
+    // The worker only injects names the host advertised at
+    // configure time, so an unregistered name is a TypeError on
+    // the worker-side reference itself — not even a bridge call.
+    const rt = runtime()
+    await rt.init(makePolicy({ fns: { foo: () => 1 } }))
+    const code = `
+      try {
+        await unregistered()
+        taskFail('expected unregistered() to throw')
+      } catch (e) {
+        taskSuccess(e.name)
+      }
+    `
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: 'ReferenceError' })
+  })
+
+  it('exposes a non-live namespace; visible methods round-trip', async () => {
+    const rt = runtime()
+    await rt.init(
+      makePolicy({
+        namespaces: {
+          math: {
+            target: {
+              add: (a: unknown, b: unknown) => (a as number) + (b as number),
+              multiply: (a: unknown, b: unknown) => (a as number) * (b as number),
+            },
+          },
+        },
+      }),
+    )
+    const code = 'taskSuccess([await math.add(2, 3), await math.multiply(4, 5)])'
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: [5, 20] })
+  })
+
+  it('respects include / exclude member filters when exposing a namespace', async () => {
+    // `_secret` should be invisible by default (the `_*` rule);
+    // `helper` is excluded explicitly.
+    const rt = runtime()
+    await rt.init(
+      makePolicy({
+        namespaces: {
+          util: {
+            target: {
+              ok: () => 'ok',
+              helper: () => 'helper',
+              _secret: () => 'secret',
+            },
+            exclude: ['helper', '_*'],
+          },
+        },
+      }),
+    )
+    const code = `
+      const visible = []
+      if (typeof util.ok === 'function') visible.push('ok')
+      if (typeof util.helper === 'function') visible.push('helper')
+      if (typeof util._secret === 'function') visible.push('_secret')
+      taskSuccess(visible)
+    `
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: ['ok'] })
+  })
+
+  it('walks the prototype chain so class-based namespace targets expose methods', async () => {
+    // A registered namespace whose target is an instance of a
+    // class should expose methods defined on the prototype, not
+    // just own properties. evalRuntime / the renderer both walk
+    // the chain; the worker bridge needs to too.
+    class Calc {
+      double(x: number) {
+        return x * 2
+      }
+    }
+    const rt = runtime()
+    await rt.init(makePolicy({ namespaces: { calc: { target: new Calc() } } }))
+    const code = 'taskSuccess(await calc.double(7))'
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: 14 })
+  })
+
+  it("ignores live: true namespaces in PR 3 (the worker simply doesn't see them)", async () => {
+    // Live-instance proxying lands in the next PR; until then the
+    // configure step skips them. The agent-side reference just
+    // doesn't exist — same shape as an unregistered name.
+    const rt = runtime()
+    await rt.init(
+      makePolicy({
+        namespaces: {
+          db: { target: { query: () => 'rows' }, live: true },
+        },
+      }),
+    )
+    const code = `
+      try {
+        await db.query()
+        taskFail('expected live namespace to be invisible')
+      } catch (e) {
+        taskSuccess(e.name)
+      }
+    `
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: 'ReferenceError' })
   })
 })

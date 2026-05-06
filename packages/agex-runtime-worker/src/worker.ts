@@ -8,11 +8,15 @@
  *      injected names land directly in scope. Same shape as
  *      `evalRuntime`, just inside a Worker realm.
  *   2. Inject the v1 surface: `taskSuccess`, `taskFail`,
- *      `taskClarify`, `viewImage`, a captured `console`, and proxy
- *      objects for `fs` / `cache` whose methods round-trip through
- *      the host via `bridgeCall` / `bridgeResponse` (see the
- *      `BridgeChannel` class below). `inputs`, registered
- *      fns / classes, and namespace proxies are still follow-up PRs.
+ *      `taskClarify`, `viewImage`, a captured `console`, proxy
+ *      objects for `fs` / `cache`, registered host functions
+ *      (`agent.fn`), and non-live namespaces (`agent.namespace`).
+ *      All of those round-trip through the host via `bridgeCall` /
+ *      `bridgeResponse` (see the `BridgeChannel` class below). The
+ *      registered names come from a one-time `configure` message
+ *      the host posts after worker boot. `inputs`, registered
+ *      classes, and live-namespace instance proxies are still
+ *      follow-up PRs.
  *   3. Resolve the emission's outcome from the way the AsyncFunction
  *      settles: a `taskSuccess` raise → success; a `TaskFailError` /
  *      `TaskClarifyError` raise → fail / clarify; clean return →
@@ -33,6 +37,7 @@
 import type { OutputPart, TaskOutcome } from 'agex-ts/types'
 import type {
   BridgeTarget,
+  ConfigureMessage,
   Host2WorkerMessage,
   SerializedError,
   Worker2HostMessage,
@@ -204,7 +209,30 @@ class BridgeChannel {
     return out
   }
 
-  private call(target: BridgeTarget, method: string, args: unknown[]): Promise<unknown> {
+  /** Build a stub for a single registered fn — calling it posts a
+   *  `bridgeCall` with `target: 'fn'` and `method: <name>`. */
+  buildFn(name: string): (...args: unknown[]) => Promise<unknown> {
+    return (...args: unknown[]) => this.call('fn', name, args)
+  }
+
+  /** Build a non-live namespace object: each visible member becomes
+   *  a method that posts `bridgeCall` with the namespace name as
+   *  `subject` so the host knows which surface to dispatch to. */
+  buildNamespace(name: string, members: ReadonlyArray<string>): Record<string, unknown> {
+    const out: Record<string, unknown> = {}
+    for (const member of members) {
+      out[member] = (...args: unknown[]): Promise<unknown> =>
+        this.call('namespace', member, args, name)
+    }
+    return out
+  }
+
+  private call(
+    target: BridgeTarget,
+    method: string,
+    args: unknown[],
+    subject?: string,
+  ): Promise<unknown> {
     return new Promise<unknown>((resolve, reject) => {
       const callId = this.nextCallId++
       this.pending.set(callId, { resolve, reject })
@@ -214,6 +242,7 @@ class BridgeChannel {
           executeId: this.executeId,
           callId,
           target,
+          ...(subject !== undefined && { subject }),
           method,
           args,
         })
@@ -267,6 +296,13 @@ function serializeError(e: unknown): SerializedError {
  *  enough. Cleared when the AsyncFunction settles. */
 let activeBridge: BridgeChannel | null = null
 
+/** Most recent `configure` payload from the host. Set once after
+ *  boot, possibly overwritten on a respawn (host re-sends after a
+ *  hard-kill). The execute handler reads this to know which fn /
+ *  namespace stubs to inject; if absent, it falls back to no-extras
+ *  (matches the empty-policy case). */
+let configured: ConfigureMessage | null = null
+
 async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' }>): Promise<void> {
   const { code, executeId } = msg
 
@@ -291,6 +327,24 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
     console: makeConsole(executeId),
     fs: bridge.build('fs', FS_METHODS),
     cache: bridge.build('cache', CACHE_METHODS),
+  }
+
+  if (configured !== null) {
+    // Inject one stub per registered fn name. The agent calls
+    // `await myFn(args)` and the stub round-trips through the host.
+    for (const fnName of configured.fns) {
+      // Skip names that would collide with built-ins above — the
+      // host shouldn't allow these registrations in the first
+      // place, but defending here avoids a silent override.
+      if (fnName in injected) continue
+      injected[fnName] = bridge.buildFn(fnName)
+    }
+    // Each registered (non-live) namespace becomes one object whose
+    // visible members are the host's filtered method list.
+    for (const ns of configured.namespaces) {
+      if (ns.name in injected) continue
+      injected[ns.name] = bridge.buildNamespace(ns.name, ns.members)
+    }
   }
 
   const names = Object.keys(injected)
@@ -318,6 +372,10 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
 
 self.addEventListener('message', (ev: MessageEvent<Host2WorkerMessage>) => {
   const msg = ev.data
+  if (msg?.type === 'configure') {
+    configured = msg
+    return
+  }
   if (msg?.type === 'execute') {
     void handleExecute(msg)
     return

@@ -27,11 +27,20 @@
  *   - ✅ Full re-export shapes supported: `export { x }`,
  *     `export { x as y }`, `export * from '...'`, `export * as ns
  *     from '...'`, default re-exports
- *   - ❌ No live bindings (helpers can't mutate exports after load —
- *     not a pattern agents use)
- *   - ❌ No top-level `await` coordination across helper graph
- *     (each helper is a single async function; module-evaluation
- *     ordering is straightforward request-order)
+ *   - ✅ Top-level `await` works inside helpers — each helper is
+ *     an async function we `await` before its dependents load,
+ *     so `export const data = await fetch(...)` resolves correctly
+ *     across the import graph
+ *   - ❌ No live bindings — `export let x = 0` followed by mutation
+ *     in the helper isn't visible to importers (we copy values at
+ *     load time). Workaround: wrap mutable state in an object so
+ *     it's shared by reference. Rare in agent-written helpers (they
+ *     trend toward pure functions and constants).
+ *   - ❌ No `import.meta` or import attributes — agents don't use
+ *     these.
+ *   - ❌ Cyclic helper imports throw a clear error rather than
+ *     supporting real ESM's temporal-dead-zone partial-binding
+ *     semantics. Agents don't write cyclic helpers in practice.
  *
  * **Stack traces:** every helper script gets a `//# sourceURL=`
  * pragma so engine-reported file names use the agent's original

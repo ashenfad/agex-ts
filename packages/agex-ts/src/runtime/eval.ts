@@ -57,10 +57,46 @@ const AsyncFunction = Object.getPrototypeOf(async () => undefined).constructor a
 export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
   let policy: Policy | null = null
   const timeoutMs = opts.timeoutMs ?? 5000
+  // Cache for URL-shipped registrations. evalRuntime is same-realm,
+  // so the host's own `import()` resolves the URL and the resulting
+  // export is injected directly into the agent's scope — no
+  // serialization, no realm boundary. Populated at `init()`,
+  // consumed at every `execute()`.
+  const urlRefs = new Map<string, unknown>()
 
   return {
     async init(p: Policy): Promise<void> {
       policy = p
+      // Resolve any URL-shipped registrations up front. Failure
+      // propagates from `init()` so the agent loop can surface it
+      // on the host's first `await rt.init(...)` rather than on
+      // the next execute (which would be more confusing).
+      const tasks: Promise<void>[] = []
+      const queue = (name: string, url: string, exp: string | undefined): void => {
+        tasks.push(
+          (async () => {
+            const mod = (await import(url)) as Record<string, unknown>
+            const key = exp ?? name
+            const value = mod[key]
+            if (value === undefined) {
+              throw new Error(
+                `evalRuntime URL import '${url}': module has no '${key}' export (named exports: ${Object.keys(mod).join(', ') || '<none>'})`,
+              )
+            }
+            urlRefs.set(name, value)
+          })(),
+        )
+      }
+      for (const [name, reg] of p.fns) {
+        if (reg.url !== undefined) queue(name, reg.url, reg.export)
+      }
+      for (const [name, reg] of p.namespaces) {
+        if (reg.url !== undefined) queue(name, reg.url, reg.export)
+      }
+      for (const [name, reg] of p.classes) {
+        if (reg.url !== undefined) queue(name, reg.url, reg.export)
+      }
+      await Promise.all(tasks)
     },
 
     async execute(code: string, ctx: ExecuteContext): Promise<ExecResult> {
@@ -101,10 +137,20 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
         console: captureConsole,
         inputs: ctx.inputs,
       }
-      for (const [name, reg] of policy.fns) injected[name] = reg.fn
-      for (const [name, reg] of policy.namespaces) injected[name] = reg.target
+      // Host-bound registrations inject their live JS reference;
+      // URL-shipped ones inject the value resolved at `init()` time.
+      // The two paths are mutually exclusive per registration (see
+      // `PolicyBuilder.assertHostXorUrl`).
+      for (const [name, reg] of policy.fns) {
+        injected[name] = reg.fn ?? urlRefs.get(name)
+      }
+      for (const [name, reg] of policy.namespaces) {
+        injected[name] = reg.target ?? urlRefs.get(name)
+      }
       // Classes are exposed as constructors at their registered name.
-      for (const [name, reg] of policy.classes) injected[name] = reg.cls
+      for (const [name, reg] of policy.classes) {
+        injected[name] = reg.cls ?? urlRefs.get(name)
+      }
 
       const start = performance.now()
       let error: Error | null = null

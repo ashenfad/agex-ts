@@ -40,7 +40,6 @@ function makePolicy(args: {
     string,
     {
       target: object
-      live?: boolean
       include?: RegisteredNs['include']
       exclude?: RegisteredNs['exclude']
     }
@@ -56,7 +55,6 @@ function makePolicy(args: {
       kind: 'namespace',
       name,
       target: spec.target,
-      ...(spec.live === true && { live: true }),
       ...(spec.include !== undefined && { include: spec.include }),
       ...(spec.exclude !== undefined && { exclude: spec.exclude }),
     }
@@ -634,29 +632,5 @@ describe('workerRuntime — fn / namespace bridge', () => {
       makeCtx(),
     )
     expect(r2.outcome).toEqual({ kind: 'success', value: 'CancelledError' })
-  })
-
-  it("ignores live: true namespaces in PR 3 (the worker simply doesn't see them)", async () => {
-    // Live-instance proxying lands in the next PR; until then the
-    // configure step skips them. The agent-side reference just
-    // doesn't exist — same shape as an unregistered name.
-    const rt = runtime()
-    await rt.init(
-      makePolicy({
-        namespaces: {
-          db: { target: { query: () => 'rows' }, live: true },
-        },
-      }),
-    )
-    const code = `
-      try {
-        await db.query()
-        taskFail('expected live namespace to be invisible')
-      } catch (e) {
-        taskSuccess(e.name)
-      }
-    `
-    const result = await rt.execute(code, makeCtx())
-    expect(result.outcome).toEqual({ kind: 'success', value: 'ReferenceError' })
   })
 })

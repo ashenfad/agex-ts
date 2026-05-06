@@ -764,16 +764,6 @@ describe('renderRegistrations — classes with members', () => {
     })
     expect(renderRegistrations(p.snapshot())).toContain('not constructable')
   })
-
-  it('live: true namespace gets a proxy hint', () => {
-    const p = new PolicyBuilder()
-    p.registerNamespace('db', {
-      target: { query: () => null },
-      description: 'Live db.',
-      live: true,
-    })
-    expect(renderRegistrations(p.snapshot())).toContain('live host instance')
-  })
 })
 
 describe('extractJsonSchema — error paths', () => {

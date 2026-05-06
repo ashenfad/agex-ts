@@ -55,7 +55,6 @@ interface NsRegistration extends RegistrationCommon {
   readonly include?: MemberFilter
   readonly exclude?: MemberFilter
   readonly configure?: Readonly<Record<string, MemberConfig>>
-  readonly live?: boolean
 }
 
 interface TerminalRegistration extends RegistrationCommon {

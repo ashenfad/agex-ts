@@ -10,13 +10,13 @@
  *   2. Inject the v1 surface: `taskSuccess`, `taskFail`,
  *      `taskClarify`, `viewImage`, a captured `console`, proxy
  *      objects for `fs` / `cache`, registered host functions
- *      (`agent.fn`), and non-live namespaces (`agent.namespace`).
+ *      (`agent.fn`), and registered namespaces (`agent.namespace`).
  *      All of those round-trip through the host via `bridgeCall` /
  *      `bridgeResponse` (see the `BridgeChannel` class below). The
  *      registered names come from a one-time `configure` message
- *      the host posts after worker boot. `inputs`, registered
- *      classes, and live-namespace instance proxies are still
- *      follow-up PRs.
+ *      the host posts after worker boot. `inputs` and registered
+ *      classes (agent-side `new` returning per-emission instance
+ *      handles) are still follow-up PRs.
  *   3. Resolve the emission's outcome from the way the AsyncFunction
  *      settles: a `taskSuccess` raise → success; a `TaskFailError` /
  *      `TaskClarifyError` raise → fail / clarify; clean return →
@@ -215,9 +215,9 @@ class BridgeChannel {
     return (...args: unknown[]) => this.call('fn', name, args)
   }
 
-  /** Build a non-live namespace object: each visible member becomes
-   *  a method that posts `bridgeCall` with the namespace name as
-   *  `subject` so the host knows which surface to dispatch to. */
+  /** Build a namespace object: each visible member becomes a method
+   *  that posts `bridgeCall` with the namespace name as `subject`
+   *  so the host knows which surface to dispatch to. */
   buildNamespace(name: string, members: ReadonlyArray<string>): Record<string, unknown> {
     const out: Record<string, unknown> = {}
     for (const member of members) {
@@ -365,8 +365,8 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
       if (fnName in injected) continue
       injected[fnName] = bridge.buildFn(fnName)
     }
-    // Each registered (non-live) namespace becomes one object whose
-    // visible members are the host's filtered method list.
+    // Each registered namespace becomes one object whose visible
+    // members are the host's filtered method list.
     for (const ns of configured.namespaces) {
       if (ns.name in injected) continue
       injected[ns.name] = bridge.buildNamespace(ns.name, ns.members)

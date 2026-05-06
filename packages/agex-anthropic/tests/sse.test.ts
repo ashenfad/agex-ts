@@ -54,6 +54,19 @@ describe('parseSseEvents', () => {
     expect(await collect(parseSseEvents(s))).toEqual(['trailing'])
   })
 
+  it('accepts data: lines with no space (SSE spec — space is optional)', async () => {
+    // Anthropic always sends 'data: <payload>' but the spec allows
+    // either form. Be defensive against proxies/providers that omit
+    // the space.
+    const s = streamOf('data:no-space\ndata: with-space\n')
+    expect(await collect(parseSseEvents(s))).toEqual(['no-space', 'with-space'])
+  })
+
+  it('accepts a no-space data: line in the trailing flush too', async () => {
+    const s = streamOf('data:trailing-no-space')
+    expect(await collect(parseSseEvents(s))).toEqual(['trailing-no-space'])
+  })
+
   it('preserves multi-byte UTF-8 split across chunks', async () => {
     // U+1F600 grinning face is a 4-byte sequence; split between bytes 2 and 3
     const bytes = enc.encode('data: hi 😀\n')

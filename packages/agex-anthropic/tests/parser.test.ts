@@ -139,9 +139,20 @@ describe('parseToolEvents — write_file tool', () => {
     expect(types).toContain('fileContent')
   })
 
-  it('drops the call when path is missing', async () => {
+  it('synthesizes a fallback text emission when path is missing', async () => {
+    // Bad tool calls used to be dropped silently — but that left the
+    // assistant turn with no emissions, which Anthropic 400s on the
+    // next request. Now we surface a text emission describing the
+    // failure so (a) the turn is non-empty and (b) the model sees
+    // its own error and can adjust.
     const events = callEvents('a', 'write_file', '{"content":"orphan"}')
-    expect(emissionsOf(await collect(parseToolEvents(fromArray(events))))).toEqual([])
+    const emissions = emissionsOf(await collect(parseToolEvents(fromArray(events))))
+    expect(emissions).toHaveLength(1)
+    expect(emissions[0]?.type).toBe('text')
+    if (emissions[0]?.type === 'text') {
+      expect(emissions[0].text).toContain('write_file call dropped')
+      expect(emissions[0].text).toContain('required fields missing')
+    }
   })
 })
 
@@ -177,9 +188,14 @@ describe('parseToolEvents — edit_file tool', () => {
     expect(types).toContain('fileContent')
   })
 
-  it('drops the call when search is missing', async () => {
+  it('synthesizes a fallback text emission when search is missing', async () => {
     const events = callEvents('a', 'edit_file', '{"path":"/n","content":"new"}')
-    expect(emissionsOf(await collect(parseToolEvents(fromArray(events))))).toEqual([])
+    const emissions = emissionsOf(await collect(parseToolEvents(fromArray(events))))
+    expect(emissions).toHaveLength(1)
+    expect(emissions[0]?.type).toBe('text')
+    if (emissions[0]?.type === 'text') {
+      expect(emissions[0].text).toContain('edit_file call dropped')
+    }
   })
 })
 
@@ -191,9 +207,15 @@ describe('parseToolEvents — TextPart / ThinkingPart events', () => {
     ])
   })
 
-  it('drops whitespace-only TextPart', async () => {
+  it('preserves whitespace-only TextPart (avoids empty-assistant-turn 400)', async () => {
+    // Earlier we dropped whitespace text as "noise"; that's a real
+    // bug if the model's only output for a turn was a whitespace
+    // text block — the action would render as an empty assistant
+    // turn. Anthropic 400s on those.
     const events: ToolCallEvent[] = [{ type: 'textPart', text: '\n  ' }]
-    expect(emissionsOf(await collect(parseToolEvents(fromArray(events))))).toEqual([])
+    expect(emissionsOf(await collect(parseToolEvents(fromArray(events))))).toEqual([
+      { type: 'text', text: '\n  ' },
+    ])
   })
 
   it('ThinkingPart becomes a ThinkingEmission with signature preserved as bytes', async () => {
@@ -257,14 +279,19 @@ describe('parseToolEvents — TextPart / ThinkingPart events', () => {
 })
 
 describe('parseToolEvents — invariants', () => {
-  it('drops calls with malformed JSON', async () => {
+  it('synthesizes a fallback text emission for malformed JSON', async () => {
     const events: ToolCallEvent[] = [
       { type: 'toolCallStart', callId: 'a', toolName: 'ts_action' },
       { type: 'toolCallArgDelta', callId: 'a', argumentChunk: '{"code":"x"' }, // unclosed
       { type: 'toolCallEnd', callId: 'a' },
     ]
     const emissions = emissionsOf(await collect(parseToolEvents(fromArray(events))))
-    expect(emissions).toEqual([])
+    expect(emissions).toHaveLength(1)
+    expect(emissions[0]?.type).toBe('text')
+    if (emissions[0]?.type === 'text') {
+      expect(emissions[0].text).toContain('ts_action call dropped')
+      expect(emissions[0].text).toContain('invalid JSON args')
+    }
   })
 
   it('assigns monotonically increasing emission indices across mixed events', async () => {

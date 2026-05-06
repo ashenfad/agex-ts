@@ -216,9 +216,11 @@ describe('buildTaskMessage', () => {
       { description: 'Greet.', inputJsonSchema },
       { name: 'Ada', tone: 'casual' },
     )
-    expect(msg).toContain('inputs.name = Ada')
-    expect(msg).toContain('inputs.tone = casual')
-    expect(msg).toContain('Access these values with patterns like `inputs.name`')
+    // YAML-style key:value (not JS-assignment) so the model can't
+    // copy-paste it into a `const inputs = ...` redeclaration.
+    expect(msg).toContain('name: Ada')
+    expect(msg).toContain('tone: casual')
+    expect(msg).toContain('do not redeclare it')
   })
 
   it('renders no-input tasks cleanly', () => {

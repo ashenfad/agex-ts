@@ -57,6 +57,12 @@ function buildInputsBlock<I, O>(def: TaskDefinition<I, O>, inputValue: I): strin
     return 'This task takes no inputs (the `inputs` variable is `undefined`).'
   }
 
+  // The `inputs` variable is already in scope inside `ts_action`.
+  // Reminder is repeated alongside every render mode so the model
+  // doesn't redeclare it (`const inputs = {...}` would shadow-throw).
+  const reminder =
+    'The `inputs` variable is already bound to this value — read fields off it directly (e.g. `inputs.foo`); do not redeclare it.'
+
   const intro =
     'Details for your task are available in the `inputs` variable. Here is its structure and content:'
 
@@ -66,25 +72,20 @@ function buildInputsBlock<I, O>(def: TaskDefinition<I, O>, inputValue: I): strin
     const properties = objectPropertyNames(jsonSchema)
     for (const prop of properties) {
       const fieldValue = (inputValue as Record<string, unknown>)[prop]
-      lines.push(`inputs.${prop} = ${safeStringify(fieldValue, { maxChars: 2_000 })}`)
+      lines.push(`${prop}: ${safeStringify(fieldValue, { maxChars: 2_000 })}`)
     }
-    const exampleField = properties[0]
-    const renderedFields = `\`\`\`\n${lines.join('\n')}\n\`\`\``
-    const access =
-      exampleField !== undefined
-        ? `Access these values with patterns like \`inputs.${exampleField}\`.`
-        : ''
-    return [intro, renderedFields, access].filter((s) => s.length > 0).join('\n\n')
+    const renderedFields = `\`\`\`yaml\n${lines.join('\n')}\n\`\`\``
+    return [intro, renderedFields, reminder].join('\n\n')
   }
 
   if (def.inputDescription !== undefined && def.inputDescription.trim().length > 0) {
-    const blob = `\`\`\`\ninputs = ${safeStringify(inputValue, { maxChars: 4_000 })}\n\`\`\``
-    return `${intro}\n\nShape: ${def.inputDescription.trim()}\n\n${blob}`
+    const blob = `\`\`\`json\n${safeStringify(inputValue, { maxChars: 4_000 })}\n\`\`\``
+    return `${intro}\n\nShape: ${def.inputDescription.trim()}\n\n${blob}\n\n${reminder}`
   }
 
   // Fallback: single-blob value
-  const blob = `\`\`\`\ninputs = ${safeStringify(inputValue, { maxChars: 4_000 })}\n\`\`\``
-  return `${intro}\n\n${blob}`
+  const blob = `\`\`\`json\n${safeStringify(inputValue, { maxChars: 4_000 })}\n\`\`\``
+  return `${intro}\n\n${blob}\n\n${reminder}`
 }
 
 function resolveInputJsonSchema<I, O>(def: TaskDefinition<I, O>): object | null {

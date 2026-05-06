@@ -1,5 +1,6 @@
 packages:
   - "packages/*"
+  - "examples/*"
 
 # Postinstall scripts pnpm 11+ requires explicit approval for.
 # These tools download platform-specific native binaries via

@@ -3,6 +3,10 @@
  * embedders that explicitly opt out of worker isolation.
  *
  * What it does:
+ * - Strips TypeScript type annotations via `ts-blank-space` so the
+ *   agent can emit idiomatic typed code (the schemas advertise
+ *   "TypeScript" — this delivers on that). Whitespace-preserving:
+ *   line/column positions in stack traces match the original code.
  * - Evaluates the emitted code via `new AsyncFunction(...)` so the
  *   code can use `await` and the injected names land directly in
  *   scope (no `with` block needed).
@@ -15,14 +19,17 @@
  *   `outputs` array.
  *
  * What it explicitly does NOT do:
- * - No TypeScript transpilation. Emit raw JS or use a runtime that
- *   ships esbuild (e.g. `@agex-ts/runtime-worker`).
+ * - No bundling / esbuild — `ts-blank-space` strips types only. Full
+ *   TS features that aren't erasable as types (enum, namespace,
+ *   decorators, parameter properties) throw a syntax error. Modern
+ *   TS style avoids these and the primer flags them.
  * - No sandboxing. The code runs in the host realm with full access
  *   to the surrounding closures. Use this for tests or for trusted
  *   embedders only.
  * - No tick limit. Wall-clock `timeoutMs` is the only enforcement.
  */
 
+import tsBlankSpace from 'ts-blank-space'
 import { CancelledError, TaskClarifyError, TaskFailError, isTaskControlError } from '../errors'
 import type {
   ExecResult,
@@ -107,7 +114,12 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
 
       try {
         const names = Object.keys(injected)
-        const fn = new AsyncFunction(...names, code)
+        // Strip TS type annotations before AsyncFunction sees the code.
+        // ts-blank-space throws on non-erasable TS (enum, namespace,
+        // decorators, parameter properties); that surfaces as a normal
+        // runtime error so the agent can read the message and adjust.
+        const erased = tsBlankSpace(code)
+        const fn = new AsyncFunction(...names, erased)
         const userPromise = fn(...names.map((n) => injected[n]))
 
         // Race the user code against the abort signal.

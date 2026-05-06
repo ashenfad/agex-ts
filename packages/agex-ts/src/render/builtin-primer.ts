@@ -35,6 +35,8 @@ The computation surface.  Each \`ts_action\` runs as a fresh script — variable
 
 \`async\`/\`await\` is supported at the top level — most host-registered methods will be async, especially anything proxying back to the host (database calls, fs operations, etc.).  Top-level \`await\` is fine; you don't need an IIFE.
 
+**TypeScript syntax**: type annotations, interfaces, type aliases, generics, and \`as\` casts are all supported and erased before execution.  A few TS features that aren't pure type-erasure are NOT supported and will throw a syntax error: \`enum\` (use \`const X = { A: 'a' } as const\` instead), \`namespace\` (use modules / imports), parameter properties (\`constructor(private x: number)\` — declare and assign instead), and decorators.  Modern TS style avoids all of these, so this rarely bites in practice.
+
 Task terminators (\`taskSuccess\`, \`taskFail\`, \`taskClarify\`) are only available here — not in scripts run via the shell.
 
 ### Terminal (\`terminal_action\`)

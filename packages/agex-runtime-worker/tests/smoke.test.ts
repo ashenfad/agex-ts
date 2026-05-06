@@ -569,6 +569,40 @@ describe('workerRuntime — fn / namespace bridge', () => {
     expect(result.outcome).toEqual({ kind: 'success', value: 14 })
   })
 
+  it('drops a stale bridgeResponse from a settled prior execute (executeId guard)', async () => {
+    // Race: execute #1 fires a slow registered fn but never awaits
+    // it before taskSuccess'ing. The worker scope is reused across
+    // executes, and BridgeChannel resets callId to 1 each time —
+    // so a late host-side reply from #1 (bridgeResponse with
+    // executeId=1, callId=1) would collide on callId with a live
+    // pending call in execute #2 (also callId=1). Without the
+    // executeId filter in handleResponse, execute #2 would resolve
+    // its call with execute #1's stale value.
+    let counter = 0
+    const rt = runtime()
+    await rt.init(
+      makePolicy({
+        fns: {
+          slow: async () => {
+            const id = ++counter
+            await new Promise((r) => setTimeout(r, 80))
+            return id
+          },
+        },
+      }),
+    )
+    // Execute #1: kick off slow() but don't await. The returned
+    // Promise is orphaned worker-side; AsyncFunction unwinds via
+    // taskSuccess before slow's host-side dispatch settles.
+    const r1 = await rt.execute('void slow(); taskSuccess("first")', makeCtx())
+    expect(r1.outcome).toEqual({ kind: 'success', value: 'first' })
+    // Execute #2: actually awaits slow(). Should observe its own
+    // call's value (counter=2), not the stale value (counter=1)
+    // posted by execute #1's late response.
+    const r2 = await rt.execute('taskSuccess(await slow())', makeCtx())
+    expect(r2.outcome).toEqual({ kind: 'success', value: 2 })
+  })
+
   it("ignores live: true namespaces in PR 3 (the worker simply doesn't see them)", async () => {
     // Live-instance proxying lands in the next PR; until then the
     // configure step skips them. The agent-side reference just

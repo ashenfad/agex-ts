@@ -259,9 +259,20 @@ class BridgeChannel {
 
   /** Called by the module-level message listener when a
    *  `bridgeResponse` arrives. Looks up the parked resolver and
-   *  settles it. Unknown callIds are ignored (e.g. a late response
-   *  for a previous emission whose worker scope was reused). */
+   *  settles it.
+   *
+   *  We filter on **both** `executeId` and `callId`: the worker
+   *  scope is reused across consecutive executes (one BridgeChannel
+   *  per execute, but the same Worker), and `callId` resets to 1
+   *  every new channel. A response from a previous execute whose
+   *  bridged call finished *after* the execute settled (orphaned
+   *  Promise — agent code dispatched a call without awaiting it,
+   *  then `taskSuccess`'d) would otherwise collide on `callId`
+   *  with a live pending call in the current execute and resolve
+   *  it with the stale value. The `executeId` check drops those
+   *  stale responses cleanly. */
   handleResponse(msg: Extract<Host2WorkerMessage, { type: 'bridgeResponse' }>): void {
+    if (msg.executeId !== this.executeId) return
     const slot = this.pending.get(msg.callId)
     if (slot === undefined) return
     this.pending.delete(msg.callId)

@@ -1,7 +1,7 @@
 import { defineConfig } from 'tsup'
 
 export default defineConfig({
-  entry: ['src/index.ts', 'src/fs/memory.ts', 'src/fs/real.ts', 'src/fs/kvgit.ts'],
+  entry: ['src/index.ts', 'src/glob.ts', 'src/fs/memory.ts', 'src/fs/real.ts', 'src/fs/kvgit.ts'],
   format: ['esm'],
   dts: true,
   sourcemap: true,

@@ -12,6 +12,10 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./glob": {
+      "types": "./dist/glob.d.ts",
+      "import": "./dist/glob.js"
+    },
     "./fs/memory": {
       "types": "./dist/fs/memory.d.ts",
       "import": "./dist/fs/memory.js"

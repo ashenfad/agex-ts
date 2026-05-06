@@ -5,6 +5,7 @@ export default defineConfig({
     'src/index.ts',
     'src/types.ts',
     'src/errors.ts',
+    'src/policy.ts',
     'src/state/index.ts',
     'src/llm/dummy.ts',
     'src/runtime/eval.ts',

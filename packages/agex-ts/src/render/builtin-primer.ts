@@ -68,7 +68,7 @@ A Virtual Filesystem is your durable workspace.  TypeScript actions and shell co
 - To insert content around an existing anchor, include the anchor itself in \`content\` (e.g. search for \`function foo() {\` and replace with \`function foo() {\\n  // new line\`).
 - For purely additive content, prefer \`append\` over \`edit\` — append can't miss a search target that was never there.
 
-**Importing your code** — files you write under \`/helpers/\` (e.g. \`/helpers/utils.ts\`) can be imported as \`import { ... } from '/helpers/utils'\`.  Helpers are the canonical way to carry code across actions and tasks: write reusable functions there, import them in any future action.
+**Importing your code** — files you write under \`/helpers/\` (e.g. \`/helpers/utils.ts\`) can be imported as \`import { ... } from '/helpers/utils'\`.  Always use **absolute** VFS paths (\`/helpers/...\`) when importing from \`ts_action\` — the script has no meaningful current directory, so relative specifiers like \`./utils\` resolve against the VFS root and won't find your helper.  Helpers themselves *can* import each other with relative paths (\`./other\` resolves relative to the importing helper's directory).  Helpers are the canonical way to carry code across actions and tasks: write reusable functions there, import them in any future action.
 
 ### Cache (\`cache\`)
 

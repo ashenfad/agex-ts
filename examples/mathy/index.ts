@@ -6,16 +6,16 @@
  * that transforms a list of numbers based on a prompt.
  *
  * Run:
- *   GOOGLE_API_KEY=... pnpm --filter mathy-example start
+ *   GEMINI_API_KEY=... pnpm --filter mathy-example start
  */
 
 import { Gemini } from 'agex-gemini'
 import { createAgent, prettyEvents } from 'agex-ts'
 import { evalRuntime } from 'agex-ts/runtime-eval'
 
-const apiKey = process.env.GOOGLE_API_KEY
+const apiKey = process.env.GEMINI_API_KEY ?? process.env.GOOGLE_API_KEY
 if (apiKey === undefined || apiKey.length === 0) {
-  throw new Error('Set GOOGLE_API_KEY in the environment.')
+  throw new Error('Set GEMINI_API_KEY (or GOOGLE_API_KEY) in the environment.')
 }
 
 const agent = await createAgent({
@@ -23,7 +23,7 @@ const agent = await createAgent({
   primer: 'You are an expert at solving math problems.',
   llm: new Gemini({
     apiKey,
-    model: process.env.GOOGLE_MODEL ?? 'gemini-3.1-flash',
+    model: process.env.GEMINI_MODEL ?? 'gemini-3.1-flash',
   }),
   runtime: evalRuntime(),
 })

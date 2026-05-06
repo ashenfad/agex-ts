@@ -104,13 +104,9 @@ function enumerateMembers(
   exclude: MemberFilter | undefined,
 ): string[] {
   const seen = new Set<string>()
-  // Default `_*` exclusion when no exclude is supplied — same rule
-  // agex-py applies to keep underscore-prefixed members private.
-  const effectiveExclude = exclude ?? '_*'
-
   for (const k of Object.getOwnPropertyNames(target)) {
     if (k === 'constructor') continue
-    if (memberAllowed(k, include, effectiveExclude)) seen.add(k)
+    if (memberAllowed(k, include, exclude)) seen.add(k)
   }
   // Walk the prototype chain so class methods (which live on .prototype,
   // not on instances) get listed too.
@@ -118,7 +114,7 @@ function enumerateMembers(
   while (proto !== null && proto !== Object.prototype) {
     for (const k of Object.getOwnPropertyNames(proto)) {
       if (k === 'constructor') continue
-      if (memberAllowed(k, include, effectiveExclude)) seen.add(k)
+      if (memberAllowed(k, include, exclude)) seen.add(k)
     }
     proto = Object.getPrototypeOf(proto) as object | null
   }

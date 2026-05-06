@@ -109,6 +109,7 @@ describe('renderRegistrations', () => {
     p.registerNamespace('db', {
       target: { query: () => null, insert: () => null, _internal: () => null },
       description: 'Project database.',
+      exclude: '_*',
     })
     p.registerTerminal('beep', { description: 'Beep noise.', handler: async () => undefined })
     const out = renderRegistrations(p.snapshot())
@@ -120,9 +121,23 @@ describe('renderRegistrations', () => {
     expect(out).toContain('db')
     expect(out).toContain('query')
     expect(out).toContain('insert')
-    // Default `_*` exclusion hides the underscore-prefixed member
+    // The explicit `_*` exclude hides the underscore-prefixed member.
     expect(out).not.toContain('_internal')
     expect(out).toContain('beep')
+  })
+
+  it('without an explicit exclude, exposes underscore-prefixed members', () => {
+    // Confirms that no `_*`-by-default rule fires — TS doesn't have
+    // the Python convention so an embedder who doesn't ask for the
+    // filter sees `_internal` in the rendered primer.
+    const p = new PolicyBuilder()
+    p.registerNamespace('db', {
+      target: { query: () => null, _internal: () => null },
+      description: 'Project database.',
+    })
+    const out = renderRegistrations(p.snapshot())
+    expect(out).toContain('query')
+    expect(out).toContain('_internal')
   })
 
   it('returns empty string when no described entries', () => {

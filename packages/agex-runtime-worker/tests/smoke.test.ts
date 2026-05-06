@@ -502,9 +502,9 @@ describe('workerRuntime — fn / namespace bridge', () => {
     expect(result.outcome).toEqual({ kind: 'success', value: [5, 20] })
   })
 
-  it('respects include / exclude member filters when exposing a namespace', async () => {
-    // `_secret` should be invisible by default (the `_*` rule);
-    // `helper` is excluded explicitly.
+  it('respects explicit include / exclude member filters when exposing a namespace', async () => {
+    // No default `_*` rule — both `_secret` and `helper` need the
+    // explicit exclude entry.
     const rt = runtime()
     await rt.init(
       makePolicy({
@@ -529,6 +529,27 @@ describe('workerRuntime — fn / namespace bridge', () => {
     `
     const result = await rt.execute(code, makeCtx())
     expect(result.outcome).toEqual({ kind: 'success', value: ['ok'] })
+  })
+
+  it('exposes underscore-prefixed members when no exclude filter is set', async () => {
+    // Confirms there's no `_*`-by-default — if the embedder's
+    // registered target has `_helper` and they didn't ask to hide
+    // it, the agent sees it.
+    const rt = runtime()
+    await rt.init(
+      makePolicy({
+        namespaces: {
+          util: {
+            target: {
+              _helper: () => 'underscore is fine',
+            },
+          },
+        },
+      }),
+    )
+    const code = 'taskSuccess(await util._helper())'
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: 'underscore is fine' })
   })
 
   it('walks the prototype chain so class-based namespace targets expose methods', async () => {

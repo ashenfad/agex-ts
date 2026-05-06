@@ -178,14 +178,19 @@ export class PolicyBuilder {
 /**
  * Apply the standard `include`/`exclude` filtering rule to a member name.
  *
- * - `exclude` always wins (matches agex-py's default `_*` exclusion of
- *   underscore-prefixed members).
+ * - `exclude` always wins.
  * - `include` defaults to "everything not excluded".
  * - Filter values can be a single glob (`'foo*'`), an array of globs, or
  *   a predicate function.
  *
  * Globs are simple shell-style: `*` matches any chars (no slashes), `?`
  * matches one char. No bracket expressions for v1.
+ *
+ * No default `_*` exclusion: TypeScript has `#field` for true privacy
+ * and `private` as a compile-time hint, so an underscore prefix carries
+ * no special meaning here. If a registered target intentionally exposes
+ * `_helper`, the agent sees it. Embedders who want the Python-style
+ * convention can pass `exclude: '_*'` explicitly.
  */
 export function memberAllowed(
   name: string,

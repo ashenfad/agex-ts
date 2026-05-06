@@ -528,18 +528,16 @@ function buildConfigure(policy: Policy): ConfigureMessage {
 }
 
 /** Compute the set of allowed member names on a namespace, applying
- *  `_*`-by-default exclusion and any include/exclude filters from
- *  the registration. Walks the prototype chain so methods defined
- *  on a class's `.prototype` get listed too. Uses agex-ts's
- *  `memberAllowed` directly so the visibility semantics here track
- *  the registration system's source of truth — no parallel glob
- *  implementation to drift. */
+ *  the registration's include/exclude filters. Walks the prototype
+ *  chain so methods defined on a class's `.prototype` get listed
+ *  too. Uses agex-ts's `memberAllowed` directly so the visibility
+ *  semantics here track the registration system's source of truth
+ *  — no parallel glob implementation to drift. */
 function visibleNamespaceMembers(reg: RegisteredNs): Set<string> {
   const seen = new Set<string>()
-  const effectiveExclude = reg.exclude ?? '_*'
   const test = (k: string): boolean => {
     if (k === 'constructor') return false
-    return memberAllowed(k, reg.include, effectiveExclude)
+    return memberAllowed(k, reg.include, reg.exclude)
   }
   for (const k of Object.getOwnPropertyNames(reg.target)) {
     if (test(k)) seen.add(k)

@@ -158,3 +158,69 @@ describe('evalRuntime — error handling', () => {
     await expect(r.execute('null', makeContext())).rejects.toThrow(/before init/)
   })
 })
+
+describe('evalRuntime — TypeScript syntax (ts-blank-space)', () => {
+  it('strips parameter type annotations', async () => {
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const result = await r.execute(
+      'function add(a: number, b: number): number { return a + b }; taskSuccess(add(2, 3))',
+      makeContext(),
+    )
+    expect(result.outcome).toEqual({ kind: 'success', value: 5 })
+  })
+
+  it('strips variable declaration types and arrow function types', async () => {
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const result = await r.execute(
+      'const xs: number[] = [1, 2, 3]; const sum = (a: number, b: number): number => a + b; taskSuccess(xs.reduce(sum, 0))',
+      makeContext(),
+    )
+    expect(result.outcome).toEqual({ kind: 'success', value: 6 })
+  })
+
+  it('strips interface and type alias declarations', async () => {
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const result = await r.execute(
+      `
+      interface Point { x: number; y: number }
+      type Pair = [number, number]
+      const p: Point = { x: 1, y: 2 }
+      const pair: Pair = [3, 4]
+      taskSuccess({ p, pair })
+      `,
+      makeContext(),
+    )
+    expect(result.outcome).toEqual({ kind: 'success', value: { p: { x: 1, y: 2 }, pair: [3, 4] } })
+  })
+
+  it('strips generic type parameters and `as` casts', async () => {
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const result = await r.execute(
+      `
+      function first<T>(xs: T[]): T | undefined { return xs[0] }
+      const v = first<number>([10, 20, 30])
+      const s = '42' as unknown as string
+      taskSuccess({ v, s })
+      `,
+      makeContext(),
+    )
+    expect(result.outcome).toEqual({ kind: 'success', value: { v: 10, s: '42' } })
+  })
+
+  it('throws a clear error for non-erasable TS (enum)', async () => {
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const result = await r.execute(
+      'enum Color { Red, Green } taskSuccess(Color.Red)',
+      makeContext(),
+    )
+    // ts-blank-space refuses non-erasable TS; the agent sees the error
+    // and can rewrite using `as const` or modules.
+    expect(result.outcome).toEqual({ kind: 'continue' })
+    expect(result.error).not.toBeNull()
+  })
+})

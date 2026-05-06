@@ -1,0 +1,22 @@
+{
+  "name": "funcy-example",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Function generation — TS port of agex-py's examples/funcy.py.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "tsx index.ts"
+  },
+  "dependencies": {
+    "agex-anthropic": "workspace:*",
+    "agex-ts": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

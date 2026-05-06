@@ -49,6 +49,7 @@
     "vitest": "^2.1.8"
   },
   "dependencies": {
-    "@standard-schema/spec": "^1.1.0"
+    "@standard-schema/spec": "^1.1.0",
+    "ts-blank-space": "^0.6.0"
   }
 }

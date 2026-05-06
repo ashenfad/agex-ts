@@ -18,6 +18,21 @@ importers:
         specifier: ^5.7.2
         version: 5.9.3
 
+  packages/agex-anthropic:
+    devDependencies:
+      agex-ts:
+        specifier: workspace:*
+        version: link:../agex-ts
+      tsup:
+        specifier: ^8.3.5
+        version: 8.5.1(postcss@8.5.13)(typescript@5.9.3)
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@25.6.0)(@vitest/browser@2.1.9)(msw@2.14.2(@types/node@25.6.0)(typescript@5.9.3))
+
   packages/agex-ts:
     dependencies:
       '@standard-schema/spec':

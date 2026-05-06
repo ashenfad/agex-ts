@@ -38,12 +38,13 @@
  */
 
 import type { OutputPart, TaskOutcome } from 'agex-ts/types'
-import type {
-  BridgeTarget,
-  ConfigureMessage,
-  Host2WorkerMessage,
-  SerializedError,
-  Worker2HostMessage,
+import {
+  type BridgeTarget,
+  type ConfigureMessage,
+  type Host2WorkerMessage,
+  INSTANCE_HANDLE_KEY,
+  type SerializedError,
+  type Worker2HostMessage,
 } from './messages'
 
 // ---------------------------------------------------------------------------
@@ -199,6 +200,13 @@ interface PendingBridgeCall {
 class BridgeChannel {
   private nextCallId = 1
   private readonly pending = new Map<number, PendingBridgeCall>()
+  /** Tracks Proxies this channel created via `buildClass`, so we
+   *  can recognize them when they appear in outbound args and
+   *  replace with a wire marker the host can rehydrate. WeakMap
+   *  keyed on the Proxy reference — entries auto-clear when the
+   *  Proxy is no longer reachable (typically at execute settle
+   *  when the agent's locals go out of scope). */
+  private readonly trackedProxies = new WeakMap<object, Promise<number>>()
 
   constructor(private readonly executeId: number) {}
 
@@ -287,7 +295,7 @@ class BridgeChannel {
       // Surface synchronous construction failures (DataCloneError on
       // args, etc.) by letting `idPromise` reject; method calls on
       // the returned Proxy will reject in turn.
-      const proxy: unknown = new Proxy(Object.create(sentinelProto), {
+      const proxy: object = new Proxy(Object.create(sentinelProto), {
         getPrototypeOf(): object {
           // `instance instanceof WorkerStub` walks the prototype
           // chain via this trap. We hand back our sentinel which
@@ -311,6 +319,13 @@ class BridgeChannel {
           }
         },
       })
+      // Register the Proxy so `packArgs` can recognize it when the
+      // agent passes this instance to *another* bridged call (e.g.
+      // `a.add(b)` — `b` is one of these Proxies). Without this,
+      // the Proxy would hit structured-clone as an opaque empty
+      // object and the agent's await would reject with
+      // DataCloneError.
+      channel.trackProxy(proxy, idPromise)
       // ECMAScript: if the constructor returns a non-primitive,
       // that object is what `new` evaluates to. We rely on this so
       // the agent gets the Proxy, not whatever `this` happens to
@@ -341,6 +356,78 @@ class BridgeChannel {
     return WorkerStub
   }
 
+  /** Register a Proxy this channel built so it can be recognized
+   *  in later outbound args. The id Promise is stored (not the
+   *  resolved id) because construction is async — when the Proxy
+   *  is first passed as an arg, we await the id at that moment. */
+  trackProxy(proxy: object, idPromise: Promise<number>): void {
+    this.trackedProxies.set(proxy, idPromise)
+  }
+
+  /** Sync probe: does the args tree contain any tracked Proxy? If
+   *  not, the args pass through structured-clone unchanged and we
+   *  can avoid the async pack-then-post path entirely. Keeping the
+   *  common case synchronous matters for orphan-call cancellation
+   *  timing: when an agent fires `void slow()` then `taskSuccess`'s,
+   *  the bridgeCall must reach the host *before* the result message
+   *  for the host's per-execute listener to handle the response —
+   *  deferring all posts behind an `await` shifts the orphan call
+   *  past the listener teardown and the orphan never executes. */
+  private argsNeedPacking(args: ReadonlyArray<unknown>): boolean {
+    const seen = new WeakSet<object>()
+    const probe = (v: unknown): boolean => {
+      if (v === null || typeof v !== 'object') return false
+      if (this.trackedProxies.has(v)) return true
+      if (seen.has(v)) return false
+      seen.add(v)
+      if (Array.isArray(v)) return v.some(probe)
+      if (Object.getPrototypeOf(v) !== Object.prototype) return false
+      return Object.keys(v).some((k) => probe((v as Record<string, unknown>)[k]))
+    }
+    return args.some(probe)
+  }
+
+  /** Walk an args array and replace any tracked Proxy (top-level,
+   *  in arrays, or in plain objects) with an `INSTANCE_HANDLE_KEY`
+   *  marker the host knows how to rehydrate. Non-plain objects
+   *  (Uint8Array, Date, Map, etc.) pass through unchanged — they
+   *  structured-clone fine on their own. Cycle protection via a
+   *  visited WeakSet so a circular plain-object structure doesn't
+   *  stack-overflow.
+   *
+   *  Awaits each tracked Proxy's id Promise lazily so this works
+   *  even when the agent calls a method on `b` immediately after
+   *  `new B()` — the id may still be pending host-side, but we
+   *  serialize the wait into the call's own pre-post step rather
+   *  than blocking arg construction. */
+  private async packArgs(args: ReadonlyArray<unknown>): Promise<unknown[]> {
+    const visited = new WeakSet<object>()
+    const pack = async (v: unknown): Promise<unknown> => {
+      if (v === null || typeof v !== 'object') return v
+      const tracked = this.trackedProxies.get(v)
+      if (tracked !== undefined) {
+        const id = await tracked
+        return { [INSTANCE_HANDLE_KEY]: { id } }
+      }
+      if (visited.has(v)) return v
+      visited.add(v)
+      if (Array.isArray(v)) {
+        const out: unknown[] = []
+        for (const e of v) out.push(await pack(e))
+        return out
+      }
+      // Plain objects only — Uint8Array / Date / Map / Set / etc.
+      // pass through. structured-clone handles them natively.
+      if (Object.getPrototypeOf(v) !== Object.prototype) return v
+      const out: Record<string, unknown> = {}
+      for (const k of Object.keys(v)) {
+        out[k] = await pack((v as Record<string, unknown>)[k])
+      }
+      return out
+    }
+    return Promise.all(args.map(pack))
+  }
+
   /** Wrappers around `call()` that produce alternate outbound
    *  message shapes — `newInstance` and `instanceCall` aren't
    *  `bridgeCall` variants on the wire (the host needs to dispatch
@@ -350,26 +437,17 @@ class BridgeChannel {
   newInstance(clsName: string, args: unknown[]): Promise<number> {
     return new Promise<number>((resolve, reject) => {
       const callId = this.nextCallId++
-      // The host replies with `bridgeResponse.value: { instanceId }`.
-      // Wrap the resolver to unpack it so the caller gets a bare
-      // number. If the response carries an error, the reject path
-      // fires unchanged.
       this.pending.set(callId, {
         resolve: (v) => resolve((v as { instanceId: number }).instanceId),
         reject,
       })
-      try {
-        post({
-          type: 'newInstance',
-          executeId: this.executeId,
-          callId,
-          clsName,
-          args,
-        })
-      } catch (e) {
-        this.pending.delete(callId)
-        reject(e instanceof Error ? e : new Error(String(e)))
-      }
+      this.postWithArgs(callId, reject, args, (packed) => ({
+        type: 'newInstance',
+        executeId: this.executeId,
+        callId,
+        clsName,
+        args: packed,
+      }))
     })
   }
 
@@ -377,19 +455,14 @@ class BridgeChannel {
     return new Promise<unknown>((resolve, reject) => {
       const callId = this.nextCallId++
       this.pending.set(callId, { resolve, reject })
-      try {
-        post({
-          type: 'instanceCall',
-          executeId: this.executeId,
-          callId,
-          instanceId,
-          method,
-          args,
-        })
-      } catch (e) {
-        this.pending.delete(callId)
-        reject(e instanceof Error ? e : new Error(String(e)))
-      }
+      this.postWithArgs(callId, reject, args, (packed) => ({
+        type: 'instanceCall',
+        executeId: this.executeId,
+        callId,
+        instanceId,
+        method,
+        args: packed,
+      }))
     })
   }
 
@@ -402,25 +475,62 @@ class BridgeChannel {
     return new Promise<unknown>((resolve, reject) => {
       const callId = this.nextCallId++
       this.pending.set(callId, { resolve, reject })
-      try {
-        post({
-          type: 'bridgeCall',
-          executeId: this.executeId,
-          callId,
-          target,
-          ...(subject !== undefined && { subject }),
-          method,
-          args,
-        })
-      } catch (e) {
-        // postMessage threw — typically a DataCloneError because an
-        // arg wasn't structured-cloneable. Surface it on the
-        // returned Promise so the agent code sees a real error
-        // rather than a hung await.
-        this.pending.delete(callId)
-        reject(e instanceof Error ? e : new Error(String(e)))
-      }
+      this.postWithArgs(callId, reject, args, (packed) => ({
+        type: 'bridgeCall',
+        executeId: this.executeId,
+        callId,
+        target,
+        ...(subject !== undefined && { subject }),
+        method,
+        args: packed,
+      }))
     })
+  }
+
+  /** Common post path that respects the sync/async split:
+   *
+   *    - If `args` contain no tracked Proxies, skip packing entirely
+   *      and post synchronously. This is the common case (primitives,
+   *      Uint8Array, plain objects, etc.) and matters for orphan-
+   *      call cancellation timing — the bridgeCall reaches the host
+   *      *before* the per-execute listener tears down at execute
+   *      settle, so cancelPending can correctly settle the orphan.
+   *    - If `args` *do* contain tracked Proxies, pack them async
+   *      (awaiting each Proxy's idPromise) and post when done. This
+   *      branch is only used when the agent passes one Proxy
+   *      instance as an argument to another instance's method.
+   *
+   *  In both branches a `postMessage` failure (typically
+   *  DataCloneError on an arg) deletes the pending entry and
+   *  rejects the caller's Promise. */
+  private postWithArgs(
+    callId: number,
+    reject: (e: Error) => void,
+    args: unknown[],
+    build: (packed: unknown[]) => Worker2HostMessage,
+  ): void {
+    const fail = (e: unknown): void => {
+      this.pending.delete(callId)
+      reject(e instanceof Error ? e : new Error(String(e)))
+    }
+    if (!this.argsNeedPacking(args)) {
+      try {
+        post(build(args))
+      } catch (e) {
+        fail(e)
+      }
+      return
+    }
+    this.packArgs(args).then(
+      (packed) => {
+        try {
+          post(build(packed))
+        } catch (e) {
+          fail(e)
+        }
+      },
+      (e) => fail(e),
+    )
   }
 
   /** Called by the module-level message listener when a

@@ -66,6 +66,30 @@ export interface SerializedError {
   readonly stack?: string
 }
 
+/** Marker key used in `bridgeCall` / `newInstance` / `instanceCall`
+ *  args (and recursively in their nested arrays / plain objects) to
+ *  represent a worker-side instance Proxy when it's passed as an
+ *  argument to another bridged call. The worker replaces tracked
+ *  Proxies with `{ [INSTANCE_HANDLE_KEY]: { id } }` before posting;
+ *  the host walks args and rehydrates these markers back into the
+ *  live host instance via the per-execute instance table.
+ *
+ *  Without this round-trip, passing a Proxy as an arg would
+ *  trigger `DataCloneError` (Proxies don't clone) — see the
+ *  identity-preservation note in `runtime.ts`. The marker key is
+ *  intentionally obscure (double-underscore + package prefix) so
+ *  user data that happens to use a single common name doesn't
+ *  collide; the value carries an inner `{id}` object rather than a
+ *  bare number so a plain `{ __agexInstanceHandle__: 5 }` from the
+ *  agent doesn't mis-rehydrate. Both checks must pass for
+ *  rehydration to fire. */
+export const INSTANCE_HANDLE_KEY = '__agexInstanceHandle__' as const
+
+/** Wire shape for an instance handle marker. */
+export interface InstanceHandleMarker {
+  readonly [INSTANCE_HANDLE_KEY]: { readonly id: number }
+}
+
 /** Which surface a `bridgeCall` targets.
  *
  *   - `fs` / `cache` — the per-execute `ExecuteContext` surfaces.

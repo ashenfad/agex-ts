@@ -36,6 +36,7 @@
  */
 
 import { CancelledError } from 'agex-ts/errors'
+import { prepareScriptForWire } from 'agex-ts/module-loader'
 import { memberAllowed } from 'agex-ts/policy'
 import type {
   ExecResult,
@@ -234,6 +235,30 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
         }
       }
 
+      // Resolve agent-authored `import` statements that reach the
+      // VFS (`/helpers/...`). The host walks the import graph,
+      // reads + transforms each helper file, and produces a list
+      // of compiled-but-unevaluated bodies in dependency order
+      // alongside the user code's rewritten import-to-lookup form.
+      // The worker AsyncFunction-evaluates each helper in its own
+      // realm — function exports don't structured-clone, so the
+      // eval has to happen worker-side.
+      let preparedCode: string
+      let helpers: ReadonlyArray<{ path: string; body: string }>
+      try {
+        const prepared = await prepareScriptForWire(transformed, ctx.fs, transform)
+        preparedCode = prepared.code
+        helpers = prepared.helpers
+      } catch (e) {
+        activeExecute = null
+        return {
+          outcome: { kind: 'continue' },
+          outputs: [],
+          error: e instanceof Error ? e : new Error(String(e)),
+          elapsedMs: performance.now() - start,
+        }
+      }
+
       if (worker === null) spawn()
       // `spawn()` populates both `worker` and `readyPromise`; tell TS.
       const w = worker as Worker
@@ -361,8 +386,9 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
 
         const out: Host2WorkerMessage = {
           type: 'execute',
-          code: transformed,
+          code: preparedCode,
           executeId,
+          ...(helpers.length > 0 && { helpers }),
           ...(ctx.emissionId !== undefined && { emissionId: ctx.emissionId }),
         }
         w.postMessage(out)

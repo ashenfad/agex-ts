@@ -1,19 +1,21 @@
 /**
- * Convenience callback for `TaskCallOptions.onToken` — prints
- * streaming `TokenChunk`s to the console as they arrive, mirroring
- * agex-py's `pprint_tokens`.
+ * Drop-in console formatters for `TaskCallOptions.onToken` and
+ * `TaskCallOptions.onEvent`, mirroring agex-py's `pprint_tokens` and
+ * `pprint_events`.
  *
- * Each emission starts with a small `[<toolName>]` header, then the
- * content of each token streams inline so the model's `thinking`,
- * `code`, `commands`, and other text channels appear as the model
- * writes them. Emission boundaries get a newline separator.
+ *   - `prettyTokens` — streams a `TokenChunk` (per-character flow as
+ *     the model writes); use when you want to watch the model
+ *     thinking and coding live.
+ *   - `prettyEvents` — formats a discrete `AgentEvent` (one section
+ *     per action / output / outcome); use when you want a chunkier
+ *     after-the-fact log.
  *
- * Designed to be drop-in: pass `prettyTokens` directly to
- * `onToken`. For UIs that want different formatting (HTML, color,
- * etc.) write your own callback against the same `TokenChunk` shape.
+ * Pass either directly to the corresponding callback. For UIs that
+ * want different formatting (HTML, color, etc.) write your own
+ * against the same `TokenChunk` / `AgentEvent` shapes.
  */
 
-import type { TokenChunk } from './types'
+import type { AgentEvent, TokenChunk } from './types'
 
 interface PrettyOptions {
   /** Where to write. Defaults to `console.log` (no buffering). When
@@ -79,4 +81,94 @@ export function prettyTokens(token: TokenChunk, opts: PrettyOptions = {}): void 
       // Opaque round-trip blob; not human-readable.
       return
   }
+}
+
+interface PrettyEventOptions {
+  /** Per-line writer. Defaults to `console.log` (each call emits its
+   *  own newline). Set this if you want to capture or redirect. */
+  readonly write?: (line: string) => void
+  /** Cap the per-emission code/text body at N chars when printing.
+   *  Set to `Infinity` for no cap. Defaults to `2_000`. */
+  readonly maxBody?: number
+}
+
+/** Pretty-print a single `AgentEvent` as a compact block. Drop in as
+ *  `onEvent`. Each event writes one or more lines via the configured
+ *  writer (default: `console.log`). */
+export function prettyEvents(event: AgentEvent, opts: PrettyEventOptions = {}): void {
+  const write = opts.write ?? ((s: string) => console.log(s))
+  const maxBody = opts.maxBody ?? 2_000
+  switch (event.type) {
+    case 'taskStart':
+      write(`[taskStart] ${event.taskName}`)
+      return
+    case 'action':
+      for (const em of event.emissions) {
+        switch (em.type) {
+          case 'ts':
+            write(`[ts]\n${indent(cap(em.code, maxBody))}`)
+            break
+          case 'terminal':
+            write(`[terminal] ${cap(em.commands, maxBody)}`)
+            break
+          case 'thinking':
+            write(`[thinking] ${cap(em.text, maxBody)}`)
+            break
+          case 'text':
+            write(`[text] ${cap(em.text, maxBody)}`)
+            break
+          case 'fileWrite':
+            write(`[fileWrite] ${em.path} (${em.mode})`)
+            break
+          case 'fileEdit':
+            write(`[fileEdit] ${em.path}`)
+            break
+        }
+      }
+      return
+    case 'output':
+      for (const p of event.parts) {
+        if (p.type === 'text') write(`[stdout] ${cap(p.text.trim(), maxBody)}`)
+        else write(`[stdout] <image ${p.format}>`)
+      }
+      return
+    case 'success':
+      write('[success]')
+      return
+    case 'fail':
+      write(`[fail] ${event.message}`)
+      return
+    case 'clarify':
+      write(`[clarify] ${event.message}`)
+      return
+    case 'cancelled':
+      write(`[cancelled] ${event.taskName} after ${event.iterationsCompleted} iterations`)
+      return
+    case 'error':
+      write(`[error] ${event.errorName}: ${event.errorMessage}`)
+      return
+    case 'chapter':
+      write(`[chapter] ${event.name} — ${cap(event.message, maxBody)}`)
+      return
+    case 'file':
+      write(
+        `[file:${event.source}] +${event.added.length} ~${event.modified.length} -${event.removed.length}`,
+      )
+      return
+    case 'systemNote':
+      write(`[systemNote] ${event.message}`)
+      return
+  }
+}
+
+function cap(s: string, n: number): string {
+  if (n === Number.POSITIVE_INFINITY || s.length <= n) return s
+  return `${s.slice(0, n)}…(${s.length - n} more)`
+}
+
+function indent(s: string, by = '  '): string {
+  return s
+    .split('\n')
+    .map((l) => by + l)
+    .join('\n')
 }

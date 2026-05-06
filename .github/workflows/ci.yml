@@ -46,7 +46,7 @@ jobs:
         run: pnpm test
 
   browser:
-    name: Browser tests (real IndexedDB)
+    name: Browser tests (real IndexedDB + Web Worker runtime)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -67,5 +67,16 @@ jobs:
       - name: Install Playwright Chromium (with system deps)
         run: pnpm --filter kvgit-ts exec playwright install chromium --with-deps
 
-      - name: Test (Chromium + real IndexedDB)
+      - name: kvgit-ts (Chromium + real IndexedDB)
         run: pnpm --filter kvgit-ts test:browser
+
+      # agex-runtime-worker tests import from `agex-ts/types` and
+      # `agex-ts/errors`, which are sub-path exports resolved out of
+      # the built `dist/`. The Node lane builds the workspace; the
+      # browser lane is its own job, so it builds the upstream
+      # dependency explicitly here.
+      - name: Build agex-ts (for runtime-worker tests)
+        run: pnpm --filter agex-ts build
+
+      - name: agex-runtime-worker (Web Worker smoke)
+        run: pnpm --filter agex-runtime-worker test:browser

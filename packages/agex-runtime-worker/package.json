@@ -19,8 +19,10 @@
   "files": ["dist", "README.md"],
   "scripts": {
     "build": "tsup",
-    "test": "vitest run --config vitest.browser.config.ts",
-    "test:watch": "vitest --config vitest.browser.config.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:browser": "vitest run --config vitest.browser.config.ts",
+    "test:browser:watch": "vitest --config vitest.browser.config.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

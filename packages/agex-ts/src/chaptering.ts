@@ -94,8 +94,10 @@ export async function runChaptering(
     const raw = await chapterTask(eventIndex, {
       // Run the chapter task in an isolated session so its own task
       // events (taskStart, action, success) don't pollute the parent
-      // log we're trying to summarize.
-      session: `${parentSession}/__chapter__`,
+      // log we're trying to summarize. Dot separator (not slash)
+      // because session ids are sanitized — they're embedded into
+      // SQLite paths and IDB names, so `/` is reserved.
+      session: `${parentSession}.__chapter__`,
       signal,
     })
     chapters = validateChapters(raw, parentEvents.length)

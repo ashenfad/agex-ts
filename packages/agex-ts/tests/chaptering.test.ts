@@ -174,7 +174,7 @@ describe('chaptering — chapterTask integration', () => {
     const parentLog = await agent.events('default')
     for await (const e of parentLog.iter()) parentEvents.push(e)
     const childEvents: AgentEvent[] = []
-    const childLog = await agent.events('default/__chapter__')
+    const childLog = await agent.events('default.__chapter__')
     for await (const e of childLog.iter()) childEvents.push(e)
 
     // Parent session: one taskStart (the parent task)

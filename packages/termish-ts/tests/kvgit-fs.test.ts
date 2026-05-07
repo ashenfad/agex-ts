@@ -114,9 +114,9 @@ describe('polymorphic encoder/decoder', () => {
   })
 
   it('routes FileRecord-shape values through the file encoder, not JSON', () => {
-    // The structural check is that .content is a Uint8Array. A JSON
-    // object that happens to have a `content` field with bytes would
-    // get routed to the file encoder — that's the contract.
+    // The structural check requires all four FileRecord keys (isDir,
+    // createdAt, modifiedAt, content) so JSON values that happen to
+    // carry a Uint8Array under `content` are not misrouted.
     const rec = {
       isDir: false,
       createdAt: '2026-05-06T00:00:00.000Z',
@@ -125,6 +125,18 @@ describe('polymorphic encoder/decoder', () => {
     }
     const bytes = polymorphicEncoder(rec)
     expect(bytes[0]).toBe(0x46) // 'F'
+  })
+
+  it('treats a partial-shape value (Uint8Array content but missing other fields) as JSON', () => {
+    // Defends against the false-positive Gemini flagged: a state value
+    // that has `content: <bytes>` but no createdAt/modifiedAt/isDir
+    // would crash inside fileRecordEncoder if it slipped through. The
+    // tightened predicate routes it to the JSON branch instead, where
+    // JSON.stringify drops the Uint8Array harmlessly (serializes to
+    // `{}`). The point is no crash on encode.
+    const partial = { content: new Uint8Array([1, 2, 3]), tag: 'partial' }
+    const bytes = polymorphicEncoder(partial)
+    expect(bytes[0]).toBe(0x4a) // 'J' — routed as JSON, not file
   })
 
   it('shares one Staged for both shapes — atomic mixed-keys commit', async () => {

@@ -51,4 +51,63 @@ risk is low; the abstraction shape is obvious in advance.
 **Defer rationale.** No concrete user is asking, and the author's own
 work is browser-side. Architecture isn't something we'll regret
 delaying. Pick this up when a Node embedder surfaces or when broader
-adoption makes server-side isolation a credible asks.
+adoption makes server-side isolation a credible ask.
+
+---
+
+### `@agex-ts/git` — agent-view git over the agent's VFS
+
+**Why it matters.** Port of agex-py's `agent_git`: branches, an index,
+and a commit log on the agent's VFS files, layered over kvgit. Gives
+agents undo / branching / diff / time-travel for iterative work in
+their workspace. Aligns with the embeddable LLM-work primitive thesis
+— file content lives in the same versioned substrate as agent state,
+so a `git commit` is a true snapshot and rollback rolls everything
+back together.
+
+**Prerequisite.** The unified-kvgit-substrate work (in progress /
+landed) is a hard prereq — `@agex-ts/git` has nothing to commit
+against until VFS contents live in the same versioned store as
+agent state.
+
+**Scope.**
+
+- Port `agent_git` from agex-py: `metadata.ts`, `refs.ts`,
+  `core.ts`, `cli.ts`. ~1400 LOC of mostly mechanical translation
+  (sync → async, monkeyfs path encoding → KvgitFS `f:` / `d:`
+  prefix, `difflib.unified_diff` → npm `diff` wrapper).
+- Termish-ts API expansion: optional `extras` field on
+  `CommandContext`, threaded through `execute()`. ~15 LOC. Lets
+  registered commands reach beyond `fs` for substrate access (git
+  needs the `Staged` and `Versioned` handles).
+- Subcommands: `log`, `diff`, `status`, `branch`, `checkout`,
+  `commit`, `reset`, `show`, `merge`, `add`, `rm`. Same surface as
+  agex-py.
+- Diff library wrapper (`diff` npm + binary-detect heuristic).
+- Test suite mirroring agex-py's coverage.
+
+**Architectural notes.**
+
+- agex-py's substrate model with one polymorphic encoder is the
+  target — both file content and agent state live in the same
+  `VersionedKV` and one commit captures both atomically. The
+  unified-substrate prereq delivers this.
+- `_flush_alignment` pattern (commit `info: undefined` to advance
+  the kvgit chain after a file rewrite, without a virtual commit)
+  works with kvgit-ts's fast-forward path unchanged.
+- Path encoding is simpler than Python's: `f:/path` / `d:/path`
+  prefixes from `KvgitFS`, no monkeyfs `__vfs_` poke-into-internals.
+- Metadata blob (`__agex_git__`) sits at a no-prefix key, naturally
+  invisible to FS operations. Encode as a `FileRecord` with
+  `isDir: false` and JSON-bytes content, or via the polymorphic
+  encoder's JSON branch — depends on what the unified substrate
+  settles on.
+
+**Estimate.** ~1500 LOC port, 3 focused sessions. Risk concentrated
+in (a) async refactor of pervasive sync iteration patterns and
+(b) the edge cases around `Staged`'s selective commit + buffered
+removal semantics — the agex-py tests cover these well, so mirroring
+the suite catches drift.
+
+**Defer rationale.** Substrate unification first. Once that's in,
+this lands cleanly without architectural surprises.

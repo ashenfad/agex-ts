@@ -465,6 +465,137 @@ describe('renderEvents', () => {
   })
 })
 
+describe('renderEvents — Filter A (chapter-scope filtering)', () => {
+  // Filter A's contract: closed `__chapter__` task scopes are skipped
+  // when building the LLM render. Open scopes (the chapter task
+  // currently running) stay visible so the chapter task's own loop
+  // can render its prompt and prior turns.
+  //
+  // These tests pin two properties separately so a renderer refactor
+  // that loses the skip set causes a localised, obvious failure
+  // rather than a quietly-doubled token bill.
+
+  // Cheap proxy for "rendered cost." Sums character lengths of all
+  // text parts plus JSON-stringified tool_use inputs across all
+  // returned turns. A real tokenizer would be more accurate but
+  // adds a dependency for a coarse claim — character count is
+  // monotonic in the relevant regime.
+  function renderedCost(turns: NeutralTurn[]): number {
+    let n = 0
+    for (const t of turns) {
+      for (const p of t.content) {
+        if (p.type === 'text') {
+          n += p.text.length
+        } else if (p.type === 'toolUse') {
+          n += JSON.stringify(p.input).length
+        } else if (p.type === 'toolResult') {
+          for (const r of p.content) {
+            if (r.type === 'text') n += r.text.length
+          }
+        }
+      }
+    }
+    return n
+  }
+
+  const tCommon = '2026-05-05T00:00:00.000Z'
+  const taskStart = (taskName: string, message?: string): TaskStartEvent =>
+    ({
+      type: 'taskStart',
+      timestamp: tCommon,
+      agentName: 'a',
+      taskName,
+      inputs: null,
+      ...(message !== undefined && { message }),
+    }) as TaskStartEvent
+
+  // A wordy primer in the chapter scope so a regression that leaks
+  // the chapter task's bookkeeping into the render produces an
+  // obviously-large token delta.
+  const verboseChapterPrimer = `## Chapter task instructions\n\n${'Compact your context by folding completed work into named chapters. '.repeat(8)}${'Do not chapter in-progress work. '.repeat(4)}`
+
+  const closedChapterScope = (): AgentEvent[] => [
+    taskStart('__chapter__', verboseChapterPrimer), // primer is the user-message text
+    {
+      type: 'action',
+      timestamp: tCommon,
+      agentName: 'a',
+      emissions: [
+        {
+          type: 'ts',
+          code: `taskSuccess([{ start: 1, end: 2, name: "Phase 1", message: "${'x'.repeat(200)}" }])`,
+        },
+      ],
+    } as ActionEvent,
+    { type: 'success', timestamp: tCommon, agentName: 'a', result: null },
+  ]
+
+  it('does not inflate rendered cost when a closed chapter scope precedes the same trailing events', () => {
+    // Two event sequences differ only by the presence of a closed
+    // chapter scope (verbose primer + summary-laden action + success)
+    // before a `ChapterEvent`. Both end with the same trailing
+    // parent activity. Filter A should make the rendered cost
+    // identical (modulo a few formatting bytes that don't change
+    // here).
+    const trailingActivity: AgentEvent[] = [
+      {
+        type: 'chapter',
+        timestamp: tCommon,
+        agentName: 'a',
+        name: 'Phase 1',
+        message: 'rolled up early phases',
+        slug: 'phase-1',
+        eventRefs: ['ref-a', 'ref-b'],
+      } as ChapterEvent,
+      taskStart('continuation'),
+      {
+        type: 'action',
+        timestamp: tCommon,
+        agentName: 'a',
+        emissions: [{ type: 'ts', code: 'taskSuccess(null)' }],
+      } as ActionEvent,
+    ]
+
+    const baseline = renderEvents(trailingActivity)
+    const withBookkeeping = renderEvents([...closedChapterScope(), ...trailingActivity])
+
+    const delta = Math.abs(renderedCost(withBookkeeping) - renderedCost(baseline))
+    // ε of 5 chars catches structural divergence (a single missing
+    // skip would leak hundreds of chars of summary + primer text)
+    // while leaving slack for formatting trivia.
+    expect(delta).toBeLessThanOrEqual(5)
+  })
+
+  it('open chapter scope mid-log stays visible to the renderer', () => {
+    // If a chapter task crashes between turns (process killed,
+    // resource limit, etc.) its scope is left *open*: a
+    // `taskStart "__chapter__"` with no terminator. Filter A skips
+    // *closed* scopes only — orphaned open scopes render as-is.
+    // Defensible default (the operator may want to debug a partial
+    // state); pinning it here so a future change to filter open
+    // scopes is a deliberate decision against an explicit test.
+    const events: AgentEvent[] = [
+      taskStart('parent', 'Task: do work.'),
+      taskStart('__chapter__', verboseChapterPrimer),
+      // Note: no closing event for the chapter scope — it's orphaned.
+      {
+        type: 'action',
+        timestamp: tCommon,
+        agentName: 'a',
+        emissions: [{ type: 'ts', code: '/* the chapter task left this behind */' }],
+      } as ActionEvent,
+    ]
+    const turns = renderEvents(events)
+    // The orphaned chapter task's taskStart message is in the render.
+    const allText = turns
+      .flatMap((t) => t.content)
+      .filter((p): p is { type: 'text'; text: string } => p.type === 'text')
+      .map((p) => p.text)
+      .join('\n')
+    expect(allText).toContain(verboseChapterPrimer.slice(0, 30))
+  })
+})
+
 describe('renderEvents — emission variants', () => {
   it('terminal emission becomes a terminal_action toolUse', () => {
     const ev: ActionEvent = {

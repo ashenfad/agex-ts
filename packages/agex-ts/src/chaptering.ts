@@ -354,11 +354,27 @@ interface BoundaryRange {
  *  up to but not including the next boundary. The final boundary
  *  owns through the end of the log.
  *
+ *  **Boundary-range absorption.** A boundary's range extends to the
+ *  next boundary's start, *including any filtered (chapter-scoped)
+ *  events in between*. The alternative — trim each range at the first
+ *  filtered index — would leave orphaned chapter-task bookkeeping in
+ *  the log between boundaries. With absorption, folding a parent task
+ *  sweeps trailing chapter-task bookkeeping into the new chapter's
+ *  `eventRefs`; subsequent renders are smaller and the active log
+ *  stays clean across many chaptering rounds. Locked in by a test
+ *  ("boundary range absorbs trailing chapter-scope events") so a
+ *  silent flip to the trim interpretation is caught immediately.
+ *
  *  Outcome detection: for TaskStartEvent boundaries, scan the events
  *  in the boundary's range for a closing event (success/fail/clarify/
- *  cancelled). The first match becomes the rendered outcome; absence
- *  marks the task `(in progress)`. */
-function buildBoundaryIndex(events: ReadonlyArray<AgentEvent>): {
+ *  cancelled). Filtered indices are skipped during the scan so a
+ *  closed chapter scope's terminator inside an in-progress parent's
+ *  range doesn't get misread as the parent's own outcome. The first
+ *  match becomes the rendered outcome; absence marks the task
+ *  `(in progress)`. */
+/** Exported for unit testing. Not part of the public API surface;
+ *  consumers should drive chaptering through `runChaptering`. */
+export function buildBoundaryIndex(events: ReadonlyArray<AgentEvent>): {
   text: string
   ranges: BoundaryRange[]
 } {
@@ -397,18 +413,43 @@ function buildBoundaryIndex(events: ReadonlyArray<AgentEvent>): {
 /** True if at least one boundary in `ranges` represents foldable
  *  content: a ChapterEvent (always completable) or a TaskStartEvent
  *  whose range contains a closing outcome event (success / fail /
- *  cancelled). The currently-running task is *not* completable —
- *  its boundary range has no closing event yet. */
-function hasCompletableBoundary(
+ *  clarify / cancelled). The currently-running task is *not*
+ *  completable — its boundary range has no closing event yet.
+ *
+ *  Important: scan past `__chapter__`-scoped events when looking for
+ *  the parent's terminator. Boundary ranges absorb trailing filtered
+ *  events (see `buildBoundaryIndex`), so a chapter task that ran and
+ *  closed *inside* a still-running parent's range would otherwise be
+ *  misread as the parent's own completion — the chapter task's
+ *  `success` would land in the loop and we'd return `true` for an
+ *  in-progress parent. Apply the same `includeOpen=true` filter the
+ *  index builder uses to skip those indices.
+ *
+ *  `clarify` counts as a completion: a clarified task is closed
+ *  (waiting on the human, not continuing), so its outcome is fixed
+ *  and the chapter message can capture both the question and the
+ *  surrounding context. Matches `describeBoundary`, which has had a
+ *  clarify branch since the boundary index was introduced. */
+/** Exported for unit testing. Not part of the public API surface. */
+export function hasCompletableBoundary(
   events: ReadonlyArray<AgentEvent>,
   ranges: ReadonlyArray<BoundaryRange>,
 ): boolean {
+  const skip = buildChapterScopeFilter(events, true)
   for (const r of ranges) {
     const head = events[r.start] as AgentEvent
     if (head.type === 'chapter') return true
     for (let j = r.start + 1; j < r.end; j++) {
+      if (skip.has(j)) continue
       const ev = events[j] as AgentEvent
-      if (ev.type === 'success' || ev.type === 'fail' || ev.type === 'cancelled') return true
+      if (
+        ev.type === 'success' ||
+        ev.type === 'fail' ||
+        ev.type === 'clarify' ||
+        ev.type === 'cancelled'
+      ) {
+        return true
+      }
     }
   }
   return false

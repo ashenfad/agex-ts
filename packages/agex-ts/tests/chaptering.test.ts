@@ -348,6 +348,80 @@ describe('chaptering — multi-turn chapter task', () => {
   })
 })
 
+describe('chaptering — fires mid-loop within a multi-turn parent task', () => {
+  it('parent task continues coherently after a chapter event lands mid-flight', async () => {
+    // Pin behavior of the per-ActionEvent chaptering placement:
+    // chapter task fires *between* turns of a still-running parent.
+    // The parent's next render shows a `ChapterEvent` (folding earlier
+    // completed work) inside its ongoing turn — between its last
+    // tool_result and its next emission. The point of this test is
+    // to lock in what currently happens, so a renderer or chaptering-
+    // placement change that breaks the multi-turn-parent path makes
+    // an explicit pinned-test fail rather than silently regressing.
+    const llm = new Dummy({
+      responses: [
+        finishTurn, // task A — completes
+        finishTurn, // task B — completes
+        // Task C: multi-turn parent.
+        // Turn 1: heavy non-terminal — trips chaptering.
+        heavyNonTerminal,
+        // Chapter task: fold tasks A + B as a single chapter.
+        {
+          emissions: [
+            {
+              type: 'ts',
+              code: 'taskSuccess([{ start: 1, end: 2, name: "early-phase", message: "did A then B" }])',
+            },
+          ],
+        },
+        // Task C turn 2: another non-terminal action — at this point
+        // task C's render includes the ChapterEvent from chaptering.
+        // We're confirming the loop *continues* (i.e. the LLM call
+        // for turn 2 happens, the response is consumed, the loop
+        // doesn't bail).
+        { emissions: [{ type: 'ts', code: '/* still working */' }], inputTokens: 200 },
+        // Task C turn 3: close out.
+        finishTurn,
+      ],
+    })
+    const agent = await createAgent({
+      name: 'A',
+      llm,
+      runtime: evalRuntime(),
+      chapteringTrigger: 1000,
+    })
+    const events: AgentEvent[] = []
+    const onEvent = (e: AgentEvent) => void events.push(e)
+
+    const taskA = agent.task<undefined, null>({ description: 'Task A.' })
+    const taskB = agent.task<undefined, null>({ description: 'Task B.' })
+    const taskC = agent.task<undefined, null>({ description: 'Task C.' })
+    await taskA(undefined, { onEvent })
+    await taskB(undefined, { onEvent })
+    await taskC(undefined, { onEvent })
+
+    // Outcome assertions — what we want to lock in:
+    // 1. Chaptering produced exactly one ChapterEvent.
+    expect(events.filter((e) => e.type === 'chapter').length).toBe(1)
+    // 2. Task C ran multiple turns post-chaptering (heavy turn,
+    //    chapter task, then 2 more turns inside C). LLM call count
+    //    reflects this: A=1, B=1, C-turn1=1, chapter=1, C-turn2=1,
+    //    C-turn3=1 → 6 total.
+    expect(llm.callCount).toBe(6)
+    // 3. Task C completed cleanly. The chapter task's own success
+    //    doesn't propagate through onEvent (runChaptering invokes
+    //    the chapter task without forwarding the parent's onEvent;
+    //    only the produced ChapterEvent flows through `notify`).
+    //    So the visible terminal events are: task A success, task B
+    //    success, task C success — and no fail/clarify/cancelled.
+    const terminals = events.filter(
+      (e) => e.type === 'success' || e.type === 'fail' || e.type === 'clarify',
+    )
+    expect(terminals.length).toBe(3)
+    expect(terminals.every((e) => e.type === 'success')).toBe(true)
+  })
+})
+
 describe('isChapteringInFlight (recursion guard)', () => {
   it('is false outside of a chapter run', async () => {
     const agent = await createAgent({ name: 'A' })

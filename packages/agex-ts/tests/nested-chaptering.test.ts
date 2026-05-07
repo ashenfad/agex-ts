@@ -28,29 +28,32 @@ const finishTurn: LLMResponse = {
   inputTokens: 50,
 }
 
-const heavyNonTerminal: LLMResponse = {
-  emissions: [{ type: 'ts', code: '/* heavy */' }],
+const heavyFinishTurn: LLMResponse = {
+  // High-input-tokens task completion — chaptering fires at the
+  // task boundary because the latest action's inputTokens is over
+  // threshold.
+  emissions: [{ type: 'ts', code: 'taskSuccess(null)' }],
   inputTokens: 5000,
 }
 
 describe('nested chaptering', () => {
   it('produces a hierarchical /chapters/<outer>/chapters/<inner>/ layout and the right log shape', async () => {
     // Multi-task scenario: tasks A, B complete normally, then task C
-    // runs a heavy turn that trips chaptering — chapter task #1 folds
-    // A and B as two separate chapters (Phase 1, Phase 2). Task C
-    // closes out, task D runs a heavy turn that trips chaptering #2,
-    // and chapter task #2 wraps the two prior chapters as a single
-    // outer chapter "Phases 1+2".
+    // completes with high inputTokens — chaptering fires at task C's
+    // boundary, folding A and B as two separate chapters (Phase 1,
+    // Phase 2). Task D then completes heavy, triggering a second
+    // chaptering round, which wraps the two prior chapters as a
+    // single outer chapter "Phases 1+2".
     const responses: LLMResponse[] = [
       // task A: trivial completion
       finishTurn,
       // task B: trivial completion
       finishTurn,
-      // task C turn 1: heavy non-terminal — trips chaptering #1
-      heavyNonTerminal,
-      // chapter task #1: fold tasks A and B into Phase 1 and Phase 2.
-      // Boundary index at this point: [1] task A → success,
-      // [2] task B → success, [3] task C (in progress).
+      // task C: heavy completion — trips chaptering at task C's boundary.
+      heavyFinishTurn,
+      // chapter task #1: boundary index has [1] task A → success,
+      // [2] task B → success, [3] task C → success. Fold tasks A and B
+      // as two separate chapters.
       {
         emissions: [
           {
@@ -59,14 +62,11 @@ describe('nested chaptering', () => {
           },
         ],
       },
-      // task C turn 2: close out
-      finishTurn,
-      // task D turn 1: heavy non-terminal — trips chaptering #2
-      heavyNonTerminal,
-      // chapter task #2: log boundaries now [1] chapter Phase 1,
-      // [2] chapter Phase 2, [3] task C → success, [4] task D
-      // (in progress). Wrap [1,2] (the two prior chapters) into one
-      // outer chapter.
+      // task D: heavy completion — trips chaptering at task D's boundary.
+      heavyFinishTurn,
+      // chapter task #2: boundary index now has [1] chapter Phase 1,
+      // [2] chapter Phase 2, [3] task C → success, [4] task D → success.
+      // Wrap [1,2] (the two prior chapters) into one outer chapter.
       {
         emissions: [
           {
@@ -75,8 +75,6 @@ describe('nested chaptering', () => {
           },
         ],
       },
-      // task D turn 2: close out
-      finishTurn,
     ]
     const llm = new Dummy({ responses })
 
@@ -150,7 +148,7 @@ describe('nested chaptering', () => {
     const responses: LLMResponse[] = [
       finishTurn, // task A
       finishTurn, // task B
-      heavyNonTerminal, // task C heavy turn
+      heavyFinishTurn, // task C — high inputTokens, trips chaptering at boundary
       // Chapter task: fold A and B as two chapters with the same name.
       {
         emissions: [
@@ -160,7 +158,6 @@ describe('nested chaptering', () => {
           },
         ],
       },
-      finishTurn, // task C close-out
     ]
     const agent = await createAgent({
       name: 'slug-collide',

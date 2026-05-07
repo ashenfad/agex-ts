@@ -181,17 +181,14 @@ describe('E2E smoke — full agent pipeline', () => {
   })
 
   it('chaptering compacts the parent log: a later task sees the chapter, not the originals', async () => {
-    // Boundary-based chaptering needs multiple completed tasks to
-    // fold over. Setup: tasks A and B complete, then task C runs a
-    // heavy turn that trips chaptering. Chapter task folds [1, 2]
-    // (tasks A+B) into one ChapterEvent. Task C's next LLM call
-    // (after chaptering applied) should see the chapter in its
-    // rendered history — not the original tasks.
+    // Task-boundary chaptering: after a task completes, if the latest
+    // action's inputTokens exceeds the threshold, the chapter task
+    // fires. So a task that runs *after* chaptering will see the
+    // chapter event in its first LLM call's rendered history — not
+    // the originals.
     const llm = new Dummy({
       responses: [
-        // Task A — trivial completion
-        { emissions: [{ type: 'ts', code: 'taskSuccess(null)' }], inputTokens: 50 },
-        // Task B — write a file then complete
+        // Task A — write a file then complete (small).
         {
           emissions: [
             {
@@ -204,14 +201,10 @@ describe('E2E smoke — full agent pipeline', () => {
           ],
           inputTokens: 80,
         },
-        // Task C turn 1 — heavy non-terminal, trips chaptering.
-        {
-          emissions: [{ type: 'ts', code: '/* think hard */' }],
-          inputTokens: 5000,
-        },
-        // Chapter task — boundary index has [1] task A, [2] task B,
-        // [3] task C (in progress). Fold tasks A and B as one
-        // chapter named "warmup".
+        // Task B — heavy completion. Trips chaptering at B's boundary.
+        { emissions: [{ type: 'ts', code: 'taskSuccess(null)' }], inputTokens: 5000 },
+        // Chapter task — boundary index has [1] task A → success,
+        // [2] task B → success. Fold both as one chapter "warmup".
         {
           emissions: [
             {
@@ -220,13 +213,9 @@ describe('E2E smoke — full agent pipeline', () => {
             },
           ],
         },
-        // Task C turn 2 — finish. Its LLM call sees the rendered
-        // history *after* chaptering applied: the chapter event in
-        // place of tasks A and B.
-        {
-          emissions: [{ type: 'ts', code: 'taskSuccess("done")' }],
-          inputTokens: 100,
-        },
+        // Task C — runs AFTER chaptering applied. Its first LLM call
+        // sees the chapter event in place of tasks A and B.
+        { emissions: [{ type: 'ts', code: 'taskSuccess("done")' }], inputTokens: 100 },
       ],
     })
     const agent = await createAgent({
@@ -243,16 +232,14 @@ describe('E2E smoke — full agent pipeline', () => {
     const result = await taskC(undefined)
     expect(result).toBe('done')
 
-    // 5 LLM calls: task A turn 1, task B turn 1, task C turn 1
-    // (heavy → triggers chaptering), chapter task turn 1, task C
-    // turn 2 (after chaptering).
-    expect(llm.allTurns.length).toBe(5)
+    // 4 LLM calls: task A, task B, chapter task (post-B), task C.
+    expect(llm.allTurns.length).toBe(4)
 
-    // Task C's second LLM call is rendered *after* chaptering
-    // applied. The compacted log should show the ChapterEvent
-    // (📖 Chapter) in place of tasks A and B.
-    const taskCSecondCall = llm.allTurns[4] ?? []
-    const chapterTextSeen = taskCSecondCall.some((t) =>
+    // Task C's first (and only) LLM call is rendered *after* chaptering
+    // applied. The compacted log shows the ChapterEvent (📖 Chapter)
+    // in place of tasks A and B.
+    const taskCCall = llm.allTurns[3] ?? []
+    const chapterTextSeen = taskCCall.some((t) =>
       t.content.some((p) => p.type === 'text' && p.text.includes('📖 Chapter')),
     )
     expect(chapterTextSeen).toBe(true)
@@ -260,7 +247,7 @@ describe('E2E smoke — full agent pipeline', () => {
     // `taskSuccess([Chapter(...)])` action) is filtered from the
     // LLM render — closed `__chapter__` scopes don't appear — so
     // the long summary text doesn't get duplicated.
-    const chapterTaskActionSeen = taskCSecondCall.some((t) =>
+    const chapterTaskActionSeen = taskCCall.some((t) =>
       t.content.some(
         (p) =>
           p.type === 'toolUse' &&

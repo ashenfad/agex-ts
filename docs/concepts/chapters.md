@@ -32,7 +32,9 @@ When the agent sees this in its rendered context, it gets the summary plus a pat
 
 ### The chapter task
 
-When the most recent `ActionEvent`'s `inputTokens` exceeds the configured `chapteringTrigger`, the framework invokes the `__chapter__` task. This is a regular agex-ts task — registered via `agent.chapterTask({...})`, runs through the same action loop as any other task, sees the agent's registered fns / namespaces / classes.
+When a task completes (success / fail / clarify, including the budget-exhausted fail) and the most recent `ActionEvent`'s `inputTokens` exceeds the configured `chapteringTrigger`, the framework invokes the `__chapter__` task. Chaptering fires at task boundaries — never mid-action — so a task always either completes cleanly or runs into the limit and ends, with chaptering happening *between* tasks. This is a regular agex-ts task — auto-registered when `chapteringTrigger` is set, runs through the same action loop as any other task, sees the agent's registered fns / namespaces / classes.
+
+A consequence: a single long-running task with no completed sub-tasks gets no relief from chaptering — its only boundary is in-progress until it ends. The deferred [overflow-protection mechanism](https://github.com/ashenfad/agex-ts/blob/main/roadmap.md) covers that case (force task end + chapter + optional resume) when it lands.
 
 Crucially, the chapter task runs **in the parent's session**. Its loop renders the parent's full event log as conversation history when calling the LLM, so the agent reflects on its own work with actual context (real code, results, outputs) — not a skeletal summary string.
 
@@ -137,7 +139,7 @@ Nothing is deleted. `ChapterEvent.eventRefs` holds the original state keys; the 
 
 ### Single round per trigger
 
-When the trigger fires, the framework invokes the chapter task once, applies the returned chapters, and returns control to the parent. If context is still above the trigger after one round, the trigger naturally fires again on the next action — but each round can only see one boundary index, so producing all useful chapters in one call is the agent's job.
+When a task ends and the trigger fires, the framework invokes the chapter task once, applies the returned chapters, and returns control to the caller. If context is still above the trigger after one round, the trigger naturally fires again at the next task's boundary — but each round can only see one boundary index, so producing all useful chapters in one call is the agent's job.
 
 ## Compared to plain compaction
 

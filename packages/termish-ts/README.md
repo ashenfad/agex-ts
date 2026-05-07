@@ -8,10 +8,6 @@ Pure-TypeScript shell parser + builtin commands operating over an async `FileSys
 
 A virtual terminal that runs inside your application. Parses shell text (`ls -la | grep .ts`), executes against a pluggable `FileSystem`, supports custom commands. Used by agex-ts to power agent `terminal` emissions.
 
-## Design
-
-See [`design.md`](../../design.md) and the `termish-ts` section of [`implementation.md`](../../implementation.md) at the repo root for scope, decisions, and lessons.
-
 ## Backends shipped in v1
 
 | Adapter | Sub-path | When to reach for it |

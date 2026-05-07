@@ -13,8 +13,9 @@
  * - Injects the active policy's `fns` and `namespaces` as
  *   identifiers — same as the worker runtime would expose, just
  *   without the message-passing layer.
- * - Injects `taskSuccess`, `taskFail`, `taskClarify`, `cache`, `fs`
- *   and `viewImage` per `design.md` §4.
+ * - Injects `taskSuccess`, `taskFail`, `taskClarify`, `cache`, `fs`,
+ *   and `viewImage` — the standard task-loop bindings the agent's
+ *   emitted code expects.
  * - Captures `console.log` / `.error` calls into the result's
  *   `outputs` array.
  *
@@ -129,10 +130,9 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
 
       // Build the injected name list. Functions go in directly;
       // namespaces are exposed as objects keyed by member name.
-      // `inputs` is the validated task input (per design.md and the
-      // builtin primer) — stable across every emission of a single
-      // task call, accessed via `inputs.field` syntax in the agent
-      // code.
+      // `inputs` is the validated task input — stable across every
+      // emission of a single task call, accessed via `inputs.field`
+      // syntax in the agent code (per the builtin primer).
       const injected: Record<string, unknown> = {
         taskSuccess,
         taskFail,

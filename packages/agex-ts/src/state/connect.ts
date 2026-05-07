@@ -21,10 +21,6 @@
  * pull `idb`. Tree-shaking handles the unused branches per environment.
  */
 
-import {
-  polymorphicDecoder as polyDecoder,
-  polymorphicEncoder as polyEncoder,
-} from 'termish-ts/fs/kvgit'
 import type { StateConfig } from '../types'
 import type { StateBackend } from './backend'
 import { Live } from './live'
@@ -39,12 +35,31 @@ export interface StateResolver {
   readonly versioned: boolean
 }
 
+/** Permitted session-id shape. Sessions are embedded into filesystem
+ *  paths (SQLite) and IndexedDB names, so untrusted strings can let
+ *  an attacker escape the configured directory or namespace. The
+ *  rule is intentionally narrow — agex-py's session ids are typically
+ *  `chat-<uuid>` style; anything outside `[A-Za-z0-9_.-]`, anything
+ *  starting with `.`, or empty strings are rejected. Apply uniformly
+ *  across all backends so the contract doesn't depend on which
+ *  storage the embedder chose. */
+const SAFE_SESSION_RE = /^[A-Za-z0-9_-][A-Za-z0-9_.-]*$/
+
+function assertSafeSession(session: string): void {
+  if (typeof session !== 'string' || session.length === 0 || !SAFE_SESSION_RE.test(session)) {
+    throw new Error(
+      `connectState: invalid session id ${JSON.stringify(session)} — must match /^[A-Za-z0-9_-][A-Za-z0-9_.-]*$/ to prevent path traversal in storage backends`,
+    )
+  }
+}
+
 export async function connectState(config: StateConfig = { type: 'live' }): Promise<StateResolver> {
   if (config.type === 'live') {
     const cache = new Map<string, StateBackend>()
     return {
       versioned: false,
       async resolve(session: string): Promise<StateBackend> {
+        assertSafeSession(session)
         const cached = cache.get(session)
         if (cached !== undefined) return cached
         const fresh = new Live()
@@ -55,9 +70,14 @@ export async function connectState(config: StateConfig = { type: 'live' }): Prom
   }
 
   // Versioned path: one VersionedKV / Staged / KvgitState per session,
-  // each over its own KVStore namespace.
+  // each over its own KVStore namespace. Imports are lazy so a Live-
+  // only embedder doesn't pull kvgit-ts / termish-ts into their
+  // bundle.
   const { Staged, VersionedKV } = await import('kvgit-ts')
   const { KvgitState } = await import('./kvgit')
+  const { polymorphicDecoder: polyDecoder, polymorphicEncoder: polyEncoder } = await import(
+    'termish-ts/fs/kvgit'
+  )
 
   // Per-storage factory: produce a fresh `KVStore` keyed by session id.
   // This is where the substrate boundary lives — different stores for
@@ -103,6 +123,7 @@ export async function connectState(config: StateConfig = { type: 'live' }): Prom
   return {
     versioned: true,
     async resolve(session: string): Promise<StateBackend> {
+      assertSafeSession(session)
       const cached = cache.get(session)
       if (cached !== undefined) return cached
       const store = await makeStore(session)

@@ -86,3 +86,39 @@ describe('connectState — errors', () => {
     )
   })
 })
+
+describe('connectState — session id validation', () => {
+  // Sessions are embedded into SQLite paths and IndexedDB names, so
+  // an attacker-supplied session like '../../etc/passwd' must not
+  // escape the configured directory or namespace.
+  it('rejects path-traversal attempts in session id', async () => {
+    const r = await connectState({ type: 'versioned', storage: 'memory' })
+    await expect(r.resolve('../escape')).rejects.toThrow(/invalid session id/)
+    await expect(r.resolve('foo/bar')).rejects.toThrow(/invalid session id/)
+    await expect(r.resolve('foo\\bar')).rejects.toThrow(/invalid session id/)
+  })
+
+  it('rejects empty / leading-dot / control-char session ids', async () => {
+    const r = await connectState({ type: 'versioned', storage: 'memory' })
+    await expect(r.resolve('')).rejects.toThrow(/invalid session id/)
+    await expect(r.resolve('.hidden')).rejects.toThrow(/invalid session id/)
+    await expect(r.resolve('foo\x00bar')).rejects.toThrow(/invalid session id/)
+  })
+
+  it('accepts the conventional session id shapes', async () => {
+    const r = await connectState({ type: 'versioned', storage: 'memory' })
+    // The "default" name + agex-studio's `chat-<uuid>` style + plain
+    // alphanumeric / dotted / hyphenated identifiers should all pass.
+    await expect(r.resolve('default')).resolves.toBeDefined()
+    await expect(r.resolve('chat-abc123def4')).resolves.toBeDefined()
+    await expect(r.resolve('alice')).resolves.toBeDefined()
+    await expect(r.resolve('user.42_session-1')).resolves.toBeDefined()
+  })
+
+  it('applies the same validation to live (Map-backed) sessions', async () => {
+    // Live has no path/namespace exposure but the contract is uniform.
+    const r = await connectState({ type: 'live' })
+    await expect(r.resolve('../escape')).rejects.toThrow(/invalid session id/)
+    await expect(r.resolve('default')).resolves.toBeDefined()
+  })
+})

@@ -52,11 +52,17 @@ const dec = new TextDecoder()
  *  only shape we expect to carry a `Uint8Array` payload, and JSON
  *  values can't naturally contain raw bytes (they'd round-trip as
  *  `{}` through JSON.stringify), so this is collision-proof in
- *  practice. */
+ *  practice. We require all four FileRecord keys (not just `content`)
+ *  so a JSON-shaped state value that happens to carry a Uint8Array
+ *  somewhere doesn't get misrouted into the file branch — otherwise
+ *  the encoder would crash on missing `createdAt.padEnd(...)`. */
 function isFileRecord(v: unknown): v is FileRecord {
   return (
     typeof v === 'object' &&
     v !== null &&
+    'isDir' in v &&
+    'createdAt' in v &&
+    'modifiedAt' in v &&
     'content' in v &&
     (v as { content: unknown }).content instanceof Uint8Array
   )

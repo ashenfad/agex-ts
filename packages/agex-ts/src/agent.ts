@@ -16,7 +16,11 @@
 import type { CommitInfo } from 'kvgit-ts'
 import type { FileSystem } from 'termish-ts/fs/protocol'
 import { CacheImpl } from './cache'
-import { CHAPTER_TASK_NAME, DEFAULT_CHAPTER_PRIMER } from './chaptering'
+import {
+  CHAPTER_TASK_NAME,
+  DEFAULT_CHAPTER_PRIMER,
+  runChaptering as runChapteringInternal,
+} from './chaptering'
 import { RegistrationError } from './errors'
 import { EventLogImpl } from './event-log'
 import { PolicyBuilder, memberAllowed } from './policy'
@@ -420,6 +424,42 @@ export class Agent {
    *  embedders enable chaptering via `AgentOptions.chapteringTrigger`. */
   getChapterTask(): TaskFn<string, ReadonlyArray<Chapter>> | undefined {
     return this.#chapterTask
+  }
+
+  /** Manually trigger chaptering for `session`. Useful when an
+   *  embedder wants explicit control over when compaction happens —
+   *  e.g. a "compact now" UI button, scheduled compaction, or
+   *  application-specific signals beyond the automatic
+   *  `chapteringTrigger` threshold check.
+   *
+   *  Bypasses the threshold gate: chaptering runs whenever called,
+   *  regardless of `chapteringTrigger`. Still respects the runtime
+   *  guard — if there's nothing safe to fold (e.g. only one
+   *  in-progress task, no completed predecessors and no prior
+   *  chapters), the chapter task isn't invoked and `0` is returned.
+   *
+   *  Requires the chapter task to be registered (set
+   *  `AgentOptions.chapteringTrigger` to enable; if you only want
+   *  manual chaptering and never auto-fire, set it to a value high
+   *  enough that the auto-trigger never trips).
+   *
+   *  Returns the number of `ChapterEvent`s applied to the session's
+   *  log. `0` when chaptering is disabled, no chapter task is
+   *  registered, or there's nothing foldable. */
+  async runChaptering(
+    session: string = DEFAULT_SESSION,
+    opts: {
+      readonly signal?: AbortSignal
+      readonly onEvent?: (event: import('./types').AgentEvent) => void | Promise<void>
+    } = {},
+  ): Promise<number> {
+    const eventLog = await this.events(session)
+    const events: import('./types').AgentEvent[] = []
+    for await (const e of eventLog.iter()) events.push(e)
+    const signal = opts.signal ?? new AbortController().signal
+    return runChapteringInternal(events, eventLog, this, session, signal, async (e) => {
+      if (opts.onEvent !== undefined) await opts.onEvent(e)
+    })
   }
 
   // -- Per-session host APIs ---------------------------------------------

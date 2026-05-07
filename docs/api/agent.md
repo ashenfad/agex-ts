@@ -137,6 +137,21 @@ async eventsAt(commitHash: string, session?: string): Promise<EventLog | null>
 
 Open a read-only event log as it was at a historical commit. Returns `null` for non-versioned state or unknown hash.
 
+### `agent.runChaptering(session?, opts?)`
+
+```ts
+async runChaptering(
+  session?: string,
+  opts?: { signal?: AbortSignal; onEvent?: (event: AgentEvent) => void | Promise<void> },
+): Promise<number>
+```
+
+Manually trigger chaptering for `session`. Bypasses the `chapteringTrigger` threshold check — chaptering runs whenever called. Useful when an embedder wants explicit control: a "compact now" UI button, scheduled compaction, or app-specific signals beyond the auto-trigger.
+
+The runtime guard still applies — if there's nothing safe to fold (only an in-progress task with no completed predecessors and no prior chapters), the chapter task isn't invoked and `0` is returned. Otherwise returns the number of `ChapterEvent`s applied.
+
+Requires the chapter task to be registered (set `AgentOptions.chapteringTrigger` to enable). For manual-only control, set `chapteringTrigger` to a value high enough that the auto-trigger never trips.
+
 ### Internal: `refreshSkillsOverlay` / `refreshChaptersOverlay`
 
 Used by the framework to rebuild VFS overlays when skills or chapters change. Most embedders don't call these directly.

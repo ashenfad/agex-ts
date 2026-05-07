@@ -430,6 +430,89 @@ describe('chaptering — multi-turn parent task triggers at the boundary', () =>
   })
 })
 
+describe('agent.runChaptering — manual trigger', () => {
+  it('bypasses the threshold gate — chapters fold even when latest tokens are low', async () => {
+    // Embedder controls when chaptering runs (e.g. a "compact now"
+    // UI button). The auto-trigger threshold check doesn't apply.
+    // Even with a finishTurn (inputTokens=50) below the trigger of
+    // 1000, calling agent.runChaptering(session) folds whatever the
+    // chapter task picks.
+    const llm = new Dummy({
+      responses: [
+        finishTurn, // task A
+        finishTurn, // task B
+        // Chapter task — fires only because the embedder calls
+        // agent.runChaptering() directly.
+        {
+          emissions: [
+            {
+              type: 'ts',
+              code: 'taskSuccess([{ start: 1, end: 2, name: "manual", message: "compacted on demand" }])',
+            },
+          ],
+        },
+      ],
+    })
+    const agent = await createAgent({
+      name: 'A',
+      llm,
+      runtime: evalRuntime(),
+      chapteringTrigger: 1000, // task tokens stay below this; auto wouldn't fire
+    })
+    const taskA = agent.task<undefined, null>({ description: 'A.' })
+    const taskB = agent.task<undefined, null>({ description: 'B.' })
+    await taskA(undefined)
+    await taskB(undefined)
+
+    // Pre-condition: no chapter applied yet — auto-trigger didn't trip.
+    let log = await agent.events('default')
+    const preEvents: AgentEvent[] = []
+    for await (const e of log.iter()) preEvents.push(e)
+    expect(preEvents.filter((e) => e.type === 'chapter').length).toBe(0)
+
+    // Manual call.
+    const observed: AgentEvent[] = []
+    const applied = await agent.runChaptering('default', {
+      onEvent: (e) => void observed.push(e),
+    })
+    expect(applied).toBe(1)
+    expect(observed.filter((e) => e.type === 'chapter').length).toBe(1)
+
+    // Post-condition: one chapter in the log.
+    log = await agent.events('default')
+    const postEvents: AgentEvent[] = []
+    for await (const e of log.iter()) postEvents.push(e)
+    expect(postEvents.filter((e) => e.type === 'chapter').length).toBe(1)
+  })
+
+  it('returns 0 when chapter task is not registered', async () => {
+    const agent = await createAgent({
+      name: 'A',
+      llm: new Dummy({ responses: [] }),
+      runtime: evalRuntime(),
+      // chapteringTrigger omitted — no chapter task registered.
+    })
+    const applied = await agent.runChaptering('default')
+    expect(applied).toBe(0)
+  })
+
+  it('returns 0 when there is nothing safe to fold', async () => {
+    // Manual call with no completed tasks and no prior chapters in
+    // the session. Runtime guard catches this — chapter task isn't
+    // invoked, no LLM call burned.
+    const llm = new Dummy({ responses: [] })
+    const agent = await createAgent({
+      name: 'A',
+      llm,
+      runtime: evalRuntime(),
+      chapteringTrigger: 1000,
+    })
+    const applied = await agent.runChaptering('default')
+    expect(applied).toBe(0)
+    expect(llm.callCount).toBe(0)
+  })
+})
+
 describe('isChapteringInFlight (recursion guard)', () => {
   it('is false outside of a chapter run', async () => {
     const agent = await createAgent({ name: 'A' })

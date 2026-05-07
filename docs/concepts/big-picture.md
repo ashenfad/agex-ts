@@ -126,9 +126,13 @@ Most agent capabilities fit the library shape — registered modules and functio
 
 The library shape stays primary — that's where work finishes, and `taskSuccess` only fires from `ts_action`. The terminal is a secondary surface for tools whose natural interface isn't a TS function.
 
+### The agent's workspace is versioned, not ephemeral
+
+With `state: 'versioned'` and `fs: 'kvgit'`, the agent's files (written from `ts_action` *or* `terminal_action`), cache, event log, and metadata all share one kvgit substrate per session. A single `agent.commit(session)` captures the whole workspace atomically; rollback rolls everything back together. Most agent frameworks treat the agent's filesystem as ephemeral scratch space or as a separate real-filesystem concern — here it's just versioned state, checkpointed alongside the conversation history. See [State & Sessions](state-and-sessions.md) for the substrate details.
+
 ### Time-travel via kvgit
 
-When state is configured as `{ type: 'versioned', ... }`, every commit captures the full session world (state + VFS) atomically. You can pull up the agent's workspace at any past commit:
+Because the workspace is versioned state, every commit captures the full session world (state + VFS) atomically. You can pull up the agent's workspace at any past commit:
 
 ```ts
 const head = await agent.commit('alice')               // snapshot now
@@ -137,8 +141,6 @@ const log = await agent.eventsAt(head, 'alice')         // events as they were a
 const events: AgentEvent[] = []
 for await (const e of log!.iter()) events.push(e)
 ```
-
-See [State & Sessions](state-and-sessions.md) for details on the substrate.
 
 ## How agex-ts relates to other agent frameworks
 

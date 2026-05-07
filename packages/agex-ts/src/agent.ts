@@ -14,11 +14,18 @@
  */
 
 import type { CommitInfo } from 'kvgit-ts'
-import { CacheManager } from './cache'
+import type { FileSystem } from 'termish-ts/fs/protocol'
+import { CacheImpl } from './cache'
 import { RegistrationError } from './errors'
 import { EventLogImpl } from './event-log'
 import { PolicyBuilder, memberAllowed } from './policy'
-import { KvgitState, type StateBackend, connectState, isVersioned } from './state'
+import {
+  KvgitState,
+  type StateBackend,
+  type StateResolver,
+  connectState,
+  isVersioned,
+} from './state'
 import { type TaskDefinition, makeTask } from './task'
 import type {
   Cache,
@@ -36,7 +43,7 @@ import type {
   TerminalCommandHandler,
   VirtualFileSystem,
 } from './types'
-import { VfsManager } from './vfs'
+import { type BackingFactory, VfsManager } from './vfs'
 
 export interface AgentOptions {
   /** Display name. Used in event logs and error messages. */
@@ -78,8 +85,8 @@ export interface AgentOptions {
 
 /** Async factory — handles the awaitable parts of state setup. */
 export async function createAgent(opts: AgentOptions): Promise<Agent> {
-  const state = await connectState(opts.state ?? { type: 'live' })
-  return new Agent(opts, state)
+  const stateResolver = await connectState(opts.state ?? { type: 'live' })
+  return new Agent(opts, stateResolver)
 }
 
 /** Options accepted by `agent.fn()`. The function is the first
@@ -222,18 +229,52 @@ export interface ChapterTaskDefinition {
 
 export class Agent {
   readonly #opts: AgentOptions
-  readonly #state: StateBackend
+  readonly #stateResolver: StateResolver
   readonly #policy = new PolicyBuilder()
   readonly #vfs: VfsManager
-  readonly #caches: CacheManager
+  readonly #caches = new Map<string, CacheImpl>()
   readonly #eventLogs = new Map<string, EventLogImpl>()
   #chapterTask: TaskFn<string, ReadonlyArray<Chapter>> | undefined
 
-  constructor(opts: AgentOptions, state: StateBackend) {
+  constructor(opts: AgentOptions, stateResolver: StateResolver) {
     this.#opts = opts
-    this.#state = state
-    this.#vfs = new VfsManager(opts.fs ?? { type: 'memory' })
-    this.#caches = new CacheManager(state)
+    this.#stateResolver = stateResolver
+    const fsConfig: FSConfig = opts.fs ?? { type: 'memory' }
+    this.#vfs = new VfsManager(this.#buildBackingFactory(fsConfig))
+  }
+
+  /** Build the per-session backing-FS factory the VfsManager will
+   *  call. `memory`: fresh `MemoryFS` per session. `kvgit`: a
+   *  `KvgitFS` over the session's shared `Staged`, which is the same
+   *  store the cache and event log use — so a single
+   *  `state.commit(session)` captures the whole world. */
+  #buildBackingFactory(fsConfig: FSConfig): BackingFactory {
+    if (fsConfig.type === 'memory') {
+      return async () => {
+        const { MemoryFS } = await import('termish-ts/fs/memory')
+        return new MemoryFS() as FileSystem
+      }
+    }
+    // 'kvgit': share the session's KvgitState's Staged.
+    const resolver = this.#stateResolver
+    if (!resolver.versioned) {
+      // Surface the misconfiguration eagerly rather than waiting
+      // for the first `fs(session)` call to fail.
+      throw new Error(
+        'Agent: { fs: { type: "kvgit" } } requires { state: { type: "versioned", ... } } — kvgit-backed VFS shares the agent\'s versioned state.',
+      )
+    }
+    return async (session: string) => {
+      const state = await resolver.resolve(session)
+      if (!(state instanceof KvgitState)) {
+        // Defensive — `versioned: true` resolvers are expected to
+        // produce KvgitState. Surfaces a clear error if a future
+        // resolver shape ever drifts.
+        throw new Error('Agent: kvgit-backed FS expects KvgitState; got an unexpected backend')
+      }
+      const { KvgitFS } = await import('termish-ts/fs/kvgit')
+      return new KvgitFS(state.staged) as FileSystem
+    }
   }
 
   // -- Identity -----------------------------------------------------------
@@ -387,10 +428,16 @@ export class Agent {
   }
 
   // -- Per-session host APIs ---------------------------------------------
+  //
+  // Every per-session accessor is async because session state is
+  // resolved lazily through the `StateResolver` (opening an
+  // IndexedDB / SQLite store is async). Once a session has been
+  // resolved, the corresponding `CacheImpl` / `EventLogImpl` /
+  // `MountFS` is cached, so subsequent calls await one map lookup.
 
   /** Per-session VFS. Same instance for the same session id; writes
    *  persist across calls within the agent's lifetime. */
-  fs(session: string = DEFAULT_SESSION): VirtualFileSystem {
+  async fs(session: string = DEFAULT_SESSION): Promise<VirtualFileSystem> {
     return this.#vfs.fs(session)
   }
 
@@ -398,10 +445,10 @@ export class Agent {
    *  from the current registered skills. Called by the action loop
    *  on every task start so newly-registered skills become
    *  browseable. */
-  refreshSkillsOverlay(session: string = DEFAULT_SESSION): void {
+  async refreshSkillsOverlay(session: string = DEFAULT_SESSION): Promise<void> {
     // Touch fs(session) first to ensure the session entry exists,
     // otherwise refresh is a no-op.
-    this.fs(session)
+    await this.fs(session)
     this.#vfs.refreshSkillsOverlay(session, this.policy().skills)
   }
 
@@ -410,17 +457,23 @@ export class Agent {
    *  just landed becomes browseable on the next read. The chaptering
    *  machinery calls this after `replaceRange`. */
   async refreshChaptersOverlay(session: string = DEFAULT_SESSION): Promise<void> {
-    const log = this.events(session)
+    const log = await this.events(session)
+    const state = await this.#stateResolver.resolve(session)
     await this.#vfs.refreshChaptersOverlay(
       session,
       log.iter(),
-      (ref) => this.#state.get(ref) as Promise<import('./types').AgentEvent | undefined>,
+      (ref) => state.get(ref) as Promise<import('./types').AgentEvent | undefined>,
     )
   }
 
   /** Per-session typed cache. */
-  cache(session: string = DEFAULT_SESSION): Cache {
-    return this.#caches.cache(session)
+  async cache(session: string = DEFAULT_SESSION): Promise<Cache> {
+    const cached = this.#caches.get(session)
+    if (cached !== undefined) return cached
+    const state = await this.#stateResolver.resolve(session)
+    const fresh = new CacheImpl(state, session)
+    this.#caches.set(session, fresh)
+    return fresh
   }
 
   /** Per-session event log. Same instance for the same session id.
@@ -430,25 +483,31 @@ export class Agent {
    *  task lifecycle, chaptering machinery) need extra methods like
    *  `refs()` and `replaceRange()`. The public surface is the same;
    *  end-user code generally interacts via the `EventLog` interface. */
-  events(session: string = DEFAULT_SESSION): EventLogImpl {
+  async events(session: string = DEFAULT_SESSION): Promise<EventLogImpl> {
     const cached = this.#eventLogs.get(session)
     if (cached !== undefined) return cached
-    const fresh = new EventLogImpl(this.#state, session)
+    const state = await this.#stateResolver.resolve(session)
+    const fresh = new EventLogImpl(state, session)
     this.#eventLogs.set(session, fresh)
     return fresh
   }
 
-  /** The shared underlying StateBackend. Useful for inspection /
+  /** The session's underlying StateBackend. Useful for inspection /
    *  manual commit / time travel via kvgit. Returns the raw backend
    *  so consumers can use the `isVersioned` predicate. */
-  state(): StateBackend {
-    return this.#state
+  async state(session: string = DEFAULT_SESSION): Promise<StateBackend> {
+    return this.#stateResolver.resolve(session)
   }
 
-  /** Flush pending writes if the backend is versioned. No-op for Live. */
-  async commit(opts: { info?: Readonly<Record<string, unknown>> } = {}): Promise<string | null> {
-    if (!isVersioned(this.#state)) return null
-    return this.#state.commit(opts)
+  /** Flush pending writes for `session` if the backend is versioned.
+   *  No-op for Live. */
+  async commit(
+    session: string = DEFAULT_SESSION,
+    opts: { info?: Readonly<Record<string, unknown>> } = {},
+  ): Promise<string | null> {
+    const state = await this.#stateResolver.resolve(session)
+    if (!isVersioned(state)) return null
+    return state.commit(opts)
   }
 
   /** Release runtime resources. Must be called when the agent is no
@@ -465,34 +524,46 @@ export class Agent {
 
   // -- Inspection / time-travel ------------------------------------------
 
-  /** Commit metadata at `hash` (or current HEAD if omitted). Null
-   *  on non-versioned state or if the commit doesn't exist. */
-  async commitInfo(hash?: string): Promise<CommitInfo | null> {
-    if (!(this.#state instanceof KvgitState)) return null
-    return this.#state.commitInfo(hash)
+  /** Commit metadata at `hash` (or current HEAD if omitted) for
+   *  `session`. Null on non-versioned state or if the commit doesn't
+   *  exist. */
+  async commitInfo(hash?: string, session: string = DEFAULT_SESSION): Promise<CommitInfo | null> {
+    const state = await this.#stateResolver.resolve(session)
+    if (!(state instanceof KvgitState)) return null
+    return state.commitInfo(hash)
   }
 
-  /** Walk commit hashes backward through the history. Yields
-   *  nothing on non-versioned state. */
-  async *history(hash?: string, opts: { allParents?: boolean } = {}): AsyncIterable<string> {
-    if (!(this.#state instanceof KvgitState)) return
-    for await (const h of this.#state.history(hash, opts)) yield h
+  /** Walk `session`'s commit hashes backward through the history.
+   *  Yields nothing on non-versioned state. */
+  async *history(
+    hash?: string,
+    opts: { allParents?: boolean; session?: string } = {},
+  ): AsyncIterable<string> {
+    const session = opts.session ?? DEFAULT_SESSION
+    const state = await this.#stateResolver.resolve(session)
+    if (!(state instanceof KvgitState)) return
+    const histOpts = opts.allParents !== undefined ? { allParents: opts.allParents } : {}
+    for await (const h of state.history(hash, histOpts)) yield h
   }
 
-  /** Read the events as they were at a historical commit, for the
-   *  given session. Returns `null` if the backend isn't versioned
-   *  or the commit doesn't exist. */
+  /** Read `session`'s events as they were at a historical commit.
+   *  Returns `null` if the backend isn't versioned or the commit
+   *  doesn't exist. */
   async eventsAt(commitHash: string, session: string = DEFAULT_SESSION): Promise<EventLog | null> {
-    if (!(this.#state instanceof KvgitState)) return null
-    const view = await this.#state.checkoutAt(commitHash)
+    const state = await this.#stateResolver.resolve(session)
+    if (!(state instanceof KvgitState)) return null
+    const view = await state.checkoutAt(commitHash)
     if (view === null) return null
     // Build a thin StateBackend over the historical Versioned. We
     // don't need writes — just iter() and get() — so a minimal
     // adapter wraps the Versioned's reads directly. Pass `session`
-    // so the historical EventLog reads from the right per-session
-    // index (not the default).
+    // so the historical EventLog reads from the right keyspace.
     const { Staged } = await import('kvgit-ts')
-    const historicalStaged = new Staged(view)
+    const { polymorphicDecoder, polymorphicEncoder } = await import('termish-ts/fs/kvgit')
+    const historicalStaged = new Staged(view, {
+      encoder: polymorphicEncoder,
+      decoder: polymorphicDecoder,
+    })
     const historicalState = new KvgitState(historicalStaged)
     return new EventLogImpl(historicalState, session)
   }

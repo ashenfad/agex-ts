@@ -2,10 +2,15 @@
  * `EventLogImpl` — append-only log of `AgentEvent`s, organized as
  * an explicit ordered index over a `StateBackend`.
  *
- * Storage layout:
+ * Storage layout (within the per-session state):
  *   `__event_log__`            — ordered array of event refs (state
  *                                keys), defines the active log shape
  *   `evt/<ISO ts>/<seq>`       — one entry per event, holds the value
+ *
+ * The `StateBackend` handed in is already session-scoped (one
+ * `VersionedKV` per session at the substrate layer), so this log
+ * uses plain keys with no session prefix. Sessions are isolated below
+ * this layer.
  *
  * `iter()` walks the index, batch-fetching values. The prefix scan
  * the prior implementation used returns inactive keys post-chaptering;
@@ -26,15 +31,15 @@ import { type StateBackend, isVersioned } from './state/backend'
 import type { AgentEvent, ChapterEvent, EventLog } from './types'
 
 const DEFAULT_SESSION = 'default'
+const VALUE_PREFIX = 'evt/'
+const INDEX_KEY = '__event_log__'
 
 export class EventLogImpl implements EventLog {
   readonly #state: StateBackend
-  /** Per-session prefix — `<session>/evt/<ts>/<seq>` for event values,
-   *  `<session>/__event_log__` for the index. Keeps sessions isolated
-   *  on a shared state backend. */
+  /** Tracked for surface compatibility with callers that read
+   *  `log.session` for diagnostics; the prefix is no longer derived
+   *  from this field — sessions are isolated at the substrate. */
   readonly #session: string
-  readonly #valuePrefix: string
-  readonly #indexKey: string
   /** Per-millisecond collision counter so two events at the same
    *  timestamp don't overwrite each other. */
   #lastTimestamp = ''
@@ -43,8 +48,6 @@ export class EventLogImpl implements EventLog {
   constructor(state: StateBackend, session: string = DEFAULT_SESSION) {
     this.#state = state
     this.#session = session
-    this.#valuePrefix = `${session}/evt/`
-    this.#indexKey = `${session}/__event_log__`
   }
 
   /** Session id this log is scoped to. */
@@ -63,13 +66,13 @@ export class EventLogImpl implements EventLog {
     // there's nothing to await here.
     const key = this.#generateKey(event)
     this.#state.set(key, event)
-    const index = ((await this.#state.get<string[]>(this.#indexKey)) ?? []) as string[]
-    this.#state.set(this.#indexKey, [...index, key])
+    const index = ((await this.#state.get<string[]>(INDEX_KEY)) ?? []) as string[]
+    this.#state.set(INDEX_KEY, [...index, key])
     return key
   }
 
   async *iter(): AsyncIterable<AgentEvent> {
-    const index = ((await this.#state.get<string[]>(this.#indexKey)) ?? []) as string[]
+    const index = ((await this.#state.get<string[]>(INDEX_KEY)) ?? []) as string[]
     for (const key of index) {
       const v = await this.#state.get<AgentEvent>(key)
       if (v !== undefined) yield v
@@ -89,7 +92,7 @@ export class EventLogImpl implements EventLog {
    *  Used by chaptering to map numbered positions back to state
    *  keys; not part of the public `EventLog` interface. */
   async refs(): Promise<ReadonlyArray<string>> {
-    return ((await this.#state.get<string[]>(this.#indexKey)) ?? []) as string[]
+    return ((await this.#state.get<string[]>(INDEX_KEY)) ?? []) as string[]
   }
 
   /** Replace a contiguous run of event refs with a single
@@ -113,7 +116,7 @@ export class EventLogImpl implements EventLog {
     const chapterKey = this.#generateKey(chapterEvent)
     this.#state.set(chapterKey, chapterEvent)
 
-    const index = ((await this.#state.get<string[]>(this.#indexKey)) ?? []) as string[]
+    const index = ((await this.#state.get<string[]>(INDEX_KEY)) ?? []) as string[]
     const refSet = new Set(eventRefs)
     const next: string[] = []
     let inserted = false
@@ -131,7 +134,7 @@ export class EventLogImpl implements EventLog {
     // If none of the refs were in the index (caller error), append the
     // chapter at the end so we don't silently drop it.
     if (!inserted) next.push(chapterKey)
-    this.#state.set(this.#indexKey, next)
+    this.#state.set(INDEX_KEY, next)
     return chapterKey
   }
 
@@ -144,6 +147,6 @@ export class EventLogImpl implements EventLog {
       this.#lastTimestamp = ts
       this.#seq = 0
     }
-    return `${this.#valuePrefix}${ts}/${this.#seq.toString().padStart(6, '0')}`
+    return `${VALUE_PREFIX}${ts}/${this.#seq.toString().padStart(6, '0')}`
   }
 }

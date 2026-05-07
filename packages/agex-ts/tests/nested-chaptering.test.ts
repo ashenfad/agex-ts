@@ -100,7 +100,8 @@ describe('nested chaptering', () => {
     // two inner chapters via eventRefs), action(turn 3), action(turn 4
     // that called taskSuccess), success.
     const parentEvents: AgentEvent[] = []
-    for await (const e of agent.events('default').iter()) parentEvents.push(e)
+    const parentLog = await agent.events('default')
+    for await (const e of parentLog.iter()) parentEvents.push(e)
     const types = parentEvents.map((e) => e.type)
     expect(types).toEqual(['taskStart', 'chapter', 'action', 'action', 'success'])
 
@@ -108,13 +109,14 @@ describe('nested chaptering', () => {
     expect(outer.name).toBe('Phases 1+2')
     expect(outer.eventRefs.length).toBe(2)
     // Both inner refs point at the prior ChapterEvents
+    const state = await agent.state()
     for (const ref of outer.eventRefs) {
-      const inner = (await agent.state().get(ref)) as AgentEvent | undefined
+      const inner = (await state.get(ref)) as AgentEvent | undefined
       expect(inner?.type).toBe('chapter')
     }
 
     // -- VFS overlay shape ----------------------------------------------
-    const fs = agent.fs('default')
+    const fs = await agent.fs('default')
     // Outer summary at the top level
     const outerSummary = await fs.read(`/chapters/${outer.slug}/summary.md`)
     expect(dec.decode(outerSummary)).toContain('Phases 1+2')
@@ -176,12 +178,13 @@ describe('nested chaptering', () => {
     await agent.task<undefined, null>({ description: 'X.' })(undefined)
 
     const slugs: string[] = []
-    for await (const e of agent.events('default').iter()) {
+    const log = await agent.events('default')
+    for await (const e of log.iter()) {
       if (e.type === 'chapter') slugs.push(e.slug)
     }
     expect(slugs).toEqual(['work', 'work-2'])
 
-    const fs = agent.fs('default')
+    const fs = await agent.fs('default')
     const top = await fs.list('/chapters')
     expect(top.sort()).toEqual(['work', 'work-2'])
   })

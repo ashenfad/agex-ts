@@ -71,8 +71,8 @@ describe('agent.fs(session) mounts the skills overlay', () => {
   it('a registered skill is readable at /skills/<name>/SKILL.md after refresh', async () => {
     const agent = await createAgent({ name: 'A' })
     agent.skill('# How To\n\nDo X.', { name: 'howto' })
-    agent.refreshSkillsOverlay()
-    const fs = agent.fs()
+    await agent.refreshSkillsOverlay()
+    const fs = await agent.fs()
     expect(await fs.exists('/skills/howto/SKILL.md')).toBe(true)
     expect(dec.decode(await fs.read('/skills/howto/SKILL.md'))).toContain('How To')
   })

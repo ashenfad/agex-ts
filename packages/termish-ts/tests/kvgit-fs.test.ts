@@ -1,7 +1,13 @@
 import { Staged, VersionedKV } from 'kvgit-ts'
 import { Memory } from 'kvgit-ts/backends/memory'
 import { describe, expect, it } from 'vitest'
-import { KvgitFS, fileRecordDecoder, fileRecordEncoder } from '../src/fs/kvgit'
+import {
+  KvgitFS,
+  fileRecordDecoder,
+  fileRecordEncoder,
+  polymorphicDecoder,
+  polymorphicEncoder,
+} from '../src/fs/kvgit'
 import { runFsConformance } from './fs-conformance'
 
 async function makeFs(): Promise<KvgitFS> {
@@ -53,5 +59,97 @@ describe('KvgitFS — kvgit integration', () => {
     const fs = await makeFs()
     expect(fs.staged).toBeDefined()
     expect(typeof fs.staged.commit).toBe('function')
+  })
+})
+
+describe('polymorphic encoder/decoder', () => {
+  it('round-trips a FileRecord (file)', () => {
+    const rec = {
+      isDir: false,
+      createdAt: '2026-05-06T00:00:00.000Z',
+      modifiedAt: '2026-05-06T00:00:00.000Z',
+      content: new TextEncoder().encode('hello'),
+    }
+    const bytes = polymorphicEncoder(rec)
+    const decoded = polymorphicDecoder(bytes) as typeof rec
+    expect(decoded.isDir).toBe(false)
+    expect(decoded.createdAt).toBe(rec.createdAt)
+    expect(decoded.modifiedAt).toBe(rec.modifiedAt)
+    expect(new TextDecoder().decode(decoded.content)).toBe('hello')
+  })
+
+  it('round-trips a FileRecord (dir)', () => {
+    const rec = {
+      isDir: true,
+      createdAt: '2026-05-06T00:00:00.000Z',
+      modifiedAt: '2026-05-06T00:00:00.000Z',
+      content: new Uint8Array(0),
+    }
+    const bytes = polymorphicEncoder(rec)
+    const decoded = polymorphicDecoder(bytes) as typeof rec
+    expect(decoded.isDir).toBe(true)
+    expect(decoded.content.byteLength).toBe(0)
+  })
+
+  it('round-trips arbitrary JSON values (object)', () => {
+    const value = { name: 'agex', branches: { main: 'abc123' }, count: 42 }
+    const bytes = polymorphicEncoder(value)
+    expect(bytes[0]).toBe(0x4a) // 'J'
+    expect(polymorphicDecoder(bytes)).toEqual(value)
+  })
+
+  it('round-trips arbitrary JSON values (array, primitive)', () => {
+    expect(polymorphicDecoder(polymorphicEncoder([1, 2, 3]))).toEqual([1, 2, 3])
+    expect(polymorphicDecoder(polymorphicEncoder('hello'))).toBe('hello')
+    expect(polymorphicDecoder(polymorphicEncoder(null))).toBe(null)
+    expect(polymorphicDecoder(polymorphicEncoder(true))).toBe(true)
+  })
+
+  it('rejects an empty record on decode', () => {
+    expect(() => polymorphicDecoder(new Uint8Array(0))).toThrow(/empty record/)
+  })
+
+  it('rejects an unknown type tag on decode', () => {
+    expect(() => polymorphicDecoder(new Uint8Array([0x99]))).toThrow(/unknown record tag/)
+  })
+
+  it('routes FileRecord-shape values through the file encoder, not JSON', () => {
+    // The structural check is that .content is a Uint8Array. A JSON
+    // object that happens to have a `content` field with bytes would
+    // get routed to the file encoder — that's the contract.
+    const rec = {
+      isDir: false,
+      createdAt: '2026-05-06T00:00:00.000Z',
+      modifiedAt: '2026-05-06T00:00:00.000Z',
+      content: new Uint8Array([1, 2, 3]),
+    }
+    const bytes = polymorphicEncoder(rec)
+    expect(bytes[0]).toBe(0x46) // 'F'
+  })
+
+  it('shares one Staged for both shapes — atomic mixed-keys commit', async () => {
+    // The unified-substrate scenario: one Staged with the polymorphic
+    // encoder accepting both file records (via KvgitFS writes) and
+    // arbitrary JSON state values (via direct staged.set). One commit
+    // captures both atomically, which is the whole point.
+    const store = new Memory()
+    const vk = await VersionedKV.open(store)
+    const staged = new Staged(vk, {
+      encoder: polymorphicEncoder,
+      decoder: polymorphicDecoder,
+    })
+    const fs = new KvgitFS(staged)
+
+    await fs.write('/data.txt', new TextEncoder().encode('payload'))
+    staged.set('cache/answer', { kind: 'success', value: 42 })
+
+    expect(staged.hasChanges).toBe(true)
+    const result = await staged.commit()
+    expect(result.merged).toBe(true)
+    expect(staged.hasChanges).toBe(false)
+
+    // Both visible after commit through their respective surfaces.
+    expect(new TextDecoder().decode(await fs.read('/data.txt'))).toBe('payload')
+    expect(await staged.get('cache/answer')).toEqual({ kind: 'success', value: 42 })
   })
 })

@@ -207,6 +207,11 @@ const summarize = agent.task({
   output: z.object({ total: z.number(), count: z.number() }),
 })
 
+const items = [
+  { sku: 'A-1', amount: 100 },
+  { sku: 'B-2', amount: 250 },
+]
+
 try {
   const result = await summarize(items, { session: 'q1' })
   console.log(result)

@@ -127,9 +127,9 @@ Standard Schema validation failure. Two paths:
 - **Input validation** (host-side, before the task starts): thrown to the caller immediately — agent never runs.
 - **Output validation** (when agent calls `taskSuccess(...)`): the agent sees a runtime error inside its TS and tries again.
 
-### `CancelledError` (duplicate definition)
+### `CancelledError` (also raised from worker timeouts)
 
-The same class as the task-control variant; raised both from the agent loop's abort path and from worker termination on timeout (worker timeouts manifest as cancellation).
+`CancelledError` is the same class shown in the task-control section above. It's worth noting it surfaces from two paths: the agent loop's abort path (the caller cancelled via `AbortSignal`) and worker termination on timeout (the runtime adapter killed the worker after `timeoutMs`).
 
 ## Errors that don't bubble
 

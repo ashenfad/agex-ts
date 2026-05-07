@@ -249,17 +249,21 @@ describe('chaptering — chapterTask integration', () => {
 })
 
 describe('chaptering — single-task scenarios are a no-op', () => {
-  it('a single in-progress task offers no foldable boundaries', async () => {
+  it('a single in-progress task offers no foldable boundaries — chapter task is not invoked', async () => {
     // With only one task and no completed prior work, the boundary
-    // index has just one entry ("task X (in progress)"). The chapter
-    // task LLM is invoked but should return an empty list — there's
-    // nothing safe to chapter. We assert no ChapterEvent lands.
+    // index has just one entry ("task X (in progress)"). Per the
+    // primer's rules, in-progress work shouldn't be chaptered — and
+    // there's nothing else. The runtime detects this and *skips*
+    // the chapter task entirely (no LLM call, no bookkeeping
+    // events). The trigger will simply re-fire next turn if the
+    // task is still over budget; if other tasks have completed by
+    // then, those become foldable.
     const llm = new Dummy({
       responses: [
-        // Task X turn 1 — heavy
+        // Task X turn 1 — heavy. No chapter task LLM call follows
+        // because the runtime skips chaptering when nothing is
+        // foldable.
         heavyNonTerminal,
-        // Chapter task — returns nothing to chapter.
-        { emissions: [{ type: 'ts', code: 'taskSuccess([])' }] },
         // Task X turn 2 — close-out
         finishTurn,
       ],
@@ -276,9 +280,14 @@ describe('chaptering — single-task scenarios are a no-op', () => {
     await fn(undefined, { onEvent: (e) => void events.push(e) })
 
     expect(events.filter((e) => e.type === 'chapter').length).toBe(0)
-    // The chapter task itself still ran (its bookkeeping is in the
-    // log) — that's expected; the agent decided there was nothing
-    // to fold.
+    // No chapter task bookkeeping in the log either — the runtime
+    // skipped invocation entirely.
+    expect(
+      events.filter((e) => e.type === 'taskStart' && e.taskName === '__chapter__').length,
+    ).toBe(0)
+    // Two LLM calls total: task X turn 1, task X turn 2. No chapter
+    // task call.
+    expect(llm.callCount).toBe(2)
   })
 })
 

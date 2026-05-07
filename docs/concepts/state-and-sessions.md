@@ -35,8 +35,6 @@ const bobState   = await resolver.resolve('bob')
 
 The `Agent` class wraps this internally — `agent.cache(session)`, `agent.events(session)`, `agent.fs(session)`, `agent.state(session)`, and `agent.commit(session)` all route through the resolver and cache the per-session views.
 
-This matches agex-py's host pattern: framework session is "which substrate," not "which key prefix in a shared store." The previous "one substrate per agent + key-prefix sessions" shape conflated the substrate boundary with the namespace boundary; the substrate-unification refactor split them.
-
 ## Why a session is its own commit chain
 
 Three concrete benefits:

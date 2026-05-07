@@ -209,7 +209,7 @@ interface EventLog {
 }
 ```
 
-The append-only log surface. `add(event)` writes and returns the storage key. `iter()` yields events in chronological order — with chapter splicing applied (chaptered ranges show up as `ChapterEvent`). `at(hash)` opens a historical view (currently `null` in v1; use `agent.eventsAt(hash, session)` instead).
+The append-only log surface. `add(event)` writes and returns the storage key. `iter()` yields events in chronological order — with chapter splicing applied (chaptered ranges show up as `ChapterEvent`). For historical views (the log as it was at a past commit), use `agent.eventsAt(hash, session)` instead of `at()` on a live log instance.
 
 `EventLogImpl` (the concrete class returned by `agent.events(session)`) adds `refs()` (read-only access to the index) and `replaceRange(refs, chapterEvent)` (used by the chaptering machinery).
 

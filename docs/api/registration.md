@@ -209,7 +209,7 @@ Two flags propagate to the registration record for adapters to consult:
 | `hostFsAccess?: boolean` | Hint that this registration may read/write the host's real filesystem (vs. just the agent's VFS). |
 | `networkAccess?: boolean` | Hint that this registration may make network requests. |
 
-These are advisory in v1 — the framework doesn't currently enforce sandboxing based on them, but they're surfaced for embedders building review tooling around agent activity.
+These are advisory: agex-ts doesn't enforce sandboxing based on them. They're surfaced on the registration record for embedders building audit / review tooling around agent activity, and may inform future capability-based isolation.
 
 ## Member filters
 

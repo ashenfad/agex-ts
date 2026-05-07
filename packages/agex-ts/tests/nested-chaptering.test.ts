@@ -87,7 +87,6 @@ describe('nested chaptering', () => {
       state: { type: 'versioned', storage: 'memory' },
       chapteringTrigger: 1000,
     })
-    agent.chapterTask({ description: 'Compact prior task ranges into chapters.' })
 
     const taskA = agent.task<undefined, null>({ description: 'Task A.' })
     const taskB = agent.task<undefined, null>({ description: 'Task B.' })
@@ -169,7 +168,6 @@ describe('nested chaptering', () => {
       runtime: evalRuntime(),
       chapteringTrigger: 1000,
     })
-    agent.chapterTask({ description: 'Compact.' })
     const taskA = agent.task<undefined, null>({ description: 'A.' })
     const taskB = agent.task<undefined, null>({ description: 'B.' })
     const taskC = agent.task<undefined, null>({ description: 'C.' })

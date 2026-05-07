@@ -65,10 +65,18 @@ export interface AgentOptions {
   /** Max iterations per task (turn cap). Default `10`. */
   readonly maxIterations?: number
   /** Threshold (in input tokens, as reported by the latest
-   *  `ActionEvent`) at which chaptering fires. Pair with a
-   *  registered `agent.chapterTask({ ... })` — without one the
-   *  trigger is a no-op. */
+   *  `ActionEvent`) at which chaptering fires. When set, the
+   *  framework auto-registers a chapter task with the default
+   *  primer (override via `chapterPrimer`). Without this option,
+   *  no chapter task is registered and chaptering never runs. */
   readonly chapteringTrigger?: number
+  /** Override the default primer the auto-registered chapter task
+   *  uses. Most embedders should leave this undefined —
+   *  `DEFAULT_CHAPTER_PRIMER` describes the boundary-based
+   *  contract the framework expects. Supply a custom one if you
+   *  want different framing or domain-specific guidance. Ignored
+   *  when `chapteringTrigger` is undefined. */
+  readonly chapterPrimer?: string
   /** Replace the agex-ts `BUILTIN_PRIMER` entirely. Use only if
    *  you really mean to override agex's environment description —
    *  the agent loses the conventions explanation and best
@@ -217,17 +225,6 @@ function resolveName(
   )
 }
 
-/** Options accepted by `agent.chapterTask()`. The chapter task uses
- *  fixed input/output shapes (numbered event index → `Chapter[]`)
- *  set by the framework, so the user only supplies the prose. */
-export interface ChapterTaskDefinition {
-  /** Surfaced in the system prompt for the chapter task. Should
-   *  describe the chaptering goal in the agent's voice. */
-  readonly description: string
-  /** Optional task-specific addendum. */
-  readonly primer?: string
-}
-
 export class Agent {
   readonly #opts: AgentOptions
   readonly #stateResolver: StateResolver
@@ -242,6 +239,20 @@ export class Agent {
     this.#stateResolver = stateResolver
     const fsConfig: FSConfig = opts.fs ?? { type: 'memory' }
     this.#vfs = new VfsManager(this.#buildBackingFactory(fsConfig))
+
+    // Auto-register the chapter task when chaptering is enabled. The
+    // chapter task is a framework concern — the user just opts in by
+    // setting `chapteringTrigger`. The default primer teaches the
+    // boundary-based contract; embedders override via
+    // `opts.chapterPrimer` if they want different framing.
+    if (opts.chapteringTrigger !== undefined) {
+      const primer = opts.chapterPrimer ?? DEFAULT_CHAPTER_PRIMER
+      this.#chapterTask = makeTask<string, ReadonlyArray<Chapter>>(
+        this,
+        { description: 'Compact prior task ranges into chapters.', primer },
+        CHAPTER_TASK_NAME,
+      )
+    }
   }
 
   /** Build the per-session backing-FS factory the VfsManager will
@@ -402,42 +413,11 @@ export class Agent {
     return makeTask(this, def)
   }
 
-  /** Register the agent's `__chapter__` task — runs through the
-   *  same task() machinery, with the agent's LLM and registered
-   *  fns/namespaces in scope, when the chaptering trigger fires.
-   *
-   *  Contract: input is a numbered event index (string) the
-   *  framework constructs from the parent task's log. Output is
-   *  `readonly Chapter[]`, returned via `taskSuccess(chapters)`.
-   *
-   *  Skipping this method disables chaptering even when
-   *  `chapteringTrigger` is set. */
-  chapterTask(def: ChapterTaskDefinition): this {
-    // Stamp the chapter task's events with the reserved name
-    // `__chapter__` so the renderer (Filter A) and chaptering index
-    // builder (Filter B) recognise them and skip them on subsequent
-    // passes. Without this marker, prior chaptering bookkeeping
-    // would (a) duplicate summary text in the parent's LLM context
-    // and (b) clutter the next chapter task's index of foldable work.
-    //
-    // The default chapter primer teaches the contract; embedders
-    // who want different framing can supply their own `primer`.
-    const primer = def.primer ?? DEFAULT_CHAPTER_PRIMER
-    this.#chapterTask = makeTask<string, ReadonlyArray<Chapter>>(
-      this,
-      {
-        description: def.description,
-        primer,
-      },
-      CHAPTER_TASK_NAME,
-    )
-    return this
-  }
-
-  /** Framework-internal accessor — chaptering machinery looks the
-   *  registered chapter task up through here. Public so the
-   *  chaptering module (which lives outside Agent) can reach it;
-   *  not part of the user-facing surface. */
+  /** Framework-internal accessor — the chaptering machinery looks
+   *  up the auto-registered chapter task through here. Returns
+   *  `undefined` when chaptering is disabled (i.e. `chapteringTrigger`
+   *  was not set on this agent). Not part of the user-facing surface;
+   *  embedders enable chaptering via `AgentOptions.chapteringTrigger`. */
   getChapterTask(): TaskFn<string, ReadonlyArray<Chapter>> | undefined {
     return this.#chapterTask
   }

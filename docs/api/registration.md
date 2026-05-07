@@ -233,18 +233,9 @@ agent.namespace(myMod, {
 })
 ```
 
-## `chapterTask`
+## Chaptering
 
-```ts
-agent.chapterTask(def: ChapterTaskDefinition): this
-
-interface ChapterTaskDefinition {
-  readonly description: string
-  readonly primer?: string  // override the default chapter primer
-}
-```
-
-Registers the special `__chapter__` task that runs when `chapteringTrigger` is exceeded. See [Chapters](../concepts/chapters.md) for the model.
+There's no `agent.chapterTask({...})` method — chaptering is enabled via `AgentOptions.chapteringTrigger`. When that option is set, the framework auto-registers an internal chapter task with the default primer. Override the primer with `AgentOptions.chapterPrimer` if you want different framing. See [Chapters](../concepts/chapters.md) for the model.
 
 ## Validation
 

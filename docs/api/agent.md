@@ -34,7 +34,8 @@ const agent = await createAgent({
 | `state` | `StateConfig` | `{ type: 'live' }` | Persistent state. See [State](state.md). |
 | `fs` | `FSConfig` | `{ type: 'memory' }` | VFS. `{ type: 'kvgit' }` shares the agent's versioned state. |
 | `maxIterations` | `number` | `10` | Per-task turn cap. |
-| `chapteringTrigger` | `number` | `undefined` | When latest action's `inputTokens` >= this, run the chapter task. Pair with `agent.chapterTask({...})`. |
+| `chapteringTrigger` | `number` | `undefined` | When latest action's `inputTokens` >= this, run a chapter task. Setting this option auto-registers an internal chapter task with the default primer; see [Chapters](../concepts/chapters.md). |
+| `chapterPrimer` | `string` | `DEFAULT_CHAPTER_PRIMER` | Override the auto-registered chapter task's primer. Most embedders should leave this undefined. Ignored when `chapteringTrigger` is undefined. |
 | `agexPrimerOverride` | `string` | `undefined` | Replace the built-in environment description. Use only if you really mean to override agex-ts's conventions. |
 | `capabilitiesPrimer` | `string` | `undefined` | Replace the auto-rendered Registered Resources section with curated prose. The runtime adapter still injects everything registered. |
 
@@ -48,10 +49,11 @@ agent.cls(cls,           opts?: ClsRegistration)       // → this
 agent.namespace(target,  opts:  NsRegistration)        // → this
 agent.skill(content,     opts:  SkillRegistration)     // → this
 agent.terminal(handler,  opts:  TerminalRegistration)  // → this
-agent.chapterTask(def:   ChapterTaskDefinition)        // → this
 ```
 
 Each returns `this` for chaining. See [Registration](registration.md) for full options.
+
+Chaptering is configured via `AgentOptions.chapteringTrigger` (and optionally `AgentOptions.chapterPrimer` to override the default primer) — the framework auto-registers the chapter task internally.
 
 ## Tasks
 
@@ -198,7 +200,6 @@ agent
     name: 'sum', description: 'Sum of an array of numbers.',
   })
   .skill(`# Domain notes\nProducts SKUs follow the pattern …`, { name: 'domain' })
-  .chapterTask({ description: 'Compact prior task ranges.' })
 
 const summarize = agent.task({
   description: 'Compute total sales for the given line items.',

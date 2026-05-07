@@ -16,6 +16,7 @@
 import type { CommitInfo } from 'kvgit-ts'
 import type { FileSystem } from 'termish-ts/fs/protocol'
 import { CacheImpl } from './cache'
+import { CHAPTER_TASK_NAME, DEFAULT_CHAPTER_PRIMER } from './chaptering'
 import { RegistrationError } from './errors'
 import { EventLogImpl } from './event-log'
 import { PolicyBuilder, memberAllowed } from './policy'
@@ -412,10 +413,24 @@ export class Agent {
    *  Skipping this method disables chaptering even when
    *  `chapteringTrigger` is set. */
   chapterTask(def: ChapterTaskDefinition): this {
-    this.#chapterTask = makeTask<string, ReadonlyArray<Chapter>>(this, {
-      description: def.description,
-      ...(def.primer !== undefined && { primer: def.primer }),
-    })
+    // Stamp the chapter task's events with the reserved name
+    // `__chapter__` so the renderer (Filter A) and chaptering index
+    // builder (Filter B) recognise them and skip them on subsequent
+    // passes. Without this marker, prior chaptering bookkeeping
+    // would (a) duplicate summary text in the parent's LLM context
+    // and (b) clutter the next chapter task's index of foldable work.
+    //
+    // The default chapter primer teaches the contract; embedders
+    // who want different framing can supply their own `primer`.
+    const primer = def.primer ?? DEFAULT_CHAPTER_PRIMER
+    this.#chapterTask = makeTask<string, ReadonlyArray<Chapter>>(
+      this,
+      {
+        description: def.description,
+        primer,
+      },
+      CHAPTER_TASK_NAME,
+    )
     return this
   }
 

@@ -96,10 +96,11 @@ Both can be used together. agex-ts core only manages framework sessions; branche
 
 When the agent's runtime adapter dispatches a `ts_action` emission, it executes within the session's `Staged` view. The agent's writes accumulate in the buffer:
 
-```
-agent code: await fs.write('/notes/today.md', enc.encode('...'))
-            await cache.set('lastEdit', { path: '/notes/today.md' })
-            console.log('saved')
+```ts
+// inside the agent's ts_action emission:
+await fs.write('/notes/today.md', new TextEncoder().encode('...'))
+await cache.set('lastEdit', { path: '/notes/today.md' })
+console.log('saved')
 ```
 
 After dispatch, an `ActionEvent` is appended to the event log (also a write to the same `Staged`). Then the agent loop calls `state.commit({ info: { ... } })` — one kvgit commit captures the file write, the cache write, and the event log update atomically.

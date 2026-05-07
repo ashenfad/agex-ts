@@ -142,6 +142,7 @@ The encoder is exported from `termish-ts/fs/kvgit` as `polymorphicEncoder` / `po
 When `state: { type: 'versioned', ... }` and `fs: { type: 'kvgit' }`, file writes and state writes share one `Staged`. A single `staged.commit()` (or `agent.commit(session)`) flushes both atomically:
 
 ```ts
+const enc = new TextEncoder()
 const fs = await agent.fs('alice')
 const cache = await agent.cache('alice')
 

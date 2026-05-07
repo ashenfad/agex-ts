@@ -23,6 +23,7 @@ import type { Agent } from './agent'
 import { runChaptering, shouldTriggerChaptering } from './chaptering'
 import { dispatchFileEdit, dispatchFileWrite, dispatchTerminal } from './dispatcher'
 import { CancelledError, SchemaError, TaskClarifyError, TaskFailError } from './errors'
+import type { EventLogImpl } from './event-log'
 import { buildSystemMessage, buildTaskMessage, makeToolUseId, renderEvents } from './render'
 import type {
   ActionEvent,
@@ -181,28 +182,6 @@ export function makeTask<I, O>(
         }
         await emit(actionEvent, eventLog, options.onEvent)
 
-        // Chaptering — context compaction triggered by token budget.
-        // Runs after the ActionEvent is logged (so the trigger reads
-        // the just-arrived inputTokens) and before dispatch (so any
-        // chapter events the chaptering machinery splices in are in
-        // place before the next LLM call). The chapter task runs in
-        // the *parent's* session so its loop renders the parent's
-        // full conversation history when calling the LLM — it has
-        // real context to reflect on, not a skeletal index. Its own
-        // bookkeeping events are filtered from subsequent renders
-        // (`buildChapterScopeFilter`) so the duplicate summary text
-        // doesn't clutter the parent agent's next turn.
-        if (agent.getChapterTask() !== undefined) {
-          const allEvents = await collectEvents(eventLog)
-          if (shouldTriggerChaptering(allEvents, agent.chapteringTrigger)) {
-            await runChaptering(allEvents, eventLog, agent, session, signal, async (e) => {
-              // Forward to the user's onEvent callback only —
-              // replaceRange has already updated the index for us.
-              if (options.onEvent !== undefined) await options.onEvent(e)
-            })
-          }
-        }
-
         // Dispatch
         const ctx: ExecuteContext = {
           fs,
@@ -235,6 +214,7 @@ export function makeTask<I, O>(
             result,
           }
           await emit(successEvent, eventLog, options.onEvent)
+          await maybeFireBoundaryChaptering(agent, session, eventLog, signal, options.onEvent)
           return result
         }
         if (outcome.kind === 'fail') {
@@ -245,6 +225,7 @@ export function makeTask<I, O>(
             message: outcome.message,
           }
           await emit(failEvent, eventLog, options.onEvent)
+          await maybeFireBoundaryChaptering(agent, session, eventLog, signal, options.onEvent)
           throw new TaskFailError(outcome.message)
         }
         if (outcome.kind === 'clarify') {
@@ -255,12 +236,13 @@ export function makeTask<I, O>(
             message: outcome.message,
           }
           await emit(clarifyEvent, eventLog, options.onEvent)
+          await maybeFireBoundaryChaptering(agent, session, eventLog, signal, options.onEvent)
           throw new TaskClarifyError(outcome.message)
         }
         // outcome.kind === 'continue' → next iteration
       }
 
-      // Loop budget exhausted
+      // Loop budget exhausted — chapter the just-failed task too.
       const failEvent: FailEvent = {
         type: 'fail',
         timestamp: new Date().toISOString(),
@@ -268,6 +250,7 @@ export function makeTask<I, O>(
         message: `Task exceeded maxIterations (${maxIter})`,
       }
       await emit(failEvent, eventLog, options.onEvent)
+      await maybeFireBoundaryChaptering(agent, session, eventLog, signal, options.onEvent)
       throw new TaskFailError(`Task exceeded maxIterations (${maxIter})`)
     } catch (e) {
       if (e instanceof CancelledError) {
@@ -397,6 +380,40 @@ async function emit(
 ): Promise<void> {
   await log.add(event)
   if (onEvent !== undefined) await onEvent(event)
+}
+
+/** Fire chaptering at a task boundary. Called from each terminal-
+ *  outcome path (success / fail / clarify, including the budget-
+ *  exhaustion fail) after the terminal event lands in the log but
+ *  before the task call returns or throws.
+ *
+ *  Skipped on caller-cancellation (`signal.aborted`) — if the user
+ *  is signaling they want out, we don't add work. Errors that escape
+ *  the task loop never reach here at all (the catch path re-throws
+ *  before we'd run).
+ *
+ *  Per-action chaptering used to live inside the loop and fire
+ *  whenever the latest `inputTokens` exceeded the threshold. Moving
+ *  to task-boundary firing keeps chapter events out of the middle
+ *  of an in-progress task's render and gives the chapter task a
+ *  cleanly closed parent to fold. Single long tasks with no
+ *  completed sub-tasks aren't helped by chaptering at all (their
+ *  only boundary is in-progress until they end); the deferred
+ *  overflow-protection mechanism in roadmap.md covers that case. */
+async function maybeFireBoundaryChaptering(
+  agent: Agent,
+  session: string,
+  eventLog: EventLogImpl,
+  signal: AbortSignal,
+  onEvent: ((e: AgentEvent) => void | Promise<void>) | undefined,
+): Promise<void> {
+  if (agent.getChapterTask() === undefined) return
+  if (signal.aborted) return
+  const allEvents = await collectEvents(eventLog)
+  if (!shouldTriggerChaptering(allEvents, agent.chapteringTrigger)) return
+  await runChaptering(allEvents, eventLog, agent, session, signal, async (e) => {
+    if (onEvent !== undefined) await onEvent(e)
+  })
 }
 
 function deriveTaskName<I, O>(def: TaskDefinition<I, O>): string {

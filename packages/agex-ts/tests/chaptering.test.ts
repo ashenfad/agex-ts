@@ -49,20 +49,23 @@ const finishTurn: LLMResponse = {
   inputTokens: 50,
 }
 
-const heavyNonTerminal: LLMResponse = {
-  // Non-terminal heavy turn — its inputTokens trips chaptering, then
-  // the loop continues to the next response (the chapter task's
-  // emission, then the task's eventual taskSuccess).
-  emissions: [{ type: 'ts', code: '/* think */' }],
+const heavyFinishTurn: LLMResponse = {
+  // Heavy task-completing turn — its inputTokens trips the chaptering
+  // trigger when checked at the task boundary. Chaptering fires after
+  // the task's success event lands in the log.
+  emissions: [{ type: 'ts', code: 'taskSuccess(null)' }],
   inputTokens: 5000,
 }
 
 /** Run a multi-task scenario: task A completes, task B completes,
- *  then task C runs with a heavy non-terminal turn that trips
- *  chaptering. By the time chaptering fires, the boundary index has
- *  three entries — `task "A"`, `task "B"`, `task "C" (in progress)` —
- *  so the chapter task can meaningfully pick a range like
- *  `{ start: 1, end: 2 }` to fold the two completed tasks.
+ *  then task C runs as a single heavy turn whose inputTokens exceed
+ *  the chaptering threshold. Chaptering fires at task C's boundary
+ *  (after its success event lands). The boundary index then has three
+ *  entries — `task "A" → success`, `task "B" → success`, `task "C" →
+ *  success` — and the chapter task can fold `{ start: 1, end: 2 }`
+ *  (tasks A and B). The just-completed task C is itself foldable but
+ *  the agent typically chooses to leave it alone; tests can pick
+ *  whichever range they want.
  *
  *  Returns the agent and the full ordered event stream observed via
  *  onEvent across all task invocations. */
@@ -115,8 +118,8 @@ describe('chaptering — chapterTask integration', () => {
       responses: [
         finishTurn, // task A
         finishTurn, // task B
-        heavyNonTerminal, // task C turn 1 — trips chaptering
-        // Chapter task: fold boundaries 1+2 (tasks A and B).
+        heavyFinishTurn, // task C — high inputTokens, completes
+        // Chapter task: fires at task C's boundary; folds [1, 2] (A+B).
         {
           emissions: [
             {
@@ -125,7 +128,6 @@ describe('chaptering — chapterTask integration', () => {
             },
           ],
         },
-        finishTurn, // task C turn 2 — close out
       ],
       withChapterTask: true,
     })
@@ -145,10 +147,9 @@ describe('chaptering — chapterTask integration', () => {
       responses: [
         finishTurn,
         finishTurn,
-        heavyNonTerminal,
-        // Chapter task fails
+        heavyFinishTurn,
+        // Chapter task fails — fires at task C's boundary
         { emissions: [{ type: 'ts', code: 'taskFail("summary api down")' }] },
-        finishTurn,
       ],
       withChapterTask: true,
     })
@@ -164,10 +165,9 @@ describe('chaptering — chapterTask integration', () => {
       responses: [
         finishTurn,
         finishTurn,
-        heavyNonTerminal,
+        heavyFinishTurn,
         // Wrong shape
         { emissions: [{ type: 'ts', code: 'taskSuccess("not an array")' }] },
-        finishTurn,
       ],
       withChapterTask: true,
     })
@@ -178,17 +178,16 @@ describe('chaptering — chapterTask integration', () => {
   })
 
   it('chapter task events live in the parent log (no child session)', async () => {
-    // After the substrate-unification + boundary-based chaptering
-    // redirect, the chapter task runs in the parent's session so its
-    // LLM sees the parent's full conversation. Its bookkeeping events
+    // The chapter task runs in the parent's session so its LLM sees
+    // the parent's full conversation. Its bookkeeping events
     // (taskStart "__chapter__", action, success) land in the parent
-    // log — they're filtered from LLM render, but visible to UI / undo
-    // / iter().
+    // log — filtered from LLM render, but visible to UI / undo /
+    // iter().
     const { agent } = await runMultiTaskScenario({
       responses: [
         finishTurn,
         finishTurn,
-        heavyNonTerminal,
+        heavyFinishTurn,
         {
           emissions: [
             {
@@ -197,7 +196,6 @@ describe('chaptering — chapterTask integration', () => {
             },
           ],
         },
-        finishTurn,
       ],
       withChapterTask: true,
     })
@@ -206,12 +204,10 @@ describe('chaptering — chapterTask integration', () => {
     const parentLog = await agent.events('default')
     for await (const e of parentLog.iter()) parentEvents.push(e)
 
-    // taskStart events: tasks A, B, C plus the __chapter__ task. Tasks
-    // A and B were folded into a chapter event though — their refs
-    // moved out of the active index. So the active index at this
-    // point holds: ChapterEvent (folds A+B), task C's taskStart,
-    // task C's action(s), __chapter__ taskStart, __chapter__ action,
-    // __chapter__ success, task C's final action+success.
+    // After chaptering folds A+B, the active log holds: ChapterEvent
+    // (folds A+B), task C's full range, plus the chapter task's
+    // bookkeeping (taskStart "__chapter__", action, success) appended
+    // *after* task C's success since chaptering fires post-task-end.
     const chapterTaskStarts = parentEvents.filter(
       (e) => e.type === 'taskStart' && e.taskName === '__chapter__',
     )
@@ -226,8 +222,9 @@ describe('chaptering — chapterTask integration', () => {
       responses: [
         finishTurn, // task A
         finishTurn, // task B
-        heavyNonTerminal, // task C heavy turn — trips chaptering
-        // Chapter task action — also heavy, but guard prevents re-fire.
+        heavyFinishTurn, // task C — trips chaptering at boundary
+        // Chapter task action — also heavy, but guard prevents re-fire
+        // when the chapter task itself ends.
         {
           emissions: [
             {
@@ -237,7 +234,6 @@ describe('chaptering — chapterTask integration', () => {
           ],
           inputTokens: 9999,
         },
-        finishTurn, // task C close-out
       ],
       withChapterTask: true,
     })
@@ -247,24 +243,50 @@ describe('chaptering — chapterTask integration', () => {
   })
 })
 
-describe('chaptering — single-task scenarios are a no-op', () => {
-  it('a single in-progress task offers no foldable boundaries — chapter task is not invoked', async () => {
-    // With only one task and no completed prior work, the boundary
-    // index has just one entry ("task X (in progress)"). Per the
-    // primer's rules, in-progress work shouldn't be chaptered — and
-    // there's nothing else. The runtime detects this and *skips*
-    // the chapter task entirely (no LLM call, no bookkeeping
-    // events). The trigger will simply re-fire next turn if the
-    // task is still over budget; if other tasks have completed by
-    // then, those become foldable.
+describe('chaptering — single-task scenarios', () => {
+  it('a light-token single task does not trip the trigger — no chapter task invocation', async () => {
+    // Trigger gating: shouldTriggerChaptering checks the latest
+    // ActionEvent's inputTokens against chapteringTrigger. If no
+    // action exceeds the threshold, the chapter task isn't invoked
+    // even at the task boundary.
+    const llm = new Dummy({ responses: [finishTurn] }) // inputTokens: 50
+    const agent = await createAgent({
+      name: 'A',
+      llm,
+      runtime: evalRuntime(),
+      chapteringTrigger: 1000,
+    })
+    const events: AgentEvent[] = []
+    await agent.task<undefined, null>({ description: 'X.' })(undefined, {
+      onEvent: (e) => void events.push(e),
+    })
+
+    expect(events.filter((e) => e.type === 'chapter').length).toBe(0)
+    expect(
+      events.filter((e) => e.type === 'taskStart' && e.taskName === '__chapter__').length,
+    ).toBe(0)
+    // One LLM call: the task's only turn. No chapter task call.
+    expect(llm.callCount).toBe(1)
+  })
+
+  it('a heavy single task triggers chaptering at its boundary — agent may fold itself', async () => {
+    // Under task-boundary firing, a just-completed task is a
+    // completable boundary. The chapter task is invoked with that
+    // single boundary in the index; it can choose to fold itself,
+    // leave it alone, or fold nothing. Here the test agent picks
+    // `[1, 1]` to fold the parent.
     const llm = new Dummy({
       responses: [
-        // Task X turn 1 — heavy. No chapter task LLM call follows
-        // because the runtime skips chaptering when nothing is
-        // foldable.
-        heavyNonTerminal,
-        // Task X turn 2 — close-out
-        finishTurn,
+        heavyFinishTurn, // task X — high inputTokens, completes
+        // Chapter task fires at task X's boundary; folds X itself.
+        {
+          emissions: [
+            {
+              type: 'ts',
+              code: 'taskSuccess([{ start: 1, end: 1, name: "the-work", message: "did X" }])',
+            },
+          ],
+        },
       ],
     })
     const agent = await createAgent({
@@ -274,17 +296,12 @@ describe('chaptering — single-task scenarios are a no-op', () => {
       chapteringTrigger: 1000,
     })
     const events: AgentEvent[] = []
-    const fn = agent.task<undefined, null>({ description: 'X.' })
-    await fn(undefined, { onEvent: (e) => void events.push(e) })
+    await agent.task<undefined, null>({ description: 'X.' })(undefined, {
+      onEvent: (e) => void events.push(e),
+    })
 
-    expect(events.filter((e) => e.type === 'chapter').length).toBe(0)
-    // No chapter task bookkeeping in the log either — the runtime
-    // skipped invocation entirely.
-    expect(
-      events.filter((e) => e.type === 'taskStart' && e.taskName === '__chapter__').length,
-    ).toBe(0)
-    // Two LLM calls total: task X turn 1, task X turn 2. No chapter
-    // task call.
+    // Chapter applied; chapter task ran one turn.
+    expect(events.filter((e) => e.type === 'chapter').length).toBe(1)
     expect(llm.callCount).toBe(2)
   })
 })
@@ -307,7 +324,7 @@ describe('chaptering — multi-turn chapter task', () => {
       responses: [
         finishTurn, // task A
         finishTurn, // task B
-        heavyNonTerminal, // task C heavy → triggers chaptering
+        heavyFinishTurn, // task C — high inputTokens, triggers chaptering at boundary
         // Chapter task turn 1 — emits a non-terminal action so the
         // chapter task runs a second turn.
         { emissions: [{ type: 'ts', code: '/* picking which to fold */' }] },
@@ -323,7 +340,6 @@ describe('chaptering — multi-turn chapter task', () => {
             },
           ],
         },
-        finishTurn, // task C close-out
       ],
     })
     const agent = await createAgent({
@@ -348,24 +364,30 @@ describe('chaptering — multi-turn chapter task', () => {
   })
 })
 
-describe('chaptering — fires mid-loop within a multi-turn parent task', () => {
-  it('parent task continues coherently after a chapter event lands mid-flight', async () => {
-    // Pin behavior of the per-ActionEvent chaptering placement:
-    // chapter task fires *between* turns of a still-running parent.
-    // The parent's next render shows a `ChapterEvent` (folding earlier
-    // completed work) inside its ongoing turn — between its last
-    // tool_result and its next emission. The point of this test is
-    // to lock in what currently happens, so a renderer or chaptering-
-    // placement change that breaks the multi-turn-parent path makes
-    // an explicit pinned-test fail rather than silently regressing.
+describe('chaptering — multi-turn parent task triggers at the boundary', () => {
+  it('mid-task heavy turns do not fire chaptering — only the post-completion check does', async () => {
+    // Under task-boundary firing, chaptering does not fire mid-loop.
+    // A multi-turn parent task can have heavy turns in the middle;
+    // chaptering checks only when the task completes. The trigger
+    // gate (latest action's inputTokens >= threshold) reads the
+    // close-out turn, which in real usage carries the cumulative
+    // conversation tokens — so a task that grew heavy will still
+    // be over the threshold at completion. (Test fixture mimics
+    // this by giving the close-out turn high inputTokens.)
     const llm = new Dummy({
       responses: [
         finishTurn, // task A — completes
         finishTurn, // task B — completes
         // Task C: multi-turn parent.
-        // Turn 1: heavy non-terminal — trips chaptering.
-        heavyNonTerminal,
-        // Chapter task: fold tasks A + B as a single chapter.
+        // Turn 1: a non-terminal action with low inputTokens. Under
+        // per-action firing this would not have triggered chaptering
+        // either; under task-boundary firing it definitely doesn't.
+        { emissions: [{ type: 'ts', code: '/* working */' }], inputTokens: 200 },
+        // Turn 2: another non-terminal action.
+        { emissions: [{ type: 'ts', code: '/* still working */' }], inputTokens: 500 },
+        // Turn 3: heavy close-out (cumulative inputTokens trips trigger).
+        heavyFinishTurn,
+        // Chapter task: fires *after* task C's success event lands.
         {
           emissions: [
             {
@@ -374,14 +396,6 @@ describe('chaptering — fires mid-loop within a multi-turn parent task', () => 
             },
           ],
         },
-        // Task C turn 2: another non-terminal action — at this point
-        // task C's render includes the ChapterEvent from chaptering.
-        // We're confirming the loop *continues* (i.e. the LLM call
-        // for turn 2 happens, the response is consumed, the loop
-        // doesn't bail).
-        { emissions: [{ type: 'ts', code: '/* still working */' }], inputTokens: 200 },
-        // Task C turn 3: close out.
-        finishTurn,
       ],
     })
     const agent = await createAgent({
@@ -400,20 +414,14 @@ describe('chaptering — fires mid-loop within a multi-turn parent task', () => 
     await taskB(undefined, { onEvent })
     await taskC(undefined, { onEvent })
 
-    // Outcome assertions — what we want to lock in:
-    // 1. Chaptering produced exactly one ChapterEvent.
+    // 1. Exactly one ChapterEvent (folding A+B), produced post-task-C.
     expect(events.filter((e) => e.type === 'chapter').length).toBe(1)
-    // 2. Task C ran multiple turns post-chaptering (heavy turn,
-    //    chapter task, then 2 more turns inside C). LLM call count
-    //    reflects this: A=1, B=1, C-turn1=1, chapter=1, C-turn2=1,
-    //    C-turn3=1 → 6 total.
+    // 2. LLM call count: A=1 + B=1 + C-turn1=1 + C-turn2=1 + C-turn3=1
+    //    + chapter=1 = 6.
     expect(llm.callCount).toBe(6)
-    // 3. Task C completed cleanly. The chapter task's own success
-    //    doesn't propagate through onEvent (runChaptering invokes
-    //    the chapter task without forwarding the parent's onEvent;
-    //    only the produced ChapterEvent flows through `notify`).
-    //    So the visible terminal events are: task A success, task B
-    //    success, task C success — and no fail/clarify/cancelled.
+    // 3. Visible terminal events: A success, B success, C success.
+    //    No fail/clarify/cancelled. (Chapter task's own success
+    //    doesn't propagate through onEvent.)
     const terminals = events.filter(
       (e) => e.type === 'success' || e.type === 'fail' || e.type === 'clarify',
     )

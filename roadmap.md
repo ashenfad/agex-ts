@@ -12,6 +12,28 @@ for known-wanted work that hasn't shipped yet.
 
 ## Deferred
 
+### Overflow protection — fail-and-chapter for the long-task case
+
+**Why it matters.** Chaptering currently fires only at task boundaries (success / fail / clarify). A task that runs many turns without ever completing accumulates context unchecked — chaptering can't help because there's no completable boundary to fold over. The single long-running-task case (typically autonomous workers without sub-task decomposition) hits the model's context window with no relief.
+
+**Scope.** Add a hard-watermark mechanism that detects overflow during a task and forces the task to end so chaptering can fold its work, with optional auto-resume.
+
+- **Hard watermark auto-derived from the model.** No new `overflowTrigger` knob on `AgentOptions`. The threshold comes from `LLMConfig.contextWindow * (1 - safetyMargin)`. Default safety margin handles output budget + tokenization slop (~5% of window).
+- **Detection in the action loop.** After each `ActionEvent`, check whether `inputTokens` exceeds the derived overflow threshold. If yes:
+  1. Synthesize a `FailEvent` with a "context-overflow" reason.
+  2. Run chaptering — the task is now closed, so its range is foldable. The chapter folds the failed task plus prior completed work.
+  3. Throw `TaskOverflowError` (subclass of `TaskFailError`) so the caller can distinguish "agent decided to fail" from "framework forced termination."
+- **Opt-in auto-retry.** Add `maxOverflowRetries?: number` to `TaskCallOptions` (default `0`). When `>0`, the framework re-invokes the task with the same input in the same session, up to N retries; the new attempt sees the chapter from the failed run as part of its conversation history and picks up from there.
+- **Provider work.** Each `connect*` factory adds a model→`contextWindow` lookup table and populates the field on `dumpConfig`. ~10 LOC × 3 providers. If the lookup misses (custom / self-hosted model), `contextWindow` is `undefined` and overflow protection silently disables — emit a `SystemNoteEvent` once on the first task call so the embedder knows.
+
+**Estimate.** ~250 LOC across `task.ts`, `chaptering.ts`, `errors.ts`, plus tests. Not invasive — adds one detection point in the loop and one new error type. Provider lookups are mechanical.
+
+**Trade-offs.** A forced fail is a strong intervention — the agent didn't choose to fail. `TaskOverflowError` is a distinct subclass so embedders can handle it specifically; the agent's TS doesn't see it (it surfaces only on the host side). In-flight state inside the failing task is gone; only what's in the chapter summary survives. Acceptable for the autonomous-worker case where decomposition into sub-tasks is the right answer anyway; less great for tasks that hold complex stateful intermediate results.
+
+**Defer rationale.** Task-boundary chaptering covers the chat / multi-task case completely (the dominant use). The single-long-task case hasn't surfaced as a concrete user need yet; pick this up when one does.
+
+---
+
 ### Node `worker_threads` target for `@agex-ts/runtime-worker`
 
 **Why it matters.** `workerRuntime` is browser-only today; Node-side

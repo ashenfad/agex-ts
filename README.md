@@ -2,7 +2,7 @@
 
 `agex-ts` is a TypeScript-native agent framework. You define a typed task with `agent.task({...})` and the agent fills it in by writing TypeScript that calls into the modules you've registered. Real values flow in and out without JSON serialization at the boundary, and there's no separate runtime to deploy — agex-ts is a library you import.
 
-The agent's TS runs in an isolated Web Worker by default (or `worker_threads` on Node — [planned](roadmap.md)), with state and an optional virtual filesystem persisted in a versioned [kvgit-ts](packages/kvgit-ts) substrate. One commit captures the whole world per session; sessions roll back independently. Browser-native: no Pyodide, no wasm Python. Just a Web Worker bundle.
+The agent's TS runs in an isolated Web Worker by default (or `worker_threads` on Node — [planned](roadmap.md)). Per-session state and an optional virtual filesystem are versioned — one commit captures the whole world; sessions roll back independently. Browser-native: no Pyodide, no wasm Python. Just a Web Worker bundle.
 
 ```ts
 import { createAgent } from 'agex-ts'
@@ -33,7 +33,7 @@ const result = await summarize([3, 1, 4, 1, 5, 9, 2, 6])
 - **Typed function tasks** — `agent.task({...})` declares the input/output contract; the agent fulfills it. [Standard Schema](https://standardschema.dev/) (Zod, Valibot, ArkType, …) for runtime validation.
 - **Curated TS environment** — register exactly which functions, classes, and namespaces the agent can use. Per-member visibility filters. URL-shipped registrations let you hand the agent a whole library by URL without RPC bridging per call.
 - **Worker-isolated runtime** — agent code runs in a Web Worker; no shared globals, no DOM access. Production-ready isolation today; in-process `evalRuntime` for tests.
-- **Versioned per-session state** — agent's cache, event log, and (optional) virtual filesystem all live in one [kvgit-ts](packages/kvgit-ts) substrate per session. One `agent.commit(session)` captures everything atomically. Time-travel via `agent.eventsAt(hash, session)`.
+- **Versioned per-session state** — agent's cache, event log, and (optional) virtual filesystem are versioned per session. One `agent.commit(session)` captures everything atomically. Time-travel via `agent.eventsAt(hash, session)`. Built on [kvgit-ts](packages/kvgit-ts).
 - **Agent-directed compaction** — when context grows, the agent writes its own chapter summaries. Originals stay browsable at `/chapters/<slug>/`. See [Chapters](docs/concepts/chapters.md).
 - **Multi-agent flows are regular control flow** — sub-agents are functions; orchestrators call them like any other. No workflow DSL.
 
@@ -48,8 +48,8 @@ This is a small monorepo. Pick what you need:
 | [`@agex-ts/anthropic`](packages/agex-anthropic) | Anthropic provider (`connectAnthropic`). |
 | [`@agex-ts/openai`](packages/agex-openai) | OpenAI provider (`connectOpenAI`). |
 | [`@agex-ts/gemini`](packages/agex-gemini) | Gemini provider (`connectGemini`). |
-| [`kvgit-ts`](packages/kvgit-ts) | Versioned KV store (HAMT-backed branches, three-way merge). Standalone-usable. |
-| [`termish-ts`](packages/termish-ts) | Async filesystem protocol + shell-style command interpreter for `terminal_action`. Standalone-usable. |
+| [`kvgit-ts`](packages/kvgit-ts) | Versioned KV store with branches and merge. Powers `state` + the kvgit-backed VFS. Standalone-usable. |
+| [`termish-ts`](packages/termish-ts) | Async filesystem protocol + shell command interpreter. Powers the agent's `terminal_action` surface. Standalone-usable. |
 
 ## Documentation
 
@@ -71,7 +71,7 @@ For tests / trusted code (no worker isolation), the in-process `evalRuntime` shi
 
 ## Project Status
 
-> **Pre-1.0.** Public API is experimental and may change. The core thesis is settled; surfaces are still narrowing. Wire format (postMessage payloads), on-disk format (kvgit polymorphic encoder), and registration shapes are the most likely to shift before 1.0.
+> **Pre-1.0.** Public API is experimental and may change. The core thesis is settled; surfaces are still narrowing. Wire format, on-disk format, and registration shapes are the most likely to shift before 1.0.
 
 ## Relationship to agex (Python)
 
@@ -83,15 +83,6 @@ When to pick which:
 - **agex** (Python) — your stack is Python, you want the data-science library ecosystem (pandas, scikit-learn, plotly), or you need richer in-process sandboxing (sandtrap's tick limits, CPU caps, etc.).
 
 Both projects share the same author and thesis. They're not competitors — they're the same library shape compiled to different ecosystems.
-
-## Built on
-
-agex-ts is composed of several focused libraries that can also be used independently:
-
-| Library | Purpose |
-|---|---|
-| [`kvgit-ts`](packages/kvgit-ts) | Versioned key-value store with git-like semantics — HAMT-backed branches, three-way merge, multiple storage backends (memory / IndexedDB / SQLite). |
-| [`termish-ts`](packages/termish-ts) | Async filesystem protocol + parser/interpreter for shell-style command pipelines (the agent's `terminal_action` surface). |
 
 ## Contributing
 

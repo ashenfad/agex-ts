@@ -23,7 +23,7 @@ agex-ts ships two adapters; embedders can implement their own.
 Use this for:
 
 - Tests
-- Trusted code paths where you want zero overhead
+- Trusted code paths that don't need a worker boundary
 - Quick prototyping
 
 Don't use this for:

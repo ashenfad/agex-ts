@@ -41,7 +41,7 @@ Three concrete benefits:
 
 1. **Independent rollback.** Roll back alice's commits without touching bob's.
 2. **Atomic per-session commits.** A single `staged.commit()` captures alice's state, cache, event log, and VFS together. Either everything from this turn lands or nothing does.
-3. **Storage-natural multiplexing.** Sessions map to the storage layer's natural unit (DB, file). Backups, deletes, migrations operate at session granularity for free.
+3. **Storage-natural multiplexing.** Sessions map to the storage layer's natural unit (DB, file), so backups, deletes, and migrations already operate at session granularity.
 
 ## The polymorphic encoder
 

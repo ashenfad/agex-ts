@@ -32,7 +32,7 @@ const result = await summarize([3, 1, 4, 1, 5, 9, 2, 6])
 
 - **Typed function tasks** — `agent.task({...})` declares the input/output contract; the agent fulfills it. [Standard Schema](https://standardschema.dev/) (Zod, Valibot, ArkType, …) for runtime validation.
 - **Curated TS environment** — register exactly which functions, classes, and namespaces the agent can use. Per-member visibility filters. URL-shipped registrations let you hand the agent a whole library by URL without RPC bridging per call.
-- **Worker-isolated runtime** — agent code runs in a Web Worker; no shared globals, no DOM access. Production-ready isolation today; in-process `evalRuntime` for tests.
+- **Worker-isolated runtime** — agent code runs in a Web Worker; no shared globals, no DOM access. In-process `evalRuntime` for tests.
 - **Versioned per-session state** — agent's cache, event log, and (optional) virtual filesystem are versioned per session. One `agent.commit(session)` captures everything atomically. Time-travel via `agent.eventsAt(hash, session)`. Built on [kvgit-ts](packages/kvgit-ts).
 - **Agent-directed compaction** — when context grows, the agent writes its own chapter summaries. Originals stay browsable at `/chapters/<slug>/`. See [Chapters](docs/concepts/chapters.md).
 - **Multi-agent flows are regular control flow** — sub-agents are functions; orchestrators call them like any other. No workflow DSL.

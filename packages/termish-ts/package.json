@@ -27,6 +27,10 @@
     "./fs/kvgit": {
       "types": "./dist/fs/kvgit.d.ts",
       "import": "./dist/fs/kvgit.js"
+    },
+    "./fs/protocol": {
+      "types": "./dist/fs/protocol.d.ts",
+      "import": "./dist/fs/protocol.js"
     }
   },
   "files": ["dist", "README.md"],

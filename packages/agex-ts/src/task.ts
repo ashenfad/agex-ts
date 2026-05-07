@@ -81,9 +81,13 @@ export function makeTask<I, O>(agent: Agent, def: TaskDefinition<I, O>): TaskFn<
 
     const session = options.session ?? DEFAULT_SESSION
     const signal = options.signal ?? new AbortController().signal
-    const eventLog = agent.events(session)
-    const fs = agent.fs(session)
-    const cache = agent.cache(session)
+    // Per-session host APIs are async — the underlying state /
+    // VFS / cache may need to open an IndexedDB or SQLite store.
+    // Resolve them up front so the loop body can use them
+    // synchronously.
+    const eventLog = await agent.events(session)
+    const fs = await agent.fs(session)
+    const cache = await agent.cache(session)
 
     // -- Validate input ---------------------------------------------------
     let validatedInput: I = input
@@ -96,7 +100,7 @@ export function makeTask<I, O>(agent: Agent, def: TaskDefinition<I, O>): TaskFn<
 
     // Make sure registered skills are visible at /skills/<name>/SKILL.md
     // before the agent starts running.
-    agent.refreshSkillsOverlay(session)
+    await agent.refreshSkillsOverlay(session)
 
     // -- Log TaskStartEvent ----------------------------------------------
     // The full task message lives on the event so renderEvents can

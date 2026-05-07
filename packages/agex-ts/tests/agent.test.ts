@@ -8,12 +8,12 @@ describe('createAgent — defaults', () => {
     const a = await createAgent({ name: 'tiny' })
     expect(a.name).toBe('tiny')
     expect(a.maxIterations).toBe(10)
-    expect(isVersioned(a.state())).toBe(false)
+    expect(isVersioned(await a.state())).toBe(false)
   })
 
   it('honors explicit state config', async () => {
     const a = await createAgent({ name: 'kv', state: { type: 'versioned', storage: 'memory' } })
-    expect(isVersioned(a.state())).toBe(true)
+    expect(isVersioned(await a.state())).toBe(true)
   })
 })
 
@@ -156,27 +156,49 @@ describe('Agent — URL-shipped registrations', () => {
 describe('Agent — per-session host APIs', () => {
   it('fs(session) returns the same instance across calls', async () => {
     const a = await createAgent({ name: 't' })
-    expect(a.fs('alice')).toBe(a.fs('alice'))
-    expect(a.fs('alice')).not.toBe(a.fs('bob'))
+    expect(await a.fs('alice')).toBe(await a.fs('alice'))
+    expect(await a.fs('alice')).not.toBe(await a.fs('bob'))
   })
 
   it('cache(session) is per-session', async () => {
     const a = await createAgent({ name: 't' })
-    await a.cache('alice').set('x', 1)
-    await a.cache('bob').set('x', 2)
-    expect(await a.cache('alice').get('x')).toBe(1)
-    expect(await a.cache('bob').get('x')).toBe(2)
+    const alice = await a.cache('alice')
+    const bob = await a.cache('bob')
+    await alice.set('x', 1)
+    await bob.set('x', 2)
+    expect(await alice.get('x')).toBe(1)
+    expect(await bob.get('x')).toBe(2)
   })
 
   it('events(session) returns the same EventLog per session', async () => {
     const a = await createAgent({ name: 't' })
-    expect(a.events('alice')).toBe(a.events('alice'))
+    expect(await a.events('alice')).toBe(await a.events('alice'))
   })
 
   it('default session is shared across no-arg calls', async () => {
     const a = await createAgent({ name: 't' })
-    expect(a.fs()).toBe(a.fs('default'))
-    expect(a.cache()).toBe(a.cache('default'))
+    expect(await a.fs()).toBe(await a.fs('default'))
+    expect(await a.cache()).toBe(await a.cache('default'))
+  })
+
+  it('versioned state: separate sessions are independent commit chains', async () => {
+    // Sessions = separate VersionedKV instances. Writes to one don't
+    // appear in the other's commit chain.
+    const a = await createAgent({
+      name: 't',
+      state: { type: 'versioned', storage: 'memory' },
+    })
+    const alice = await a.cache('alice')
+    const bob = await a.cache('bob')
+    await alice.set('owner', 'alice')
+    await bob.set('owner', 'bob')
+    await a.commit('alice')
+    await a.commit('bob')
+    expect(await alice.get('owner')).toBe('alice')
+    expect(await bob.get('owner')).toBe('bob')
+    expect(await alice.has('owner')).toBe(true)
+    // Bob's session should not see alice's key.
+    expect(await bob.get('owner')).not.toBe('alice')
   })
 })
 
@@ -188,7 +210,8 @@ describe('Agent — commit', () => {
 
   it('returns a new commit hash on versioned state with changes', async () => {
     const a = await createAgent({ name: 't', state: { type: 'versioned', storage: 'memory' } })
-    await a.cache('default').set('k', 'v')
+    const cache = await a.cache('default')
+    await cache.set('k', 'v')
     const hash = await a.commit()
     expect(typeof hash).toBe('string')
     expect((hash as string).length).toBeGreaterThan(0)
@@ -196,8 +219,18 @@ describe('Agent — commit', () => {
 })
 
 describe('Agent — direct construction', () => {
-  it('accepts a pre-built StateBackend', () => {
-    const a = new Agent({ name: 'manual' }, new Live())
+  it('accepts a pre-built StateResolver', async () => {
+    // Trivial inline resolver hands every session the same Live —
+    // matches the prior single-state shape for tests that don't care
+    // about session isolation.
+    const live = new Live()
+    const resolver = {
+      versioned: false,
+      async resolve(): Promise<Live> {
+        return live
+      },
+    }
+    const a = new Agent({ name: 'manual' }, resolver)
     expect(a.name).toBe('manual')
   })
 })

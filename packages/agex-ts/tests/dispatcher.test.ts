@@ -26,7 +26,7 @@ describe('emission dispatch — fileWrite', () => {
     ])
     const fn = agent.task<undefined, null>({ description: 'Write a file.' })
     await fn(undefined)
-    const bytes = await agent.fs().read('/note.txt')
+    const bytes = await (await agent.fs()).read('/note.txt')
     expect(dec.decode(bytes)).toBe('hello')
   })
 
@@ -40,7 +40,7 @@ describe('emission dispatch — fileWrite', () => {
     ])
     const fn = agent.task<undefined, null>({ description: 'Append.' })
     await fn(undefined)
-    expect(dec.decode(await agent.fs().read('/log.txt'))).toBe('line1\nline2\n')
+    expect(dec.decode(await (await agent.fs()).read('/log.txt'))).toBe('line1\nline2\n')
   })
 })
 
@@ -55,7 +55,7 @@ describe('emission dispatch — fileEdit', () => {
     ])
     const fn = agent.task<undefined, null>({ description: 'Edit.' })
     await fn(undefined)
-    expect(dec.decode(await agent.fs().read('/p.txt'))).toBe('new value here')
+    expect(dec.decode(await (await agent.fs()).read('/p.txt'))).toBe('new value here')
   })
 
   it('matchAll replaces every occurrence', async () => {
@@ -68,7 +68,7 @@ describe('emission dispatch — fileEdit', () => {
     ])
     const fn = agent.task<undefined, null>({ description: 'Edit all.' })
     await fn(undefined)
-    expect(dec.decode(await agent.fs().read('/p.txt'))).toBe('X X X')
+    expect(dec.decode(await (await agent.fs()).read('/p.txt'))).toBe('X X X')
   })
 
   it('fails the task when the file does not exist', async () => {
@@ -102,7 +102,7 @@ describe('emission dispatch — terminal', () => {
     ])
     const fn = agent.task<undefined, null>({ description: 'Sort.' })
     await fn(undefined)
-    expect(dec.decode(await agent.fs().read('/sorted.txt'))).toBe('a\nb\nc\n')
+    expect(dec.decode(await (await agent.fs()).read('/sorted.txt'))).toBe('a\nb\nc\n')
   })
 
   it('host-registered terminal commands are reachable', async () => {
@@ -121,7 +121,7 @@ describe('emission dispatch — terminal', () => {
     )
     const fn = agent.task<undefined, null>({ description: 'Beep.' })
     await fn(undefined)
-    expect(dec.decode(await agent.fs().read('/out.txt'))).toBe('BEEP\n')
+    expect(dec.decode(await (await agent.fs()).read('/out.txt'))).toBe('BEEP\n')
   })
 
   it('emits captured stdout as an OutputEvent', async () => {
@@ -308,7 +308,7 @@ taskSuccess(nextPrime(500_000))
     expect(result).toBe(500_009)
     // Helper is genuinely persisted in the VFS for inspection /
     // future tasks.
-    const bytes = await agent.fs().read('/helpers/primeUtils.ts')
+    const bytes = await (await agent.fs()).read('/helpers/primeUtils.ts')
     expect(new TextDecoder().decode(bytes)).toContain('nextPrime')
     void enc
   })

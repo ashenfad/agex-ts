@@ -114,8 +114,10 @@ describe('chaptering — chapterTask integration', () => {
     expect(chapters[0]?.name).toBe('warmup')
     expect(chapters[0]?.message).toBe('thought briefly')
     // eventRefs holds the actual state keys that the chapter replaced.
+    // Per-session isolation now lives at the substrate layer, so refs
+    // start with `evt/` (no session segment).
     expect(chapters[0]?.eventRefs.length).toBe(1)
-    expect(chapters[0]?.eventRefs.every((r) => r.includes('/evt/'))).toBe(true)
+    expect(chapters[0]?.eventRefs.every((r) => r.startsWith('evt/'))).toBe(true)
   })
 
   it('emits a SystemNoteEvent when the chapter task throws', async () => {
@@ -169,9 +171,11 @@ describe('chaptering — chapterTask integration', () => {
     })
 
     const parentEvents: AgentEvent[] = []
-    for await (const e of agent.events('default').iter()) parentEvents.push(e)
+    const parentLog = await agent.events('default')
+    for await (const e of parentLog.iter()) parentEvents.push(e)
     const childEvents: AgentEvent[] = []
-    for await (const e of agent.events('default/__chapter__').iter()) childEvents.push(e)
+    const childLog = await agent.events('default/__chapter__')
+    for await (const e of childLog.iter()) childEvents.push(e)
 
     // Parent session: one taskStart (the parent task)
     expect(parentEvents.filter((e) => e.type === 'taskStart').length).toBe(1)

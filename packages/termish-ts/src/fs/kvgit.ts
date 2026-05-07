@@ -31,6 +31,10 @@ import type { FileInfo, FileMetadata, FileSystem } from './protocol'
 
 const TYPE_FILE = 0x46
 const TYPE_DIR = 0x44
+/** Type-tag for JSON-encoded values written by the polymorphic
+ *  encoder. Distinct from `F` / `D` so a single `Staged` can carry
+ *  both `FileRecord` and arbitrary state values without collisions. */
+const TYPE_JSON = 0x4a
 const ISO_LEN = 24
 const HEADER_LEN = 1 + ISO_LEN * 2
 
@@ -43,6 +47,20 @@ interface FileRecord {
 
 const enc = new TextEncoder()
 const dec = new TextDecoder()
+
+/** Discriminator for the polymorphic encoder: a `FileRecord` is the
+ *  only shape we expect to carry a `Uint8Array` payload, and JSON
+ *  values can't naturally contain raw bytes (they'd round-trip as
+ *  `{}` through JSON.stringify), so this is collision-proof in
+ *  practice. */
+function isFileRecord(v: unknown): v is FileRecord {
+  return (
+    typeof v === 'object' &&
+    v !== null &&
+    'content' in v &&
+    (v as { content: unknown }).content instanceof Uint8Array
+  )
+}
 
 /** Typed as `Encoder` (value: unknown) so it plugs into `Staged`'s
  *  constructor without a generic-variance cast at call sites. */
@@ -67,6 +85,40 @@ export const fileRecordDecoder: Decoder = (bytes) => {
   const modifiedAt = dec.decode(bytes.subarray(1 + ISO_LEN, HEADER_LEN)).trim()
   const content = bytes.byteLength > HEADER_LEN ? bytes.subarray(HEADER_LEN) : new Uint8Array(0)
   return { isDir, createdAt, modifiedAt, content }
+}
+
+/** Encoder that handles both `FileRecord` payloads and arbitrary
+ *  JSON-able values via a one-byte type tag. Use this on the unified
+ *  `Staged` an agex-ts agent shares between its state backend and its
+ *  kvgit-backed VFS — one `staged.commit()` then captures both atomically.
+ *
+ *  Wire format:
+ *  - `0x46` (`F`) / `0x44` (`D`): existing FileRecord layout.
+ *  - `0x4a` (`J`): byte 0 = tag, bytes 1+ = UTF-8 JSON.
+ */
+export const polymorphicEncoder: Encoder = (value) => {
+  if (isFileRecord(value)) return fileRecordEncoder(value)
+  const json = enc.encode(JSON.stringify(value))
+  const out = new Uint8Array(1 + json.byteLength)
+  out[0] = TYPE_JSON
+  out.set(json, 1)
+  return out
+}
+
+export const polymorphicDecoder: Decoder = (bytes) => {
+  if (bytes.byteLength === 0) {
+    throw new Error('polymorphicDecoder: empty record')
+  }
+  const tag = bytes[0]
+  if (tag === TYPE_JSON) {
+    return JSON.parse(dec.decode(bytes.subarray(1)))
+  }
+  if (tag === TYPE_FILE || tag === TYPE_DIR) {
+    return fileRecordDecoder(bytes)
+  }
+  throw new Error(
+    `polymorphicDecoder: unknown record tag 0x${(tag ?? 0).toString(16).padStart(2, '0')}`,
+  )
 }
 
 export interface KvgitFSOptions {

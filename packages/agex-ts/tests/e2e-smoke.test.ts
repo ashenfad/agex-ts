@@ -98,7 +98,8 @@ describe('E2E smoke — full agent pipeline', () => {
       .fn(
         async (...args: unknown[]) => {
           const path = args[0] as string
-          const bytes = await agent.fs().read(path)
+          const fs = await agent.fs()
+          const bytes = await fs.read(path)
           return dec.decode(bytes)
         },
         { name: 'readFile', description: 'Read a file from the VFS as text.' },
@@ -163,10 +164,11 @@ describe('E2E smoke — full agent pipeline', () => {
     expect(onToken.length).toBeGreaterThan(0)
 
     // -- VFS state survives across turns -------------------------------
-    expect(dec.decode(await agent.fs().read('/sorted.txt'))).toBe('APPLE\nbanana\ncherry\n')
+    const fs = await agent.fs()
+    expect(dec.decode(await fs.read('/sorted.txt'))).toBe('APPLE\nbanana\ncherry\n')
 
     // -- Versioned state persists + commitInfo round-trip --------------
-    const hash = await agent.commit({ info: { phase: 'final' } })
+    const hash = await agent.commit('default', { info: { phase: 'final' } })
     expect(hash).toBeTruthy()
     const info = await agent.commitInfo(hash as string)
     expect(info).toBeTruthy()
@@ -275,7 +277,8 @@ describe('E2E smoke — full agent pipeline', () => {
     // Parent's final iter() over its log shows the same compacted shape:
     // taskStart, chapter, success (the success comes after turn 3 lands).
     const finalEvents: AgentEvent[] = []
-    for await (const e of agent.events('default').iter()) finalEvents.push(e)
+    const finalLog = await agent.events('default')
+    for await (const e of finalLog.iter()) finalEvents.push(e)
     const finalTypes = finalEvents.map((e) => e.type)
     expect(finalTypes).toEqual(['taskStart', 'chapter', 'action', 'success'])
 

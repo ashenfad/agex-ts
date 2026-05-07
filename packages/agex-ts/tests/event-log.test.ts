@@ -24,7 +24,10 @@ describe('EventLog — add + iter', () => {
   it('returns the storage key from add()', async () => {
     const log = new EventLogImpl(new Live())
     const key = await log.add(evt({ type: 'success', result: 1 }))
-    expect(key.startsWith('default/evt/')).toBe(true)
+    // Per-session isolation now lives at the StateBackend layer, so
+    // event keys live at a clean `evt/` prefix without a session
+    // segment.
+    expect(key.startsWith('evt/')).toBe(true)
   })
 
   it('handles same-millisecond collisions with sequence suffix', async () => {

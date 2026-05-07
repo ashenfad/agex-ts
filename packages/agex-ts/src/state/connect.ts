@@ -1,36 +1,83 @@
 /**
  * `connectState(config)` — factory that turns a `StateConfig` into a
- * concrete `StateBackend`.
+ * `StateResolver`: the resolver owns the per-session state lookup and
+ * caches a fresh `StateBackend` per session id on first request.
  *
- * Storage-specific backends are loaded via dynamic `import()` so the
- * agex-ts state module doesn't pull `node:sqlite` into a browser
- * bundle (or `idb` into a Node-only bundle). Tree-shaking handles
- * the unused branches per environment.
+ * Each framework session gets its own KV-store namespace so its
+ * commit chain is independent of every other session's. Mirrors
+ * agex-py's `host/local.py` model: separate Disk dirs per session,
+ * separate ModalDicts per session, etc. Storage backends embed the
+ * session differently — Memory: a fresh `Memory()` per session;
+ * IndexedDB: a session-suffixed db name; SQLite: a per-session file.
  *
- * `'live'` returns a `Live` directly — no kvgit dependency needed.
- * `'versioned'` wires `<backend> → VersionedKV → Staged → KvgitState`.
+ * The earlier "one VersionedKV per agent + key-prefix sessions"
+ * shape conflated the substrate boundary with the namespace boundary.
+ * Splitting them lets cache / event log / VFS share one substrate
+ * within a session (atomic commits across all three) and lets sessions
+ * roll back independently of each other.
+ *
+ * Storage-specific backends are loaded via dynamic `import()` so a
+ * browser bundle doesn't pull `node:sqlite` and a Node bundle doesn't
+ * pull `idb`. Tree-shaking handles the unused branches per environment.
  */
 
+import {
+  polymorphicDecoder as polyDecoder,
+  polymorphicEncoder as polyEncoder,
+} from 'termish-ts/fs/kvgit'
 import type { StateConfig } from '../types'
 import type { StateBackend } from './backend'
 import { Live } from './live'
 
-export async function connectState(config: StateConfig = { type: 'live' }): Promise<StateBackend> {
-  if (config.type === 'live') return new Live()
+/** Lazy per-session resolver. `resolve(session)` returns the
+ *  `StateBackend` for that session, constructing it on first access
+ *  and caching for the rest of the resolver's lifetime. The
+ *  `versioned` flag tells callers (notably `VfsManager`) whether the
+ *  produced backends are kvgit-backed without forcing a resolution. */
+export interface StateResolver {
+  resolve(session: string): Promise<StateBackend>
+  readonly versioned: boolean
+}
 
-  // Lazy imports keep the unused storage backends out of the bundle.
+export async function connectState(config: StateConfig = { type: 'live' }): Promise<StateResolver> {
+  if (config.type === 'live') {
+    const cache = new Map<string, StateBackend>()
+    return {
+      versioned: false,
+      async resolve(session: string): Promise<StateBackend> {
+        const cached = cache.get(session)
+        if (cached !== undefined) return cached
+        const fresh = new Live()
+        cache.set(session, fresh)
+        return fresh
+      },
+    }
+  }
+
+  // Versioned path: one VersionedKV / Staged / KvgitState per session,
+  // each over its own KVStore namespace.
   const { Staged, VersionedKV } = await import('kvgit-ts')
+  const { KvgitState } = await import('./kvgit')
 
-  let store: import('kvgit-ts').KVStore
+  // Per-storage factory: produce a fresh `KVStore` keyed by session id.
+  // This is where the substrate boundary lives — different stores for
+  // different sessions means different commit chains.
+  let makeStore: (session: string) => Promise<import('kvgit-ts').KVStore>
   switch (config.storage) {
     case 'memory': {
       const { Memory } = await import('kvgit-ts/backends/memory')
-      store = new Memory()
+      // Each session = a fresh `Memory()`; sessions are completely
+      // isolated and ephemeral.
+      makeStore = async () => new Memory()
       break
     }
     case 'indexeddb': {
       const { IndexedDB } = await import('kvgit-ts/backends/idb')
-      store = await IndexedDB.open()
+      // Each session = its own IndexedDB database name. Default base
+      // name is `kvgit`; sessions land at `kvgit/<session>` (a single
+      // distinct database per session, so closing/reopening a session
+      // doesn't disturb others).
+      makeStore = async (session) => IndexedDB.open({ dbName: `kvgit/${session}` })
       break
     }
     case 'sqlite': {
@@ -38,7 +85,12 @@ export async function connectState(config: StateConfig = { type: 'live' }): Prom
         throw new Error('connectState: storage "sqlite" requires a `path` option')
       }
       const { Sqlite } = await import('kvgit-ts/backends/sqlite')
-      store = await Sqlite.open({ path: config.path })
+      // `config.path` is treated as a directory; each session occupies
+      // its own SQLite file under it. Differs from the prior single-
+      // session shape that took `path` as a file path directly — pre-
+      // 1.0 we trade the breaking change for multi-session correctness.
+      const dir = config.path
+      makeStore = async (session) => Sqlite.open({ path: `${dir}/${session}.db` })
       break
     }
     default: {
@@ -47,8 +99,21 @@ export async function connectState(config: StateConfig = { type: 'live' }): Prom
     }
   }
 
-  const vk = await VersionedKV.open(store)
-  const staged = new Staged(vk)
-  const { KvgitState } = await import('./kvgit')
-  return new KvgitState(staged)
+  const cache = new Map<string, StateBackend>()
+  return {
+    versioned: true,
+    async resolve(session: string): Promise<StateBackend> {
+      const cached = cache.get(session)
+      if (cached !== undefined) return cached
+      const store = await makeStore(session)
+      const vk = await VersionedKV.open(store)
+      // Polymorphic encoder lets one Staged carry both FileRecord
+      // (KvgitFS writes) and JSON-able state (cache, event log,
+      // metadata) — atomically commitable in one call.
+      const staged = new Staged(vk, { encoder: polyEncoder, decoder: polyDecoder })
+      const fresh = new KvgitState(staged)
+      cache.set(session, fresh)
+      return fresh
+    },
+  }
 }

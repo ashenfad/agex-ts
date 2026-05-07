@@ -6,23 +6,35 @@
  * the agent's `ts` emissions see via the runtime adapter.
  *
  * Each session's FS is a `MountFS` composing:
- *   - a writable backing FS (a per-session `MemoryFS` in v1)
- *   - read-only overlays at fixed prefixes (`/chapters/` today,
- *     future `/skills/`)
+ *   - a writable backing FS (a fresh `MemoryFS` per session, or a
+ *     `KvgitFS` over the session's shared `Staged` when configured)
+ *   - read-only overlays at fixed prefixes (`/chapters/`, `/skills/`)
  *
  * The chapters overlay is created on first request and refreshed
  * via `refreshChaptersOverlay(session, ...)` whenever the action
  * loop applies new chapters to the session's event log.
+ *
+ * Backing-FS construction is delegated to a factory passed at
+ * construction time. That keeps `VfsManager` agnostic of state
+ * plumbing — the factory closes over the agex-ts state resolver when
+ * the embedder wants kvgit-backed files, or just hands back a
+ * `MemoryFS` per session otherwise.
  */
 
-import { MemoryFS } from 'termish-ts/fs/memory'
+import type { FileSystem } from 'termish-ts/fs/protocol'
 import { ChaptersOverlay, buildChaptersOverlay } from './fs/chapters-overlay'
 import { MountFS } from './fs/mount'
 import { SkillsOverlay } from './fs/skills-overlay'
-import type { AgentEvent, FSConfig, RegisteredSkill } from './types'
+import type { AgentEvent, RegisteredSkill } from './types'
 
 const CHAPTERS_PREFIX = '/chapters'
 const SKILLS_PREFIX = '/skills'
+
+/** Async factory for the session's backing FS. The factory is async
+ *  because kvgit-backed sessions need to await their `Staged`
+ *  resolution (IndexedDB / SQLite open are async). MemoryFS is sync
+ *  but wears the same async signature for uniformity. */
+export type BackingFactory = (session: string) => Promise<FileSystem>
 
 interface SessionEntry {
   readonly mount: MountFS
@@ -31,19 +43,22 @@ interface SessionEntry {
 }
 
 export class VfsManager {
-  readonly #config: FSConfig
+  readonly #createBacking: BackingFactory
   readonly #cache = new Map<string, SessionEntry>()
 
-  constructor(config: FSConfig = { type: 'memory' }) {
-    this.#config = config
+  constructor(createBacking: BackingFactory) {
+    this.#createBacking = createBacking
   }
 
   /** Get the FileSystem for a session. Lazily creates and caches one
-   *  per session id; subsequent calls return the same instance. */
-  fs(session: string): MountFS {
+   *  per session id; subsequent calls return the same instance.
+   *
+   *  Async because the backing FS factory may await — for the kvgit
+   *  backing, opening the per-session VersionedKV is async. */
+  async fs(session: string): Promise<MountFS> {
     const cached = this.#cache.get(session)
     if (cached !== undefined) return cached.mount
-    const backing = this.#createBacking()
+    const backing = await this.#createBacking(session)
     const chaptersOverlay = new ChaptersOverlay()
     const skillsOverlay = new SkillsOverlay()
     const mount = new MountFS(backing, [
@@ -78,21 +93,5 @@ export class VfsManager {
     const entry = this.#cache.get(session)
     if (entry === undefined) return
     entry.skillsOverlay.swap(skills)
-  }
-
-  #createBacking(): MemoryFS {
-    switch (this.#config.type) {
-      case 'memory':
-        return new MemoryFS()
-      case 'kvgit':
-        // Wiring the agent's KvgitState into KvgitFS lands in a
-        // follow-up — for v1 the agent surfaces this as a runtime
-        // error rather than a silent fallback.
-        throw new Error('VfsManager: { type: "kvgit" } is not wired in v1; use { type: "memory" }')
-      default: {
-        const exhaustive: never = this.#config
-        throw new Error(`VfsManager: unknown FSConfig type: ${(exhaustive as FSConfig).type}`)
-      }
-    }
   }
 }

@@ -97,7 +97,7 @@ The bookkeeping events stay in the log for UI, undo, and `iter()` — only LLM r
 
 ## Configuration
 
-Two settings — a trigger threshold and a chapter task registration:
+One setting:
 
 ```ts
 const agent = await createAgent({
@@ -105,14 +105,19 @@ const agent = await createAgent({
   state: { type: 'versioned', storage: 'memory' },
   chapteringTrigger: 100_000,
 })
-
-agent.chapterTask({
-  description: 'Compact prior task ranges into chapters.',
-  // primer: optional override; defaults to a sensible one.
-})
 ```
 
-Without a `chapterTask` registration, the trigger fires but no chaptering occurs. Without a `chapteringTrigger`, the trigger never fires. Both must be present.
+Setting `chapteringTrigger` enables chaptering. The framework auto-registers an internal chapter task with the default primer. Without `chapteringTrigger`, no chapter task exists and chaptering never runs.
+
+Optionally override the primer if you want different framing or domain-specific guidance:
+
+```ts
+const agent = await createAgent({
+  /* ... */
+  chapteringTrigger: 100_000,
+  chapterPrimer: 'Compact older completed tasks. Be terse — one sentence summaries.',
+})
+```
 
 The framework guards the chapter task from being invoked when there's nothing safe to fold (e.g., a single in-progress task with no prior completed work). This avoids burning an LLM call that would just return `[]`.
 

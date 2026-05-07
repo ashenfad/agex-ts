@@ -235,7 +235,6 @@ describe('E2E smoke — full agent pipeline', () => {
       runtime: evalRuntime(),
       chapteringTrigger: 1000,
     })
-    agent.chapterTask({ description: 'Summarize prior task work into chapters.' })
     const taskA = agent.task<undefined, null>({ description: 'A.' })
     const taskB = agent.task<undefined, null>({ description: 'B.' })
     const taskC = agent.task<undefined, string>({ description: 'C.' })

@@ -75,11 +75,10 @@ async function runMultiTaskScenario(opts: {
     name: 'A',
     llm,
     runtime: evalRuntime(),
-    chapteringTrigger: 1000,
+    // chapteringTrigger auto-registers the chapter task internally.
+    // When disabled, no trigger means no chaptering.
+    ...(opts.withChapterTask && { chapteringTrigger: 1000 }),
   })
-  if (opts.withChapterTask) {
-    agent.chapterTask({ description: 'Summarize completed task ranges into chapters.' })
-  }
 
   const events: AgentEvent[] = []
   const onEvent = (e: AgentEvent) => void events.push(e)
@@ -274,7 +273,6 @@ describe('chaptering — single-task scenarios are a no-op', () => {
       runtime: evalRuntime(),
       chapteringTrigger: 1000,
     })
-    agent.chapterTask({ description: 'Compact.' })
     const events: AgentEvent[] = []
     const fn = agent.task<undefined, null>({ description: 'X.' })
     await fn(undefined, { onEvent: (e) => void events.push(e) })
@@ -334,7 +332,6 @@ describe('chaptering — multi-turn chapter task', () => {
       runtime: evalRuntime(),
       chapteringTrigger: 1000,
     })
-    agent.chapterTask({ description: 'Compact.' })
     const taskA = agent.task<undefined, null>({ description: 'A.' })
     const taskB = agent.task<undefined, null>({ description: 'B.' })
     const taskC = agent.task<undefined, null>({ description: 'C.' })

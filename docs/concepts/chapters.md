@@ -60,7 +60,7 @@ The framework converts each `Chapter` into a `ChapterEvent`, splicing it into th
 Picking ranges over boundaries (rather than every event position) means:
 
 - The chapter task can't fold a partial task — only complete units.
-- ChapterEvents are first-class boundary entries, so picking a range that includes a prior chapter is **nested chaptering** — the new chapter's `eventRefs` includes the inner chapter's storage key. Hierarchy for free.
+- ChapterEvents are boundary entries themselves, so picking a range that includes a prior chapter is **nested chaptering** — the new chapter's `eventRefs` includes the inner chapter's storage key, producing a tree of summaries.
 - The index stays short and scannable as the log grows.
 
 The trade-off: chaptering doesn't help a single long-running task with no sub-tasks (only one boundary in the index). Decompose into sub-tasks if you want chaptering to operate within that work.

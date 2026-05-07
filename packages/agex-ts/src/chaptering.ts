@@ -77,50 +77,39 @@ export const CHAPTER_TASK_NAME = '__chapter__'
  *    - The chapter task's own bookkeeping is filtered from the index,
  *      so it won't see entries for prior chaptering it performed. */
 export const DEFAULT_CHAPTER_PRIMER = `\
-You are being asked to manage your context by closing completed work \
-into named chapters. Each chapter replaces a contiguous range of past \
-boundaries (task starts and prior chapter events) with a detailed \
-summary, while preserving the originals for later browsing at \
-\`/chapters/<slug>/\`.
+Compact your context by folding completed work into named chapters. \
+You were invoked because your context is over budget — default to \
+folding something. The originals stay browsable at \`/chapters/<slug>/\`.
 
-The numbered task index in your inputs maps to the [N] boundaries you \
-can fold. Each entry is either a task you ran (with its outcome — \
-success, fail, in progress, etc.) or a chapter event you produced \
-earlier. Use the index to identify ranges, but read the full task \
-content in your context above to write thorough summaries that capture \
-important details.
-
-Including a prior chapter entry in a new range is normal — that's how \
-you fold older summaries into higher-level ones. The original details \
-stay accessible via \`/chapters/<slug>/\`.
+The numbered index in your inputs maps to the [N] boundaries you can \
+fold. Each entry is either a task you ran (with its outcome) or a \
+chapter you produced earlier. Read the full task content in your \
+context above to write detailed summaries; the index is just for \
+referring to ranges.
 
 Construct \`Chapter\` instances and return them via \`taskSuccess\`:
 
     taskSuccess([
       { start: 1, end: 3, name: "Data exploration", message: "Found 3 tables..." },
-      { start: 4, end: 5, name: "Schema validation", message: "..." },
     ])
 
-IMPORTANT: Not everything should be chaptered. Leave recent and ongoing \
-work in full context — you need those details to continue effectively. \
-Only chapter work that is clearly finished and whose full details you \
-no longer need at hand. When in doubt, leave them unchaptered. It is \
-perfectly fine to return \`taskSuccess([])\`.
+Fold completed work that's no longer your immediate context. Including \
+a prior chapter entry in a new range is normal — that's how you fold \
+older summaries into higher-level ones (nested chaptering).
+
+Don't fold the in-progress entry, or anything you still need detailed \
+access to for active work. \`taskSuccess([])\` is a last resort — \
+return it only when literally every boundary is in-progress or actively \
+needed.
 
 Rules:
-- \`start\` and \`end\` are 1-based inclusive boundary positions from the index.
+- \`start\` and \`end\` are 1-based inclusive boundary positions.
 - Ranges must be contiguous and non-overlapping.
-- The \`message\` must be a VERBOSE, detailed summary — not a brief one-liner. \
-Include specific findings, data values, variable names, file paths, decisions \
-made, and any other concrete details from the full content. The chapter \
-message is what you will see in place of the originals, so capture \
-everything you might need later.
-
-Good chapters:
-- Capture ALL key findings, decisions, data, code, and outcomes from the full content.
-- Preserve specific names, numbers, paths, schemas, and configuration details.
-- Use descriptive names that serve as a mini table of contents.
-- Close out completed phases — never chapter work in progress or the most recent boundary.
+- \`message\` must be VERBOSE — capture specific findings, data values, \
+variable names, file paths, decisions, and outcomes. The chapter message \
+is what you'll see in place of the originals, so include everything you \
+might need later.
+- \`name\` should serve as a table-of-contents entry.
 `
 
 /** True when the latest `ActionEvent.inputTokens` is at or above
@@ -182,10 +171,17 @@ export async function runChaptering(
   // contiguous range of underlying log positions; the chapter task
   // picks boundary positions and we fold the corresponding log range.
   const { text: indexText, ranges } = buildBoundaryIndex(parentEvents)
-  if (ranges.length === 0) {
-    // Nothing to chapter (e.g., single-task parent with no completed
-    // sub-tasks or prior chapters). Skip silently — chaptering is
-    // best-effort.
+
+  // Skip the chapter task entirely when there's nothing safe to
+  // fold. The trigger fires *during* a task — its taskStart is one
+  // of the boundaries, but it's marked `(in progress)` and the
+  // primer rules out chaptering in-progress work. So we need at
+  // least one *completable* boundary in addition to the running
+  // task: another completed task or a prior ChapterEvent. Invoking
+  // the chapter task without one wastes an LLM call (it'd return
+  // `[]`) and pollutes the parent log with empty chaptering
+  // bookkeeping that Filter A would then filter out anyway.
+  if (!hasCompletableBoundary(parentEvents, ranges)) {
     return 0
   }
 
@@ -379,6 +375,26 @@ function buildBoundaryIndex(events: ReadonlyArray<AgentEvent>): {
   }
 
   return { text: lines.join('\n'), ranges }
+}
+
+/** True if at least one boundary in `ranges` represents foldable
+ *  content: a ChapterEvent (always completable) or a TaskStartEvent
+ *  whose range contains a closing outcome event (success / fail /
+ *  cancelled). The currently-running task is *not* completable —
+ *  its boundary range has no closing event yet. */
+function hasCompletableBoundary(
+  events: ReadonlyArray<AgentEvent>,
+  ranges: ReadonlyArray<BoundaryRange>,
+): boolean {
+  for (const r of ranges) {
+    const head = events[r.start] as AgentEvent
+    if (head.type === 'chapter') return true
+    for (let j = r.start + 1; j < r.end; j++) {
+      const ev = events[j] as AgentEvent
+      if (ev.type === 'success' || ev.type === 'fail' || ev.type === 'cancelled') return true
+    }
+  }
+  return false
 }
 
 function describeBoundary(

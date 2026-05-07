@@ -4,9 +4,6 @@
  * Canonical source for the public types of kvgit-ts. Implementations
  * (`Hamt`, `Keyset`, `VersionedKV`, `Staged`, `Namespaced`, the
  * backends) live in sibling files and import from here.
- *
- * Where this file disagrees with `design.md` §6 or
- * `implementation.md` §"kvgit-ts", design wins — fix this file.
  */
 
 // ---------------------------------------------------------------------------

@@ -10,6 +10,4 @@ A `Map<string, T>` with git-like history. Every `commit()` creates a checkpoint;
 
 ## Design
 
-See [`design.md` §6](../../design.md) and [`implementation.md`](../../implementation.md) at the repo root for scope, decisions, and lessons.
-
-The canonical type contracts live in [`src/types.ts`](./src/types.ts).
+The canonical type contracts live in [`src/types.ts`](./src/types.ts). For how kvgit-ts is used inside agex-ts, see [agex-ts's State & Sessions concepts doc](../../docs/concepts/state-and-sessions.md).

@@ -5,9 +5,8 @@ pick up later without re-deriving the analysis. Live priorities go
 here; once an item is in flight, it moves out (PR description carries
 the detail). Once shipped, delete the entry.
 
-`design.md` is the source of truth for *what* we're building;
-`implementation.md` is the original bottom-up build plan. This
-document is for items that survived past those phases.
+[`docs/`](docs/) describes what's currently shipped. This document is
+for known-wanted work that hasn't shipped yet.
 
 ---
 

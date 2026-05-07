@@ -263,35 +263,51 @@ export async function runChaptering(
 // Filter helpers — also used by the renderer
 // ---------------------------------------------------------------------------
 
-/** Walk events and mark which indices fall inside a *closed*
- *  `__chapter__` task scope. Open scopes (the chapter task currently
- *  running, mid-execution) are NOT marked — that's how the chapter
- *  task's own loop sees its prompt and prior turns when it calls
- *  `renderEvents` against the parent log.
+/** Walk events and mark which indices fall inside a `__chapter__`
+ *  task scope.
  *
- *  Multiple non-chapter tasks can nest inside (in principle); we use
- *  a stack to match each `taskStart` with its closing
- *  `success`/`fail`/`cancelled` event.
+ *  Two callers, two contracts — controlled by `includeOpen`:
  *
- *  Exported so `renderEvents` can apply the same filter at LLM render
- *  time without duplicating the boundary-detection logic. */
-export function buildChapterScopeFilter(events: ReadonlyArray<AgentEvent>): ReadonlySet<number> {
+ *  - **Renderer (Filter A, `includeOpen=false`, default):** mark only
+ *    *closed* chapter scopes. The currently-running chapter task's
+ *    own events stay unmarked so its loop's `renderEvents(...)` call
+ *    can see its own taskStart prompt and any prior turns. Once the
+ *    chapter task closes (success / fail / cancelled), the parent's
+ *    next render skips the now-closed scope.
+ *
+ *  - **Index builder (Filter B, `includeOpen=true`):** mark events
+ *    inside *both* open and closed chapter scopes. The boundary
+ *    index handed to the chapter task should never enumerate the
+ *    chapter task's own (in-progress) bookkeeping as a foldable
+ *    boundary — the chapter task can't chapter itself.
+ *
+ *  Implementation: stack-based scope tracking with non-chapter
+ *  task frames recorded too (so close events pair with the right
+ *  frame inside nested cases). Closed scopes are marked via a
+ *  range fill at close time (`for j in [start, close]`). Open-scope
+ *  marking happens *after* the stack update for the current event,
+ *  so the chapter taskStart that opens the scope gets marked when
+ *  `includeOpen` is true (its push has just happened, putting it in
+ *  range). For close events, the pop happens first, then the close
+ *  branch's range-fill marks the close index — `inChapterRange()`
+ *  is false post-pop, so the open-scope mark below correctly
+ *  declines to re-mark it.
+ *
+ *  Exported so `renderEvents` can apply the renderer-mode filter
+ *  without duplicating the boundary-detection logic. */
+export function buildChapterScopeFilter(
+  events: ReadonlyArray<AgentEvent>,
+  includeOpen = false,
+): ReadonlySet<number> {
   const skip = new Set<number>()
-  // Stack frames: { kind: 'chapter', start: idx } for chapter tasks,
-  // { kind: 'other' } for non-chapter tasks. We need to track even
-  // non-chapter pushes so close events pair with the right frame.
   type Frame = { kind: 'chapter'; start: number } | { kind: 'other' }
   const stack: Frame[] = []
-  // Marks every index that sits inside any open `chapter` frame —
-  // used so `success/fail/cancelled` of a non-chapter task that's
-  // nested *inside* a chapter scope still gets marked when the outer
-  // scope closes.
   const inChapterRange = (): boolean => stack.some((f) => f.kind === 'chapter')
 
   for (let i = 0; i < events.length; i++) {
     const e = events[i] as AgentEvent
-    if (inChapterRange()) skip.add(i)
 
+    // Update the stack based on this event first.
     if (e.type === 'taskStart') {
       if (e.taskName === CHAPTER_TASK_NAME) {
         stack.push({ kind: 'chapter', start: i })
@@ -301,19 +317,17 @@ export function buildChapterScopeFilter(events: ReadonlyArray<AgentEvent>): Read
     } else if (e.type === 'success' || e.type === 'fail' || e.type === 'cancelled') {
       const top = stack.pop()
       if (top !== undefined && top.kind === 'chapter') {
-        // Closed scope — re-mark from start through this close
-        // (events between were marked while iterating; the start was
-        // marked above when we hit the taskStart; this close itself
-        // was marked above too if any outer chapter scope was open).
-        // For the case where this *is* the outer chapter scope, the
-        // close index won't have been marked by `inChapterRange()`
-        // above (we check before the pop below), so add it now.
+        // Closed scope — mark from start through this close event.
         for (let j = top.start; j <= i; j++) skip.add(j)
       }
     }
+
+    // Open-scope marking — only when the caller wants in-progress
+    // chapter scopes filtered too (Filter B). For the renderer
+    // (Filter A), this stays off so the running chapter task can
+    // see its own loop history.
+    if (includeOpen && inChapterRange()) skip.add(i)
   }
-  // Open chapter scopes left on the stack: do NOT mark. The currently-
-  // running chapter task needs to see its own prompt + prior turns.
   return skip
 }
 
@@ -348,7 +362,10 @@ function buildBoundaryIndex(events: ReadonlyArray<AgentEvent>): {
   text: string
   ranges: BoundaryRange[]
 } {
-  const skip = buildChapterScopeFilter(events)
+  // Filter B — exclude *both* open and closed `__chapter__` scopes.
+  // The currently-running chapter task (if any) must not appear in
+  // the index; it can't chapter itself.
+  const skip = buildChapterScopeFilter(events, true)
 
   // First pass: locate boundary indices, in order.
   const boundaryIndices: number[] = []

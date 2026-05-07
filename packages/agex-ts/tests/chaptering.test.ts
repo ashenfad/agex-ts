@@ -291,6 +291,66 @@ describe('chaptering — single-task scenarios are a no-op', () => {
   })
 })
 
+describe('chaptering — multi-turn chapter task', () => {
+  it('the chapter task sees its own prior turns when its own scope is open', async () => {
+    // Filter A's contract: while the chapter task is running, its own
+    // taskStart and any prior-turn actions must remain visible to
+    // renderEvents — the chapter task LLM needs its own conversation
+    // history when it goes to call the LLM on turn 2+. Filter B (the
+    // boundary index) is the opposite — it must never enumerate the
+    // running chapter task's events as foldable boundaries.
+    //
+    // We exercise the multi-turn case by having the chapter task emit
+    // a non-terminal action on its first turn, then taskSuccess on
+    // its second turn. If Filter A incorrectly hides the chapter
+    // task's own prior turn, the LLM response queue gets out of sync
+    // (the renderer's expected turns don't match what the LLM sees).
+    const llm = new Dummy({
+      responses: [
+        finishTurn, // task A
+        finishTurn, // task B
+        heavyNonTerminal, // task C heavy → triggers chaptering
+        // Chapter task turn 1 — emits a non-terminal action so the
+        // chapter task runs a second turn.
+        { emissions: [{ type: 'ts', code: '/* picking which to fold */' }] },
+        // Chapter task turn 2 — finally taskSuccess. By now the
+        // chapter task's loop has rendered events including its own
+        // turn-1 taskStart + action. Filter A must keep the open
+        // scope visible.
+        {
+          emissions: [
+            {
+              type: 'ts',
+              code: 'taskSuccess([{ start: 1, end: 2, name: "early", message: "tasks A and B" }])',
+            },
+          ],
+        },
+        finishTurn, // task C close-out
+      ],
+    })
+    const agent = await createAgent({
+      name: 'A',
+      llm,
+      runtime: evalRuntime(),
+      chapteringTrigger: 1000,
+    })
+    agent.chapterTask({ description: 'Compact.' })
+    const taskA = agent.task<undefined, null>({ description: 'A.' })
+    const taskB = agent.task<undefined, null>({ description: 'B.' })
+    const taskC = agent.task<undefined, null>({ description: 'C.' })
+    await taskA(undefined)
+    await taskB(undefined)
+    await taskC(undefined)
+
+    // Chapter actually applied (chapter task ran 2 turns + emitted
+    // a valid Chapter[]).
+    const events: AgentEvent[] = []
+    const log = await agent.events('default')
+    for await (const e of log.iter()) events.push(e)
+    expect(events.filter((e) => e.type === 'chapter').length).toBe(1)
+  })
+})
+
 describe('isChapteringInFlight (recursion guard)', () => {
   it('is false outside of a chapter run', async () => {
     const agent = await createAgent({ name: 'A' })

@@ -74,7 +74,17 @@ export interface TaskDefinition<I, O> {
   readonly primer?: string
 }
 
-export function makeTask<I, O>(agent: Agent, def: TaskDefinition<I, O>): TaskFn<I, O> {
+/** Build a task function. The optional `taskName` overrides the
+ *  default of deriving the name from the description's first line —
+ *  used internally by `agent.chapterTask` to stamp chapter-task events
+ *  with the reserved `__chapter__` name so the renderer / chaptering
+ *  index builder can recognise them. End-user tasks should leave
+ *  `taskName` undefined and let `deriveTaskName` produce a stable key. */
+export function makeTask<I, O>(
+  agent: Agent,
+  def: TaskDefinition<I, O>,
+  taskName?: string,
+): TaskFn<I, O> {
   return async (input: I, options: TaskCallOptions = {}): Promise<O> => {
     const llmClient = agent.llm ?? throwMissing('llm')
     const runtimeAdapter = agent.runtime ?? throwMissing('runtime')
@@ -113,7 +123,7 @@ export function makeTask<I, O>(agent: Agent, def: TaskDefinition<I, O>): TaskFn<
       type: 'taskStart',
       timestamp: new Date().toISOString(),
       agentName: agent.name,
-      taskName: deriveTaskName(def),
+      taskName: taskName ?? deriveTaskName(def),
       inputs: validatedInput,
       message: taskMessage,
     }
@@ -175,9 +185,13 @@ export function makeTask<I, O>(agent: Agent, def: TaskDefinition<I, O>): TaskFn<
         // Runs after the ActionEvent is logged (so the trigger reads
         // the just-arrived inputTokens) and before dispatch (so any
         // chapter events the chaptering machinery splices in are in
-        // place before the next LLM call). The chapter task itself
-        // runs in a child session (see runChaptering) so its events
-        // don't pollute the parent log.
+        // place before the next LLM call). The chapter task runs in
+        // the *parent's* session so its loop renders the parent's
+        // full conversation history when calling the LLM — it has
+        // real context to reflect on, not a skeletal index. Its own
+        // bookkeeping events are filtered from subsequent renders
+        // (`buildChapterScopeFilter`) so the duplicate summary text
+        // doesn't clutter the parent agent's next turn.
         if (agent.getChapterTask() !== undefined) {
           const allEvents = await collectEvents(eventLog)
           if (shouldTriggerChaptering(allEvents, agent.chapteringTrigger)) {
@@ -262,7 +276,7 @@ export function makeTask<I, O>(agent: Agent, def: TaskDefinition<I, O>): TaskFn<
             type: 'cancelled',
             timestamp: new Date().toISOString(),
             agentName: agent.name,
-            taskName: deriveTaskName(def),
+            taskName: taskName ?? deriveTaskName(def),
             iterationsCompleted: iter,
           },
           eventLog,

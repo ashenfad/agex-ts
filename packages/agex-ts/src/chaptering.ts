@@ -5,16 +5,17 @@
  *   - The user registers a chapter task via `agent.chapterTask({...})`.
  *     It's a normal task that runs through the action loop, sees
  *     registered fns/namespaces, and uses the agent's LLM. Contract:
- *     input is a numbered event index (string); output is `Chapter[]`
+ *     input is a numbered task index (string); output is `Chapter[]`
  *     where each chapter has 1-based inclusive `start`/`end`
  *     positions into that index.
  *   - After each `ActionEvent`, the parent task's loop calls
  *     `shouldTriggerChaptering`. If it trips and a chapter task is
  *     registered, `runChaptering` builds the index, invokes the
- *     chapter task (in a child session so its events don't pollute
- *     the parent), and for each returned `Chapter`:
- *       1. Translates `start`/`end` to the actual state keys at those
- *          index positions.
+ *     chapter task **in the parent's session** (so the chapter task's
+ *     LLM sees the parent's full conversation history rendered as
+ *     turns), and for each returned `Chapter`:
+ *       1. Translates `start`/`end` boundary positions to a contiguous
+ *          slice of state keys.
  *       2. Calls `EventLogImpl.replaceRange(refs, chapterEvent)`,
  *          which writes the chapter event and rewrites the log's
  *          index — the chaptered range is removed and the chapter
@@ -23,16 +24,104 @@
  *   - Recursion guard: chaptering doesn't re-fire while the chapter
  *     task itself is executing. Tracked via a `WeakSet<Agent>`.
  *
- * After this, subsequent `iter()` over the parent's event log yields
- * the chapter event in place of the originals — so the next LLM call
- * sees the compacted log naturally, no separate render-time
- * substitution needed.
+ * **Why same session, not a child:** the chapter task running in the
+ * parent's session means its loop renders the parent's full event log
+ * as conversation history when it calls the LLM. The agent reflects on
+ * its *own* work with full context visible — actual code, results,
+ * outputs, errors — not a skeletal summary string. The numbered index
+ * passed as input is just a navigational aid that tells the LLM how
+ * positions map to ranges. Without same-session, chaptering quality
+ * collapses to "summarise from a log skeleton."
+ *
+ * **Boundaries, not events:** the chapter task picks ranges over
+ * *boundaries* (TaskStartEvent ∪ ChapterEvent), not raw events. Each
+ * boundary owns the events from itself up to (but not including) the
+ * next boundary — so a TaskStartEvent boundary is "this whole task"
+ * and a ChapterEvent boundary is "this folded summary." Picking a
+ * range that spans both kinds is nested chaptering: the new
+ * ChapterEvent's `eventRefs` includes the inner ChapterEvent's storage
+ * key, and walking down resolves to the original raw events.
+ *
+ * **Filtering:** the chapter task's own bookkeeping events
+ * (`taskStart` with `taskName === '__chapter__'` and its closing
+ * outcome) are filtered from both the LLM render path (Filter A in
+ * `renderEvents`) and the chaptering index builder (Filter B here).
+ * They stay in the log for UI / undo. This avoids the summary text
+ * being duplicated (once in the ChapterEvent, again in the chapter
+ * task's emitted code) and keeps future chapter tasks from seeing
+ * prior chaptering work as enumerable entries.
  */
 
 import type { Agent } from './agent'
 import type { EventLogImpl } from './event-log'
 import { slugify, uniqueSlug } from './slugify'
-import type { ActionEvent, AgentEvent, Chapter, ChapterEvent } from './types'
+import type { AgentEvent, Chapter, ChapterEvent } from './types'
+
+/** Reserved task name used to stamp the chapter task's events.
+ *  Filters in the renderer and the index builder key off this name. */
+export const CHAPTER_TASK_NAME = '__chapter__'
+
+/** Default primer attached to chapter tasks unless the embedder
+ *  overrides via `agent.chapterTask({ primer })`. Adapted from
+ *  agex-py's `CHAPTER_TASK_PRIMER` for our boundary-based index.
+ *
+ *  Key bits the LLM needs to know:
+ *    - Its full conversation history sits above; the numbered index
+ *      points at *boundary* positions (task starts and prior chapter
+ *      events). Read the full context to write detailed summaries.
+ *    - Picking a range that includes a prior chapter is normal —
+ *      that's nested chaptering. The original details remain at
+ *      `/chapters/<slug>/`.
+ *    - Don't chapter in-progress or recent work; only fold completed
+ *      phases. Returning `[]` is fine.
+ *    - The chapter task's own bookkeeping is filtered from the index,
+ *      so it won't see entries for prior chaptering it performed. */
+export const DEFAULT_CHAPTER_PRIMER = `\
+You are being asked to manage your context by closing completed work \
+into named chapters. Each chapter replaces a contiguous range of past \
+boundaries (task starts and prior chapter events) with a detailed \
+summary, while preserving the originals for later browsing at \
+\`/chapters/<slug>/\`.
+
+The numbered task index in your inputs maps to the [N] boundaries you \
+can fold. Each entry is either a task you ran (with its outcome — \
+success, fail, in progress, etc.) or a chapter event you produced \
+earlier. Use the index to identify ranges, but read the full task \
+content in your context above to write thorough summaries that capture \
+important details.
+
+Including a prior chapter entry in a new range is normal — that's how \
+you fold older summaries into higher-level ones. The original details \
+stay accessible via \`/chapters/<slug>/\`.
+
+Construct \`Chapter\` instances and return them via \`taskSuccess\`:
+
+    taskSuccess([
+      { start: 1, end: 3, name: "Data exploration", message: "Found 3 tables..." },
+      { start: 4, end: 5, name: "Schema validation", message: "..." },
+    ])
+
+IMPORTANT: Not everything should be chaptered. Leave recent and ongoing \
+work in full context — you need those details to continue effectively. \
+Only chapter work that is clearly finished and whose full details you \
+no longer need at hand. When in doubt, leave them unchaptered. It is \
+perfectly fine to return \`taskSuccess([])\`.
+
+Rules:
+- \`start\` and \`end\` are 1-based inclusive boundary positions from the index.
+- Ranges must be contiguous and non-overlapping.
+- The \`message\` must be a VERBOSE, detailed summary — not a brief one-liner. \
+Include specific findings, data values, variable names, file paths, decisions \
+made, and any other concrete details from the full content. The chapter \
+message is what you will see in place of the originals, so capture \
+everything you might need later.
+
+Good chapters:
+- Capture ALL key findings, decisions, data, code, and outcomes from the full content.
+- Preserve specific names, numbers, paths, schemas, and configuration details.
+- Use descriptive names that serve as a mini table of contents.
+- Close out completed phases — never chapter work in progress or the most recent boundary.
+`
 
 /** True when the latest `ActionEvent.inputTokens` is at or above
  *  `threshold`. Returns false if no threshold is configured, or if
@@ -65,7 +154,9 @@ export function isChapteringInFlight(agent: Agent): boolean {
 
 /** Run the registered chapter task and apply each returned `Chapter`
  *  to the parent log via `replaceRange`. No-op if no chapter task is
- *  registered. Returns the number of chapter events applied.
+ *  registered, or if no boundaries to fold over (e.g., a single-task
+ *  parent that hasn't accumulated enough scoped work). Returns the
+ *  number of chapter events applied.
  *
  *  `notify` is invoked for every event the user-facing onEvent
  *  callback should see (SystemNote on failure + each ChapterEvent on
@@ -86,21 +177,31 @@ export async function runChaptering(
   // Snapshot the index before we run the chapter task — chapter
   // positions resolve against this exact ordering.
   const refsAtTrigger = await parentEventLog.refs()
-  const eventIndex = renderEventIndex(parentEvents)
+
+  // Build the boundary-based index. Each boundary entry maps to a
+  // contiguous range of underlying log positions; the chapter task
+  // picks boundary positions and we fold the corresponding log range.
+  const { text: indexText, ranges } = buildBoundaryIndex(parentEvents)
+  if (ranges.length === 0) {
+    // Nothing to chapter (e.g., single-task parent with no completed
+    // sub-tasks or prior chapters). Skip silently — chaptering is
+    // best-effort.
+    return 0
+  }
 
   chapteringInFlight.add(agent)
   let chapters: ReadonlyArray<Chapter>
   try {
-    const raw = await chapterTask(eventIndex, {
-      // Run the chapter task in an isolated session so its own task
-      // events (taskStart, action, success) don't pollute the parent
-      // log we're trying to summarize. Dot separator (not slash)
-      // because session ids are sanitized — they're embedded into
-      // SQLite paths and IDB names, so `/` is reserved.
-      session: `${parentSession}.__chapter__`,
+    // Run the chapter task in the parent's session. Its loop will
+    // render the parent's full log as conversation history (the
+    // open chapter scope is not filtered — see Filter A) so the
+    // LLM has actual context to reflect on. The numbered index is
+    // a navigational aid pointing at boundary positions.
+    const raw = await chapterTask(indexText, {
+      session: parentSession,
       signal,
     })
-    chapters = validateChapters(raw, parentEvents.length)
+    chapters = validateChapters(raw, ranges.length)
   } catch (e) {
     const note: AgentEvent = {
       type: 'systemNote',
@@ -117,13 +218,13 @@ export async function runChaptering(
 
   if (chapters.length === 0) return 0
 
-  // Apply chapters in reverse order so earlier indices remain valid
-  // as we mutate the log (mirrors agex-py's reverse-application).
+  // Apply chapters in reverse boundary-order so earlier ranges remain
+  // valid as we mutate the log (mirrors agex-py's reverse application).
   const sorted = [...chapters].sort((a, b) => b.start - a.start)
 
   // Collect existing slugs from the parent log so new chapters don't
   // collide on path. `parentEvents` is the snapshot from the trigger
-  // point, which already contains any prior chapters in this session.
+  // point and already contains any prior chapters in this session.
   const takenSlugs = new Set<string>()
   for (const e of parentEvents) {
     if (e.type === 'chapter') takenSlugs.add(e.slug)
@@ -131,8 +232,13 @@ export async function runChaptering(
 
   let applied = 0
   for (const ch of sorted) {
-    // Translate 1-based inclusive positions to a slice of state keys.
-    const refs = refsAtTrigger.slice(ch.start - 1, ch.end)
+    // Translate 1-based inclusive boundary positions to a slice of
+    // underlying log refs. The boundary range stored alongside
+    // each index entry holds the log [start, end) span.
+    const startRange = ranges[ch.start - 1]
+    const endRange = ranges[ch.end - 1]
+    if (startRange === undefined || endRange === undefined) continue
+    const refs = refsAtTrigger.slice(startRange.start, endRange.end)
     if (refs.length === 0) continue
     const slug = uniqueSlug(slugify(ch.name), takenSlugs)
     takenSlugs.add(slug)
@@ -158,57 +264,148 @@ export async function runChaptering(
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Filter helpers — also used by the renderer
 // ---------------------------------------------------------------------------
 
-/** Render the parent event log as a numbered index. One line per
- *  event, position prefixed in brackets. The chapter task uses the
- *  bracketed positions as `start` / `end` values when constructing
- *  chapters. */
-function renderEventIndex(events: ReadonlyArray<AgentEvent>): string {
-  const lines: string[] = []
+/** Walk events and mark which indices fall inside a *closed*
+ *  `__chapter__` task scope. Open scopes (the chapter task currently
+ *  running, mid-execution) are NOT marked — that's how the chapter
+ *  task's own loop sees its prompt and prior turns when it calls
+ *  `renderEvents` against the parent log.
+ *
+ *  Multiple non-chapter tasks can nest inside (in principle); we use
+ *  a stack to match each `taskStart` with its closing
+ *  `success`/`fail`/`cancelled` event.
+ *
+ *  Exported so `renderEvents` can apply the same filter at LLM render
+ *  time without duplicating the boundary-detection logic. */
+export function buildChapterScopeFilter(events: ReadonlyArray<AgentEvent>): ReadonlySet<number> {
+  const skip = new Set<number>()
+  // Stack frames: { kind: 'chapter', start: idx } for chapter tasks,
+  // { kind: 'other' } for non-chapter tasks. We need to track even
+  // non-chapter pushes so close events pair with the right frame.
+  type Frame = { kind: 'chapter'; start: number } | { kind: 'other' }
+  const stack: Frame[] = []
+  // Marks every index that sits inside any open `chapter` frame —
+  // used so `success/fail/cancelled` of a non-chapter task that's
+  // nested *inside* a chapter scope still gets marked when the outer
+  // scope closes.
+  const inChapterRange = (): boolean => stack.some((f) => f.kind === 'chapter')
+
   for (let i = 0; i < events.length; i++) {
     const e = events[i] as AgentEvent
-    const pos = `[${i + 1}]`
-    lines.push(`${pos} ${describeEvent(e)}`)
+    if (inChapterRange()) skip.add(i)
+
+    if (e.type === 'taskStart') {
+      if (e.taskName === CHAPTER_TASK_NAME) {
+        stack.push({ kind: 'chapter', start: i })
+      } else {
+        stack.push({ kind: 'other' })
+      }
+    } else if (e.type === 'success' || e.type === 'fail' || e.type === 'cancelled') {
+      const top = stack.pop()
+      if (top !== undefined && top.kind === 'chapter') {
+        // Closed scope — re-mark from start through this close
+        // (events between were marked while iterating; the start was
+        // marked above when we hit the taskStart; this close itself
+        // was marked above too if any outer chapter scope was open).
+        // For the case where this *is* the outer chapter scope, the
+        // close index won't have been marked by `inChapterRange()`
+        // above (we check before the pop below), so add it now.
+        for (let j = top.start; j <= i; j++) skip.add(j)
+      }
+    }
   }
-  return lines.join('\n')
+  // Open chapter scopes left on the stack: do NOT mark. The currently-
+  // running chapter task needs to see its own prompt + prior turns.
+  return skip
 }
 
-function describeEvent(e: AgentEvent): string {
-  switch (e.type) {
-    case 'taskStart':
-      return `taskStart "${truncate(e.taskName, 60)}"`
-    case 'action': {
-      const a = e as ActionEvent
-      const types = a.emissions.map((em) => em.type).join(', ')
-      const tokens = a.inputTokens !== undefined ? `; inputTokens=${a.inputTokens}` : ''
-      return `action (${a.emissions.length} emissions: ${types})${tokens}`
-    }
-    case 'output':
-      return `output (${e.parts.length} parts)`
-    case 'success':
-      return 'success'
-    case 'fail':
-      return `fail "${truncate(e.message, 60)}"`
-    case 'clarify':
-      return `clarify "${truncate(e.message, 60)}"`
-    case 'cancelled':
-      return `cancelled (after ${e.iterationsCompleted} iterations)`
-    case 'error':
-      return `error ${e.errorName}: "${truncate(e.errorMessage, 60)}"`
-    case 'file':
-      return `file (+${e.added.length} ~${e.modified.length} -${e.removed.length})`
-    case 'systemNote':
-      return `systemNote "${truncate(e.message, 60)}"`
-    case 'chapter':
-      return `chapter "${truncate(e.name, 40)}" — ${truncate(e.message, 40)}`
-    default: {
-      const exhaustive: never = e
-      void exhaustive
-      return 'unknown'
-    }
+// ---------------------------------------------------------------------------
+// Boundary-based index builder
+// ---------------------------------------------------------------------------
+
+interface BoundaryRange {
+  /** 0-based, inclusive log position where this boundary's range
+   *  starts (the boundary event itself). */
+  readonly start: number
+  /** 0-based, exclusive log position where this boundary's range
+   *  ends — equal to the next boundary's `start`, or `events.length`
+   *  for the final boundary. */
+  readonly end: number
+}
+
+/** Build the numbered task index handed to the chapter task's LLM,
+ *  plus the parallel array of underlying log ranges that boundary
+ *  positions resolve to.
+ *
+ *  Boundaries: every TaskStartEvent (excluding `__chapter__`-scoped)
+ *  and every ChapterEvent. Each boundary owns the events from itself
+ *  up to but not including the next boundary. The final boundary
+ *  owns through the end of the log.
+ *
+ *  Outcome detection: for TaskStartEvent boundaries, scan the events
+ *  in the boundary's range for a closing event (success/fail/clarify/
+ *  cancelled). The first match becomes the rendered outcome; absence
+ *  marks the task `(in progress)`. */
+function buildBoundaryIndex(events: ReadonlyArray<AgentEvent>): {
+  text: string
+  ranges: BoundaryRange[]
+} {
+  const skip = buildChapterScopeFilter(events)
+
+  // First pass: locate boundary indices, in order.
+  const boundaryIndices: number[] = []
+  for (let i = 0; i < events.length; i++) {
+    if (skip.has(i)) continue
+    const e = events[i] as AgentEvent
+    if (e.type === 'taskStart' || e.type === 'chapter') boundaryIndices.push(i)
   }
+
+  // Second pass: compute (start, end) for each boundary.
+  const ranges: BoundaryRange[] = boundaryIndices.map((start, i) => ({
+    start,
+    end: i + 1 < boundaryIndices.length ? (boundaryIndices[i + 1] as number) : events.length,
+  }))
+
+  // Third pass: render index lines.
+  const lines: string[] = []
+  for (let i = 0; i < boundaryIndices.length; i++) {
+    const idx = boundaryIndices[i] as number
+    const range = ranges[i] as BoundaryRange
+    const e = events[idx] as AgentEvent
+    const label = describeBoundary(e, events, range, skip)
+    lines.push(`[${i + 1}] ${label}`)
+  }
+
+  return { text: lines.join('\n'), ranges }
+}
+
+function describeBoundary(
+  boundary: AgentEvent,
+  events: ReadonlyArray<AgentEvent>,
+  range: BoundaryRange,
+  skip: ReadonlySet<number>,
+): string {
+  if (boundary.type === 'chapter') {
+    return `chapter "${truncate(boundary.name, 60)}" — ${truncate(boundary.message, 80)}`
+  }
+  if (boundary.type !== 'taskStart') return 'unknown'
+  // taskStart: find the closing event in the range, if any.
+  const taskName = boundary.taskName
+  const message = boundary.message ?? ''
+  const head = `task "${truncate(taskName, 50)}"`
+  const trailer = message.length > 0 ? `: ${truncate(message.replace(/\n/g, ' '), 80)}` : ''
+
+  for (let j = range.start + 1; j < range.end; j++) {
+    if (skip.has(j)) continue
+    const ev = events[j] as AgentEvent
+    if (ev.type === 'success') return `${head}${trailer} → success`
+    if (ev.type === 'fail') return `${head}${trailer} → fail "${truncate(ev.message, 60)}"`
+    if (ev.type === 'clarify') return `${head}${trailer} → clarify "${truncate(ev.message, 60)}"`
+    if (ev.type === 'cancelled') return `${head}${trailer} → cancelled`
+  }
+  return `${head}${trailer} (in progress)`
 }
 
 function truncate(s: string, max: number): string {

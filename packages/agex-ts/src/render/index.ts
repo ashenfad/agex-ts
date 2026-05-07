@@ -27,6 +27,7 @@
  * mutate, the IDs stay stable.
  */
 
+import { buildChapterScopeFilter } from '../chaptering'
 import type {
   ActionEvent,
   AgentEvent,
@@ -153,6 +154,18 @@ export interface NeutralTurn {
 export function renderEvents(events: ReadonlyArray<AgentEvent>): NeutralTurn[] {
   const turns: NeutralTurn[] = []
 
+  // Filter A: skip events inside *closed* `__chapter__` task scopes.
+  // The chapter task's bookkeeping (taskStart, action with the
+  // `taskSuccess([Chapter(...)])` code, success) sits in the parent's
+  // log alongside everything else, but rendering it to the LLM would
+  // (a) duplicate the summary text already rendered via the
+  // ChapterEvents themselves and (b) clutter the parent agent's
+  // context with "I ran a `__chapter__` task" noise. Open scopes
+  // (the chapter task currently running, mid-loop) are intentionally
+  // *not* filtered — that's how the chapter task's own LLM call sees
+  // its own user prompt (the TaskStartEvent) plus any prior turns.
+  const skip = buildChapterScopeFilter(events)
+
   // Per-action state, reset each time a new ActionEvent arrives.
   let toolUseOrder: { id: string; toolName: ToolName }[] = []
   let obsByEmission = new Map<string, OutputPart[]>()
@@ -178,7 +191,9 @@ export function renderEvents(events: ReadonlyArray<AgentEvent>): NeutralTurn[] {
       : null
   }
 
-  for (const event of events) {
+  for (let __i = 0; __i < events.length; __i++) {
+    if (skip.has(__i)) continue
+    const event = events[__i] as AgentEvent
     switch (event.type) {
       case 'taskStart': {
         flushUser()

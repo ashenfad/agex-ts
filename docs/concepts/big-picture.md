@@ -148,7 +148,7 @@ A few rough comparisons in case it helps situate the project:
 
 **Shell-based code agents** (Claude Code, Codex CLI, Aider): same general harness shape (stateless code execution + filesystem-as-state), different contract. They're conversational tools; agex-ts's surface is a typed function you call from your application.
 
-**[smolagents](https://github.com/huggingface/smolagents)** and **[agex](https://github.com/ashenfad/agex)** (the Python sibling): same core thesis — agents that think in code instead of choosing tools. agex-ts is the TypeScript port of agex's library-shape, embeddable thesis. Compared to agex (Python), agex-ts trades the Python AST sandbox (sandtrap) for a Web Worker / `worker_threads` boundary, gains TypeScript's type-checking on the agent surface, and runs natively in the browser without Pyodide.
+**Code-as-action ([CodeAct](https://arxiv.org/abs/2402.01030)) harnesses** ([smolagents](https://github.com/huggingface/smolagents), [agex](https://github.com/ashenfad/agex), and others). Same core thesis: agents take action by writing code, not by picking from a JSON tool list. agex-ts is the TypeScript port of agex, layering a typed function as the task contract on top of the basic CodeAct shape. Compared to agex (Python), agex-ts trades the Python AST sandbox ([sandtrap](https://github.com/ashenfad/sandtrap)) for a Web Worker / `worker_threads` boundary, gains TypeScript's type-checking on the agent surface, and runs natively in the browser without Pyodide.
 
 ## The result
 

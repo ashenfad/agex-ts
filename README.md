@@ -75,7 +75,7 @@ For tests / trusted code (no worker isolation), the in-process `evalRuntime` shi
 
 ## Relationship to agex (Python)
 
-agex-ts is the TypeScript sibling of [agex](https://github.com/ashenfad/agex), a Python library that pioneered the same code-as-action thesis (which itself echoes [smolagents](https://github.com/huggingface/smolagents) and the CodeAct line of work). Same library shape, same typed-function contract, same agent-directed compaction model. Different runtime: agex uses a pure-Python AST sandbox ([sandtrap](https://github.com/ashenfad/sandtrap)) that runs in-process / subprocess / kernel-isolated / via Pyodide; agex-ts uses Web Worker isolation (and eventually `worker_threads`).
+agex-ts is a [CodeAct](https://arxiv.org/abs/2402.01030)-style harness (agent actions are TypeScript code, not JSON tool calls) with a typed function as the task contract. It's a TypeScript port of [agex](https://github.com/ashenfad/agex), a Python library that brought this shape to library-embeddable form (alongside [smolagents](https://github.com/huggingface/smolagents)). Different runtime: agex uses a pure-Python AST sandbox ([sandtrap](https://github.com/ashenfad/sandtrap)) that runs in-process / subprocess / kernel-isolated / via Pyodide; agex-ts uses Web Worker isolation (and eventually `worker_threads`).
 
 When to pick which:
 

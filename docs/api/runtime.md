@@ -119,6 +119,8 @@ const agent = await createAgent({
 
 The worker bundle ships with the package — your bundler resolves `./worker.js` to it.
 
+> **Vite users:** add `'agex-runtime-worker'` to `optimizeDeps.exclude` in your `vite.config`, or the worker fails to boot. See [Using with Vite](../../README.md#using-with-vite) in the top-level README.
+
 ### How the boundary works
 
 Three patterns connect the host realm and the worker realm:

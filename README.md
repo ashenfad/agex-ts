@@ -69,6 +69,23 @@ pnpm add agex-ts @agex-ts/anthropic @agex-ts/runtime-worker
 
 For tests / trusted code (no worker isolation), the in-process `evalRuntime` ships with `agex-ts` itself — skip `@agex-ts/runtime-worker`.
 
+### Using with Vite
+
+If you use `@agex-ts/runtime-worker`, add the package to `optimizeDeps.exclude`:
+
+```ts
+// vite.config.ts
+import { defineConfig } from 'vite'
+
+export default defineConfig({
+  optimizeDeps: {
+    exclude: ['agex-runtime-worker'],
+  },
+})
+```
+
+Without this, the worker fails to boot with `Error: worker failed during boot: undefined`. Vite pre-bundles dependencies into `node_modules/.vite/deps/`, which rewrites `import.meta.url` away from the package's own `dist/` — breaking the `new URL('./worker.js', import.meta.url)` resolution that loads the worker bundle. Standard quirk that affects any library shipping a worker this way (comlink-based libs, tesseract.js, etc.).
+
 ### Working from a clone (this repo)
 
 The package `dist/` directories are gitignored. After a fresh clone, build once before running anything that imports the libraries (tests, downstream apps using `file:` deps, etc.):

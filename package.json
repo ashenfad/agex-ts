@@ -10,6 +10,7 @@
   "packageManager": "pnpm@11.0.4",
   "scripts": {
     "build": "pnpm -r build",
+    "check:dist": "node scripts/check-dist-shape.mjs",
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",
     "lint": "biome check .",

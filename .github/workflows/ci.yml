@@ -36,6 +36,14 @@ jobs:
       - name: Build
         run: pnpm build
 
+      # Scan every package's `dist/` for browser-hostile patterns
+      # (`createRequire`, `node:module`, `worker_threads`, etc.) that
+      # leak into bundles consumed by browser apps. See
+      # `scripts/check-dist-shape.mjs` for the rules + per-package
+      # allowlist.
+      - name: Bundle-shape check
+        run: pnpm check:dist
+
       - name: Lint
         run: pnpm lint
 

@@ -69,6 +69,17 @@ pnpm add agex-ts @agex-ts/anthropic @agex-ts/runtime-worker
 
 For tests / trusted code (no worker isolation), the in-process `evalRuntime` ships with `agex-ts` itself — skip `@agex-ts/runtime-worker`.
 
+### Working from a clone (this repo)
+
+The package `dist/` directories are gitignored. After a fresh clone, build once before running anything that imports the libraries (tests, downstream apps using `file:` deps, etc.):
+
+```bash
+pnpm install
+pnpm -r build
+```
+
+Each library package also has a `prepare` script, so consumers using `file:` or `git+` references will trigger the build automatically on `npm install` / `pnpm install`.
+
 ## Project Status
 
 > **Pre-1.0.** Public API is experimental and may change. The core thesis is settled; surfaces are still narrowing. Wire format, on-disk format, and registration shapes are the most likely to shift before 1.0.

@@ -98,7 +98,11 @@ export class Gemini implements LLMClient {
     this.forceToolUse = opts.forceToolUse ?? true
     this.nativeThinking = opts.nativeThinking ?? true
     this.generationConfig = opts.generationConfig ?? {}
-    this.fetchImpl = opts.fetchImpl ?? fetch
+    // Bind to globalThis so browsers don't throw "Illegal invocation"
+    // — `window.fetch` requires `this === window` and we call it as
+    // `this.fetchImpl(...)` from inside the client. Node/Deno don't
+    // enforce the check, but the bind is harmless there.
+    this.fetchImpl = opts.fetchImpl ?? fetch.bind(globalThis)
   }
 
   // ---------- LLMClient surface ----------

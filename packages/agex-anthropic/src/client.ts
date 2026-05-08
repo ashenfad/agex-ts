@@ -97,7 +97,11 @@ export class Anthropic implements LLMClient {
     this.maxTokens = opts.maxTokens ?? DEFAULT_MAX_TOKENS
     this.extras = opts.extras ?? {}
     this.browserDirectAccess = opts.browserDirectAccess ?? false
-    this.fetchImpl = opts.fetchImpl ?? fetch
+    // Bind to globalThis so browsers don't throw "Illegal invocation"
+    // — `window.fetch` requires `this === window` and we call it as
+    // `this.fetchImpl(...)` from inside the client. Node/Deno don't
+    // enforce the check, but the bind is harmless there.
+    this.fetchImpl = opts.fetchImpl ?? fetch.bind(globalThis)
   }
 
   // ---------- LLMClient surface ----------

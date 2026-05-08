@@ -236,6 +236,8 @@ export function prettyEvents(event: AgentEvent, opts: PrettyEventOptions = {}): 
     case 'output':
       for (const p of event.parts) {
         if (p.type === 'text') write(`[stdout] ${cap(p.text.trim(), maxBody)}`)
+        else if (p.type === 'error')
+          write(`[stderr] ${cap(`${p.errorName}: ${p.errorMessage}`, maxBody)}`)
         else write(`[stdout] <image ${p.format}>`)
       }
       return

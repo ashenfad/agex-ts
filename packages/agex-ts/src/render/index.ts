@@ -28,6 +28,7 @@
  */
 
 import { buildChapterScopeFilter } from '../chaptering'
+import { formatErrorPart } from '../output-part'
 import type {
   ActionEvent,
   AgentEvent,
@@ -420,9 +421,10 @@ function buildToolResultPart(
   synth: string | undefined,
 ): ToolResultPart {
   const obs = observations ?? []
-  const hasText = obs.some((p) => p.type === 'text')
-  const hasImage = obs.some((p) => p.type === 'image')
-  if (synth !== undefined && !hasText && !hasImage) {
+  const hasObservable = obs.some(
+    (p) => p.type === 'text' || p.type === 'image' || p.type === 'error',
+  )
+  if (synth !== undefined && !hasObservable) {
     return {
       type: 'toolResult',
       toolUseId,
@@ -430,10 +432,17 @@ function buildToolResultPart(
     }
   }
   const content: Array<TextPart | ImagePart> = []
-  const textBits = obs.filter((p): p is { type: 'text'; text: string } => p.type === 'text')
+  // Coalesce text + error parts into a single text block so a single
+  // emission's stdout-then-error sequence reads naturally to the LLM.
+  // Errors lower via `outputPartToNeutral` to the agex-py-compatible
+  // `💥 ErrorName: message` shape.
+  const textBits: string[] = []
+  for (const p of obs) {
+    if (p.type === 'text') textBits.push(p.text)
+    else if (p.type === 'error') textBits.push(formatErrorPart(p.errorName, p.errorMessage))
+  }
   if (textBits.length > 0) {
-    const body = textBits.map((p) => p.text).join('\n')
-    content.push({ type: 'text', text: `${toolName}: output\n${body}` })
+    content.push({ type: 'text', text: `${toolName}: output\n${textBits.join('\n')}` })
   }
   for (const p of obs) {
     if (p.type === 'image') {
@@ -453,6 +462,13 @@ function buildToolResultPart(
 
 function outputPartToNeutral(p: OutputPart): TextPart | ImagePart {
   if (p.type === 'text') return { type: 'text', text: p.text }
+  if (p.type === 'error') {
+    // The LLM sees the same `💥 {ErrorName}: {message}` shape agex-py
+    // uses, so the agent's prompt-side recognition stays uniform across
+    // implementations. Embedders rendering a UI should switch on
+    // `part.type === 'error'` directly to style it distinctly.
+    return { type: 'text', text: formatErrorPart(p.errorName, p.errorMessage) }
+  }
   return {
     type: 'image',
     format: p.format,

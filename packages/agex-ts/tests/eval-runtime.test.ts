@@ -96,6 +96,35 @@ describe('evalRuntime — registered names in scope', () => {
   })
 })
 
+describe('evalRuntime — `inputs` binding', () => {
+  it('binds `inputs` from ctx into the agent scope', async () => {
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const ctx: ExecuteContext = {
+      ...makeContext(),
+      inputs: { name: 'foo', value: 21 },
+    }
+    const result = await r.execute(
+      'taskSuccess({ name: inputs.name, doubled: inputs.value * 2 })',
+      ctx,
+    )
+    expect(result.outcome).toEqual({ kind: 'success', value: { name: 'foo', doubled: 42 } })
+  })
+
+  it('binds `inputs` to undefined (not unbound) when ctx has no inputs', async () => {
+    // Regression: `const value = inputs` must not throw a
+    // ReferenceError just because the task takes no inputs. The
+    // binding is always present; its value may be undefined.
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const result = await r.execute(
+      'const value = inputs; taskSuccess({ wasUndef: value === undefined })',
+      makeContext(),
+    )
+    expect(result.outcome).toEqual({ kind: 'success', value: { wasUndef: true } })
+  })
+})
+
 describe('evalRuntime — captured console output', () => {
   it('console.log entries land in outputs as text parts', async () => {
     const r = evalRuntime()

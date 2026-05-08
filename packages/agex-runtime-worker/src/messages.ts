@@ -176,6 +176,12 @@ export type Host2WorkerMessage =
        *  don't — one outstanding execute at a time — but the field
        *  future-proofs the protocol). */
       readonly executeId: number
+      /** Validated task input — bound as the `inputs` global in the
+       *  agent's TS scope, mirroring the eval-runtime injection. Must
+       *  structured-clone (Standard-Schema-validated values are JSON-
+       *  shaped, so this is naturally satisfied). Omitted entirely
+       *  when the task takes no inputs. */
+      readonly inputs?: unknown
       /** Optional, threaded through for diagnostic logs. */
       readonly emissionId?: string
     }

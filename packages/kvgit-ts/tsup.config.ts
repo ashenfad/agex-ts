@@ -6,6 +6,7 @@ export default defineConfig({
     'src/backends/memory.ts',
     'src/backends/idb.ts',
     'src/backends/sqlite.ts',
+    'src/backends/sqlite.browser.ts',
   ],
   format: ['esm'],
   dts: true,

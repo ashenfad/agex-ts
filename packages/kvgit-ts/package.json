@@ -22,6 +22,7 @@
     },
     "./backends/sqlite": {
       "types": "./dist/backends/sqlite.d.ts",
+      "browser": "./dist/backends/sqlite.browser.js",
       "import": "./dist/backends/sqlite.js"
     }
   },

@@ -1,7 +1,12 @@
 /**
  * Archive commands: `gzip`, `gunzip`, `tar`, `zip`, `unzip`.
  *
- * gzip + zip are powered by `fflate` (browser-safe, zero Node deps).
+ * gzip + zip are powered by `fflate`, lazy-loaded inside each handler
+ * so that just importing `termish-ts` (or anything that depends on it,
+ * like `agex-ts`) doesn't pull fflate's `createRequire('module')` path
+ * into browser bundles. The cost of the dynamic import only fires when
+ * a `gzip`/`tar`/`zip`/`unzip` command actually runs.
+ *
  * tar uses an in-house USTAR reader/writer in `_tar.ts`.
  *
  * stdout for binary data: `gzip -c` writes compressed bytes to stdout.
@@ -11,7 +16,6 @@
  * will misbehave — the docs surface this caveat.
  */
 
-import { gunzipSync, gzipSync, unzipSync, zipSync } from 'fflate'
 import type { CommandHandler } from '../context'
 import { TerminalError } from '../errors'
 import { basename, dirname, joinPath, normalize } from '../fs/path'
@@ -23,11 +27,22 @@ const decoder = new TextDecoder('utf-8', { fatal: false })
 const latin1 = new TextDecoder('latin1')
 const encoder = new TextEncoder()
 
+// fflate is lazy-loaded so that importing termish-ts (and transitively
+// agex-ts) doesn't pull fflate's `createRequire('module')` path into
+// browser bundles. Only `gzip`/`tar`/`zip`/`unzip` invocations pay the
+// load cost, and only on first use per process.
+let _fflate: typeof import('fflate') | null = null
+async function loadFflate(): Promise<typeof import('fflate')> {
+  if (_fflate === null) _fflate = await import('fflate')
+  return _fflate
+}
+
 // ---------------------------------------------------------------------------
 // gzip / gunzip
 // ---------------------------------------------------------------------------
 
 export const gzip: CommandHandler = async (ctx) => {
+  const { gunzipSync, gzipSync } = await loadFflate()
   // Pre-pass: pluck `-1`..`-9` compression-level shorthand before argparse.
   let level = 9
   const filtered: string[] = []
@@ -112,6 +127,7 @@ export const gunzip: CommandHandler = async (ctx) => {
 // ---------------------------------------------------------------------------
 
 export const tar: CommandHandler = async (ctx) => {
+  const { gunzipSync, gzipSync } = await loadFflate()
   let args: readonly string[] = ctx.args
   // Traditional dashless form: `tar czf x.tar.gz ...` → `tar -czf ...`.
   if (args.length > 0) {
@@ -274,6 +290,7 @@ function isGzipMagic(bytes: Uint8Array): boolean {
 // ---------------------------------------------------------------------------
 
 export const zip: CommandHandler = async (ctx) => {
+  const { zipSync } = await loadFflate()
   const parsed = parseArgs(
     ctx.args,
     {
@@ -329,6 +346,7 @@ async function collectZipEntries(
 }
 
 export const unzip: CommandHandler = async (ctx) => {
+  const { unzipSync } = await loadFflate()
   const parsed = parseArgs(
     ctx.args,
     {

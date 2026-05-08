@@ -165,6 +165,7 @@ interface CtxOpts {
   signal?: AbortSignal
   fs?: ExecuteContext['fs']
   cache?: ExecuteContext['cache']
+  inputs?: ExecuteContext['inputs']
 }
 
 function makeCtx(opts: CtxOpts = {}): ExecuteContext {
@@ -172,6 +173,7 @@ function makeCtx(opts: CtxOpts = {}): ExecuteContext {
     fs: opts.fs ?? new MemoryFS(),
     cache: opts.cache ?? makeMemoryCache(),
     signal: opts.signal ?? new AbortController().signal,
+    ...(opts.inputs !== undefined && { inputs: opts.inputs }),
   }
 }
 
@@ -231,6 +233,32 @@ describe('workerRuntime', () => {
     const result = await rt.execute('const x = 1 + 2; void x', makeCtx())
     expect(result.error).toBeNull()
     expect(result.outcome).toEqual({ kind: 'continue' })
+  })
+
+  it('binds `inputs` from ctx into the agent scope', async () => {
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const result = await rt.execute(
+      'taskSuccess({ name: inputs.name, doubled: inputs.value * 2 })',
+      makeCtx({ inputs: { name: 'foo', value: 21 } }),
+    )
+    expect(result.error).toBeNull()
+    expect(result.outcome).toEqual({ kind: 'success', value: { name: 'foo', doubled: 42 } })
+  })
+
+  it('binds `inputs` to undefined (not unbound) when ctx has no inputs', async () => {
+    // The bug we're guarding against: `const value = inputs` used to
+    // throw `ReferenceError: inputs is not defined` when the task had
+    // no inputs, because the worker never injected the binding. Now
+    // it's always bound — undefined is fine, ReferenceError is not.
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const result = await rt.execute(
+      'const value = inputs; taskSuccess({ wasUndef: value === undefined })',
+      makeCtx(),
+    )
+    expect(result.error).toBeNull()
+    expect(result.outcome).toEqual({ kind: 'success', value: { wasUndef: true } })
   })
 
   it('surfaces an unexpected throw as result.error (not as outcome)', async () => {

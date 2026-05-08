@@ -707,6 +707,11 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
     console: makeConsole(executeId),
     fs: bridge.build('fs', FS_METHODS),
     cache: bridge.build('cache', CACHE_METHODS),
+    // Always present in the agent's scope — set to the validated task
+    // input when the host forwarded one, else `undefined`. Mirrors the
+    // eval-runtime behavior so `const value = inputs` never throws a
+    // ReferenceError just because the task had no inputs.
+    inputs: msg.inputs,
   }
 
   if (configured !== null) {

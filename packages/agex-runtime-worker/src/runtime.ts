@@ -401,6 +401,7 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
           code: preparedCode,
           executeId,
           ...(helpers.length > 0 && { helpers }),
+          ...(ctx.inputs !== undefined && { inputs: ctx.inputs }),
           ...(ctx.emissionId !== undefined && { emissionId: ctx.emissionId }),
         }
         w.postMessage(out)

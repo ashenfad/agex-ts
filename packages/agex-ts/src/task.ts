@@ -34,12 +34,12 @@ import type {
   FailEvent,
   LLMClient,
   OutputEvent,
+  OutputPart,
   Policy,
   RuntimeAdapter,
   SuccessEvent,
   TaskCallOptions,
   TaskFn,
-  TaskOutcome,
   TaskStartEvent,
   TokenChunk,
   VirtualFileSystem,
@@ -146,6 +146,11 @@ export function makeTask<I, O>(
       ...(agent.primer !== undefined && { agentPrimer: agent.primer }),
     })
 
+    // Most recent recoverable error from agent code, surfaced in the
+    // maxIterations exhaust message so callers can see "loop ran out
+    // while still erroring." Cleared whenever an emission completes
+    // without erroring — only the *last* error counts for the message.
+    let lastError: string | undefined
     try {
       while (iter < maxIter) {
         if (signal.aborted) throw new CancelledError()
@@ -240,18 +245,25 @@ export function makeTask<I, O>(
           throw new TaskClarifyError(outcome.message)
         }
         // outcome.kind === 'continue' → next iteration
+        lastError = outcome.lastError
       }
 
-      // Loop budget exhausted — chapter the just-failed task too.
+      // Loop budget exhausted — surface the last recoverable error if
+      // any, so callers can tell "the agent ran out of turns while still
+      // erroring" apart from "the agent ran out of turns silently."
+      const exhaustMessage =
+        lastError !== undefined
+          ? `Task exceeded maxIterations (${maxIter})\nLast error: ${lastError}`
+          : `Task exceeded maxIterations (${maxIter})`
       const failEvent: FailEvent = {
         type: 'fail',
         timestamp: new Date().toISOString(),
         agentName: agent.name,
-        message: `Task exceeded maxIterations (${maxIter})`,
+        message: exhaustMessage,
       }
       await emit(failEvent, eventLog, options.onEvent)
       await maybeFireBoundaryChaptering(agent, session, eventLog, signal, options.onEvent)
-      throw new TaskFailError(`Task exceeded maxIterations (${maxIter})`)
+      throw new TaskFailError(exhaustMessage)
     } catch (e) {
       if (e instanceof CancelledError) {
         await emit(
@@ -281,6 +293,19 @@ export function makeTask<I, O>(
 // Internals
 // ---------------------------------------------------------------------------
 
+/**
+ * Internal result of walking an action's emissions. Mirrors
+ * `TaskOutcome` for terminal cases (success / fail / clarify) and
+ * extends `continue` with an optional `lastError` carried up to the
+ * outer loop so a later `maxIterations` exhaust can surface "the most
+ * recent error before we gave up" — matches agex-py's `last_error`.
+ */
+type DispatchResult =
+  | { readonly kind: 'success'; readonly value: unknown }
+  | { readonly kind: 'fail'; readonly message: string }
+  | { readonly kind: 'clarify'; readonly message: string }
+  | { readonly kind: 'continue'; readonly lastError?: string }
+
 async function dispatchEmissions(
   emissions: ReadonlyArray<Emission>,
   actionTimestamp: string,
@@ -291,7 +316,7 @@ async function dispatchEmissions(
   agentName: string,
   eventLog: { add(e: AgentEvent): Promise<string> },
   onEvent: ((e: AgentEvent) => void | Promise<void>) | undefined,
-): Promise<TaskOutcome> {
+): Promise<DispatchResult> {
   for (let i = 0; i < emissions.length; i++) {
     const em = emissions[i] as Emission
     if (ctx.signal.aborted) throw new CancelledError()
@@ -299,23 +324,42 @@ async function dispatchEmissions(
 
     if (em.type === 'ts') {
       const result = await runtime.execute(em.code, { ...ctx, emissionId })
-      if (result.outputs.length > 0) {
+
+      // Cancellation surfaced by the runtime: re-raise so the outer
+      // catch emits CancelledEvent rather than swallowing it.
+      if (result.error !== null && result.outcome.kind === 'continue') {
+        if (result.error instanceof CancelledError || ctx.signal.aborted) {
+          throw new CancelledError(result.error.message)
+        }
+      }
+
+      // Bundle any captured stdout with the error part (if any) into a
+      // single OutputEvent for this emission. Pairing them keeps the
+      // emissionId-tagged tool_result stream dense.
+      const parts: OutputPart[] = [...result.outputs]
+      if (result.error !== null && result.outcome.kind === 'continue') {
+        parts.push({
+          type: 'error',
+          errorName: result.error.name || 'Error',
+          errorMessage: result.error.message,
+        })
+      }
+      if (parts.length > 0) {
         const outputEvent: OutputEvent = {
           type: 'output',
           timestamp: new Date().toISOString(),
           agentName,
           emissionId,
-          parts: result.outputs,
+          parts,
         }
         await emit(outputEvent, eventLog, onEvent)
       }
+
       if (result.error !== null && result.outcome.kind === 'continue') {
-        // Cancellation surfaced by the runtime: re-raise so the outer
-        // catch emits CancelledEvent rather than burying it in a fail.
-        if (result.error instanceof CancelledError || ctx.signal.aborted) {
-          throw new CancelledError(result.error.message)
-        }
-        return { kind: 'fail', message: result.error.message }
+        // Recoverable: stop walking emissions for this action — the
+        // agent gets to read the error on its next iteration and decide
+        // what to do. Matches agex-py's `break` after `recoverable_error`.
+        return { kind: 'continue', lastError: describeError(result.error) }
       }
       if (result.outcome.kind !== 'continue') return result.outcome
       continue
@@ -325,7 +369,8 @@ async function dispatchEmissions(
       try {
         await dispatchFileWrite(em, fs)
       } catch (e) {
-        return { kind: 'fail', message: describeError(e) }
+        await emitErrorOutput(e, agentName, emissionId, eventLog, onEvent)
+        return { kind: 'continue', lastError: describeError(e) }
       }
       continue
     }
@@ -334,7 +379,8 @@ async function dispatchEmissions(
       try {
         await dispatchFileEdit(em, fs)
       } catch (e) {
-        return { kind: 'fail', message: describeError(e) }
+        await emitErrorOutput(e, agentName, emissionId, eventLog, onEvent)
+        return { kind: 'continue', lastError: describeError(e) }
       }
       continue
     }
@@ -353,7 +399,8 @@ async function dispatchEmissions(
           await emit(outputEvent, eventLog, onEvent)
         }
       } catch (e) {
-        return { kind: 'fail', message: describeError(e) }
+        await emitErrorOutput(e, agentName, emissionId, eventLog, onEvent)
+        return { kind: 'continue', lastError: describeError(e) }
       }
     }
 
@@ -361,6 +408,25 @@ async function dispatchEmissions(
     // no further side effect.
   }
   return { kind: 'continue' }
+}
+
+async function emitErrorOutput(
+  e: unknown,
+  agentName: string,
+  emissionId: string,
+  eventLog: { add(e: AgentEvent): Promise<string> },
+  onEvent: ((e: AgentEvent) => void | Promise<void>) | undefined,
+): Promise<void> {
+  const errorName = e instanceof Error ? e.name || 'Error' : 'Error'
+  const errorMessage = e instanceof Error ? e.message : String(e)
+  const outputEvent: OutputEvent = {
+    type: 'output',
+    timestamp: new Date().toISOString(),
+    agentName,
+    emissionId,
+    parts: [{ type: 'error', errorName, errorMessage }],
+  }
+  await emit(outputEvent, eventLog, onEvent)
 }
 
 function describeError(e: unknown): string {

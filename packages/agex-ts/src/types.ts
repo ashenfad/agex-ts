@@ -186,6 +186,19 @@ export type OutputPart =
       readonly data: string
       readonly altText?: string
     }
+  /** A runtime error raised by the agent's emitted code. The loop
+   *  emits this part on the OutputEvent for the failing emission and
+   *  continues with the next iteration so the agent can self-correct.
+   *
+   *  Distinct from `ErrorEvent`, which is reserved for framework-level
+   *  errors not shown to the agent (worker death, runtime adapter
+   *  crash, etc.). This variant is "code the agent wrote threw" — the
+   *  agent should see it. */
+  | {
+      readonly type: 'error'
+      readonly errorName: string
+      readonly errorMessage: string
+    }
 
 export interface OutputEvent extends EventBase {
   readonly type: 'output'

@@ -250,6 +250,7 @@ function renderEventMarkdown(e: AgentEvent): string {
     case 'output': {
       const parts = e.parts.map((p) => {
         if (p.type === 'text') return `\`\`\`\n${p.text}\n\`\`\``
+        if (p.type === 'error') return `**${p.errorName}**: ${p.errorMessage}`
         return `*[image: ${p.format}, ${p.data.length} bytes base64]*`
       })
       return `${header}\n\n${parts.join('\n\n')}\n`

@@ -528,6 +528,69 @@ describe('evalRuntime — URL-shipped registrations (lazy)', () => {
     )
     expect(result.outcome).toEqual({ kind: 'success', value: [42, 22] })
   })
+
+  it('multiple separate imports of the same URL-shipped name do not collide (regression)', async () => {
+    // Studio reported: agent code with two `import { x } from 'arquero'`
+    // statements raised `SyntaxError: Identifier '__url_arquero' has
+    // already been declared`. The rewriter previously emitted a temp
+    // var named `__url_<name>` for each named-import — repeated for
+    // the same registered name, two `const __url_<name>` lines landed
+    // in the same scope. Fix: inline the await directly. The per-name
+    // promise cache in __load makes the duplicate await effectively
+    // free.
+    const r = evalRuntime()
+    const policy: Policy = {
+      ...emptyPolicy,
+      namespaces: new Map([
+        ['arquero', { kind: 'namespace' as const, name: 'arquero', url: FIXTURE_URL }],
+      ]),
+    }
+    await r.init(policy)
+    const result = await r.execute(
+      `
+      import { double } from 'arquero'
+      import { utils } from 'arquero'
+      taskSuccess([double(7), utils.greet('world')])
+    `,
+      makeContext(),
+    )
+    expect(result.outcome).toEqual({ kind: 'success', value: [14, 'hello world'] })
+  })
+
+  it('mixed default + named imports of the same URL-shipped name do not collide', async () => {
+    // Same regression class for the `mixed` emit path. The default-
+    // export fixture has `marker: 'default-payload'`. Two imports of
+    // the same name where one mixes default + named would have
+    // collided on the same `__url_<name>` temp.
+    const r = evalRuntime()
+    const policy: Policy = {
+      ...emptyPolicy,
+      namespaces: new Map([
+        [
+          'fixture',
+          {
+            kind: 'namespace' as const,
+            name: 'fixture',
+            url: FIXTURE_URL,
+            export: 'default',
+          },
+        ],
+      ]),
+    }
+    await r.init(policy)
+    const result = await r.execute(
+      `
+      import * as a from 'fixture'
+      import * as b from 'fixture'
+      taskSuccess([a.marker, b.marker, a === b])
+    `,
+      makeContext(),
+    )
+    expect(result.outcome).toEqual({
+      kind: 'success',
+      value: ['default-payload', 'default-payload', true],
+    })
+  })
 })
 
 describe('evalRuntime — import syntax for registered names', () => {

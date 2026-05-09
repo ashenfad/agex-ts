@@ -40,6 +40,10 @@
       "types": "./dist/runtime/module-loader.d.ts",
       "import": "./dist/runtime/module-loader.js"
     },
+    "./wrap-fs": {
+      "types": "./dist/runtime/wrap-fs.d.ts",
+      "import": "./dist/runtime/wrap-fs.js"
+    },
     "./render": {
       "types": "./dist/render/index.d.ts",
       "import": "./dist/render/index.js"

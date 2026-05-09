@@ -38,6 +38,7 @@
  */
 
 import type { OutputPart, TaskOutcome } from 'agex-ts/types'
+import { wrapAgentFs } from 'agex-ts/wrap-fs'
 import {
   type BridgeTarget,
   type ConfigureMessage,
@@ -759,7 +760,13 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
     taskClarify,
     viewImage: viewImageFor(executeId),
     console: makeConsole(executeId),
-    fs: bridge.build('fs', FS_METHODS),
+    // Node-fs-style ergonomic wrapper around the bridged proxy. The
+    // agent can write `await fs.read(path, 'utf8')` to get a string
+    // back, or `await fs.write(path, 'hello')` to encode-and-write —
+    // matches the conventional Node fs surface they were trained on.
+    // Bytes-form still works unchanged. The wrapper proxies all
+    // other methods through to the bridged fs.
+    fs: wrapAgentFs(bridge.build('fs', FS_METHODS) as Parameters<typeof wrapAgentFs>[0] & object),
     cache: bridge.build('cache', CACHE_METHODS),
     // Always present in the agent's scope — set to the validated task
     // input when the host forwarded one, else `undefined`. Mirrors the

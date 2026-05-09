@@ -42,6 +42,7 @@ import type {
 } from '../types'
 import { prepareScript } from './module-loader'
 import { safeStringifyArgs } from './safe-stringify'
+import { wrapAgentFs } from './wrap-fs'
 
 export interface EvalRuntimeOptions {
   /** Per-emission wall-clock budget in milliseconds. Default `5000`. */
@@ -191,7 +192,12 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
         taskClarify,
         viewImage,
         cache: ctx.cache,
-        fs: ctx.fs,
+        // Node-fs-style ergonomic wrapper. The agent can write
+        // `await fs.read(path, 'utf8')` to get a string back, or
+        // `await fs.write(path, 'hello')` to encode-and-write —
+        // matches the conventional Node fs surface they were
+        // trained on. Bytes-form still works unchanged.
+        fs: wrapAgentFs(ctx.fs),
         console: captureConsole,
         inputs: ctx.inputs,
         // Lazy loader for URL-shipped registrations. The agent's

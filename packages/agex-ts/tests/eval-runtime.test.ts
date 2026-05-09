@@ -162,6 +162,138 @@ describe('evalRuntime — fs / cache injection', () => {
   })
 })
 
+describe('evalRuntime — fs ergonomic wrappers (Node-fs-style)', () => {
+  // The agent sees `fs` through a wrapper that adds Node-fs-style
+  // overloads on read / write. Bytes-form still works unchanged;
+  // string-encoding overloads are the convenience that makes the
+  // agent's natural `fs.read(path, 'utf8')` / `fs.write(path, str)`
+  // patterns Just Work without learning agex-specific quirks.
+
+  it('fs.read(path, "utf8") returns a string (matches Node fs.readFile)', async () => {
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const ctx = makeContext()
+    await ctx.fs.write('/data.csv', new TextEncoder().encode('a,b,c\n1,2,3\n'))
+    const result = await r.execute(
+      `
+      const text = await fs.read('/data.csv', 'utf8')
+      const lines = text.trim().split('\\n')
+      taskSuccess(lines)
+    `,
+      ctx,
+    )
+    expect(result.outcome).toEqual({ kind: 'success', value: ['a,b,c', '1,2,3'] })
+  })
+
+  it('fs.read(path, "utf-8") (hyphenated alias) also works', async () => {
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const ctx = makeContext()
+    await ctx.fs.write('/x.txt', new TextEncoder().encode('hello'))
+    const result = await r.execute(`taskSuccess(await fs.read('/x.txt', 'utf-8'))`, ctx)
+    expect(result.outcome).toEqual({ kind: 'success', value: 'hello' })
+  })
+
+  it('fs.read(path) (no encoding) still returns Uint8Array', async () => {
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const ctx = makeContext()
+    await ctx.fs.write('/x.bin', new Uint8Array([1, 2, 3, 4]))
+    const result = await r.execute(
+      `
+      const bytes = await fs.read('/x.bin')
+      taskSuccess({ isBytes: bytes instanceof Uint8Array, length: bytes.length, first: bytes[0] })
+    `,
+      ctx,
+    )
+    expect(result.outcome).toEqual({
+      kind: 'success',
+      value: { isBytes: true, length: 4, first: 1 },
+    })
+  })
+
+  it('fs.read with an unsupported encoding throws a clear error', async () => {
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const ctx = makeContext()
+    await ctx.fs.write('/x.txt', new TextEncoder().encode('hello'))
+    const result = await r.execute(
+      `
+      try {
+        await fs.read('/x.txt', 'base64')
+        taskSuccess('unreached')
+      } catch (e) {
+        taskSuccess({ name: e.name, message: e.message })
+      }
+    `,
+      ctx,
+    )
+    expect(result.outcome.kind).toBe('success')
+    const value = (result.outcome as { kind: 'success'; value: { message: string } }).value
+    expect(value.message).toMatch(/unsupported encoding 'base64'/)
+    expect(value.message).toMatch(/decode manually with a TextDecoder/)
+  })
+
+  it('fs.write(path, string) encodes UTF-8 and writes bytes', async () => {
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const ctx = makeContext()
+    await r.execute(`await fs.write('/note.txt', 'hello world'); taskSuccess(null)`, ctx)
+    const bytes = await ctx.fs.read('/note.txt')
+    expect(new TextDecoder().decode(bytes)).toBe('hello world')
+  })
+
+  it('fs.write(path, Uint8Array) still writes bytes through unchanged', async () => {
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const ctx = makeContext()
+    await r.execute(
+      `
+      const bytes = new Uint8Array([72, 101, 108, 108, 111])
+      await fs.write('/x.bin', bytes)
+      taskSuccess(null)
+    `,
+      ctx,
+    )
+    const bytes = await ctx.fs.read('/x.bin')
+    expect(Array.from(bytes)).toEqual([72, 101, 108, 108, 111])
+  })
+
+  it('fs.write append mode passes through with strings too', async () => {
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const ctx = makeContext()
+    await ctx.fs.write('/log.txt', new TextEncoder().encode('first\n'))
+    await r.execute(`await fs.write('/log.txt', 'second\\n', 'a'); taskSuccess(null)`, ctx)
+    const text = new TextDecoder().decode(await ctx.fs.read('/log.txt'))
+    expect(text).toBe('first\nsecond\n')
+  })
+
+  it('non-read/write methods still pass through (proxy delegation)', async () => {
+    // The wrapper Proxy intercepts only `read` and `write`; everything
+    // else (exists, mkdir, list, etc.) must delegate to the underlying
+    // fs unchanged.
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const ctx = makeContext()
+    await ctx.fs.mkdir('/d')
+    await ctx.fs.write('/d/a', new TextEncoder().encode('x'))
+    const result = await r.execute(
+      `
+      const exists = await fs.exists('/d/a')
+      const isDir = await fs.isDir('/d')
+      const items = await fs.list('/d')
+      taskSuccess({ exists, isDir, items })
+    `,
+      ctx,
+    )
+    expect(result.outcome).toEqual({
+      kind: 'success',
+      value: { exists: true, isDir: true, items: ['a'] },
+    })
+  })
+})
+
 describe('evalRuntime — error handling', () => {
   it('user errors land in result.error, outcome stays continue', async () => {
     const r = evalRuntime()

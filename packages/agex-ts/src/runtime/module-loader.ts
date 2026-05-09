@@ -667,18 +667,28 @@ function rewriteAsUrlLoad(binding: ImportBinding, name: string): string {
       const dest = binding.entries
         .map((e) => (e.source === e.local ? e.source : `${e.source}: ${e.local}`))
         .join(', ')
-      // Bind the loaded value once to a temporary so the destructuring
-      // doesn't fire two `__load` calls (which the cache dedups, but
-      // double-await is wasteful).
-      const tmp = `__url_${name.replace(/[^A-Za-z0-9_$]/g, '_')}`
-      return `const ${tmp} = ${target}; const { ${dest} } = ${tmp};`
+      // Inline the await directly. A previous version of this code
+      // bound the result to `__url_<name>` to "avoid double-await on
+      // destructuring", but that was a mistake on two counts:
+      // (a) destructuring evaluates the right-hand side once anyway,
+      // and (b) the temp identifier was derived from the registered
+      // name only, so two separate `import` statements from the same
+      // URL-shipped name produced two `const __url_<name>` declarations
+      // in the same scope and threw `SyntaxError: already declared`.
+      // `__load` itself caches the resolved promise, so even if we did
+      // emit two awaits the cost would be a Map lookup — not worth a
+      // collision-prone temp.
+      return `const { ${dest} } = ${target};`
     }
     case 'mixed': {
       const named = binding.entries
         .map((e) => (e.source === e.local ? e.source : `${e.source}: ${e.local}`))
         .join(', ')
-      const tmp = `__url_${name.replace(/[^A-Za-z0-9_$]/g, '_')}`
-      return `const ${tmp} = ${target}; const ${binding.defaultLocal} = ${tmp}.default; const { ${named} } = ${tmp};`
+      // Same reasoning as the `named` case: two awaits, both hit the
+      // per-name promise cache after the first load. Inlining keeps
+      // the emit collision-free across multiple imports of the same
+      // URL-shipped name.
+      return `const ${binding.defaultLocal} = ${target}.default; const { ${named} } = ${target};`
     }
   }
 }

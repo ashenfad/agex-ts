@@ -67,7 +67,27 @@ interface TerminalRegistration extends RegistrationCommon {
   readonly handler: TerminalCommandHandler
 }
 
+/** Identifier-shape regex for host-bound registration names.
+ *
+ *  Host-bound names land as top-level scope bindings AND as
+ *  AsyncFunction parameter names, so they must be valid JS
+ *  identifiers (no hyphens, no scopes). URL-shipped names use
+ *  `URL_NAME_RE` (much more permissive) — they're only ever import
+ *  specifiers compared via string equality, not JS identifiers. */
 const NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+/** Permitted shape for URL-shipped registration names — npm-style
+ *  import specifiers. Allows hyphens, scopes (`@scope/pkg`),
+ *  subpaths (`pkg/sub`), dots, etc. The agent's import statement is
+ *  matched against this string verbatim, so `apache-arrow` registers
+ *  fine and the agent writes `import { Table } from 'apache-arrow'`
+ *  exactly as their training data suggests.
+ *
+ *  The bounds are intentionally loose: any non-empty string with no
+ *  whitespace and no control characters. Agent imports can't contain
+ *  whitespace anyway (it'd break the parser), and control chars in
+ *  registration names are always typos. */
+const URL_NAME_RE = /^[^\s\p{Cc}]+$/u
 
 export class PolicyBuilder {
   readonly #fns = new Map<string, RegisteredFn>()
@@ -79,7 +99,7 @@ export class PolicyBuilder {
   // -- Mutators -----------------------------------------------------------
 
   registerFn(name: string, opts: FnRegistration): void {
-    this.#assertNameValid(name, 'fn')
+    this.#assertNameValid(name, 'fn', opts.url !== undefined)
     this.#assertNameAvailable(name)
     this.#assertHostXorUrl(name, 'fn', opts.fn !== undefined, opts.url)
     if (opts.url !== undefined && opts.paramsSchema !== undefined) {
@@ -95,7 +115,7 @@ export class PolicyBuilder {
   }
 
   registerCls(name: string, opts: ClsRegistration): void {
-    this.#assertNameValid(name, 'cls')
+    this.#assertNameValid(name, 'cls', opts.url !== undefined)
     this.#assertNameAvailable(name)
     this.#assertHostXorUrl(name, 'cls', opts.cls !== undefined, opts.url)
     if (opts.url !== undefined) {
@@ -117,7 +137,7 @@ export class PolicyBuilder {
   }
 
   registerNamespace(name: string, opts: NsRegistration): void {
-    this.#assertNameValid(name, 'namespace')
+    this.#assertNameValid(name, 'namespace', opts.url !== undefined)
     this.#assertNameAvailable(name)
     this.#assertHostXorUrl(name, 'namespace', opts.target !== undefined, opts.url)
     if (opts.url !== undefined) {
@@ -180,9 +200,22 @@ export class PolicyBuilder {
 
   // -- Internal -----------------------------------------------------------
 
-  #assertNameValid(name: string, kind: string): void {
+  #assertNameValid(name: string, kind: string, urlShipped = false): void {
     if (typeof name !== 'string' || name.length === 0) {
       throw new RegistrationError(`${kind}: name must be a non-empty string`)
+    }
+    if (urlShipped) {
+      // URL-shipped names are import specifiers (string-equality
+      // matched against `import { ... } from '<name>'`), never JS
+      // identifiers. Allow npm-style specifiers (`apache-arrow`,
+      // `@scope/pkg`, `pkg/sub`) — reject only whitespace and
+      // control chars, which would break the import parser anyway.
+      if (!URL_NAME_RE.test(name)) {
+        throw new RegistrationError(
+          `${kind} '${name}': URL-shipped name must be a non-empty import specifier (no whitespace, no control characters). For host-bound registrations the name must additionally be a valid JS identifier; URL-shipped accepts npm-style specifiers like 'apache-arrow' or '@scope/pkg'.`,
+        )
+      }
+      return
     }
     if (!NAME_RE.test(name)) {
       throw new RegistrationError(

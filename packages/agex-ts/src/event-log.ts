@@ -65,7 +65,7 @@ export class EventLogImpl implements EventLog {
     // the kvgit Staged buffer; transactions only fire on commit), so
     // there's nothing to await here.
     const key = this.#generateKey(event)
-    this.#state.set(key, event)
+    this.#state.set(key, this.#stamp(event))
     const index = ((await this.#state.get<string[]>(INDEX_KEY)) ?? []) as string[]
     this.#state.set(INDEX_KEY, [...index, key])
     return key
@@ -114,7 +114,7 @@ export class EventLogImpl implements EventLog {
     // comment there. Chaptering runs between LLM turns, not concurrent
     // with anything else writing to the same session log.
     const chapterKey = this.#generateKey(chapterEvent)
-    this.#state.set(chapterKey, chapterEvent)
+    this.#state.set(chapterKey, this.#stamp(chapterEvent))
 
     const index = ((await this.#state.get<string[]>(INDEX_KEY)) ?? []) as string[]
     const refSet = new Set(eventRefs)
@@ -139,6 +139,28 @@ export class EventLogImpl implements EventLog {
   }
 
   // ---------------------------------------------------------------------------
+
+  /**
+   * Stamp `commitHash` onto an event being added to the log.
+   *
+   * Mirrors agex-py's `add_event_to_log` (state/log.py): when the
+   * underlying state is versioned, record the *parent* commit at
+   * add-time — i.e., the most recent landed commit, NOT the commit
+   * this event will be part of after the next flush. The semantic
+   * the studio (and any other history-replay consumer) wants is "the
+   * commit you'd revert to in order to undo this event and everything
+   * after it." Live state has no commits, so the field stays absent.
+   *
+   * Stamps once at add-time and is never rewritten when `commit()`
+   * eventually lands. Same shape as agex-py — no post-commit
+   * walk-back, no sidecar (eventKey → commitHash) index.
+   */
+  #stamp<E extends AgentEvent>(event: E): E {
+    if (!isVersioned(this.#state)) return event
+    const parent = this.#state.currentCommit
+    if (parent === null) return event
+    return { ...event, commitHash: parent } as E
+  }
 
   #generateKey(event: AgentEvent): string {
     const ts = event.timestamp || new Date().toISOString()

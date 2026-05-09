@@ -304,6 +304,7 @@ describe('Agent-code errors are recoverable', () => {
         timestamp: '2026-05-08T00:00:00.000Z',
         agentName: 'a',
         taskName: 'tt',
+        inputs: undefined,
         message: 'do the thing',
       },
       {

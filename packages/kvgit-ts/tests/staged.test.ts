@@ -297,3 +297,131 @@ describe('Staged — navigation invalidates the read cache', () => {
     expect(await writerA.get('k')).toBe('from-B')
   })
 })
+
+describe('Staged — full Versioned navigation surface (mirrors kvgit-py)', () => {
+  // Pass-through wrappers for the navigation/inspection methods that
+  // don't move *this* Staged's HEAD (createBranch, checkout, peek,
+  // listBranches, deleteBranch, history). Together with switchBranch /
+  // resetTo / refresh, these complete the kvgit-py Staged API so
+  // callers never need to drop down to `staged.versioned.*`.
+
+  it('createBranch returns a new Staged at the same HEAD', async () => {
+    const { staged } = await freshStaged()
+    staged.set('k', 'on-main')
+    await staged.commit()
+
+    const branch = await staged.createBranch('B')
+    expect(branch.currentBranch).toBe('B')
+    expect(branch.currentCommit).toBe(staged.currentCommit) // forked at HEAD
+    // Same content visible on the new branch — it points at the same
+    // commit until something diverges.
+    expect(await branch.get('k')).toBe('on-main')
+  })
+
+  it('createBranch propagates the parent encoder/decoder', async () => {
+    // Distinct codec: stores values upper-cased on encode; reads back
+    // upper-cased. Verifies the new Staged uses the same codec, not
+    // the default JSON one.
+    const enc = new TextEncoder()
+    const dec = new TextDecoder()
+    const upperEncoder = (v: unknown) => enc.encode(JSON.stringify(String(v).toUpperCase()))
+    const upperDecoder = (b: Uint8Array) => JSON.parse(dec.decode(b))
+    const { staged } = await freshStaged({ encoder: upperEncoder, decoder: upperDecoder })
+
+    staged.set('k', 'lower')
+    await staged.commit()
+
+    const branch = await staged.createBranch('B')
+    branch.set('k', 'mixed-Case')
+    await branch.commit()
+    expect(await branch.get('k')).toBe('MIXED-CASE')
+  })
+
+  it('createBranch with `at` forks from a specific commit', async () => {
+    const { staged } = await freshStaged()
+    staged.set('k', 'v1')
+    const r1 = await staged.commit()
+    const c1 = r1.commit as string
+    staged.set('k', 'v2')
+    await staged.commit()
+
+    const branch = await staged.createBranch('B', { at: c1 })
+    expect(branch.currentCommit).toBe(c1)
+    expect(await branch.get('k')).toBe('v1')
+  })
+
+  it('checkout returns a Staged view at a historical commit', async () => {
+    const { staged } = await freshStaged()
+    staged.set('k', 'v1')
+    const r1 = await staged.commit()
+    const c1 = r1.commit as string
+    staged.set('k', 'v2')
+    await staged.commit()
+
+    const view = await staged.checkout(c1)
+    expect(view).not.toBeNull()
+    expect(view?.currentCommit).toBe(c1)
+    expect(await view?.get('k')).toBe('v1')
+  })
+
+  it('checkout returns null for an unknown commit hash', async () => {
+    const { staged } = await freshStaged()
+    expect(await staged.checkout('0'.repeat(64))).toBeNull()
+  })
+
+  it('listBranches reflects createBranch + deleteBranch', async () => {
+    const { staged } = await freshStaged()
+    expect(await staged.listBranches()).toEqual(['main'])
+    await staged.createBranch('B')
+    await staged.createBranch('C')
+    expect((await staged.listBranches()).sort()).toEqual(['B', 'C', 'main'])
+    await staged.deleteBranch('C')
+    expect((await staged.listBranches()).sort()).toEqual(['B', 'main'])
+  })
+
+  it('deleteBranch refuses to delete the current branch', async () => {
+    const { staged } = await freshStaged()
+    await expect(staged.deleteBranch('main')).rejects.toThrow(/current branch/)
+  })
+
+  it('peek reads decoded values from another branch without switching', async () => {
+    const { vk, staged } = await freshStaged()
+    staged.set('k', 'on-main')
+    await staged.commit()
+    await vk.createBranch('B')
+    const branchView = await staged.checkout(vk.currentCommit, { branch: 'B' })
+    branchView?.set('k', 'on-B')
+    await branchView?.commit()
+
+    // Stay on main; peek into B without switching.
+    expect(staged.currentBranch).toBe('main')
+    expect(await staged.peek('k', { branch: 'B' })).toBe('on-B')
+    expect(staged.currentBranch).toBe('main') // no side effect
+    expect(await staged.get('k')).toBe('on-main')
+  })
+
+  it('peek returns undefined for an absent key', async () => {
+    const { vk, staged } = await freshStaged()
+    await vk.createBranch('B')
+    expect(await staged.peek('missing', { branch: 'B' })).toBeUndefined()
+  })
+
+  it('history walks the commit chain backward', async () => {
+    const { staged } = await freshStaged()
+    const seen: string[] = []
+    staged.set('k', 1)
+    await staged.commit()
+    seen.push(staged.currentCommit)
+    staged.set('k', 2)
+    await staged.commit()
+    seen.push(staged.currentCommit)
+    staged.set('k', 3)
+    await staged.commit()
+    seen.push(staged.currentCommit)
+
+    const walked: string[] = []
+    for await (const c of staged.history()) walked.push(c)
+    // Newest → oldest, length includes the initial commit.
+    expect(walked.slice(0, 3)).toEqual([seen[2], seen[1], seen[0]])
+  })
+})

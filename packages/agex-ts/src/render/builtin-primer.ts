@@ -109,6 +109,8 @@ Any terminator ends the current task.  **Prints in the same action as a terminat
 
 The task input is available as the \`inputs\` variable in \`ts_action\`.  Its shape is described in the per-task instructions (the user message that initiated the task).  Don't reach for a JSON parse of the prompt — the values are already deserialized objects ready to use.
 
+\`inputs\` is bound only inside \`ts_action\` itself.  Helpers under \`/helpers/\` are regular modules — they don't inherit \`ts_action\`'s ambient bindings (\`inputs\`, \`taskSuccess\`, \`fs\`, \`cache\`, \`console\`).  Pass what they need as parameters: \`import { solve } from '/helpers/compute'; taskSuccess(solve(inputs))\`.
+
 ## Best Practices
 
 1. **Inspect data before assuming structure.** Check \`Object.keys(data)\`, \`Array.isArray(x)\`, etc. before indexing. Saves a turn of "TypeError" on data you haven't really looked at.

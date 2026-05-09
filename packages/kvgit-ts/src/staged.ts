@@ -161,6 +161,62 @@ export class Staged {
     this.cache.clear()
   }
 
+  // --- Navigation (canonical wrappers around `Versioned`) ---
+  //
+  // `Staged` caches reads. Branch/commit/HEAD changes invalidate that
+  // cache, so any operation that moves HEAD must go through these
+  // wrappers — not directly through `staged.versioned.*` — so the cache
+  // (and staged buffers, which can't safely cross a HEAD move) get
+  // cleared. Same shape as kvgit-py's `Staged.switch_branch` / `reset_to`
+  // / `refresh`. Calling `versioned.switchBranch` (etc.) directly is
+  // unsupported and will leave the read cache stale.
+
+  /**
+   * Switch to a different branch in-place. **Discards staged changes**
+   * — `updates`, `removals`, and the read cache are all cleared.
+   *
+   * Carrying uncommitted writes across a branch switch is a three-way-
+   * merge problem in disguise; the kvgit contract is to drop them
+   * rather than silently fold them into the new branch.
+   */
+  async switchBranch(name: string): Promise<void> {
+    await this.versioned.switchBranch(name)
+    this.updates.clear()
+    this.removals.clear()
+    this.cache.clear()
+  }
+
+  /**
+   * Reset HEAD to `commitHash` and discard staged changes.
+   *
+   * Returns `true` if the commit exists and the reset landed; `false`
+   * leaves staged state untouched. Mirrors kvgit-py's `reset_to` —
+   * cleanup only fires on success so a failed reset (unknown hash)
+   * doesn't silently throw away the caller's work.
+   */
+  async resetTo(commitHash: string): Promise<boolean> {
+    const ok = await this.versioned.resetTo(commitHash)
+    if (ok) {
+      this.updates.clear()
+      this.removals.clear()
+      this.cache.clear()
+    }
+    return ok
+  }
+
+  /**
+   * Reload from HEAD (picks up writes from other producers on the
+   * same branch). **Discards staged changes** — same reasoning as
+   * `switchBranch`: a refresh that landed concurrent commits can
+   * leave staged work unable to merge cleanly.
+   */
+  async refresh(): Promise<void> {
+    await this.versioned.refresh()
+    this.updates.clear()
+    this.removals.clear()
+    this.cache.clear()
+  }
+
   // --- Merge fn registry (user-level: decoded values) ---
 
   setMergeFn<T = unknown>(key: string, fn: MergeFn<T>): void {

@@ -10,6 +10,7 @@ export default defineConfig({
     'src/llm/dummy.ts',
     'src/runtime/eval.ts',
     'src/runtime/module-loader.ts',
+    'src/runtime/wrap-fs.ts',
     'src/render/index.ts',
     'src/providers/index.ts',
   ],

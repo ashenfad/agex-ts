@@ -493,6 +493,70 @@ describe('workerRuntime — fs / cache bridge', () => {
       value: [0, 2, 4, 6, 8, 10, 12, 14, 16, 18],
     })
   })
+
+  // The agent sees `fs` through a Node-fs-style ergonomic wrapper that
+  // adds string/encoding overloads on read/write. Bytes-form still
+  // works unchanged. Same wrapper as eval runtime — these tests
+  // confirm the wrapping reaches the agent through the bridge proxy.
+
+  it('fs.read(path, "utf8") returns a string (matches Node fs.readFile)', async () => {
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const ctx = makeCtx()
+    await ctx.fs.write('/data.csv', new TextEncoder().encode('a,b,c\n1,2,3\n'))
+    const code = `
+      const text = await fs.read('/data.csv', 'utf8')
+      const lines = text.trim().split('\\n')
+      taskSuccess(lines)
+    `
+    const result = await rt.execute(code, ctx)
+    expect(result.outcome).toEqual({ kind: 'success', value: ['a,b,c', '1,2,3'] })
+  })
+
+  it('fs.read(path) (no encoding) still returns Uint8Array', async () => {
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const ctx = makeCtx()
+    await ctx.fs.write('/x.bin', new Uint8Array([1, 2, 3, 4]))
+    const code = `
+      const bytes = await fs.read('/x.bin')
+      taskSuccess({ isBytes: bytes instanceof Uint8Array, length: bytes.length, first: bytes[0] })
+    `
+    const result = await rt.execute(code, ctx)
+    expect(result.outcome).toEqual({
+      kind: 'success',
+      value: { isBytes: true, length: 4, first: 1 },
+    })
+  })
+
+  it('fs.write(path, string) encodes UTF-8 and writes bytes', async () => {
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const ctx = makeCtx()
+    const code = `await fs.write('/note.txt', 'hello world'); taskSuccess(null)`
+    await rt.execute(code, ctx)
+    const bytes = await ctx.fs.read('/note.txt')
+    expect(new TextDecoder().decode(bytes)).toBe('hello world')
+  })
+
+  it('fs.read with an unsupported encoding throws a clear error', async () => {
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const ctx = makeCtx()
+    await ctx.fs.write('/x.txt', new TextEncoder().encode('hello'))
+    const code = `
+      try {
+        await fs.read('/x.txt', 'base64')
+        taskSuccess('unreached')
+      } catch (e) {
+        taskSuccess({ name: e.name, message: e.message })
+      }
+    `
+    const result = await rt.execute(code, ctx)
+    expect(result.outcome.kind).toBe('success')
+    const value = (result.outcome as { kind: 'success'; value: { message: string } }).value
+    expect(value.message).toMatch(/unsupported encoding 'base64'/)
+  })
 })
 
 describe('workerRuntime — fn / namespace bridge', () => {

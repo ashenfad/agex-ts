@@ -161,15 +161,23 @@ export class Staged {
     this.cache.clear()
   }
 
-  // --- Navigation (canonical wrappers around `Versioned`) ---
+  // --- Navigation + inspection (canonical wrappers around `Versioned`) ---
   //
-  // `Staged` caches reads. Branch/commit/HEAD changes invalidate that
-  // cache, so any operation that moves HEAD must go through these
-  // wrappers — not directly through `staged.versioned.*` — so the cache
-  // (and staged buffers, which can't safely cross a HEAD move) get
-  // cleared. Same shape as kvgit-py's `Staged.switch_branch` / `reset_to`
-  // / `refresh`. Calling `versioned.switchBranch` (etc.) directly is
-  // unsupported and will leave the read cache stale.
+  // The full Versioned navigation surface is mirrored on `Staged` so
+  // callers don't need to reach through `staged.versioned.*` for any
+  // common operation. Two reasons:
+  //
+  // 1. Operations that move HEAD (switchBranch / resetTo / refresh)
+  //    must clear `Staged`'s read cache, otherwise post-move reads
+  //    return stale values. Reaching through `versioned` skips that.
+  // 2. Operations that fork a new HEAD (createBranch / checkout)
+  //    return a new `Versioned`. Wrapping it in `Staged` here keeps
+  //    the encoder/decoder aligned — callers stay in `Staged`-land
+  //    instead of constructing fresh `Staged`s by hand.
+  //
+  // Same shape as kvgit-py's `Staged` API. The `versioned` property
+  // remains exposed for raw bytes-level access, but for branch / commit
+  // navigation use these wrappers.
 
   /**
    * Switch to a different branch in-place. **Discards staged changes**
@@ -215,6 +223,62 @@ export class Staged {
     this.updates.clear()
     this.removals.clear()
     this.cache.clear()
+  }
+
+  /**
+   * Fork a new branch off `at` (defaults to current HEAD). Returns a
+   * fresh `Staged` wrapping the new branch's `Versioned`, with the
+   * same encoder/decoder as this one. User merge fns are NOT
+   * propagated — register them on the returned instance if needed.
+   */
+  async createBranch(name: string, opts: { at?: string } = {}): Promise<Staged> {
+    const v = await this.versioned.createBranch(name, opts)
+    return new Staged(v, { encoder: this.encoder, decoder: this.decoder })
+  }
+
+  /**
+   * Open a `Staged` view at a specific commit (read-only timeline
+   * navigation). Returns `null` if the commit doesn't exist. Optional
+   * `branch` follows the underlying `Versioned.checkout` semantics.
+   */
+  async checkout(commitHash: string, opts: { branch?: string } = {}): Promise<Staged | null> {
+    const v = await this.versioned.checkout(commitHash, opts)
+    if (v === null) return null
+    return new Staged(v, { encoder: this.encoder, decoder: this.decoder })
+  }
+
+  /** List all branch names in the underlying store. */
+  async listBranches(): Promise<string[]> {
+    return this.versioned.listBranches()
+  }
+
+  /**
+   * Delete a branch by name. Cannot delete the current branch — the
+   * underlying `Versioned` enforces this and throws.
+   */
+  async deleteBranch(name: string): Promise<void> {
+    return this.versioned.deleteBranch(name)
+  }
+
+  /**
+   * Read a key from another branch's HEAD without switching to it.
+   * Returns the decoded value, or `undefined` if the key is absent.
+   *
+   * Doesn't touch the read cache (the cache is keyed by *this* branch).
+   */
+  async peek<T = unknown>(key: string, opts: { branch: string }): Promise<T | undefined> {
+    const raw = await this.versioned.peek(key, opts)
+    if (raw === null) return undefined
+    return this.decoder(raw) as T
+  }
+
+  /**
+   * Walk the commit chain from `commitHash` (or current HEAD) backward
+   * through history. With `allParents: true`, also walks merge
+   * second-parents. Pure pass-through to the underlying `Versioned`.
+   */
+  history(commitHash?: string, opts: { allParents?: boolean } = {}): AsyncIterable<string> {
+    return this.versioned.history(commitHash, opts)
   }
 
   // --- Merge fn registry (user-level: decoded values) ---

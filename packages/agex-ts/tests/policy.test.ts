@@ -24,6 +24,102 @@ describe('PolicyBuilder — registerFn', () => {
   })
 })
 
+describe('PolicyBuilder — name validation routing (host-bound vs URL-shipped)', () => {
+  // Host-bound names land as JS scope bindings + AsyncFunction
+  // parameter names, so they must be valid JS identifiers.
+  // URL-shipped names are import specifiers compared by string
+  // equality; npm-style specifiers (`apache-arrow`, `@scope/pkg`)
+  // must be accepted so the agent's `import { ... } from
+  // 'apache-arrow'` matches its training data verbatim.
+
+  it('host-bound: still rejects non-identifier names', () => {
+    const p = new PolicyBuilder()
+    expect(() => p.registerFn('apache-arrow', { fn: () => null })).toThrow(
+      /must match.*JS identifier/,
+    )
+    expect(() => p.registerCls('apache-arrow', { cls: class {} })).toThrow(
+      /must match.*JS identifier/,
+    )
+    expect(() => p.registerNamespace('apache-arrow', { target: {} })).toThrow(
+      /must match.*JS identifier/,
+    )
+  })
+
+  it('URL-shipped: accepts npm-style hyphenated names', () => {
+    const p = new PolicyBuilder()
+    expect(() =>
+      p.registerNamespace('apache-arrow', { url: 'https://example.com/arrow.js' }),
+    ).not.toThrow()
+    expect(p.snapshot().namespaces.get('apache-arrow')?.kind).toBe('namespace')
+  })
+
+  it('URL-shipped: accepts @scope/pkg names', () => {
+    const p = new PolicyBuilder()
+    expect(() =>
+      p.registerNamespace('@duckdb/duckdb-wasm', { url: 'https://example.com/duckdb.js' }),
+    ).not.toThrow()
+    expect(p.snapshot().namespaces.get('@duckdb/duckdb-wasm')?.kind).toBe('namespace')
+  })
+
+  it('URL-shipped: accepts pkg/subpath names', () => {
+    const p = new PolicyBuilder()
+    expect(() =>
+      p.registerNamespace('lodash/fp', { url: 'https://example.com/lodash-fp.js' }),
+    ).not.toThrow()
+  })
+
+  it('URL-shipped: accepts dotted names', () => {
+    const p = new PolicyBuilder()
+    expect(() =>
+      p.registerNamespace('my.module', { url: 'https://example.com/m.js' }),
+    ).not.toThrow()
+  })
+
+  it('URL-shipped: still rejects empty', () => {
+    const p = new PolicyBuilder()
+    expect(() => p.registerNamespace('', { url: 'https://example.com/m.js' })).toThrow(
+      /non-empty string/,
+    )
+  })
+
+  it('URL-shipped: rejects whitespace inside the name', () => {
+    const p = new PolicyBuilder()
+    expect(() =>
+      p.registerNamespace('apache arrow', { url: 'https://example.com/arrow.js' }),
+    ).toThrow(/no whitespace/)
+  })
+
+  it('URL-shipped: rejects leading/trailing whitespace', () => {
+    const p = new PolicyBuilder()
+    expect(() => p.registerNamespace(' arrow', { url: 'https://example.com/arrow.js' })).toThrow(
+      /no whitespace/,
+    )
+    expect(() => p.registerNamespace('arrow ', { url: 'https://example.com/arrow.js' })).toThrow(
+      /no whitespace/,
+    )
+  })
+
+  it('URL-shipped: rejects newlines and control characters', () => {
+    const p = new PolicyBuilder()
+    expect(() =>
+      p.registerNamespace('arrow\nbad', { url: 'https://example.com/arrow.js' }),
+    ).toThrow(/no whitespace|control characters/)
+    expect(() =>
+      p.registerNamespace('arrow\x00bad', { url: 'https://example.com/arrow.js' }),
+    ).toThrow(/control characters/)
+  })
+
+  it('routing covers fn / cls / namespace symmetrically', () => {
+    const p = new PolicyBuilder()
+    expect(() => p.registerFn('apache-arrow.fn', { url: 'https://example.com/x.js' })).not.toThrow()
+    expect(() =>
+      p.registerCls('apache-arrow.Cls', { url: 'https://example.com/x.js' }),
+    ).not.toThrow()
+    // Skill / terminal don't have a URL path — keep strict.
+    expect(() => p.registerSkill('apache-arrow.skill', '...')).toThrow(/JS identifier/)
+  })
+})
+
 describe('PolicyBuilder — name uniqueness across kinds', () => {
   it('rejects re-registration under any kind', () => {
     const p = new PolicyBuilder()

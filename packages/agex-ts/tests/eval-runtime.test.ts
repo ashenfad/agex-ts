@@ -486,6 +486,48 @@ describe('evalRuntime — URL-shipped registrations (lazy)', () => {
     )
     expect(result.outcome).toEqual({ kind: 'success', value: 21 })
   })
+
+  it('accepts npm-style hyphenated and scoped names end-to-end', async () => {
+    // Validates the rewriter handles non-identifier import specifiers
+    // through the full pipeline: registration accepts the name (gated
+    // by the URL-shipped name validator), the rewriter rewrites
+    // `import { ... } from 'apache-arrow'` to `await __load(...)`, and
+    // the named-binding destructure uses a sanitized temp variable.
+    // This is the agex-studio motivating case — agents writing the
+    // exact import statement they were trained on against npm names.
+    const r = evalRuntime()
+    const policy: Policy = {
+      ...emptyPolicy,
+      namespaces: new Map([
+        [
+          'apache-arrow',
+          {
+            kind: 'namespace' as const,
+            name: 'apache-arrow',
+            url: FIXTURE_URL,
+          },
+        ],
+        [
+          '@scope/lib',
+          {
+            kind: 'namespace' as const,
+            name: '@scope/lib',
+            url: FIXTURE_URL,
+          },
+        ],
+      ]),
+    }
+    await r.init(policy)
+    const result = await r.execute(
+      `
+      import { double } from 'apache-arrow'
+      import * as scoped from '@scope/lib'
+      taskSuccess([double(21), scoped.double(11)])
+    `,
+      makeContext(),
+    )
+    expect(result.outcome).toEqual({ kind: 'success', value: [42, 22] })
+  })
 })
 
 describe('evalRuntime — import syntax for registered names', () => {

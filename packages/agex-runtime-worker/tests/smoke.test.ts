@@ -1600,3 +1600,138 @@ describe('workerRuntime — import syntax for registered names', () => {
     expect(result.error?.message).toMatch(/import statement/)
   })
 })
+
+describe('workerRuntime — DuckDB-WASM bytes-shuttling pattern', () => {
+  // Validates the integration pattern recommended to embedders for
+  // hooking up DuckDB (and similar WASM-backed engines) without
+  // teaching them about agex's VFS:
+  //
+  //   1. Register a thin wrapper module via URL-shipped registration.
+  //      The wrapper lazily instantiates the engine on first use.
+  //   2. Agent reads input bytes from the agex VFS via `fs.read`.
+  //   3. Agent registers the bytes with DuckDB via
+  //      `db.registerFileBuffer(name, bytes)`.
+  //   4. Agent runs SQL against the virtual file.
+  //   5. (Optional) agent writes derived bytes back to the agex VFS.
+  //
+  // Validates the lazy URL-shipped registration end-to-end with a real
+  // multi-MB WASM bundle (downloaded from jsDelivr inside the test
+  // worker), AND that the agent's view of the integration is exactly
+  // the bytes-in / bytes-out shape we documented for the studio.
+
+  let disposers: Array<() => Promise<void>> = []
+  afterEach(async () => {
+    await Promise.all(disposers.map((d) => d()))
+    disposers = []
+  })
+
+  function runtime() {
+    // Generous timeout — first DuckDB load fetches a few MB of WASM
+    // + worker JS off jsDelivr and instantiates the engine.
+    const rt = workerRuntime({ workerUrl: TEST_WORKER_URL, timeoutMs: 60_000 })
+    disposers.push(() => rt.dispose())
+    return rt
+  }
+
+  const DUCKDB_FIXTURE_URL = new URL('./fixtures/duckdb-fixture.ts', import.meta.url).href
+
+  it('reads CSV from VFS, queries via DuckDB, returns aggregated rows', async () => {
+    const rt = runtime()
+    await rt.init(makePolicy({ namespaceUrls: { duckdb: { url: DUCKDB_FIXTURE_URL } } }))
+
+    // Seed a CSV in the VFS the agent will query.
+    const ctx = makeCtx()
+    await ctx.fs.mkdir('/data')
+    const csv = 'region,amount\nNORTH,10\nSOUTH,20\nNORTH,15\nWEST,5\nSOUTH,7\n'
+    await ctx.fs.write('/data/sales.csv', new TextEncoder().encode(csv))
+
+    // Agent code: the documented bytes-shuttling pattern. Reads
+    // VFS bytes, registers with DuckDB, runs SQL, returns rows.
+    const code = `
+        import { getDb } from 'duckdb'
+        const db = await getDb()
+        const conn = await db.connect()
+
+        // (a) Read input bytes from agex VFS.
+        const bytes = await fs.read('/data/sales.csv')
+
+        // (b) Register bytes with DuckDB as a virtual file.
+        await db.registerFileBuffer('sales.csv', bytes)
+
+        // (c) Query the virtual file. Cast SUM to INT so the BIGINT
+        //     comes back as a plain number (the test serializes the
+        //     row to JSON for the assertion).
+        const result = await conn.query(
+          "SELECT region, SUM(amount)::INT AS total FROM 'sales.csv' GROUP BY region ORDER BY region"
+        )
+        const rows = result.toArray().map((r) => r.toJSON())
+
+        await conn.close()
+        taskSuccess(rows)
+      `
+    const result = await rt.execute(code, ctx)
+    expect(result.error).toBeNull()
+    expect(result.outcome).toEqual({
+      kind: 'success',
+      value: [
+        { region: 'NORTH', total: 25 },
+        { region: 'SOUTH', total: 27 },
+        { region: 'WEST', total: 5 },
+      ],
+    })
+  }, 60_000)
+
+  it('round-trips: reads CSV from VFS, runs DuckDB query, writes derived parquet back to VFS', async () => {
+    const rt = runtime()
+    await rt.init(makePolicy({ namespaceUrls: { duckdb: { url: DUCKDB_FIXTURE_URL } } }))
+
+    const ctx = makeCtx()
+    await ctx.fs.mkdir('/data')
+    await ctx.fs.mkdir('/results')
+    const csv = 'region,amount\nNORTH,10\nSOUTH,20\nNORTH,15\n'
+    await ctx.fs.write('/data/sales.csv', new TextEncoder().encode(csv))
+
+    // Agent code: input from VFS → DuckDB query → derived parquet
+    // → DuckDB virtual file → bytes back out to VFS. The full
+    // bytes-in / bytes-out cycle.
+    const code = `
+        import { getDb } from 'duckdb'
+        const db = await getDb()
+        const conn = await db.connect()
+
+        const inBytes = await fs.read('/data/sales.csv')
+        await db.registerFileBuffer('sales.csv', inBytes)
+
+        // Materialize a derived parquet inside DuckDB's virtual fs.
+        await conn.query(
+          "COPY (SELECT region, SUM(amount)::INT AS total FROM 'sales.csv' GROUP BY region) TO 'out.parquet' (FORMAT PARQUET)"
+        )
+
+        // Pull the derived bytes back into the agent's hands.
+        const outBytes = await db.copyFileToBuffer('out.parquet')
+
+        // Persist to agex VFS — kvgit-versioned, chaptering-aware.
+        await fs.write('/results/out.parquet', outBytes)
+
+        await conn.close()
+        taskSuccess({ wroteBytes: outBytes.length })
+      `
+    const result = await rt.execute(code, ctx)
+    expect(result.error).toBeNull()
+    expect(result.outcome.kind).toBe('success')
+    const value = (result.outcome as { kind: 'success'; value: { wroteBytes: number } }).value
+    // Parquet for 3 rows + header is small but non-trivial; just
+    // sanity that something landed.
+    expect(value.wroteBytes).toBeGreaterThan(0)
+
+    // Verify the file is actually in the VFS — embedder-side proof
+    // that the bytes-shuttling pattern persists derived data.
+    const persisted = await ctx.fs.read('/results/out.parquet')
+    expect(persisted.length).toBe(value.wroteBytes)
+    // Parquet magic number ('PAR1') at the start.
+    expect(persisted[0]).toBe(0x50) // 'P'
+    expect(persisted[1]).toBe(0x41) // 'A'
+    expect(persisted[2]).toBe(0x52) // 'R'
+    expect(persisted[3]).toBe(0x31) // '1'
+  }, 60_000)
+})

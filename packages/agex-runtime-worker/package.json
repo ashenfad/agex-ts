@@ -27,6 +27,7 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@duckdb/duckdb-wasm": "1.33.1-dev45.0",
     "@vitest/browser": "^2.1.9",
     "agex-ts": "workspace:*",
     "playwright": "^1.59.1",

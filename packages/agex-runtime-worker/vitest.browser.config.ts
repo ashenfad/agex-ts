@@ -17,4 +17,10 @@ export default defineConfig({
       headless: true,
     },
   },
+  // Pre-bundle DuckDB-WASM (used by tests/fixtures/duckdb-fixture.ts)
+  // so the dep optimizer doesn't kick in mid-test and reload the page,
+  // which Vitest warns about and can cause flaky test ordering.
+  optimizeDeps: {
+    include: ['@duckdb/duckdb-wasm'],
+  },
 })

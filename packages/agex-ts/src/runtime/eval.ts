@@ -58,52 +58,72 @@ const AsyncFunction = Object.getPrototypeOf(async () => undefined).constructor a
 export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
   let policy: Policy | null = null
   const timeoutMs = opts.timeoutMs ?? 5000
-  // Cache for URL-shipped registrations. evalRuntime is same-realm,
-  // so the host's own `import()` resolves the URL and the resulting
-  // export is injected directly into the agent's scope — no
-  // serialization, no realm boundary. Populated at `init()`,
-  // consumed at every `execute()`.
-  const urlRefs = new Map<string, unknown>()
+  // URL-shipped registration specs, keyed by registered name.
+  // Populated at `init()` but NOT imported — the dynamic `import()`
+  // fires on first reference via `__load(name)` from the agent's
+  // emitted code, mirroring workerRuntime's lazy semantics.
+  const urlSpecs = new Map<string, { url: string; key: string | undefined }>()
+  // Per-name resolved-or-in-flight promise cache. First reader stashes;
+  // concurrent readers await the same promise. Failures wrap in a plain
+  // Error named `'ImportError'` so the agent's recoverable-error path
+  // emits a readable `💥 ImportError: Could not load module 'X' (URL): ...`
+  // line on the next turn.
+  const urlPromiseCache = new Map<string, Promise<unknown>>()
+
+  function __load(name: string): Promise<unknown> {
+    const cached = urlPromiseCache.get(name)
+    if (cached !== undefined) return cached
+    const spec = urlSpecs.get(name)
+    if (spec === undefined) {
+      return Promise.reject(
+        new Error(`evalRuntime: __load('${name}') called for an unregistered URL-shipped name`),
+      )
+    }
+    const p = (async () => {
+      try {
+        const mod = (await import(spec.url)) as Record<string, unknown>
+        const value = spec.key === undefined ? mod : mod[spec.key]
+        if (value === undefined) {
+          const e = new Error(
+            `Could not load registered module '${name}' (${spec.url}): module has no '${spec.key}' export (named exports: ${Object.keys(mod).join(', ') || '<none>'})`,
+          )
+          e.name = 'ImportError'
+          throw e
+        }
+        return value
+      } catch (raw) {
+        if (raw instanceof Error && raw.name === 'ImportError') throw raw
+        const reason = raw instanceof Error ? raw.message : String(raw)
+        const wrapped = new Error(
+          `Could not load registered module '${name}' (${spec.url}): ${reason}`,
+        )
+        wrapped.name = 'ImportError'
+        throw wrapped
+      }
+    })()
+    urlPromiseCache.set(name, p)
+    p.catch(() => undefined)
+    return p
+  }
 
   return {
     async init(p: Policy): Promise<void> {
       policy = p
-      // Resolve any URL-shipped registrations up front. Failure
-      // propagates from `init()` so the agent loop can surface it
-      // on the host's first `await rt.init(...)` rather than on
-      // the next execute (which would be more confusing).
-      const tasks: Promise<void>[] = []
-      // `key === undefined` is the namespace whole-module signal —
-      // mirrors workerRuntime's wire shape after `buildConfigure`
-      // resolves fn / cls defaults to the registration name. Using
-      // the same convention here keeps the two runtimes
-      // semantically identical.
-      const queue = (name: string, url: string, key: string | undefined): void => {
-        tasks.push(
-          (async () => {
-            const mod = (await import(url)) as Record<string, unknown>
-            const value = key === undefined ? mod : mod[key]
-            if (value === undefined) {
-              throw new Error(
-                `evalRuntime URL import '${url}': module has no '${key}' export (named exports: ${Object.keys(mod).join(', ') || '<none>'})`,
-              )
-            }
-            urlRefs.set(name, value)
-          })(),
-        )
-      }
-      // fn / cls default to plucking by the registration name;
-      // namespace defaults to the whole module.
+      urlSpecs.clear()
+      urlPromiseCache.clear()
+      // Record specs only — no imports fire here. Same `key`
+      // convention as workerRuntime's `buildConfigure`: namespace
+      // defaults to the whole module (key === undefined); fn / cls
+      // default to plucking by the registration name.
       for (const [name, reg] of p.fns) {
-        if (reg.url !== undefined) queue(name, reg.url, reg.export ?? name)
+        if (reg.url !== undefined) urlSpecs.set(name, { url: reg.url, key: reg.export ?? name })
       }
       for (const [name, reg] of p.namespaces) {
-        if (reg.url !== undefined) queue(name, reg.url, reg.export)
+        if (reg.url !== undefined) urlSpecs.set(name, { url: reg.url, key: reg.export })
       }
       for (const [name, reg] of p.classes) {
-        if (reg.url !== undefined) queue(name, reg.url, reg.export ?? name)
+        if (reg.url !== undefined) urlSpecs.set(name, { url: reg.url, key: reg.export ?? name })
       }
-      await Promise.all(tasks)
     },
 
     async execute(code: string, ctx: ExecuteContext): Promise<ExecResult> {
@@ -142,20 +162,26 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
         fs: ctx.fs,
         console: captureConsole,
         inputs: ctx.inputs,
+        // Lazy loader for URL-shipped registrations. The agent's
+        // emitted code calls this via the rewriter's
+        // `await __load('name')` expansion of
+        // `import { ... } from 'name'`. First call per name per
+        // runtime lifetime fires the dynamic import; subsequent calls
+        // hit the per-name promise cache.
+        __load,
       }
-      // Host-bound registrations inject their live JS reference;
-      // URL-shipped ones inject the value resolved at `init()` time.
-      // The two paths are mutually exclusive per registration (see
-      // `PolicyBuilder.assertHostXorUrl`).
+      // Host-bound registrations inject their live JS reference.
+      // URL-shipped names are NOT injected here — the rewriter routes
+      // their imports through `__load(name)` (see `urlSpecs` / `__load`
+      // above) so the dynamic `import()` only fires on first reference.
       for (const [name, reg] of policy.fns) {
-        injected[name] = reg.fn ?? urlRefs.get(name)
+        if (reg.fn !== undefined) injected[name] = reg.fn
       }
       for (const [name, reg] of policy.namespaces) {
-        injected[name] = reg.target ?? urlRefs.get(name)
+        if (reg.target !== undefined) injected[name] = reg.target
       }
-      // Classes are exposed as constructors at their registered name.
       for (const [name, reg] of policy.classes) {
-        injected[name] = reg.cls ?? urlRefs.get(name)
+        if (reg.cls !== undefined) injected[name] = reg.cls
       }
 
       const start = performance.now()
@@ -178,12 +204,28 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
         // names are flowed to helpers via `__registered`. The
         // agent's main code uses globals (already in `injected`)
         // so registered-name imports just rebind in main scope.
+        // Host-bound registrations flow to helpers via `__registered`
+        // (sync map lookup). URL-shipped names are NOT in this map —
+        // their imports rewrite to `await __load('name')`, which
+        // closes over the eval runtime's lazy loader.
         const registeredValues = new Map<string, unknown>()
-        for (const [n, reg] of policy.fns) registeredValues.set(n, reg.fn ?? urlRefs.get(n))
-        for (const [n, reg] of policy.namespaces)
-          registeredValues.set(n, reg.target ?? urlRefs.get(n))
-        for (const [n, reg] of policy.classes) registeredValues.set(n, reg.cls ?? urlRefs.get(n))
-        const prepared = await prepareScript(erased, ctx.fs, registeredValues)
+        for (const [n, reg] of policy.fns) {
+          if (reg.fn !== undefined) registeredValues.set(n, reg.fn)
+        }
+        for (const [n, reg] of policy.namespaces) {
+          if (reg.target !== undefined) registeredValues.set(n, reg.target)
+        }
+        for (const [n, reg] of policy.classes) {
+          if (reg.cls !== undefined) registeredValues.set(n, reg.cls)
+        }
+        // Pass URL-shipped names + the lazy loader so the rewriter
+        // emits `await __load(...)` for these and helpers thread
+        // `__load` through their parameter list.
+        const urlNames = new Set(urlSpecs.keys())
+        const prepared = await prepareScript(erased, ctx.fs, registeredValues, {
+          urlNames,
+          load: __load,
+        })
         injected.__modules = prepared.modules
         const names = Object.keys(injected)
         // Append a sourceURL pragma so AsyncFunction-emitted stack

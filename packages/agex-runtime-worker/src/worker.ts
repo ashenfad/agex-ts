@@ -605,16 +605,19 @@ let activeBridge: BridgeChannel | null = null
  *  (matches the empty-policy case). */
 let configured: ConfigureMessage | null = null
 
-/** Loaded modules from URL-shipped registrations, keyed by the
- *  registered name. Populated lazily — `handleConfigure` kicks off
- *  imports, and `urlReady` resolves once they all complete (or
- *  rejects if any fail). The execute handler awaits this before
- *  building the agent scope so URL-shipped names are guaranteed
- *  available. Cleared and rebuilt on respawn (configure may
- *  arrive again with the same payload, but we re-import in case
- *  the host changed something). */
-const urlModuleRefs = new Map<string, unknown>()
-let urlReady: Promise<void> = Promise.resolve()
+/** URL-shipped registration specs, keyed by registered name. Populated
+ *  at configure time but NOT imported — the dynamic `import()` fires
+ *  on first reference via `__load(name)` from the agent's emitted code.
+ *  Cleared and rebuilt on respawn. */
+const urlSpecs = new Map<string, { url: string; export?: string }>()
+
+/** Per-name resolved-or-in-flight promise cache. First reader stashes
+ *  the promise; concurrent readers await the same one (single fetch).
+ *  Cleared on respawn alongside `urlSpecs`. Failures are wrapped in
+ *  an `Error` named `'ImportError'` so the agent loop's recoverable-
+ *  error path renders a `💥 ImportError: Could not load registered
+ *  module 'X' (URL): <reason>` line on the next turn. */
+const urlPromiseCache = new Map<string, Promise<unknown>>()
 
 /** Build a raw `import(url)` indirection that bypasses any
  *  bundler-side dynamic-import wrapping (notably Vite's
@@ -627,42 +630,74 @@ let urlReady: Promise<void> = Promise.resolve()
  *  cost is paid at boot, not per import. */
 const rawImport = new Function('url', 'return import(url)') as (url: string) => Promise<unknown>
 
-/** Process a `configure` message: store the payload + kick off
- *  dynamic imports for any URL-shipped registrations. We resolve
- *  one Promise per import in parallel (`Promise.all`) and surface
- *  failure on `urlReady` so a later `execute` sees a clean
- *  rejection rather than a hung await on a name that never
- *  populates. */
+/** Process a `configure` message: store the payload + record the
+ *  URL-shipped registration specs. No imports fire here — the actual
+ *  `import()` happens on first reference from the agent's emitted code
+ *  (via `__load(name)`). Per-name promise cache is cleared so a respawn
+ *  re-imports cleanly. */
 function handleConfigure(msg: ConfigureMessage): void {
   configured = msg
-  urlModuleRefs.clear()
-  if (msg.urlModules.length === 0) {
-    urlReady = Promise.resolve()
-    return
+  urlSpecs.clear()
+  urlPromiseCache.clear()
+  for (const spec of msg.urlModules) {
+    urlSpecs.set(spec.name, {
+      url: spec.url,
+      ...(spec.export !== undefined && { export: spec.export }),
+    })
   }
-  urlReady = Promise.all(
-    msg.urlModules.map(async (spec) => {
+}
+
+/** Lazy module loader injected into the agent's scope (and passed to
+ *  helpers). First call for a name fires the dynamic import; concurrent
+ *  callers await the same in-flight promise; later calls hit the cache.
+ *
+ *  Failures are wrapped in an `Error` named `'ImportError'` carrying
+ *  the registered name + URL + underlying message, so the agent's
+ *  recoverable-error path emits a useful `💥 ImportError: ...` line
+ *  rather than a bare `TypeError: Failed to fetch...`. */
+function __load(name: string): Promise<unknown> {
+  const cached = urlPromiseCache.get(name)
+  if (cached !== undefined) return cached
+  const spec = urlSpecs.get(name)
+  if (spec === undefined) {
+    // Unreachable in normal operation — the rewriter only emits
+    // `__load(name)` for names known to the policy as URL-shipped.
+    // Defend with a clear error if it ever does fire.
+    return Promise.reject(
+      new Error(`workerRuntime: __load('${name}') called for an unregistered URL-shipped name`),
+    )
+  }
+  const p = (async () => {
+    try {
       const mod = (await rawImport(spec.url)) as Record<string, unknown>
-      // Missing `export` on the wire means "use the whole module
-      // namespace object" — agex-runtime-worker.ts buildConfigure
-      // resolves the fn / cls default to the registration name
-      // before posting, so an absent field here always carries the
-      // namespace whole-module semantic. With an export set, pluck
-      // it (the same code path serves explicit `export: 'Vec'` and
-      // `export: 'default'`).
       const value = spec.export === undefined ? mod : mod[spec.export]
       if (value === undefined) {
-        throw new Error(
-          `workerRuntime URL import '${spec.url}': module has no '${spec.export}' export (named exports: ${Object.keys(mod).join(', ') || '<none>'})`,
+        const e = new Error(
+          `Could not load registered module '${name}' (${spec.url}): module has no '${spec.export}' export (named exports: ${Object.keys(mod).join(', ') || '<none>'})`,
         )
+        e.name = 'ImportError'
+        throw e
       }
-      urlModuleRefs.set(spec.name, value)
-    }),
-  ).then(() => undefined)
-  // Tag a `.catch` that swallows the unhandled-rejection warning
-  // when nothing's awaiting yet — the actual error still surfaces
-  // through the next `await urlReady` in `handleExecute`.
-  urlReady.catch(() => undefined)
+      return value
+    } catch (raw) {
+      // Already wrapped → re-throw as-is so the cached rejection
+      // stays informative across retries.
+      if (raw instanceof Error && raw.name === 'ImportError') throw raw
+      const reason = raw instanceof Error ? raw.message : String(raw)
+      const wrapped = new Error(
+        `Could not load registered module '${name}' (${spec.url}): ${reason}`,
+      )
+      wrapped.name = 'ImportError'
+      throw wrapped
+    }
+  })()
+  urlPromiseCache.set(name, p)
+  // Defang the unhandled-rejection warning if nothing has awaited
+  // the cached promise yet (e.g. the agent destructured but never
+  // referenced the value). The next caller still gets the real
+  // rejection on its `await __load(name)`.
+  p.catch(() => undefined)
+  return p
 }
 
 async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' }>): Promise<void> {
@@ -681,24 +716,6 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
   const bridge = new BridgeChannel(executeId)
   activeBridge = bridge
 
-  // Block until URL-shipped imports have all resolved (or one
-  // failed). This is the natural place to await — it lets `execute`
-  // messages arrive during boot's import phase and just queue
-  // behind. If `urlReady` rejects, surface as a normal execute
-  // error result so the agent loop sees a clean failure.
-  try {
-    await urlReady
-  } catch (e) {
-    activeBridge = null
-    post({
-      type: 'result',
-      executeId,
-      outcome: { kind: 'continue' },
-      error: serializeError(e),
-    })
-    return
-  }
-
   const injected: Record<string, unknown> = {
     taskSuccess,
     taskFail,
@@ -712,6 +729,12 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
     // eval-runtime behavior so `const value = inputs` never throws a
     // ReferenceError just because the task had no inputs.
     inputs: msg.inputs,
+    // Lazy loader for URL-shipped registrations. The agent's emitted
+    // code calls this via the rewriter's `await __load('name')`
+    // expansion of `import { ... } from 'name'`. First call per name
+    // per worker lifetime fires the dynamic import; subsequent calls
+    // hit the per-name promise cache.
+    __load,
   }
 
   if (configured !== null) {
@@ -738,29 +761,22 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
       if (cls.name in injected) continue
       injected[cls.name] = bridge.buildClass(cls)
     }
-    // URL-shipped registrations: the dynamic imports are already
-    // resolved (the `await urlReady` above blocked until they
-    // were). Inject the live module exports directly — no proxy,
-    // no RPC. Subclassing, `instanceof`, static access, etc. all
-    // just work because these are real worker-realm references.
-    for (const [name, value] of urlModuleRefs) {
-      if (name in injected) continue
-      injected[name] = value
-    }
+    // URL-shipped registrations are NOT injected as scope names —
+    // the rewriter routes their imports through `__load(name)` so
+    // the dynamic `import()` only fires on first reference. See
+    // `__load` and `urlSpecs` above.
   }
 
   // Evaluate any agent-authored helpers shipped in the execute
   // message. Each helper body is `async function(__exports,
-  // __modules, __registered)` — produced by `prepareScriptForWire`
-  // on the host side. We iterate in dependency order (the host
-  // emits them that way), populate a local `__modules` map, then
-  // pass it to the user's main code (which has had its imports
-  // rewritten into `__modules['/path']` / `__registered['name']`
-  // lookups). The `__registered` map mirrors the agent's main
-  // scope: registered fn / cls / namespace stubs (RPC bridges
-  // for host-bound, direct values for URL-shipped) under their
-  // registered names. Helpers reach them through the map; agent
-  // main code reaches them through the global injection.
+  // __modules, __registered, __load)` — produced by
+  // `prepareScriptForWire` on the host side. We iterate in dependency
+  // order (the host emits them that way), populate a local `__modules`
+  // map, then pass it to the user's main code (which has had its
+  // imports rewritten into `__modules['/path']` / `__registered['name']`
+  // / `await __load('name')` lookups). The `__registered` map holds
+  // host-bound fn / cls / namespace stubs (RPC bridges); URL-shipped
+  // names go through `__load` for lazy import.
   const __modules: Record<string, Readonly<Record<string, unknown>>> = {}
   const __registered: Record<string, unknown> = {}
   if (configured !== null) {
@@ -768,14 +784,13 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
     for (const ns of configured.namespaces)
       __registered[ns.name] = bridge.buildNamespace(ns.name, ns.members)
     for (const cls of configured.classes) __registered[cls.name] = bridge.buildClass(cls)
-    for (const [name, value] of urlModuleRefs) __registered[name] = value
   }
   if (msg.helpers !== undefined && msg.helpers.length > 0) {
     try {
       for (const h of msg.helpers) {
-        const fn = new AsyncFunction('__exports', '__modules', '__registered', h.body)
+        const fn = new AsyncFunction('__exports', '__modules', '__registered', '__load', h.body)
         const exports: Record<string, unknown> = {}
-        await fn(exports, __modules, __registered)
+        await fn(exports, __modules, __registered, __load)
         ;(__modules as Record<string, Readonly<Record<string, unknown>>>)[h.path] = exports
       }
     } catch (e) {

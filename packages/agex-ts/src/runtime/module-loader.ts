@@ -175,23 +175,48 @@ export async function prepareScript(
   source: string,
   fs: VirtualFileSystem,
   registeredValues: ReadonlyMap<string, unknown> = new Map(),
+  opts: PrepareScriptOptions = {},
 ): Promise<PreparedScript> {
   // Reuse the wire path then evaluate each helper locally — same
   // semantics as before, just a different output shape on the
   // far side.
-  const registeredNames = new Set(registeredValues.keys())
-  const prepared = await prepareScriptForWire(source, fs, tsBlankSpace, registeredNames)
+  //
+  // `registeredNames` is the UNION of host-bound (from registeredValues)
+  // and URL-shipped (from opts.urlNames). The rewriter recognizes both
+  // as legitimate import targets; the `urlNames` subset additionally
+  // routes through the lazy `__load` shape.
+  const urlNames = opts.urlNames ?? new Set<string>()
+  const registeredNames = new Set<string>([...registeredValues.keys(), ...urlNames])
+  const __load = opts.load ?? (async (name: string) => registeredValues.get(name))
+  const prepared = await prepareScriptForWire(source, fs, tsBlankSpace, registeredNames, urlNames)
   if (prepared.helpers.length === 0) return { code: prepared.code, modules: {} }
   const modules: Record<string, Readonly<Record<string, unknown>>> = {}
   const __registered: Record<string, unknown> = {}
   for (const [k, v] of registeredValues) __registered[k] = v
   for (const h of prepared.helpers) {
-    const fn = new AsyncFunction('__exports', '__modules', '__registered', h.body)
+    const fn = new AsyncFunction('__exports', '__modules', '__registered', '__load', h.body)
     const exports: Record<string, unknown> = {}
-    await fn(exports, modules, __registered)
+    await fn(exports, modules, __registered, __load)
     modules[h.path] = exports
   }
   return { code: prepared.code, modules }
+}
+
+/** Optional knobs for `prepareScript`. */
+export interface PrepareScriptOptions {
+  /** Names that are URL-shipped (lazy-loaded). The rewriter emits
+   *  `const x = await __load('name')` for these, instead of the
+   *  sync `__registered['name']` lookup used for host-bound names.
+   *  Omit when no URL-shipped registrations are in scope. */
+  readonly urlNames?: ReadonlySet<string>
+  /** Lazy module loader. Called by the agent's emitted code when
+   *  it imports a URL-shipped name; should return the resolved
+   *  module value (cached after first call). evalRuntime supplies
+   *  one that imports via Node's dynamic-import at first call;
+   *  `prepareScript`'s default is a synchronous lookup against
+   *  `registeredValues` so existing tests / single-realm callers
+   *  who pre-resolve still work. */
+  readonly load?: (name: string) => Promise<unknown>
 }
 
 /** Wire-friendly variant of `prepareScript`: same rewriting +
@@ -219,6 +244,7 @@ export async function prepareScriptForWire(
   fs: VirtualFileSystem,
   transform: (src: string) => string | Promise<string>,
   registeredNames: ReadonlySet<string> = new Set(),
+  urlNames: ReadonlySet<string> = new Set(),
 ): Promise<PreparedForWire> {
   const imports = parseImports(source)
   if (imports.length === 0) return { code: source, helpers: [] }
@@ -254,7 +280,7 @@ export async function prepareScriptForWire(
       await walk(sub.path, dirOfHelper)
     }
 
-    const body = compileHelperBody(stripped, sourcePath, dirOfHelper, registeredNames)
+    const body = compileHelperBody(stripped, sourcePath, dirOfHelper, registeredNames, urlNames)
     helpers.push({ path: resolved, body })
     compiled.add(resolved)
     // Aliases: if the file was found with an extension, register
@@ -297,7 +323,9 @@ export async function prepareScriptForWire(
         out = `${out.slice(0, imp.start)}/* re-export skipped */${out.slice(imp.end)}`
         continue
       }
-      const replacement = rewriteAsRegisteredAccess(imp.binding, imp.path)
+      const replacement = urlNames.has(imp.path)
+        ? rewriteAsUrlLoad(imp.binding, imp.path)
+        : rewriteAsRegisteredAccess(imp.binding, imp.path)
       out = out.slice(0, imp.start) + replacement + out.slice(imp.end)
     }
   }
@@ -342,6 +370,7 @@ function compileHelperBody(
   sourcePath: string,
   dirOfHelper: string,
   registeredNames: ReadonlySet<string>,
+  urlNames: ReadonlySet<string>,
 ): string {
   // Pass 1: rewrite re-exports first (`export { x } from '/path'`,
   // `export * from '/path'`). They become `__exports.X = __modules['/path'].X`
@@ -365,7 +394,9 @@ function compileHelperBody(
       continue
     }
     if (registeredNames.has(imp.path)) {
-      const replacement = rewriteAsRegisteredAccess(imp.binding, imp.path, true)
+      const replacement = urlNames.has(imp.path)
+        ? rewriteAsUrlLoad(imp.binding, imp.path)
+        : rewriteAsRegisteredAccess(imp.binding, imp.path, true)
       body = body.slice(0, imp.start) + replacement + body.slice(imp.end)
     }
   }
@@ -600,6 +631,58 @@ function parseNamedEntries(inside: string): ReadonlyArray<{ source: string; loca
  *  This bridges the LLM reflex of writing `import` statements
  *  with the agex injection model. The agent can write either
  *  the named-import form or just use the global; both work. */
+/** Rewrite an `import` of a URL-shipped registered name to a lazy
+ *  `await __load('name')` call. Same shape regardless of helper /
+ *  main-code context: `__load` is injected into both, and the agent's
+ *  main code runs in an AsyncFunction so top-level `await` is valid.
+ *
+ *  No "elide" path here — URL-shipped names are NOT injected as
+ *  globals (the whole point of the lazy model is to defer the import
+ *  until first reference). Every import becomes an explicit load
+ *  call.
+ *
+ *  See `rewriteAsRegisteredAccess` for the host-bound counterpart;
+ *  the difference is exactly: sync property access vs async call. */
+function rewriteAsUrlLoad(binding: ImportBinding, name: string): string {
+  const target = `(await __load(${JSON.stringify(name)}))`
+  switch (binding.kind) {
+    case 'sideEffect':
+      return `await __load(${JSON.stringify(name)});`
+    case 'namespace':
+      return `const ${binding.local} = ${target};`
+    case 'default':
+      return `const ${binding.local} = ${target}.default;`
+    case 'named': {
+      if (binding.entries.length === 0) return `await __load(${JSON.stringify(name)});`
+      // Self-named import (`import { Vec } from 'Vec'`): the URL spec's
+      // resolved value IS the thing for cls / fn registrations
+      // (registered value isn't wrapped in a module). Bind directly.
+      if (
+        binding.entries.length === 1 &&
+        binding.entries[0]?.source === name &&
+        binding.entries[0]?.local === name
+      ) {
+        return `const ${name} = ${target};`
+      }
+      const dest = binding.entries
+        .map((e) => (e.source === e.local ? e.source : `${e.source}: ${e.local}`))
+        .join(', ')
+      // Bind the loaded value once to a temporary so the destructuring
+      // doesn't fire two `__load` calls (which the cache dedups, but
+      // double-await is wasteful).
+      const tmp = `__url_${name.replace(/[^A-Za-z0-9_$]/g, '_')}`
+      return `const ${tmp} = ${target}; const { ${dest} } = ${tmp};`
+    }
+    case 'mixed': {
+      const named = binding.entries
+        .map((e) => (e.source === e.local ? e.source : `${e.source}: ${e.local}`))
+        .join(', ')
+      const tmp = `__url_${name.replace(/[^A-Za-z0-9_$]/g, '_')}`
+      return `const ${tmp} = ${target}; const ${binding.defaultLocal} = ${tmp}.default; const { ${named} } = ${tmp};`
+    }
+  }
+}
+
 function rewriteAsRegisteredAccess(
   binding: ImportBinding,
   name: string,

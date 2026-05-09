@@ -135,13 +135,34 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
       const captureConsole = makeConsoleCapture(outputs, opts.passConsole === true)
 
       let outcome: TaskOutcome = { kind: 'continue' }
+      // Per-execute "late terminator" slot. Recorded inside the wrapped
+      // taskSuccess/Fail/Clarify before the throw, so we still know
+      // what the agent meant even when the body has already settled
+      // (i.e., the call came from a non-awaited async path). After
+      // the body settles, `bodySettled` flips and the wrapped
+      // terminators stop throwing — they just record and return.
+      // This avoids the unhandled-rejection noise that would
+      // otherwise leak from the agent's orphaned promise chain into
+      // Node's process-level rejection logging (and into Vitest's
+      // unhandled-error tracking in tests).
+      let lateTerminator: TaskOutcome | null = null
+      let bodySettled = false
+      const recordLate = (slot: TaskOutcome): void => {
+        if (lateTerminator === null) lateTerminator = slot
+      }
       const taskSuccess = (value: unknown): never => {
+        recordLate({ kind: 'success', value })
+        if (bodySettled) return undefined as never
         throw new TaskFailErrorButForSuccess(value)
       }
       const taskFail = (message: string): never => {
+        recordLate({ kind: 'fail', message })
+        if (bodySettled) return undefined as never
         throw new TaskFailError(message)
       }
       const taskClarify = (message: string): never => {
+        recordLate({ kind: 'clarify', message })
+        if (bodySettled) return undefined as never
         throw new TaskClarifyError(message)
       }
       const viewImage = (image: { format: 'png' | 'jpeg' | 'webp'; data: string }): void => {
@@ -153,6 +174,17 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
       // `inputs` is the validated task input — stable across every
       // emission of a single task call, accessed via `inputs.field`
       // syntax in the agent code (per the builtin primer).
+      // Sync-flip flag for the bodySettled signal. Appended to the
+      // agent's code so that any microtask queued during body
+      // execution (e.g. an unawaited `generateReport()` whose
+      // resumption is already in the microtask queue) sees
+      // `bodySettled === true` by the time it gets to call a
+      // terminator. Without this, the resumption fires before the
+      // outer `await Promise.race` returns, the terminator throws,
+      // and we get an unhandled rejection from the orphan chain.
+      const __agexBodyDone = (): void => {
+        bodySettled = true
+      }
       const injected: Record<string, unknown> = {
         taskSuccess,
         taskFail,
@@ -169,6 +201,7 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
         // runtime lifetime fires the dynamic import; subsequent calls
         // hit the per-name promise cache.
         __load,
+        __agexBodyDone,
       }
       // Host-bound registrations inject their live JS reference.
       // URL-shipped names are NOT injected here — the rewriter routes
@@ -230,7 +263,11 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
         const names = Object.keys(injected)
         // Append a sourceURL pragma so AsyncFunction-emitted stack
         // traces refer to "<ts_action>" instead of "<anonymous>".
-        const annotated = `${prepared.code}\n//# sourceURL=<ts_action>\n`
+        // Also append the bodySettled-flip call as the last sync
+        // statement of the body — guarantees that any microtask
+        // queued during body execution (the orphaned async chain
+        // case) sees `bodySettled === true` when it resumes.
+        const annotated = `${prepared.code}\n;__agexBodyDone();\n//# sourceURL=<ts_action>\n`
         const fn = new AsyncFunction(...names, annotated)
         const userPromise = fn(...names.map((n) => injected[n]))
 
@@ -259,6 +296,24 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
         ctx.signal.removeEventListener('abort', linkedAbort)
       }
 
+      // Late-terminator detection: the AsyncFunction body settled
+      // cleanly with no terminator caught synchronously, but the
+      // agent may have invoked a terminator from an async path it
+      // didn't `await`. The injected `__agexBodyDone()` call at the
+      // end of the body has already flipped `bodySettled`, so the
+      // wrapped terminators record-without-throwing for any
+      // resumption that fires while we drain. Drain bounded so we
+      // don't spin forever on a real "agent intentionally fired-and-
+      // forgot" case.
+      if (outcome.kind === 'continue' && error === null && !ac.signal.aborted) {
+        for (let i = 0; i < 16 && lateTerminator === null; i++) {
+          await Promise.resolve()
+        }
+        if (lateTerminator !== null) {
+          error = makeMissingAwaitError(lateTerminator)
+        }
+      }
+
       return {
         outcome,
         outputs,
@@ -271,6 +326,29 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
       policy = null
     },
   }
+}
+
+/**
+ * Build the user-facing error surfaced when a terminator was called
+ * from an async path the agent didn't `await`. The message names the
+ * terminator and prescribes the fix in JS/TS-idiomatic terms — `await`
+ * is the standard pattern; `void` is the standard escape hatch for
+ * intentional fire-and-forget.
+ */
+function makeMissingAwaitError(late: TaskOutcome): Error {
+  const kind =
+    late.kind === 'success'
+      ? 'taskSuccess'
+      : late.kind === 'fail'
+        ? 'taskFail'
+        : late.kind === 'clarify'
+          ? 'taskClarify'
+          : 'task terminator'
+  const e = new Error(
+    `${kind}() was called from an async function that wasn't awaited at the top level — the terminator fired AFTER ts_action returned, so this turn produced no observable outcome. Add \`await\` before the call (e.g. \`await generateReport()\`) so the terminator unwinds before the action returns. If you genuinely meant to fire-and-forget, prefix the call with \`void\` (the standard JS/TS idiom for intentionally discarding a Promise).`,
+  )
+  e.name = 'MissingAwaitError'
+  return e
 }
 
 /** Internal — used to smuggle the success value through the throw

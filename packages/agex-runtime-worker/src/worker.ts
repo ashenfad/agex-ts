@@ -570,6 +570,29 @@ class BridgeChannel {
     this.pending.clear()
     for (const slot of entries) slot.reject(reason)
   }
+
+  /** Number of bridge calls awaiting host responses. Used by the
+   *  late-terminator-detection path to decide whether to drain
+   *  before declaring an emission settled. */
+  get pendingCount(): number {
+    return this.pending.size
+  }
+
+  /** Wait for the pending-bridge-calls map to drain (or hit the
+   *  timeout). Polled because pending calls resolve asynchronously
+   *  via `handleResponse` from the message listener — we just need
+   *  yields back to the event loop for those messages to land.
+   *
+   *  Bounded so a runaway "agent fired infinite background work"
+   *  case can't pin us forever. The host-side per-emission timeout
+   *  bounds the total wait independently. */
+  async drain(timeoutMs: number): Promise<void> {
+    const start = performance.now()
+    while (this.pending.size > 0) {
+      if (performance.now() - start > timeoutMs) return
+      await new Promise((r) => setTimeout(r, 5))
+    }
+  }
 }
 
 function rebuildError(s: SerializedError): Error {
@@ -703,13 +726,27 @@ function __load(name: string): Promise<unknown> {
 async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' }>): Promise<void> {
   const { code, executeId } = msg
 
+  // Per-execute "late terminator" slot. Recorded inside the wrapped
+  // taskSuccess/Fail/Clarify before the throw, so even if the throw
+  // becomes an unhandled rejection (because the agent called the
+  // terminator from an async path it didn't `await`), we still know
+  // what they meant. After the body settles we use this to surface a
+  // "missing await" hint instead of a silent "no observation" turn.
+  let lateTerminator:
+    | { kind: 'success'; value: unknown }
+    | { kind: 'fail'; message: string }
+    | { kind: 'clarify'; message: string }
+    | null = null
   const taskSuccess = (value: unknown): never => {
+    if (lateTerminator === null) lateTerminator = { kind: 'success', value }
     throw new TaskSuccessSignal(value)
   }
   const taskFail = (message: string): never => {
+    if (lateTerminator === null) lateTerminator = { kind: 'fail', message }
     throw new TaskFailSignal(message)
   }
   const taskClarify = (message: string): never => {
+    if (lateTerminator === null) lateTerminator = { kind: 'clarify', message }
     throw new TaskClarifySignal(message)
   }
 
@@ -825,6 +862,44 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
       error = serializeError(e)
     }
   }
+
+  // Late-terminator detection: the AsyncFunction body settled cleanly
+  // with no terminator caught synchronously, but there are pending
+  // bridge calls — strong signal that the agent fired async work
+  // (`fs.read`, registered fns, etc.) without awaiting it. Drain the
+  // bridge so the deferred chain has a chance to complete; if a
+  // terminator fires from that path, our instrumentation captures it
+  // in `lateTerminator` (recorded BEFORE the throw, so it survives the
+  // throw becoming an unhandled rejection).
+  //
+  // Suppress the matching unhandled-rejection events while we drain so
+  // the worker realm's default rejection handling doesn't log noise
+  // for what we're explicitly handling.
+  if (outcome.kind === 'continue' && error === null && bridge.pendingCount > 0) {
+    const onUnhandled = (ev: PromiseRejectionEvent): void => {
+      const reason = ev.reason as unknown
+      if (
+        reason instanceof TaskSuccessSignal ||
+        reason instanceof TaskFailSignal ||
+        reason instanceof TaskClarifySignal
+      ) {
+        ev.preventDefault()
+      }
+    }
+    self.addEventListener('unhandledrejection', onUnhandled)
+    try {
+      // 2s upper bound is generous for a deferred chain to complete;
+      // the host's per-emission timeout (default 5s in tests) bounds
+      // the total wait separately.
+      await bridge.drain(2000)
+    } finally {
+      self.removeEventListener('unhandledrejection', onUnhandled)
+    }
+    if (lateTerminator !== null) {
+      error = serializeError(makeMissingAwaitError(lateTerminator))
+    }
+  }
+
   // Reject any orphan bridge Promises (user code dispatched a call
   // without awaiting it before unwinding) so their `await`-side
   // closures release rather than retaining the channel forever.
@@ -833,6 +908,27 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
   bridge.cancelPending(makeCancelledError('execute settled with pending bridge calls'))
   activeBridge = null
   post({ type: 'result', executeId, outcome, error })
+}
+
+/** Build the user-facing error surfaced when a terminator was called
+ *  from an async path the agent didn't `await`. Names the terminator
+ *  and prescribes the fix in JS/TS-idiomatic terms — `await` is the
+ *  standard pattern, `void` the standard escape hatch for intentional
+ *  fire-and-forget. Mirrors `eval.ts`'s `makeMissingAwaitError` so
+ *  embedders see the same message regardless of runtime. */
+function makeMissingAwaitError(
+  late:
+    | { kind: 'success'; value: unknown }
+    | { kind: 'fail'; message: string }
+    | { kind: 'clarify'; message: string },
+): Error {
+  const kind =
+    late.kind === 'success' ? 'taskSuccess' : late.kind === 'fail' ? 'taskFail' : 'taskClarify'
+  const e = new Error(
+    `${kind}() was called from an async function that wasn't awaited at the top level — the terminator fired AFTER ts_action returned, so this turn produced no observable outcome. Add \`await\` before the call (e.g. \`await generateReport()\`) so the terminator unwinds before the action returns. If you genuinely meant to fire-and-forget, prefix the call with \`void\` (the standard JS/TS idiom for intentionally discarding a Promise).`,
+  )
+  e.name = 'MissingAwaitError'
+  return e
 }
 
 /** Local mirror of agex-ts's `CancelledError`. Built here (rather

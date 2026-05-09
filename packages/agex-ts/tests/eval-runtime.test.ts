@@ -738,3 +738,129 @@ describe('evalRuntime — import syntax for registered names', () => {
     expect(result.error?.message).toMatch(/import statement/)
   })
 })
+
+describe('evalRuntime — missing-await detection', () => {
+  // Reported by the studio integration: an agent declared an async
+  // function and called it bare at the top level, producing a
+  // "no observation" turn that left the agent confused. The fix:
+  // instrument task terminators to record their last call in a
+  // per-execute slot before throwing. After the AsyncFunction body
+  // settles cleanly, give pending async work a few microtask ticks
+  // to drain — if a terminator fires from that path, surface it as a
+  // wrapped `MissingAwaitError` with a clear hint to add `await`.
+
+  it('catches taskSuccess from a non-awaited async function', async () => {
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    // Studio-reported shape: declare async, call without await.
+    const code = `
+      async function generateReport() {
+        await Promise.resolve()
+        taskSuccess({ items: 3 })
+      }
+      generateReport()
+    `
+    const result = await r.execute(code, makeContext())
+    expect(result.outcome).toEqual({ kind: 'continue' })
+    expect(result.error).not.toBeNull()
+    expect(result.error?.name).toBe('MissingAwaitError')
+    expect(result.error?.message).toMatch(/taskSuccess\(\)/)
+    expect(result.error?.message).toMatch(/Add \`await\`/)
+  })
+
+  it('catches taskFail from a non-awaited async function', async () => {
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const code = `
+      async function check() {
+        await Promise.resolve()
+        taskFail('nope')
+      }
+      check()
+    `
+    const result = await r.execute(code, makeContext())
+    expect(result.outcome).toEqual({ kind: 'continue' })
+    expect(result.error?.name).toBe('MissingAwaitError')
+    expect(result.error?.message).toMatch(/taskFail\(\)/)
+  })
+
+  it('catches taskClarify from a non-awaited async function', async () => {
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const code = `
+      async function ask() {
+        await Promise.resolve()
+        taskClarify('which one?')
+      }
+      ask()
+    `
+    const result = await r.execute(code, makeContext())
+    expect(result.outcome).toEqual({ kind: 'continue' })
+    expect(result.error?.name).toBe('MissingAwaitError')
+    expect(result.error?.message).toMatch(/taskClarify\(\)/)
+  })
+
+  it('regression: properly awaited terminators still settle the action correctly', async () => {
+    // Guard rail: the late-detection path must NOT fire when the
+    // agent does the right thing. The terminator throws synchronously
+    // out of the awaited call → caught by the outer try → outcome is
+    // set normally. No drain, no MissingAwaitError.
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const code = `
+      async function generateReport() {
+        await Promise.resolve()
+        taskSuccess({ items: 3 })
+      }
+      await generateReport()
+    `
+    const result = await r.execute(code, makeContext())
+    expect(result.outcome).toEqual({ kind: 'success', value: { items: 3 } })
+    expect(result.error).toBeNull()
+  })
+
+  it('regression: regular "do-nothing" continue (no terminator) does not fire detection', async () => {
+    // A continue outcome with no terminator call at all is the
+    // legitimate "let the agent see results next turn" path. The
+    // late-detection should not flag it.
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const code = `
+      const x = 1 + 2
+      void x
+    `
+    const result = await r.execute(code, makeContext())
+    expect(result.outcome).toEqual({ kind: 'continue' })
+    expect(result.error).toBeNull()
+  })
+
+  it('regression: synchronous taskSuccess still works (no false positive)', async () => {
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const result = await r.execute('taskSuccess(42)', makeContext())
+    expect(result.outcome).toEqual({ kind: 'success', value: 42 })
+    expect(result.error).toBeNull()
+  })
+
+  it('catches the studio repro shape with fs.read in the async function', async () => {
+    // Minimal version of the studio agent's actual code: the
+    // function does a real `await fs.read(...)` (against MemoryFS)
+    // before calling taskSuccess. The terminator fires several
+    // microtasks after the body has returned; the drain catches it.
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const ctx = makeContext()
+    await ctx.fs.write('/data.txt', new TextEncoder().encode('hello'))
+    const code = `
+      async function generateReport() {
+        const bytes = await fs.read('/data.txt')
+        const text = new TextDecoder().decode(bytes)
+        taskSuccess({ length: text.length })
+      }
+      generateReport()
+    `
+    const result = await r.execute(code, ctx)
+    expect(result.outcome).toEqual({ kind: 'continue' })
+    expect(result.error?.name).toBe('MissingAwaitError')
+  })
+})

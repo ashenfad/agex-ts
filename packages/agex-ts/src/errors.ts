@@ -61,6 +61,32 @@ export class CancelledError extends Error {
   }
 }
 
+/**
+ * Cross-realm cancellation check.
+ *
+ * `instanceof CancelledError` only works for cancellations constructed
+ * on the host side. Errors crossing a worker boundary lose their
+ * prototype: `agex-runtime-worker` builds a plain `Error` with
+ * `name = 'CancelledError'` inside the worker (see `makeCancelledError`),
+ * serializes it across `postMessage`, and the host rebuilds it as a
+ * plain `Error` with the right `name` but no `CancelledError` prototype.
+ * `instanceof` would miss those, leaving the dispatcher to misclassify
+ * a worker-originated cancellation as a recoverable agent-code error.
+ *
+ * Use this helper at any check-by-name site; reserve `instanceof
+ * CancelledError` for places that genuinely care about the host-side
+ * type identity.
+ */
+export function isCancelledError(e: unknown): boolean {
+  if (e instanceof CancelledError) return true
+  return (
+    typeof e === 'object' &&
+    e !== null &&
+    'name' in e &&
+    (e as { name: unknown }).name === 'CancelledError'
+  )
+}
+
 /** Base for framework-internal errors. */
 export class AgentError extends Error {
   constructor(message: string) {

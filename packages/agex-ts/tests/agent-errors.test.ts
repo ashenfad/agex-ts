@@ -10,12 +10,19 @@
 
 import { describe, expect, it } from 'vitest'
 import { createAgent } from '../src/agent'
-import { CancelledError } from '../src/errors'
+import { CancelledError, isCancelledError } from '../src/errors'
 import { Dummy } from '../src/llm/dummy'
 import { errorPartInfo, isErrorPart } from '../src/output-part'
 import { renderEvents } from '../src/render'
 import { evalRuntime } from '../src/runtime/eval'
-import type { AgentEvent, LLMResponse, OutputEvent } from '../src/types'
+import type {
+  AgentEvent,
+  ExecResult,
+  LLMResponse,
+  OutputEvent,
+  Policy,
+  RuntimeAdapter,
+} from '../src/types'
 
 describe('Agent-code errors are recoverable', () => {
   it('reference error → OutputEvent with error part → loop continues → next turn succeeds', async () => {
@@ -325,6 +332,114 @@ describe('Agent-code errors are recoverable', () => {
     const txt = JSON.stringify(turns)
     expect(txt).toMatch(/💥 TypeError: cant do that/)
   })
+
+  it('worker-style cancellation (plain Error w/ name) re-raises as CancelledEvent — not error part', async () => {
+    // Regression for the prototype-stripping path. agex-runtime-worker
+    // builds cancellations as plain `Error` with `name = 'CancelledError'`
+    // inside the worker (makeCancelledError), then serializes them
+    // across postMessage; the host's `rebuildError` reconstructs them
+    // as plain `Error`s with the correct `name` but no `CancelledError`
+    // prototype. `result.error instanceof CancelledError` would miss
+    // them and route through the recoverable-error path. The dispatcher
+    // must use a name-based check so worker cancellations land in the
+    // CancelledEvent path like host-side ones do.
+    //
+    // We can't drive the real worker from this Node test, so we stand
+    // up a fake RuntimeAdapter that returns the same shape the worker
+    // would produce.
+    const fakeRuntime: RuntimeAdapter = {
+      async init(_p: Policy) {},
+      async execute(_code: string): Promise<ExecResult> {
+        const e = new Error('worker cancelled mid-flight')
+        e.name = 'CancelledError' // shape worker bridge produces
+        return {
+          outcome: { kind: 'continue' },
+          outputs: [],
+          error: e,
+          elapsedMs: 1,
+        }
+      },
+      async dispose() {},
+    }
+    const llm = new Dummy({
+      responses: [{ emissions: [{ type: 'ts', code: 'taskSuccess(1)' }] }],
+    })
+    const agent = await createAgent({
+      name: 'workercancel',
+      llm,
+      runtime: fakeRuntime,
+      state: { type: 'versioned', storage: 'memory' },
+      maxIterations: 3,
+    })
+    const events: AgentEvent[] = []
+
+    await expect(
+      agent.task({ description: 't' })(undefined, { onEvent: (e) => void events.push(e) }),
+    ).rejects.toBeInstanceOf(CancelledError)
+
+    // No `error`-part output — the dispatcher recognized the worker-
+    // shaped cancellation by name and re-raised, exactly as it would
+    // have for a host-prototype `CancelledError`.
+    const errorParts = events
+      .filter((e): e is OutputEvent => e.type === 'output')
+      .flatMap((e) => e.parts)
+      .filter((p) => p.type === 'error')
+    expect(errorParts).toHaveLength(0)
+    expect(events.find((e) => e.type === 'cancelled')).toBeDefined()
+  })
+
+  it('extracts errorMessage from a loose Error-shaped object (third-party adapter)', async () => {
+    // Defensive coverage: the RuntimeAdapter contract types
+    // `result.error` as `Error | null`, but third-party adapters might
+    // return a non-Error object with `.name` / `.message` properties.
+    // Direct `.message` access (not `describeError`) is what handles
+    // this correctly — `describeError` would fall to its `String(e)`
+    // branch and produce `"[object Object]"` for non-Error objects.
+    //
+    // The fake runtime always returns the loose error, so the agent
+    // never makes progress and we exhaust the iteration cap. That's
+    // fine — what we assert on is the error part stamped onto the
+    // OutputEvent during the first iteration.
+    const fakeRuntime: RuntimeAdapter = {
+      async init(_p: Policy) {},
+      async execute(_code: string): Promise<ExecResult> {
+        return {
+          outcome: { kind: 'continue' },
+          outputs: [],
+          // Plain object with the right surface, not an Error instance.
+          // Forced cast — exactly the loose-typed shape the test
+          // exercises.
+          error: { name: 'WeirdError', message: 'I am not a real Error' } as unknown as Error,
+          elapsedMs: 1,
+        }
+      },
+      async dispose() {},
+    }
+    const llm = new Dummy({
+      responses: [{ emissions: [{ type: 'ts', code: 'noop()' }] }],
+    })
+    const agent = await createAgent({
+      name: 'weird',
+      llm,
+      runtime: fakeRuntime,
+      state: { type: 'versioned', storage: 'memory' },
+      maxIterations: 1,
+    })
+    const events: AgentEvent[] = []
+    await expect(
+      agent.task({ description: 't' })(undefined, {
+        onEvent: (e) => void events.push(e),
+      }),
+    ).rejects.toThrow(/exceeded maxIterations/)
+
+    const errorPart = events
+      .filter((e): e is OutputEvent => e.type === 'output')
+      .flatMap((e) => e.parts)
+      .find((p) => p.type === 'error') as { errorName: string; errorMessage: string } | undefined
+    expect(errorPart).toBeDefined()
+    expect(errorPart?.errorName).toBe('WeirdError')
+    expect(errorPart?.errorMessage).toBe('I am not a real Error')
+  })
 })
 
 describe('output-part helpers — typed shape and py-side convention', () => {
@@ -372,5 +487,34 @@ describe('output-part helpers — typed shape and py-side convention', () => {
       errorName: 'Error',
       errorMessage: 'gone wrong',
     })
+  })
+})
+
+describe('isCancelledError — cross-realm cancellation check', () => {
+  it('true for host-side CancelledError instance', () => {
+    expect(isCancelledError(new CancelledError())).toBe(true)
+  })
+
+  it('true for plain Error with name === "CancelledError" (worker-rebuilt shape)', () => {
+    const e = new Error('via postMessage')
+    e.name = 'CancelledError'
+    expect(isCancelledError(e)).toBe(true)
+  })
+
+  it('true for an Error-shaped object literal (loose third-party adapter)', () => {
+    expect(isCancelledError({ name: 'CancelledError', message: 'x' })).toBe(true)
+  })
+
+  it('false for ordinary Errors', () => {
+    expect(isCancelledError(new Error('boom'))).toBe(false)
+    expect(isCancelledError(new TypeError('nope'))).toBe(false)
+  })
+
+  it('false for non-error values', () => {
+    expect(isCancelledError(null)).toBe(false)
+    expect(isCancelledError(undefined)).toBe(false)
+    expect(isCancelledError('CancelledError')).toBe(false)
+    expect(isCancelledError({})).toBe(false)
+    expect(isCancelledError({ name: 42 })).toBe(false)
   })
 })

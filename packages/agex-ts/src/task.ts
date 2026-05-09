@@ -22,7 +22,13 @@ import type { StandardSchemaV1 } from '@standard-schema/spec'
 import type { Agent } from './agent'
 import { runChaptering, shouldTriggerChaptering } from './chaptering'
 import { dispatchFileEdit, dispatchFileWrite, dispatchTerminal } from './dispatcher'
-import { CancelledError, SchemaError, TaskClarifyError, TaskFailError } from './errors'
+import {
+  CancelledError,
+  SchemaError,
+  TaskClarifyError,
+  TaskFailError,
+  isCancelledError,
+} from './errors'
 import type { EventLogImpl } from './event-log'
 import { buildSystemMessage, buildTaskMessage, makeToolUseId, renderEvents } from './render'
 import type {
@@ -265,7 +271,7 @@ export function makeTask<I, O>(
       await maybeFireBoundaryChaptering(agent, session, eventLog, signal, options.onEvent)
       throw new TaskFailError(exhaustMessage)
     } catch (e) {
-      if (e instanceof CancelledError) {
+      if (isCancelledError(e)) {
         await emit(
           {
             type: 'cancelled',
@@ -327,8 +333,11 @@ async function dispatchEmissions(
 
       // Cancellation surfaced by the runtime: re-raise so the outer
       // catch emits CancelledEvent rather than swallowing it.
+      // `isCancelledError` (not `instanceof`) — worker-originated
+      // cancellations come back as plain Errors with the right `name`
+      // but no `CancelledError` prototype.
       if (result.error !== null && result.outcome.kind === 'continue') {
-        if (result.error instanceof CancelledError || ctx.signal.aborted) {
+        if (isCancelledError(result.error) || ctx.signal.aborted) {
           throw new CancelledError(result.error.message)
         }
       }
@@ -336,6 +345,13 @@ async function dispatchEmissions(
       // Bundle any captured stdout with the error part (if any) into a
       // single OutputEvent for this emission. Pairing them keeps the
       // emissionId-tagged tool_result stream dense.
+      //
+      // Direct `.message` access (not `describeError`) is intentional:
+      // `result.error` is typed `Error | null` per the RuntimeAdapter
+      // contract, and even for a loose third-party adapter that hands
+      // back a non-Error object with a `.message` property, the direct
+      // read extracts the right string — `describeError` would fall to
+      // its `String(e)` branch and produce `"[object Object]"`.
       const parts: OutputPart[] = [...result.outputs]
       if (result.error !== null && result.outcome.kind === 'continue') {
         parts.push({

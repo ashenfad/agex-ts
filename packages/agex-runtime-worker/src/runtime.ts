@@ -252,13 +252,33 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
         // from the policy at execute time — registrations are
         // immutable per runtime instance, so this could be cached,
         // but the cost is trivial.
+        // `registeredNames` covers both host-bound and URL-shipped;
+        // the rewriter routes them to different emit shapes
+        // (`__registered['name']` vs `await __load('name')`) based on
+        // membership in `urlNames`.
         const registeredNames = new Set<string>()
+        const urlNames = new Set<string>()
         if (policyRef !== null) {
-          for (const n of policyRef.fns.keys()) registeredNames.add(n)
-          for (const n of policyRef.namespaces.keys()) registeredNames.add(n)
-          for (const n of policyRef.classes.keys()) registeredNames.add(n)
+          for (const [n, reg] of policyRef.fns) {
+            registeredNames.add(n)
+            if (reg.url !== undefined) urlNames.add(n)
+          }
+          for (const [n, reg] of policyRef.namespaces) {
+            registeredNames.add(n)
+            if (reg.url !== undefined) urlNames.add(n)
+          }
+          for (const [n, reg] of policyRef.classes) {
+            registeredNames.add(n)
+            if (reg.url !== undefined) urlNames.add(n)
+          }
         }
-        const prepared = await prepareScriptForWire(transformed, ctx.fs, transform, registeredNames)
+        const prepared = await prepareScriptForWire(
+          transformed,
+          ctx.fs,
+          transform,
+          registeredNames,
+          urlNames,
+        )
         preparedCode = prepared.code
         helpers = prepared.helpers
       } catch (e) {

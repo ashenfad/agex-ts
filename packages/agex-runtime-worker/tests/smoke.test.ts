@@ -1123,12 +1123,16 @@ describe('workerRuntime — URL-shipped registrations', () => {
   // serves it directly from the source tree.
   const FIXTURE_URL = new URL('./fixtures/url-module.ts', import.meta.url).href
 
-  it('imports a class from a URL and exposes it natively (full JS semantics)', async () => {
+  it('imports a class from a URL — agent uses `import` to reach it', async () => {
     const rt = runtime()
     await rt.init(makePolicy({ classUrls: { Vec: { url: FIXTURE_URL } } }))
-    // The agent gets the *real* worker-realm class — not a Proxy.
-    // Construction is sync, methods are sync, no `await` needed.
+    // URL-shipped registrations are lazy: the rewriter expands the
+    // `import` statement into `await __load('Vec')`. First reference
+    // fires the dynamic `import()`; subsequent calls hit the cache.
+    // The agent gets the *real* worker-realm class — not a Proxy or
+    // RPC stub. Construction is sync, methods are sync.
     const code = `
+      import { Vec } from 'Vec'
       const a = new Vec(1, 2)
       const b = new Vec(3, 4)
       const c = a.add(b)
@@ -1145,6 +1149,7 @@ describe('workerRuntime — URL-shipped registrations', () => {
     const rt = runtime()
     await rt.init(makePolicy({ classUrls: { Vec: { url: FIXTURE_URL } } }))
     const code = `
+      import { Vec } from 'Vec'
       class V3 extends Vec {
         z
         constructor(x, y, z) { super(x, y); this.z = z }
@@ -1162,9 +1167,12 @@ describe('workerRuntime — URL-shipped registrations', () => {
   it('imports a fn from a URL and calls it natively (no RPC round-trip)', async () => {
     const rt = runtime()
     await rt.init(makePolicy({ fnUrls: { double: { url: FIXTURE_URL } } }))
-    // Note: no `await` needed — the imported fn is a direct reference,
-    // not an async stub.
-    const code = 'taskSuccess(double(21))'
+    // Once the import resolves the agent has a direct reference to
+    // the fn — no `await` per call.
+    const code = `
+      import { double } from 'double'
+      taskSuccess(double(21))
+    `
     const result = await rt.execute(code, makeCtx())
     expect(result.outcome).toEqual({ kind: 'success', value: 42 })
   })
@@ -1176,7 +1184,10 @@ describe('workerRuntime — URL-shipped registrations', () => {
     // by registration name.
     const rt = runtime()
     await rt.init(makePolicy({ namespaceUrls: { lib: { url: FIXTURE_URL } } }))
-    const code = `taskSuccess([lib.double(21), lib.utils.greet('world')])`
+    const code = `
+      import * as lib from 'lib'
+      taskSuccess([lib.double(21), lib.utils.greet('world')])
+    `
     const result = await rt.execute(code, makeCtx())
     expect(result.outcome).toEqual({ kind: 'success', value: [42, 'hello world'] })
   })
@@ -1186,7 +1197,10 @@ describe('workerRuntime — URL-shipped registrations', () => {
     // from the module rather than the whole namespace object.
     const rt = runtime()
     await rt.init(makePolicy({ namespaceUrls: { utils: { url: FIXTURE_URL, export: 'utils' } } }))
-    const code = `taskSuccess([utils.greet('world'), utils.shout('quiet')])`
+    const code = `
+      import * as utils from 'utils'
+      taskSuccess([utils.greet('world'), utils.shout('quiet')])
+    `
     const result = await rt.execute(code, makeCtx())
     expect(result.outcome).toEqual({ kind: 'success', value: ['hello world', 'QUIET'] })
   })
@@ -1196,6 +1210,7 @@ describe('workerRuntime — URL-shipped registrations', () => {
     await rt.init(makePolicy({ classUrls: { Vector: { url: FIXTURE_URL, export: 'Vec' } } }))
     // The fixture exports `Vec`; the agent sees it as `Vector`.
     const code = `
+      import { Vector } from 'Vector'
       const v = new Vector(3, 4)
       taskSuccess([v.magnitude(), v instanceof Vector])
     `
@@ -1210,31 +1225,58 @@ describe('workerRuntime — URL-shipped registrations', () => {
         namespaceUrls: { fixture: { url: FIXTURE_URL, export: 'default' } },
       }),
     )
-    const code = 'taskSuccess(fixture.marker)'
+    const code = `
+      import * as fixture from 'fixture'
+      taskSuccess(fixture.marker)
+    `
     const result = await rt.execute(code, makeCtx())
     expect(result.outcome).toEqual({ kind: 'success', value: 'default-export-payload' })
   })
 
-  it('reports a clear error when the named export is missing', async () => {
+  it('init() does NOT import — bad export only surfaces on first agent import (wrapped ImportError)', async () => {
     const rt = runtime()
+    // init succeeds — no eager import fires. The bad export only
+    // shows up when the agent's `import` statement triggers
+    // `__load('Missing')`, which surfaces a wrapped ImportError on
+    // result.error so the loop's recoverable-errors path renders a
+    // useful `💥 ImportError: ...` line on the next turn.
     await rt.init(makePolicy({ classUrls: { Missing: { url: FIXTURE_URL, export: 'NotThere' } } }))
-    const result = await rt.execute('taskSuccess("unreached")', makeCtx())
+    const result = await rt.execute(
+      `import { Missing } from 'Missing'\ntaskSuccess(new Missing())`,
+      makeCtx(),
+    )
     expect(result.outcome).toEqual({ kind: 'continue' })
+    expect(result.error?.name).toBe('ImportError')
+    expect(result.error?.message).toMatch(/Could not load registered module 'Missing'/)
     expect(result.error?.message).toMatch(/no 'NotThere' export/)
   })
 
-  it('reports a clear error when the URL itself fails to import', async () => {
+  it('init() does NOT import — bad URL only surfaces on first agent import (wrapped ImportError)', async () => {
     const rt = runtime()
     await rt.init(makePolicy({ classUrls: { Bad: { url: '/this-does-not-exist.js' } } }))
-    const result = await rt.execute('taskSuccess("unreached")', makeCtx())
+    const result = await rt.execute(`import { Bad } from 'Bad'\ntaskSuccess(new Bad())`, makeCtx())
     expect(result.outcome).toEqual({ kind: 'continue' })
-    expect(result.error).not.toBeNull()
+    expect(result.error?.name).toBe('ImportError')
+    expect(result.error?.message).toMatch(/Could not load registered module 'Bad'/)
+  })
+
+  it('caches per-name — second import is the same module instance', async () => {
+    const rt = runtime()
+    await rt.init(makePolicy({ namespaceUrls: { lib: { url: FIXTURE_URL } } }))
+    const code = `
+      import * as a from 'lib'
+      import * as b from 'lib'
+      taskSuccess(a === b)
+    `
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: true })
   })
 
   it('mixes URL and host-bound registrations cleanly', async () => {
     // Real-world case: some libs come from URLs (worker-realm,
     // subclassable), some are host-bound (RPC for closures over
-    // host state). Both should coexist in one configure round.
+    // host state). Both coexist; each uses its natural import shape
+    // (URL = lazy `await __load`, host-bound = direct global).
     let counter = 0
     const rt = runtime()
     await rt.init(
@@ -1246,6 +1288,7 @@ describe('workerRuntime — URL-shipped registrations', () => {
       }),
     )
     const code = `
+      import { Vec } from 'Vec'
       const v = new Vec(3, 4)
       const t = await tick()
       taskSuccess([v.magnitude(), t])

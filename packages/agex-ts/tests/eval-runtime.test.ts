@@ -254,13 +254,20 @@ describe('evalRuntime — TypeScript syntax (ts-blank-space)', () => {
   })
 })
 
-describe('evalRuntime — URL-shipped registrations', () => {
+describe('evalRuntime — URL-shipped registrations (lazy)', () => {
   // Plain JS fixture so Node's native dynamic `import()` can load
   // it without a TS loader. Vitest's Node mode doesn't transform
   // dynamic imports — they pass through to the runtime.
   const FIXTURE_URL = new URL('./fixtures/url-runtime-fixture.js', import.meta.url).href
 
-  it('imports a class from a URL and exposes it natively', async () => {
+  // URL-shipped registrations are lazy: `init()` records specs but
+  // does NOT import. The dynamic `import()` fires on the agent's
+  // first `import { ... } from 'name'`, which the rewriter expands
+  // to `await __load('name')`. URL-shipped names are NOT injected as
+  // top-level scope bindings — the agent must use an import statement
+  // to reach them.
+
+  it('imports a class from a URL — agent uses `import` to reach it', async () => {
     const r = evalRuntime()
     const policy: Policy = {
       ...emptyPolicy,
@@ -268,7 +275,10 @@ describe('evalRuntime — URL-shipped registrations', () => {
     }
     await r.init(policy)
     const result = await r.execute(
-      'taskSuccess([new Vec(3, 4).magnitude(), new Vec(1, 2) instanceof Vec])',
+      `
+      import { Vec } from 'Vec'
+      taskSuccess([new Vec(3, 4).magnitude(), new Vec(1, 2) instanceof Vec])
+    `,
       makeContext(),
     )
     expect(result.outcome).toEqual({ kind: 'success', value: [5, true] })
@@ -281,7 +291,13 @@ describe('evalRuntime — URL-shipped registrations', () => {
       fns: new Map([['double', { kind: 'fn' as const, name: 'double', url: FIXTURE_URL }]]),
     }
     await r.init(policy)
-    const result = await r.execute('taskSuccess(double(21))', makeContext())
+    const result = await r.execute(
+      `
+      import { double } from 'double'
+      taskSuccess(double(21))
+    `,
+      makeContext(),
+    )
     expect(result.outcome).toEqual({ kind: 'success', value: 42 })
   })
 
@@ -296,7 +312,10 @@ describe('evalRuntime — URL-shipped registrations', () => {
     }
     await r.init(policy)
     const result = await r.execute(
-      'taskSuccess([lib.double(21), lib.utils.greet("world")])',
+      `
+      import * as lib from 'lib'
+      taskSuccess([lib.double(21), lib.utils.greet("world")])
+    `,
       makeContext(),
     )
     expect(result.outcome).toEqual({ kind: 'success', value: [42, 'hello world'] })
@@ -311,7 +330,13 @@ describe('evalRuntime — URL-shipped registrations', () => {
       ]),
     }
     await r.init(policy)
-    const result = await r.execute('taskSuccess(utils.greet("world"))', makeContext())
+    const result = await r.execute(
+      `
+      import * as utils from 'utils'
+      taskSuccess(utils.greet("world"))
+    `,
+      makeContext(),
+    )
     expect(result.outcome).toEqual({ kind: 'success', value: 'hello world' })
   })
 
@@ -327,11 +352,17 @@ describe('evalRuntime — URL-shipped registrations', () => {
       ]),
     }
     await r.init(policy)
-    const result = await r.execute('taskSuccess(fixture.marker)', makeContext())
+    const result = await r.execute(
+      `
+      import * as fixture from 'fixture'
+      taskSuccess(fixture.marker)
+    `,
+      makeContext(),
+    )
     expect(result.outcome).toEqual({ kind: 'success', value: 'default-payload' })
   })
 
-  it('rejects with a clear error when the named export is missing', async () => {
+  it('init() does NOT import — bad URL only surfaces on first agent import (wrapped ImportError)', async () => {
     const r = evalRuntime()
     const policy: Policy = {
       ...emptyPolicy,
@@ -342,7 +373,63 @@ describe('evalRuntime — URL-shipped registrations', () => {
         ],
       ]),
     }
-    await expect(r.init(policy)).rejects.toThrow(/no 'NotThere' export/)
+    // init() succeeds — no eager import.
+    await r.init(policy)
+    // First agent reference triggers the import; the missing export
+    // surfaces as a wrapped ImportError on `result.error`, with the
+    // outcome staying in 'continue' so the agent loop can route it
+    // through the recoverable-errors path.
+    const result = await r.execute(
+      `
+      import { Missing } from 'Missing'
+      taskSuccess(new Missing())
+    `,
+      makeContext(),
+    )
+    expect(result.outcome).toEqual({ kind: 'continue' })
+    expect(result.error?.name).toBe('ImportError')
+    expect(result.error?.message).toMatch(/Could not load registered module 'Missing'/)
+    expect(result.error?.message).toMatch(/no 'NotThere' export/)
+  })
+
+  it('caches per-name — second import in the same execute is the same module instance', async () => {
+    const r = evalRuntime()
+    const policy: Policy = {
+      ...emptyPolicy,
+      namespaces: new Map([['lib', { kind: 'namespace' as const, name: 'lib', url: FIXTURE_URL }]]),
+    }
+    await r.init(policy)
+    const result = await r.execute(
+      `
+      import * as a from 'lib'
+      import * as b from 'lib'
+      taskSuccess(a === b)
+    `,
+      makeContext(),
+    )
+    expect(result.outcome).toEqual({ kind: 'success', value: true })
+  })
+
+  it('caches per-name — second execute() reuses the first execute()s loaded module', async () => {
+    // Per-runtime-instance cache survives across executes. Two
+    // executes that both import 'lib' both observe the same value;
+    // a fresh runtime would re-import.
+    const r = evalRuntime()
+    const policy: Policy = {
+      ...emptyPolicy,
+      namespaces: new Map([['lib', { kind: 'namespace' as const, name: 'lib', url: FIXTURE_URL }]]),
+    }
+    await r.init(policy)
+    const r1 = await r.execute(
+      `import * as lib from 'lib'\ntaskSuccess(lib.double(5))`,
+      makeContext(),
+    )
+    const r2 = await r.execute(
+      `import * as lib from 'lib'\ntaskSuccess(lib.double(5))`,
+      makeContext(),
+    )
+    expect(r1.outcome).toEqual({ kind: 'success', value: 10 })
+    expect(r2.outcome).toEqual({ kind: 'success', value: 10 })
   })
 
   it('supports subclassing a URL-shipped class (full JS semantics)', async () => {
@@ -354,6 +441,7 @@ describe('evalRuntime — URL-shipped registrations', () => {
     await r.init(policy)
     const result = await r.execute(
       `
+      import { Vec } from 'Vec'
       class V3 extends Vec {
         constructor(x, y, z) { super(x, y); this.z = z }
         magnitude() {
@@ -366,6 +454,37 @@ describe('evalRuntime — URL-shipped registrations', () => {
       makeContext(),
     )
     expect(result.outcome).toEqual({ kind: 'success', value: [7, true, true] })
+  })
+
+  it('lazy load works inside a helper module too', async () => {
+    // Helpers receive `__load` as a 4th parameter so the same
+    // rewrite shape applies in helper context. Verifies the wiring
+    // through prepareScript's helper-body construction.
+    const r = evalRuntime()
+    const policy: Policy = {
+      ...emptyPolicy,
+      namespaces: new Map([['lib', { kind: 'namespace' as const, name: 'lib', url: FIXTURE_URL }]]),
+    }
+    await r.init(policy)
+    const ctx = makeContext()
+    const enc = new TextEncoder()
+    await ctx.fs.mkdir('/helpers')
+    await ctx.fs.write(
+      '/helpers/use-lib.ts',
+      enc.encode(
+        `import * as lib from 'lib'
+       export function tripled(x) { return lib.double(x) + x }
+      `,
+      ),
+    )
+    const result = await r.execute(
+      `
+      import { tripled } from '/helpers/use-lib'
+      taskSuccess(tripled(7))
+    `,
+      ctx,
+    )
+    expect(result.outcome).toEqual({ kind: 'success', value: 21 })
   })
 })
 

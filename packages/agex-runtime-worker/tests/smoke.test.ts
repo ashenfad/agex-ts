@@ -2004,4 +2004,36 @@ describe('workerRuntime — routeFetchToVfs', () => {
       value: { columns: ['region', 'amount'], rows: 3 },
     })
   }, 30_000)
+
+  it('primerAddendum: undefined when routing is off', () => {
+    const rt = workerRuntime({ workerUrl: TEST_WORKER_URL })
+    disposers.push(() => rt.dispose())
+    expect(rt.primerAddendum?.()).toBeUndefined()
+  })
+
+  it('primerAddendum: boolean true — generic "any path-absolute URL" framing', () => {
+    const rt = runtime(true)
+    const text = rt.primerAddendum?.()
+    expect(text).toBeDefined()
+    expect(text).toMatch(/Filesystem is fetch-accessible/)
+    expect(text).toMatch(/for any path-absolute URL/)
+    // Generic example path used in true-mode.
+    expect(text).toMatch(/\/data\/foo\.csv/)
+  })
+
+  it('primerAddendum: array prefixes — prefix list AND example use the actual config', () => {
+    const rt = runtime(['/scratch/', '/datasets/'])
+    const text = rt.primerAddendum?.() ?? ''
+    // Both prefixes interpolated into the scope description.
+    expect(text).toMatch(/under these prefixes:.*`\/scratch\/`.*`\/datasets\/`/s)
+    // Example path uses the FIRST configured prefix (not the
+    // hardcoded `/data/foo.csv` from true-mode), so an embedder
+    // who set `/scratch/` doesn't see a misleading `/data/...`
+    // example the agent would then misuse.
+    expect(text).toMatch(/`\/scratch\/foo\.csv`/)
+    expect(text).not.toMatch(/`\/data\/foo\.csv`/)
+    // Caveat about non-matching paths is included so the agent
+    // understands why some `/foo` calls hit the network.
+    expect(text).toMatch(/DO NOT match a listed prefix pass through/)
+  })
 })

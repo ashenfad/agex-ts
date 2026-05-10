@@ -38,6 +38,12 @@ export interface SystemMessageInputs {
   readonly capabilitiesPrimer?: string
   /** The agent's per-instance voice. Appended last. */
   readonly agentPrimer?: string
+  /** Optional addendum the runtime adapter contributes (via
+   *  `RuntimeAdapter.primerAddendum`). Inserted just after the
+   *  built-in primer so any environment-specific guidance the
+   *  agent needs (e.g. workerRuntime's `routeFetchToVfs` enabling
+   *  fetch-against-VFS) is read alongside the agex conventions. */
+  readonly runtimeAddendum?: string
 }
 
 export function buildSystemMessage(inputs: SystemMessageInputs): string {
@@ -45,6 +51,14 @@ export function buildSystemMessage(inputs: SystemMessageInputs): string {
 
   // 1. Agex conventions (or override)
   parts.push(inputs.agexPrimerOverride ?? BUILTIN_PRIMER)
+
+  // 1b. Runtime-contributed addendum (e.g. workerRuntime's
+  // routeFetchToVfs notice). Appears alongside the agex conventions
+  // so environment-specific guidance reads as part of the same
+  // "how this environment works" section.
+  if (inputs.runtimeAddendum !== undefined && inputs.runtimeAddendum.trim().length > 0) {
+    parts.push(inputs.runtimeAddendum.trim())
+  }
 
   // 2. Capabilities (curated) or Registered Resources (auto)
   if (inputs.capabilitiesPrimer !== undefined) {

@@ -141,6 +141,10 @@ export function makeTask<I, O>(
     const maxIter = agent.maxIterations
     // Stable across the loop — only changes if the agent's
     // registration table mutates mid-task (it shouldn't).
+    // Optional addendum from the runtime adapter — e.g.
+    // workerRuntime contributes a note when `routeFetchToVfs` is on
+    // so the agent knows VFS is reachable via `fetch`.
+    const runtimeAddendum = runtimeAdapter.primerAddendum?.()
     const system = buildSystemMessage({
       policy: agent.policy(),
       ...(agent.agexPrimerOverride !== undefined && {
@@ -150,6 +154,7 @@ export function makeTask<I, O>(
         capabilitiesPrimer: agent.capabilitiesPrimer,
       }),
       ...(agent.primer !== undefined && { agentPrimer: agent.primer }),
+      ...(runtimeAddendum !== undefined && { runtimeAddendum }),
     })
 
     // Most recent recoverable error from agent code, surfaced in the

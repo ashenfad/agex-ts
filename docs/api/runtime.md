@@ -89,7 +89,8 @@ import { workerRuntime } from '@agex-ts/runtime-worker'
 interface WorkerRuntimeOptions {
   readonly workerUrl?: string | URL
   readonly transform?: (src: string) => string | Promise<string>
-  readonly timeoutMs?: number      // default 5000
+  readonly timeoutMs?: number                                  // default 5000
+  readonly routeFetchToVfs?: boolean | ReadonlyArray<string>   // default false
 }
 
 function workerRuntime(opts?: WorkerRuntimeOptions): RuntimeAdapter
@@ -102,6 +103,55 @@ Web Worker isolation. The host spawns a worker, sends `configure` at boot, then 
 | `workerUrl` | URL the host hands to `new Worker(...)`. Defaults to a sibling file the package ships. |
 | `transform` | Source pre-processor. Default: `ts-blank-space`. Embedders can swap in `esbuild-wasm` for richer TS support. |
 | `timeoutMs` | Per-emission wall-clock budget. Hitting it terminates the worker; the next emission spawns a fresh one. |
+| `routeFetchToVfs` | Route the agent's `fetch(...)` calls for path-shaped URLs to the agent's VFS. See [routeFetchToVfs](#routefetchtovfs) below. |
+
+### `routeFetchToVfs`
+
+Recovers agex-py's "registered libraries see the VFS" property by routing path-shaped GET/HEAD `fetch` calls through the bridged VFS. Without it, library functions that internally call `fetch` (Arquero's `loadCSV`, Plotly's loaders, JSON/URL fetchers in any data lib) hit the worker's HTTP origin instead of the agent's VFS — surprising and easy to miss. With it, the agent's mental model unifies: `fs.read` and registered library loaders read from the same place.
+
+```ts
+workerRuntime({
+  workerUrl: ...,
+  routeFetchToVfs: true,                    // every path-absolute URL → VFS first
+  // OR
+  routeFetchToVfs: ['/data/', '/scratch/'], // only these prefixes → VFS
+  // OR
+  routeFetchToVfs: false,                   // default — no routing, all fetch hits network
+})
+```
+
+| Form | Behavior |
+|---|---|
+| `true` | Every path-absolute URL (`/foo`, `/data/x.csv`) is tried against VFS first; falls through to real network on miss. Use when the agent doesn't talk to a same-origin API. |
+| `string[]` | Only paths under the listed prefixes are routed to VFS. Match-but-miss returns a 404 Response (not a fall-through). Use when your app serves an API the agent might also want to call (e.g. `/api/...` should pass through; agent VFS lives under `/data/`). |
+| `false` (default) | Current behavior. Agent uses `fs.read` explicitly for VFS access; `fetch` always hits the network. |
+
+**What's routed:**
+- Only **path-absolute URLs** (`/foo` style). Scheme URLs (`https://...`), scheme-relative (`//host/...`), and relative (`./foo`, `foo`) all pass through to real `fetch` unchanged.
+- Only **GET and HEAD** methods. Other methods (POST, PUT, etc.) always pass through — writing to VFS via `fetch` isn't supported (use `fs.write`).
+
+**Content-Type:** the synthesized `Response` has its `content-type` header inferred from the file extension (`.csv` → `text/csv`, `.json` → `application/json`, `.parquet` → `application/vnd.apache.parquet`, etc., default `application/octet-stream`).
+
+**Primer integration:** when `routeFetchToVfs` is enabled, a short addendum is appended to the agent's system primer so the agent knows the VFS is reachable through `fetch`. Embedders don't need to document this themselves.
+
+**Example: agex-studio with Arquero**
+
+```ts
+const agent = await createAgent({
+  name: 'analyst',
+  llm: connectAnthropic({ model: 'claude-sonnet-4-6' }),
+  runtime: workerRuntime({
+    workerUrl: new URL('./worker.js', import.meta.url),
+    routeFetchToVfs: true,
+  }),
+  state: { type: 'versioned', storage: 'indexeddb' },
+})
+agent.namespace({ url: 'https://esm.sh/arquero@7' }, { name: 'arquero' })
+
+// Agent code: loadCSV reads from VFS — no bytes-shuttling needed.
+//   import { loadCSV } from 'arquero'
+//   const dt = await loadCSV('/data/sales.csv')
+```
 
 ```ts
 import { createAgent } from 'agex-ts'

@@ -148,6 +148,12 @@ export interface ConfigureMessage {
      *  `mod[export]` to pluck the value. */
     readonly export?: string
   }>
+  /** Optional fetch-to-VFS routing config. When set, the worker
+   *  installs a `fetch` shim that intercepts path-shaped GET/HEAD
+   *  requests and serves them from the bridged `fs` instead of
+   *  hitting the network. See `WorkerRuntimeOptions.routeFetchToVfs`
+   *  for the user-facing semantics. Absent → no shim installed. */
+  readonly routeFetchToVfs?: boolean | ReadonlyArray<string>
 }
 
 export type Host2WorkerMessage =

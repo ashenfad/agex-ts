@@ -105,6 +105,60 @@ describe('polymorphic encoder/decoder', () => {
     expect(polymorphicDecoder(polymorphicEncoder(true))).toBe(true)
   })
 
+  it('round-trips a Uint8Array preserving its typing (regression)', () => {
+    // The motivating bug: a `signature: Uint8Array` field on an event
+    // would silently corrupt under plain JSON.stringify (becomes
+    // numeric-keyed plain object). Anthropic's thinking-block lower
+    // path then 400'd because TextDecoder.decode wouldn't accept the
+    // corrupted shape. superjson preserves the typing.
+    const bytes = new Uint8Array([0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x00, 0xff])
+    const round = polymorphicDecoder(polymorphicEncoder(bytes))
+    expect(round).toBeInstanceOf(Uint8Array)
+    expect(Array.from(round as Uint8Array)).toEqual([0x68, 0x65, 0x6c, 0x6c, 0x6f, 0x00, 0xff])
+  })
+
+  it('round-trips a Uint8Array nested inside a structured value (the actual bug shape)', () => {
+    // The studio's exact case: an emission with a `signature` field.
+    const event = {
+      type: 'thinking' as const,
+      text: 'pondering',
+      signature: new Uint8Array([1, 2, 3, 4]),
+      metadata: { turn: 7 },
+    }
+    const round = polymorphicDecoder(polymorphicEncoder(event)) as typeof event
+    expect(round.type).toBe('thinking')
+    expect(round.text).toBe('pondering')
+    expect(round.signature).toBeInstanceOf(Uint8Array)
+    expect(Array.from(round.signature)).toEqual([1, 2, 3, 4])
+    expect(round.metadata).toEqual({ turn: 7 })
+  })
+
+  it('round-trips Map / Set / Date / BigInt typing (superjson coverage)', () => {
+    // Drive-by coverage of the other types JSON would silently
+    // mangle. Not currently used in agex-ts data shapes but they
+    // come along for free with superjson, and locking them in via
+    // tests prevents a future contributor from "simplifying" back
+    // to plain JSON.
+    const value = {
+      m: new Map<string, number>([
+        ['a', 1],
+        ['b', 2],
+      ]),
+      s: new Set<string>(['x', 'y', 'z']),
+      d: new Date('2026-05-08T12:34:56.000Z'),
+      big: 1234567890123456789n,
+    }
+    const round = polymorphicDecoder(polymorphicEncoder(value)) as typeof value
+    expect(round.m).toBeInstanceOf(Map)
+    expect(round.m.get('a')).toBe(1)
+    expect(round.m.get('b')).toBe(2)
+    expect(round.s).toBeInstanceOf(Set)
+    expect([...round.s].sort()).toEqual(['x', 'y', 'z'])
+    expect(round.d).toBeInstanceOf(Date)
+    expect(round.d.toISOString()).toBe('2026-05-08T12:34:56.000Z')
+    expect(round.big).toBe(1234567890123456789n)
+  })
+
   it('rejects an empty record on decode', () => {
     expect(() => polymorphicDecoder(new Uint8Array(0))).toThrow(/empty record/)
   })

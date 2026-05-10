@@ -35,6 +35,7 @@
  * cleanup releases everything when the execute settles.
  */
 
+import { installConsoleProxy, makeHostFnContext, runWithCapture } from 'agex-ts/console-capture'
 import { CancelledError } from 'agex-ts/errors'
 import { prepareScriptForWire } from 'agex-ts/module-loader'
 import { memberAllowed } from 'agex-ts/policy'
@@ -134,6 +135,14 @@ export interface WorkerRuntimeOptions {
 }
 
 export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
+  // Idempotent — first runtime construction in the host process
+  // installs the ALS-gated console proxy. Subsequent calls are no-ops.
+  // Outside any `runWithCapture` context the proxy falls through to
+  // the original real console. (Node-host only; on browser hosts
+  // `node:async_hooks` isn't available — registered host fns there
+  // should opt in to `wantsContext: true` to capture via the explicit
+  // `ctx.console` channel.)
+  installConsoleProxy()
   const transform = opts.transform ?? defaultTransform
   const timeoutMs = opts.timeoutMs ?? 5000
   const workerUrl = opts.workerUrl ?? new URL('./worker.js', import.meta.url)
@@ -400,7 +409,7 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
             return
           }
           if (m?.type === 'bridgeCall' && m.executeId === executeId) {
-            void handleBridgeCall(m, ctx, policyRef, instances, w)
+            void handleBridgeCall(m, ctx, policyRef, instances, w, outputs)
             return
           }
           if (m?.type === 'newInstance' && m.executeId === executeId) {
@@ -550,12 +559,13 @@ async function handleBridgeCall(
   policy: Policy | null,
   instances: Map<number, unknown>,
   w: Worker,
+  outputs: OutputPart[],
 ): Promise<void> {
   const { executeId, callId } = msg
   let value: unknown
   let error: SerializedError | null = null
   try {
-    value = await dispatch(msg, ctx, policy, instances)
+    value = await dispatch(msg, ctx, policy, instances, outputs)
   } catch (e) {
     error = serializeError(e)
   }
@@ -592,6 +602,7 @@ async function dispatch(
   ctx: ExecuteContext,
   policy: Policy | null,
   instances: Map<number, unknown>,
+  outputs: OutputPart[],
 ): Promise<unknown> {
   const { target, method } = msg
   const args = unpackArgs(msg.args, instances)
@@ -629,7 +640,20 @@ async function dispatch(
           `workerRuntime bridge: fn '${method}' is URL-shipped; should not see RPC traffic`,
         )
       }
-      return await reg.fn(...args)
+      const fn = reg.fn
+      // Wrap the host-side dispatch so any `console.log` inside the
+      // handler — including from helper modules it calls into —
+      // captures into the per-execute outputs array on Node-host
+      // (`node:async_hooks` available). Browser-host falls through
+      // to the real console; opt in to `wantsContext: true` for
+      // explicit capture there.
+      return await runWithCapture({ outputs, passConsole: false }, async () => {
+        if (reg.wantsContext === true) {
+          const hostCtx = makeHostFnContext({ outputs, signal: ctx.signal })
+          return await fn(...args, hostCtx)
+        }
+        return await fn(...args)
+      })
     }
     case 'namespace': {
       if (policy === null) {

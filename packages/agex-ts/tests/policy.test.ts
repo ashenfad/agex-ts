@@ -122,6 +122,23 @@ describe('PolicyBuilder — name validation routing (host-bound vs URL-shipped)'
   })
 })
 
+describe('PolicyBuilder — wantsContext + url rejection', () => {
+  it('rejects fn registration combining wantsContext with url', () => {
+    const p = new PolicyBuilder()
+    expect(() =>
+      p.registerFn('shoot', { url: 'https://example.com/m.js', wantsContext: true }),
+    ).toThrow(/wantsContext can't be combined with \{ url \}/)
+  })
+
+  it('accepts wantsContext on a host-bound fn', () => {
+    const p = new PolicyBuilder()
+    expect(() =>
+      p.registerFn('shoot', { fn: async () => undefined, wantsContext: true }),
+    ).not.toThrow()
+    expect(p.snapshot().fns.get('shoot')?.wantsContext).toBe(true)
+  })
+})
+
 describe('PolicyBuilder — skill name validation (path-segment relaxed)', () => {
   // Skill names become VFS path segments at `/skills/<name>/SKILL.md`,
   // not JS bindings — accept the hyphenated / scoped / dotted shapes

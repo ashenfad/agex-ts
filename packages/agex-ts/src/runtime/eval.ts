@@ -13,11 +13,15 @@
  * - Injects the active policy's `fns` and `namespaces` as
  *   identifiers — same as the worker runtime would expose, just
  *   without the message-passing layer.
- * - Injects `taskSuccess`, `taskFail`, `taskClarify`, `cache`, `fs`,
- *   and `viewImage` — the standard task-loop bindings the agent's
- *   emitted code expects.
- * - Captures `console.log` / `.error` calls into the result's
- *   `outputs` array.
+ * - Injects `taskSuccess`, `taskFail`, `taskClarify`, `cache`, `fs`
+ *   — the standard task-loop bindings the agent's emitted code
+ *   expects.
+ * - Installs a process-wide ALS-gated `console` proxy so `console.log`
+ *   from agent code AND from registered host fns dispatched on this
+ *   call chain captures into the result's `outputs` array. Image-
+ *   shaped values (`{format,data}`, data URLs, PNG/JPEG/WebP
+ *   `Uint8Array`s) become `image` parts; everything else flows
+ *   through `safeStringifyArgs` to a `text` part.
  *
  * What it explicitly does NOT do:
  * - No bundling / esbuild — `ts-blank-space` strips types only. Full
@@ -40,8 +44,8 @@ import type {
   RuntimeAdapter,
   TaskOutcome,
 } from '../types'
+import { installConsoleProxy, makeHostFnContext, runWithCapture } from './console-capture'
 import { prepareScript } from './module-loader'
-import { safeStringifyArgs } from './safe-stringify'
 import { wrapAgentFs } from './wrap-fs'
 
 export interface EvalRuntimeOptions {
@@ -57,6 +61,11 @@ const AsyncFunction = Object.getPrototypeOf(async () => undefined).constructor a
 ) => (...args: unknown[]) => Promise<unknown>
 
 export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
+  // Idempotent — first runtime construction in the process installs the
+  // ALS-gated console proxy; later calls are a no-op. Outside any
+  // `runWithCapture` context the proxy falls through to the original
+  // real console.
+  installConsoleProxy()
   let policy: Policy | null = null
   const timeoutMs = opts.timeoutMs ?? 5000
   // URL-shipped registration specs, keyed by registered name.
@@ -133,7 +142,7 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
       }
 
       const outputs: OutputPart[] = []
-      const captureConsole = makeConsoleCapture(outputs, opts.passConsole === true)
+      const passConsole = opts.passConsole === true
 
       let outcome: TaskOutcome = { kind: 'continue' }
       // Per-execute "late terminator" slot. Recorded inside the wrapped
@@ -166,10 +175,6 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
         if (bodySettled) return undefined as never
         throw new TaskClarifyError(message)
       }
-      const viewImage = (image: { format: 'png' | 'jpeg' | 'webp'; data: string }): void => {
-        outputs.push({ type: 'image', ...image })
-      }
-
       // Build the injected name list. Functions go in directly;
       // namespaces are exposed as objects keyed by member name.
       // `inputs` is the validated task input — stable across every
@@ -190,7 +195,6 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
         taskSuccess,
         taskFail,
         taskClarify,
-        viewImage,
         cache: ctx.cache,
         // Node-fs-style ergonomic wrapper. The agent can write
         // `await fs.read(path, 'utf8')` to get a string back, or
@@ -198,7 +202,11 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
         // matches the conventional Node fs surface they were
         // trained on. Bytes-form still works unchanged.
         fs: wrapAgentFs(ctx.fs),
-        console: captureConsole,
+        // No `console` injection — the global ALS-gated proxy (installed
+        // in `evalRuntime()`) captures `console.log` etc. from the
+        // AsyncFunction body AND from any registered host fn dispatched
+        // on this call chain, all routed via the same `runWithCapture`
+        // context below.
         inputs: ctx.inputs,
         // Lazy loader for URL-shipped registrations. The agent's
         // emitted code calls this via the rewriter's
@@ -209,12 +217,32 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
         __load,
         __agexBodyDone,
       }
-      // Host-bound registrations inject their live JS reference.
-      // URL-shipped names are NOT injected here — the rewriter routes
-      // their imports through `__load(name)` (see `urlSpecs` / `__load`
-      // above) so the dynamic `import()` only fires on first reference.
+      const start = performance.now()
+      let error: Error | null = null
+      const ac = new AbortController()
+      // Lazy `HostFnContext` for opt-in host fns. Built on first call
+      // — most invocations have no opt-in fns, and even when they do,
+      // we'd rather not allocate a Console proxy speculatively.
+      let cachedHostCtx: ReturnType<typeof makeHostFnContext> | null = null
+      const getHostCtx = (): ReturnType<typeof makeHostFnContext> => {
+        if (cachedHostCtx === null) {
+          cachedHostCtx = makeHostFnContext({ outputs, signal: ac.signal, passConsole })
+        }
+        return cachedHostCtx
+      }
+      // Host-bound registrations inject their live JS reference (or a
+      // ctx-appending wrapper, when `wantsContext: true`). URL-shipped
+      // names are NOT injected here — the rewriter routes their imports
+      // through `__load(name)` (see `urlSpecs` / `__load` above) so the
+      // dynamic `import()` only fires on first reference.
       for (const [name, reg] of policy.fns) {
-        if (reg.fn !== undefined) injected[name] = reg.fn
+        if (reg.fn === undefined) continue
+        if (reg.wantsContext === true) {
+          const fn = reg.fn
+          injected[name] = (...args: unknown[]) => fn(...args, getHostCtx())
+        } else {
+          injected[name] = reg.fn
+        }
       }
       for (const [name, reg] of policy.namespaces) {
         if (reg.target !== undefined) injected[name] = reg.target
@@ -222,10 +250,6 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
       for (const [name, reg] of policy.classes) {
         if (reg.cls !== undefined) injected[name] = reg.cls
       }
-
-      const start = performance.now()
-      let error: Error | null = null
-      const ac = new AbortController()
       const timer = setTimeout(() => ac.abort(), timeoutMs)
       const linkedAbort = (): void => ac.abort()
       ctx.signal.addEventListener('abort', linkedAbort)
@@ -275,16 +299,21 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
         // case) sees `bodySettled === true` when it resumes.
         const annotated = `${prepared.code}\n;__agexBodyDone();\n//# sourceURL=<ts_action>\n`
         const fn = new AsyncFunction(...names, annotated)
-        const userPromise = fn(...names.map((n) => injected[n]))
 
-        // Race the user code against the abort signal.
-        const cancellation = new Promise<never>((_, reject) => {
-          ac.signal.addEventListener('abort', () =>
-            reject(new CancelledError(`evalRuntime: aborted after ${timeoutMs}ms`)),
-          )
+        // Race the user code against the abort signal. The user
+        // promise must be created INSIDE `runWithCapture` so the ALS
+        // store is bound to its synchronous frames and awaited
+        // continuations — and so that any registered host fn invoked
+        // from this chain inherits the same store.
+        await runWithCapture({ outputs, passConsole }, async () => {
+          const userPromise = fn(...names.map((n) => injected[n]))
+          const cancellation = new Promise<never>((_, reject) => {
+            ac.signal.addEventListener('abort', () =>
+              reject(new CancelledError(`evalRuntime: aborted after ${timeoutMs}ms`)),
+            )
+          })
+          await Promise.race([userPromise, cancellation])
         })
-
-        await Promise.race([userPromise, cancellation])
         // Promise resolved with no taskSuccess / taskFail / taskClarify —
         // the agent wants another turn.
       } catch (e) {
@@ -365,30 +394,4 @@ class TaskFailErrorButForSuccess extends Error {
     super('taskSuccess')
     this.name = 'TaskSuccessSignal'
   }
-}
-
-function makeConsoleCapture(outputs: OutputPart[], passConsole: boolean): Console {
-  const capture =
-    (level: 'log' | 'error' | 'warn' | 'info') =>
-    (...args: unknown[]) => {
-      // safeStringifyArgs handles Error / BigInt / Symbol / undefined /
-      // circular refs without throwing, and per-arg char-budgets the
-      // output so a single huge value can't blow out the agent's
-      // context. See src/runtime/safe-stringify.ts.
-      const text = safeStringifyArgs(args)
-      outputs.push({ type: 'text', text })
-      if (passConsole) console[level](...args)
-    }
-  // We only mirror the most common methods; rare ones fall back to host
-  // console. The proxy keeps the shape Console-like so user code that
-  // does feature checks (`if (console.table) ...`) doesn't crash.
-  return new Proxy(console as unknown as Console, {
-    get(target, prop) {
-      if (prop === 'log') return capture('log')
-      if (prop === 'error') return capture('error')
-      if (prop === 'warn') return capture('warn')
-      if (prop === 'info') return capture('info')
-      return Reflect.get(target, prop)
-    },
-  })
 }

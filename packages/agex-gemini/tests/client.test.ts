@@ -244,3 +244,56 @@ describe('Gemini — dumpConfig', () => {
     expect(cfg.extras).toMatchObject({ temperature: 0.5, maxOutputTokens: 4096 })
   })
 })
+
+describe('Gemini — headers customization', () => {
+  it('passes through extra string headers alongside defaults', async () => {
+    const { fn, calls } = recordingFetch(happyPathEvents)
+    const client = new Gemini({
+      apiKey: 'k',
+      fetchImpl: fn,
+      headers: { 'x-custom': 'value' },
+    })
+    await collect(client.complete(trivialRequest))
+    const sent = calls[0]?.init.headers as Record<string, string>
+    expect(sent['x-custom']).toBe('value')
+    expect(sent['content-type']).toBe('application/json')
+    expect(sent['x-goog-api-key']).toBe('k')
+  })
+
+  it('null value DELETES a default header', async () => {
+    const { fn, calls } = recordingFetch(happyPathEvents)
+    const client = new Gemini({
+      apiKey: 'k',
+      fetchImpl: fn,
+      // Compat endpoint that uses a different auth header.
+      headers: { 'x-goog-api-key': null, authorization: 'Bearer my-token' },
+    })
+    await collect(client.complete(trivialRequest))
+    const sent = calls[0]?.init.headers as Record<string, string>
+    expect('x-goog-api-key' in sent).toBe(false)
+    expect(sent.authorization).toBe('Bearer my-token')
+  })
+
+  it('header names are case-insensitive (HTTP semantics)', async () => {
+    const { fn, calls } = recordingFetch(happyPathEvents)
+    const client = new Gemini({
+      apiKey: 'k',
+      fetchImpl: fn,
+      headers: { 'X-Goog-Api-Key': 'override-key', 'X-Custom': 'mixed' },
+    })
+    await collect(client.complete(trivialRequest))
+    const sent = calls[0]?.init.headers as Record<string, string>
+    expect(sent['x-goog-api-key']).toBe('override-key')
+    expect('X-Goog-Api-Key' in sent).toBe(false)
+    expect(sent['x-custom']).toBe('mixed')
+  })
+
+  it('omitted headers option preserves all defaults (no behavior change)', async () => {
+    const { fn, calls } = recordingFetch(happyPathEvents)
+    const client = new Gemini({ apiKey: 'k', fetchImpl: fn })
+    await collect(client.complete(trivialRequest))
+    const sent = calls[0]?.init.headers as Record<string, string>
+    expect(sent['content-type']).toBe('application/json')
+    expect(sent['x-goog-api-key']).toBe('k')
+  })
+})

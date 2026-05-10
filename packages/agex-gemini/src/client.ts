@@ -76,6 +76,21 @@ export interface GeminiOptions {
   readonly generationConfig?: Readonly<Record<string, unknown>>
   /** Override `fetch` for tests / custom transports. */
   readonly fetchImpl?: typeof fetch
+  /**
+   * Custom HTTP headers, merged into the provider's defaults.
+   *
+   * - String value sets / overrides the header.
+   * - `null` value DELETES a default header. Useful for compat
+   *   endpoints (Gemini-shaped proxies, Vertex AI variants) that
+   *   reject certain headers in CORS preflight or expect a
+   *   different auth scheme.
+   *
+   * Header names are lowercased to match `fetch`'s case-insensitive
+   * handling — both `'Authorization'` and `'authorization'` override
+   * the same default. For more invasive request shaping (URL
+   * rewriting, body transforms), use `fetchImpl` instead.
+   */
+  readonly headers?: Readonly<Record<string, string | null>>
 }
 
 export class Gemini implements LLMClient {
@@ -88,6 +103,7 @@ export class Gemini implements LLMClient {
   private readonly nativeThinking: boolean
   private readonly generationConfig: Readonly<Record<string, unknown>>
   private readonly fetchImpl: typeof fetch
+  private readonly headerOverrides: Readonly<Record<string, string | null>>
 
   constructor(opts: GeminiOptions = {}) {
     this.model = opts.model ?? DEFAULT_MODEL
@@ -103,6 +119,11 @@ export class Gemini implements LLMClient {
     // `this.fetchImpl(...)` from inside the client. Node/Deno don't
     // enforce the check, but the bind is harmless there.
     this.fetchImpl = opts.fetchImpl ?? fetch.bind(globalThis)
+    // Lowercase upfront so the merge against our (lowercase) defaults
+    // is case-insensitive — both `'X-Goog-Api-Key'` and `'x-goog-api-key'`
+    // override the same default. HTTP headers are case-insensitive
+    // per the spec.
+    this.headerOverrides = lowercaseKeys(opts.headers ?? {})
   }
 
   // ---------- LLMClient surface ----------
@@ -172,6 +193,13 @@ export class Gemini implements LLMClient {
       'content-type': 'application/json',
     }
     if (this.apiKey.length > 0) h['x-goog-api-key'] = this.apiKey
+    // Apply embedder overrides last. `null` deletes a default; string
+    // sets/overrides. Use to swap auth schemes some compat endpoints
+    // (Vertex AI variants, gateway proxies) require.
+    for (const [k, v] of Object.entries(this.headerOverrides)) {
+      if (v === null) delete h[k]
+      else h[k] = v
+    }
     return h
   }
 
@@ -234,4 +262,17 @@ export class Gemini implements LLMClient {
       ...(usage.outputTokens !== null && { outputTokens: usage.outputTokens }),
     }
   }
+}
+
+/** Lowercase the keys of a header overrides map so the merge against
+ *  our (lowercase) defaults is case-insensitive. HTTP headers are
+ *  case-insensitive per the spec; without this, an embedder passing
+ *  `'X-Goog-Api-Key'` would be added as a separate entry rather than
+ *  overriding our `'x-goog-api-key'`. */
+function lowercaseKeys(
+  obj: Readonly<Record<string, string | null>>,
+): Readonly<Record<string, string | null>> {
+  const out: Record<string, string | null> = {}
+  for (const [k, v] of Object.entries(obj)) out[k.toLowerCase()] = v
+  return out
 }

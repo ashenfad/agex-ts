@@ -268,3 +268,59 @@ describe('OpenAI — dumpConfig', () => {
     })
   })
 })
+
+describe('OpenAI — headers customization', () => {
+  it('passes through extra string headers alongside defaults', async () => {
+    const { fn, calls } = recordingFetch(happyPathEvents)
+    const client = new OpenAI({
+      apiKey: 'sk-test',
+      fetchImpl: fn,
+      headers: { 'http-referer': 'https://my-app.example', 'x-title': 'My App' },
+    })
+    await collect(client.complete(trivialRequest))
+    const sent = calls[0]?.init.headers as Record<string, string>
+    expect(sent['http-referer']).toBe('https://my-app.example')
+    expect(sent['x-title']).toBe('My App')
+    expect(sent['content-type']).toBe('application/json')
+    expect(sent.authorization).toBe('Bearer sk-test')
+  })
+
+  it('null value DELETES a default header', async () => {
+    const { fn, calls } = recordingFetch(happyPathEvents)
+    const client = new OpenAI({
+      apiKey: 'sk-test',
+      fetchImpl: fn,
+      // Some compat endpoints reject the standard auth header in
+      // favor of one they expect (e.g. via a custom proxy header).
+      headers: { authorization: null, 'x-my-auth': 'secret' },
+    })
+    await collect(client.complete(trivialRequest))
+    const sent = calls[0]?.init.headers as Record<string, string>
+    expect('authorization' in sent).toBe(false)
+    expect(sent['x-my-auth']).toBe('secret')
+  })
+
+  it('header names are case-insensitive (HTTP semantics)', async () => {
+    const { fn, calls } = recordingFetch(happyPathEvents)
+    const client = new OpenAI({
+      apiKey: 'sk-test',
+      fetchImpl: fn,
+      headers: { Authorization: 'Bearer override-key', 'X-Custom': 'mixed' },
+    })
+    await collect(client.complete(trivialRequest))
+    const sent = calls[0]?.init.headers as Record<string, string>
+    // Default lowercased version was overridden, not duplicated.
+    expect(sent.authorization).toBe('Bearer override-key')
+    expect('Authorization' in sent).toBe(false)
+    expect(sent['x-custom']).toBe('mixed')
+  })
+
+  it('omitted headers option preserves all defaults (no behavior change)', async () => {
+    const { fn, calls } = recordingFetch(happyPathEvents)
+    const client = new OpenAI({ apiKey: 'sk-test', fetchImpl: fn })
+    await collect(client.complete(trivialRequest))
+    const sent = calls[0]?.init.headers as Record<string, string>
+    expect(sent['content-type']).toBe('application/json')
+    expect(sent.authorization).toBe('Bearer sk-test')
+  })
+})

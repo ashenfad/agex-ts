@@ -73,6 +73,21 @@ export interface AnthropicOptions {
   /** Override `fetch` for tests / custom transports. Defaults to the
    *  global `fetch`. */
   readonly fetchImpl?: typeof fetch
+  /**
+   * Custom HTTP headers, merged into the provider's defaults.
+   *
+   * - String value sets / overrides the header.
+   * - `null` value DELETES a default header. Useful for compat
+   *   endpoints that don't allow certain headers in CORS preflight
+   *   (e.g. OpenRouter's Anthropic-compat endpoint rejects
+   *   `anthropic-version`; pass `headers: { 'anthropic-version': null }`).
+   *
+   * Header names are lowercased to match `fetch`'s case-insensitive
+   * handling — both `'Content-Type'` and `'content-type'` override the
+   * same default. For more invasive request shaping (auth schemes,
+   * URL rewriting, body transforms), use `fetchImpl` instead.
+   */
+  readonly headers?: Readonly<Record<string, string | null>>
 }
 
 export class Anthropic implements LLMClient {
@@ -86,6 +101,7 @@ export class Anthropic implements LLMClient {
   private readonly extras: Readonly<Record<string, unknown>>
   private readonly browserDirectAccess: boolean
   private readonly fetchImpl: typeof fetch
+  private readonly headerOverrides: Readonly<Record<string, string | null>>
 
   constructor(opts: AnthropicOptions = {}) {
     this.model = opts.model ?? DEFAULT_MODEL
@@ -102,6 +118,11 @@ export class Anthropic implements LLMClient {
     // `this.fetchImpl(...)` from inside the client. Node/Deno don't
     // enforce the check, but the bind is harmless there.
     this.fetchImpl = opts.fetchImpl ?? fetch.bind(globalThis)
+    // Lowercase keys upfront so the merge is case-insensitive (HTTP
+    // headers are case-insensitive; `fetch` normalizes via Headers).
+    // Without this, `'Content-Type'` from the embedder wouldn't
+    // override our default `'content-type'`.
+    this.headerOverrides = lowercaseKeys(opts.headers ?? {})
   }
 
   // ---------- LLMClient surface ----------
@@ -191,6 +212,14 @@ export class Anthropic implements LLMClient {
     }
     if (this.apiKey.length > 0) h['x-api-key'] = this.apiKey
     if (this.browserDirectAccess) h['anthropic-dangerous-direct-browser-access'] = 'true'
+    // Apply embedder overrides last. `null` deletes a default; string
+    // sets/overrides. Compat endpoints (e.g. OpenRouter's Anthropic-
+    // shaped one) use the `null` form to drop headers their CORS
+    // allowlist doesn't accept.
+    for (const [k, v] of Object.entries(this.headerOverrides)) {
+      if (v === null) delete h[k]
+      else h[k] = v
+    }
     return h
   }
 
@@ -257,4 +286,17 @@ export class Anthropic implements LLMClient {
       ...(usage.outputTokens !== null && { outputTokens: usage.outputTokens }),
     }
   }
+}
+
+/** Lowercase the keys of a header overrides map so the merge against
+ *  our (lowercase) defaults is case-insensitive. HTTP headers are
+ *  case-insensitive per the spec; without this, an embedder passing
+ *  `'Content-Type'` would be added as a separate entry rather than
+ *  overriding our `'content-type'`. */
+function lowercaseKeys(
+  obj: Readonly<Record<string, string | null>>,
+): Readonly<Record<string, string | null>> {
+  const out: Record<string, string | null> = {}
+  for (const [k, v] of Object.entries(obj)) out[k.toLowerCase()] = v
+  return out
 }

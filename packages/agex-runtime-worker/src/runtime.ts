@@ -98,6 +98,39 @@ export interface WorkerRuntimeOptions {
    *  terminates the worker; the next emission spawns a fresh one.
    *  Default `5000`. */
   readonly timeoutMs?: number
+  /**
+   * Route the agent's `fetch(...)` calls for path-shaped URLs (no
+   * scheme, starts with `/`) to the agent's VFS. Recovers agex-py's
+   * "registered libraries see the VFS" property — Arquero's
+   * `loadCSV`, Plotly's loaders, and any other library function
+   * that internally fetches a URL will read from VFS instead of
+   * hitting the host's HTTP origin.
+   *
+   * - `true` — every path-absolute URL is tried against VFS first;
+   *   falls through to real network on miss. Use when the agent
+   *   doesn't talk to a same-origin API (the common case).
+   * - `string[]` — only these prefixes go to VFS; everything else
+   *   (including `/api/...`) passes through unchanged. Use when
+   *   your app serves an API the agent might want to call. A
+   *   path that matches a prefix but isn't in VFS returns a 404
+   *   Response (it was an explicit miss, not "fall through and
+   *   try the network").
+   * - `false` (default) — current behavior: every fetch hits the
+   *   network, agent uses `fs.read` explicitly for VFS access.
+   *
+   * Only path-absolute URLs (`/foo`) are considered — relative
+   * (`foo`, `./foo`) and scheme-relative (`//host/foo`) URLs are
+   * always passed through to the real `fetch`.
+   *
+   * Only `GET` and `HEAD` requests are routed; other methods always
+   * pass through to real `fetch` (writing to VFS via fetch is
+   * outside the natural shape).
+   *
+   * When enabled, a short note is appended to the agent's primer
+   * so the agent knows the VFS is reachable via `fetch` (and via
+   * registered libraries that use it).
+   */
+  readonly routeFetchToVfs?: boolean | ReadonlyArray<string>
 }
 
 export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
@@ -182,7 +215,7 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
       // policy mutation. If the embedder wants new registrations,
       // they need a fresh runtime instance.
       policyRef = policy
-      configurePayload = buildConfigure(policy)
+      configurePayload = buildConfigure(policy, opts.routeFetchToVfs)
     },
 
     async execute(code: string, ctx: ExecuteContext): Promise<ExecResult> {
@@ -447,6 +480,19 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
         activeExecute.settle(new CancelledError('runtime disposed'))
       }
       killWorker()
+    },
+
+    primerAddendum(): string | undefined {
+      const route = opts.routeFetchToVfs
+      if (route === undefined || route === false) return undefined
+      const scope = Array.isArray(route)
+        ? `under these prefixes: ${route.map((p) => `\`${p}\``).join(', ')}`
+        : 'for any path-absolute URL'
+      return [
+        '## Filesystem is fetch-accessible',
+        '',
+        `This runtime routes \`fetch(...)\` calls to your VFS ${scope} (GET/HEAD only).  That means library functions that internally call \`fetch\` — Arquero's \`loadCSV\`, Plotly's loaders, JSON/URL fetchers in any data lib — read from the same VFS your \`fs.read\` reaches, without an explicit bytes-shuttling step.  Mental model: when a registered library asks you for a "URL", a path like \`/data/foo.csv\` resolves against the VFS first.  Absolute URLs (\`https://...\`) and relative URLs (\`./foo\`) are unaffected — they go to the network as usual.`,
+      ].join('\n')
     },
   }
 }
@@ -836,7 +882,10 @@ function postBridgeResponse(
  *  exclude here so the worker never sees names that policy
  *  excluded; URL registrations skip that filter entirely (whole-
  *  module exposure is the semantic of URL mode). */
-function buildConfigure(policy: Policy): ConfigureMessage {
+function buildConfigure(
+  policy: Policy,
+  routeFetchToVfs: boolean | ReadonlyArray<string> | undefined,
+): ConfigureMessage {
   const fns: string[] = []
   const namespaces: Array<{ name: string; members: ReadonlyArray<string> }> = []
   const classes: Array<{
@@ -897,7 +946,14 @@ function buildConfigure(policy: Policy): ConfigureMessage {
     classes.push({ name, instanceMethods, staticMethods })
   }
 
-  return { type: 'configure', fns, namespaces, classes, urlModules }
+  return {
+    type: 'configure',
+    fns,
+    namespaces,
+    classes,
+    urlModules,
+    ...(routeFetchToVfs !== undefined && routeFetchToVfs !== false && { routeFetchToVfs }),
+  }
 }
 
 /** Build a `urlModules` entry, conditionally including `export` so

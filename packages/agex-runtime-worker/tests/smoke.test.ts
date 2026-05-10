@@ -1799,3 +1799,209 @@ describe('workerRuntime — DuckDB-WASM bytes-shuttling pattern', () => {
     expect(persisted[3]).toBe(0x31) // '1'
   }, 60_000)
 })
+
+describe('workerRuntime — routeFetchToVfs', () => {
+  // Recovers agex-py's "registered libraries see VFS" property by
+  // routing path-shaped GET/HEAD fetches through the bridged VFS.
+  // Important for libraries (Arquero's loadCSV, Plotly's loaders,
+  // etc.) that internally call fetch() and would otherwise hit the
+  // worker's HTTP origin.
+
+  let disposers: Array<() => Promise<void>> = []
+  afterEach(async () => {
+    await Promise.all(disposers.map((d) => d()))
+    disposers = []
+  })
+
+  function runtime(routeFetchToVfs: boolean | string[]) {
+    const rt = workerRuntime({
+      workerUrl: TEST_WORKER_URL,
+      timeoutMs: 5_000,
+      routeFetchToVfs,
+    })
+    disposers.push(() => rt.dispose())
+    return rt
+  }
+
+  it('routeFetchToVfs: true — path-absolute fetch reads from VFS', async () => {
+    const rt = runtime(true)
+    await rt.init(EMPTY_POLICY)
+    const ctx = makeCtx()
+    await ctx.fs.write('/data.csv', new TextEncoder().encode('a,b\n1,2\n'))
+    const code = `
+      const res = await fetch('/data.csv')
+      const text = await res.text()
+      taskSuccess({ status: res.status, text })
+    `
+    const result = await rt.execute(code, ctx)
+    expect(result.error).toBeNull()
+    expect(result.outcome).toEqual({
+      kind: 'success',
+      value: { status: 200, text: 'a,b\n1,2\n' },
+    })
+  })
+
+  it('routeFetchToVfs: true — content-type inferred from extension', async () => {
+    const rt = runtime(true)
+    await rt.init(EMPTY_POLICY)
+    const ctx = makeCtx()
+    await ctx.fs.write('/x.json', new TextEncoder().encode('{"k":1}'))
+    const code = `
+      const res = await fetch('/x.json')
+      const ct = res.headers.get('content-type')
+      const json = await res.json()
+      taskSuccess({ ct, json })
+    `
+    const result = await rt.execute(code, ctx)
+    expect(result.outcome).toEqual({
+      kind: 'success',
+      value: { ct: 'application/json', json: { k: 1 } },
+    })
+  })
+
+  it('routeFetchToVfs: true — VFS miss falls through to network (not synthesized 404)', async () => {
+    // In boolean-true mode, a VFS miss falls through to real fetch.
+    // The cleanest signal: the response isn't the synthetic 404 we'd
+    // produce in prefix-mode. Whether the network returns 200/404/HTML
+    // depends on the host, but it WON'T be `statusText: 'Not Found in
+    // VFS'`.
+    const rt = runtime(true)
+    await rt.init(EMPTY_POLICY)
+    const ctx = makeCtx()
+    // Don't write the path to VFS.
+    const code = `
+      try {
+        const res = await fetch('/never/missing.txt')
+        taskSuccess({ ranTo: 'response', statusText: res.statusText })
+      } catch (e) {
+        taskSuccess({ ranTo: 'catch', message: e.message })
+      }
+    `
+    const result = await rt.execute(code, ctx)
+    const v = (result.outcome as { kind: 'success'; value: Record<string, unknown> }).value
+    expect(v.statusText).not.toBe('Not Found in VFS')
+  })
+
+  it('routeFetchToVfs: array prefix — only listed prefixes go to VFS', async () => {
+    const rt = runtime(['/data/'])
+    await rt.init(EMPTY_POLICY)
+    const ctx = makeCtx()
+    await ctx.fs.mkdir('/data')
+    await ctx.fs.write('/data/in-vfs.csv', new TextEncoder().encode('matched\n'))
+    // Write a file at a path that's NOT under /data/ — agent fetches
+    // it and should NOT see VFS contents (since /elsewhere/ isn't a
+    // declared prefix). The fetch falls through to the real network.
+    await ctx.fs.write('/x.csv', new TextEncoder().encode('IGNORED\n'))
+    const code = `
+      const matched = await (await fetch('/data/in-vfs.csv')).text()
+      let elsewhereStatus = 0
+      let elsewhereText = ''
+      try {
+        const r = await fetch('/x.csv')
+        elsewhereStatus = r.status
+        elsewhereText = await r.text()
+      } catch (e) {
+        elsewhereText = 'fetch-threw:' + e.message
+      }
+      taskSuccess({ matched: matched.trim(), elsewhereSawVfs: elsewhereText.includes('IGNORED') })
+    `
+    const result = await rt.execute(code, ctx)
+    const value = (result.outcome as { kind: 'success'; value: Record<string, unknown> }).value
+    expect(value.matched).toBe('matched')
+    // Critical: /x.csv was outside the declared prefix → NOT routed
+    // to VFS, even though it exists there.
+    expect(value.elsewhereSawVfs).toBe(false)
+  })
+
+  it('routeFetchToVfs: array prefix — match-but-miss returns 404 (no fall-through)', async () => {
+    const rt = runtime(['/data/'])
+    await rt.init(EMPTY_POLICY)
+    const ctx = makeCtx()
+    await ctx.fs.mkdir('/data')
+    // The path matches the prefix but doesn't exist in VFS.
+    // Prefix mode: explicit miss = 404. (vs boolean-true mode where
+    // miss falls through to network.)
+    const code = `
+      const res = await fetch('/data/missing.csv')
+      taskSuccess({ status: res.status })
+    `
+    const result = await rt.execute(code, ctx)
+    expect(result.outcome).toEqual({ kind: 'success', value: { status: 404 } })
+  })
+
+  it('routeFetchToVfs: only GET/HEAD are routed; POST passes through', async () => {
+    const rt = runtime(true)
+    await rt.init(EMPTY_POLICY)
+    const ctx = makeCtx()
+    await ctx.fs.write('/data.csv', new TextEncoder().encode('via-vfs\n'))
+    // POST against the same path: should NOT read from VFS (writing
+    // via fetch isn't a thing the wrapper supports). The real network
+    // either 404s, errors, or whatever — what we verify is that the
+    // response body isn't our VFS bytes.
+    const code = `
+      let posted = ''
+      try {
+        const r = await fetch('/data.csv', { method: 'POST', body: 'hi' })
+        posted = await r.text()
+      } catch (e) {
+        posted = 'threw:' + e.message
+      }
+      taskSuccess({ postedSawVfs: posted.includes('via-vfs') })
+    `
+    const result = await rt.execute(code, ctx)
+    const value = (result.outcome as { kind: 'success'; value: Record<string, unknown> }).value
+    expect(value.postedSawVfs).toBe(false)
+  })
+
+  it('routeFetchToVfs absent — fetch is unmodified (regression guard)', async () => {
+    const rt = workerRuntime({ workerUrl: TEST_WORKER_URL, timeoutMs: 2_000 })
+    disposers.push(() => rt.dispose())
+    await rt.init(EMPTY_POLICY)
+    const ctx = makeCtx()
+    // Write a file in VFS that would be intercepted if routing were on.
+    await ctx.fs.write('/data.csv', new TextEncoder().encode('via-vfs\n'))
+    const code = `
+      try {
+        const r = await fetch('/data.csv')
+        const text = await r.text()
+        taskSuccess({ sawVfs: text.includes('via-vfs') })
+      } catch (e) {
+        taskSuccess({ sawVfs: false })
+      }
+    `
+    const result = await rt.execute(code, ctx)
+    const value = (result.outcome as { kind: 'success'; value: Record<string, unknown> }).value
+    // No routing → fetch hits the real network → does NOT see VFS.
+    expect(value.sawVfs).toBe(false)
+  })
+
+  it('end-to-end: arquero loadCSV reads from VFS via routed fetch', async () => {
+    // The motivating case the studio hit. Register arquero as a
+    // URL-shipped namespace and have the agent use loadCSV to read
+    // a VFS-resident file. Without routing, this hits the worker's
+    // HTTP origin (returns Vite's index.html). With routing, the
+    // VFS bytes flow through to arquero's parser.
+    const rt = runtime(true)
+    await rt.init(
+      makePolicy({
+        namespaceUrls: { arquero: { url: 'https://esm.sh/arquero@7' } },
+      }),
+    )
+    const ctx = makeCtx()
+    await ctx.fs.mkdir('/data')
+    await ctx.fs.write(
+      '/data/sales.csv',
+      new TextEncoder().encode('region,amount\nNORTH,10\nSOUTH,20\nNORTH,15\n'),
+    )
+    const code = `
+      import { loadCSV } from 'arquero'
+      const dt = await loadCSV('/data/sales.csv')
+      taskSuccess({ columns: dt.columnNames(), rows: dt.numRows() })
+    `
+    const result = await rt.execute(code, ctx)
+    expect(result.outcome).toEqual({
+      kind: 'success',
+      value: { columns: ['region', 'amount'], rows: 3 },
+    })
+  }, 30_000)
+})

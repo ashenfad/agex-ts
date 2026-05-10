@@ -669,6 +669,154 @@ function handleConfigure(msg: ConfigureMessage): void {
       ...(spec.export !== undefined && { export: spec.export }),
     })
   }
+  // Install the fetch shim if the host configured route-to-VFS. Done
+  // once per configure message; the shim is inert outside an active
+  // execute (it falls through to the original fetch when there's no
+  // `activeBridge` to read VFS through).
+  if (msg.routeFetchToVfs !== undefined) {
+    installFetchShim(msg.routeFetchToVfs)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// fetch-to-VFS shim
+// ---------------------------------------------------------------------------
+
+const _originalFetch: typeof globalThis.fetch = globalThis.fetch.bind(globalThis)
+let _fetchShimInstalled = false
+
+/** Install a `globalThis.fetch` shim that routes path-shaped GET/HEAD
+ *  requests to the bridged VFS. Idempotent — calling twice replaces
+ *  the routing config but doesn't double-wrap the original fetch. */
+function installFetchShim(routing: boolean | ReadonlyArray<string>): void {
+  if (_fetchShimInstalled) {
+    // Already wrapped; just rebind the routing config closure.
+    _activeRouting = routing
+    return
+  }
+  _activeRouting = routing
+  _fetchShimInstalled = true
+  globalThis.fetch = async function patchedFetch(
+    input: RequestInfo | URL,
+    init?: RequestInit,
+  ): Promise<Response> {
+    const decision = decideFetchRoute(input, init, _activeRouting)
+    if (decision === 'passthrough') return _originalFetch(input, init)
+    if (decision === 'not-in-prefix-vfs') {
+      // Prefix-mode declared "this prefix is VFS"; agent's path
+      // didn't resolve. 404 is a clean fetch-shaped miss.
+      return new Response(null, { status: 404, statusText: 'Not Found in VFS' })
+    }
+    // decision is { path }: try the VFS read.
+    const path = decision.path
+    if (activeBridge === null) {
+      // No execute is in flight, so we have no fs to read through.
+      // Fall through to the original fetch; this only happens when
+      // some non-execute code path triggers fetch (e.g. URL-shipped
+      // module loading), which legitimately wants the network.
+      return _originalFetch(input, init)
+    }
+    try {
+      const fs = activeBridge.build('fs', FS_METHODS) as { read(p: string): Promise<Uint8Array> }
+      const bytes = await fs.read(path)
+      // Cast to BodyInit — DOM lib types still expect ArrayBufferView
+      // here, and recent Node Uint8Array<ArrayBufferLike> generic
+      // doesn't structurally match without help. Runtime accepts it.
+      return new Response(bytes as unknown as BodyInit, {
+        status: 200,
+        headers: { 'content-type': inferContentType(path) },
+      })
+    } catch (e) {
+      if (Array.isArray(_activeRouting)) {
+        // Prefix mode: the path matched a declared VFS prefix but
+        // the read failed. Surface a 404 — the agent declared this
+        // namespace as VFS, so a miss IS a miss, not a network
+        // pass-through opportunity.
+        return new Response(null, { status: 404, statusText: 'Not Found in VFS' })
+      }
+      // Boolean-true mode: VFS miss falls through to the network so
+      // the agent can still reach legitimate same-origin paths that
+      // happen to live under the host's HTTP root rather than the
+      // VFS. Honors the "VFS first, network fallback" semantic.
+      void e
+      return _originalFetch(input, init)
+    }
+  }
+}
+
+let _activeRouting: boolean | ReadonlyArray<string> = false
+
+/** Decide what to do with a fetch call. Centralizes the URL-shape
+ *  + method + routing-mode logic so the shim's body stays focused on
+ *  the fs/Response mechanics. */
+function decideFetchRoute(
+  input: RequestInfo | URL,
+  init: RequestInit | undefined,
+  routing: boolean | ReadonlyArray<string>,
+): 'passthrough' | 'not-in-prefix-vfs' | { path: string } {
+  // Method gate: only GET/HEAD are routed. Other methods don't have
+  // a sensible VFS interpretation (writing via fetch isn't a thing
+  // we want to support; the agent uses fs.write for that).
+  const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase()
+  if (method !== 'GET' && method !== 'HEAD') return 'passthrough'
+
+  // Extract the URL string from whatever shape we got.
+  const urlStr = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+
+  // Path-absolute check: only `/foo`-style URLs are routable.
+  // Scheme-prefixed (`https://...`), scheme-relative (`//host/...`),
+  // and relative (`foo`, `./foo`) all pass through. Strip query +
+  // fragment when computing the VFS path; both are noise for file
+  // lookup.
+  if (!urlStr.startsWith('/') || urlStr.startsWith('//')) return 'passthrough'
+  const noQuery = urlStr.split('#')[0]?.split('?')[0] ?? urlStr
+  const path = noQuery
+
+  if (routing === true) return { path }
+  if (Array.isArray(routing)) {
+    const matches = routing.some((prefix) => path.startsWith(prefix))
+    if (!matches) return 'passthrough'
+    return { path }
+  }
+  return 'passthrough'
+}
+
+/** Best-effort content-type from file extension. The full IANA list
+ *  isn't worth pulling in — the libraries that need this (CSV / JSON /
+ *  Parquet / images) have a small set of canonical types they expect.
+ *  Default `application/octet-stream` is safe for everything else
+ *  (libraries that need a specific type usually inspect bytes anyway). */
+function inferContentType(path: string): string {
+  const dot = path.lastIndexOf('.')
+  if (dot === -1) return 'application/octet-stream'
+  const ext = path.slice(dot + 1).toLowerCase()
+  switch (ext) {
+    case 'csv':
+      return 'text/csv'
+    case 'json':
+      return 'application/json'
+    case 'txt':
+    case 'md':
+      return 'text/plain'
+    case 'html':
+    case 'htm':
+      return 'text/html'
+    case 'xml':
+      return 'application/xml'
+    case 'png':
+      return 'image/png'
+    case 'jpg':
+    case 'jpeg':
+      return 'image/jpeg'
+    case 'webp':
+      return 'image/webp'
+    case 'parquet':
+      return 'application/vnd.apache.parquet'
+    case 'arrow':
+      return 'application/vnd.apache.arrow.stream'
+    default:
+      return 'application/octet-stream'
+  }
 }
 
 /** Lazy module loader injected into the agent's scope (and passed to

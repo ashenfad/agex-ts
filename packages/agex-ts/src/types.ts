@@ -359,6 +359,13 @@ export interface RuntimeAdapter {
   execute(code: string, ctx: ExecuteContext): Promise<ExecResult>
   /** Release resources. Called when the agent is disposed. */
   dispose(): Promise<void>
+  /** Optional addendum the runtime contributes to the system primer.
+   *  Returned text is appended to the built-in primer at task-message
+   *  build time. Use when runtime configuration is worth surfacing to
+   *  the agent — e.g. `workerRuntime`'s `routeFetchToVfs` enables
+   *  `fetch('/path')` against the VFS, which the agent should know
+   *  about. Return `undefined` when the runtime has nothing to add. */
+  primerAddendum?(): string | undefined
 }
 
 // ---------------------------------------------------------------------------

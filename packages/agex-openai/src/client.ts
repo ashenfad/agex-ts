@@ -79,6 +79,20 @@ export interface OpenAIOptions {
   readonly extras?: Readonly<Record<string, unknown>>
   /** Override `fetch` for tests / custom transports. */
   readonly fetchImpl?: typeof fetch
+  /**
+   * Custom HTTP headers, merged into the provider's defaults.
+   *
+   * - String value sets / overrides the header (e.g. supplying a
+   *   non-Bearer auth scheme some compat endpoints require).
+   * - `null` value DELETES a default header. Useful for compat
+   *   endpoints that reject certain headers in CORS preflight.
+   *
+   * Header names are lowercased to match `fetch`'s case-insensitive
+   * handling — both `'Authorization'` and `'authorization'` override
+   * the same default. For more invasive request shaping (URL
+   * rewriting, body transforms), use `fetchImpl` instead.
+   */
+  readonly headers?: Readonly<Record<string, string | null>>
 }
 
 export class OpenAI implements LLMClient {
@@ -90,6 +104,7 @@ export class OpenAI implements LLMClient {
   private readonly forceToolUse: boolean
   private readonly extras: Readonly<Record<string, unknown>>
   private readonly fetchImpl: typeof fetch
+  private readonly headerOverrides: Readonly<Record<string, string | null>>
 
   constructor(opts: OpenAIOptions = {}) {
     this.model = opts.model ?? DEFAULT_MODEL
@@ -104,6 +119,11 @@ export class OpenAI implements LLMClient {
     // `this.fetchImpl(...)` from inside the client. Node/Deno don't
     // enforce the check, but the bind is harmless there.
     this.fetchImpl = opts.fetchImpl ?? fetch.bind(globalThis)
+    // Lowercase upfront so the merge against our (lowercase) defaults
+    // is case-insensitive — both `'Authorization'` and `'authorization'`
+    // override the same default. HTTP headers are case-insensitive
+    // per the spec.
+    this.headerOverrides = lowercaseKeys(opts.headers ?? {})
   }
 
   // ---------- LLMClient surface ----------
@@ -184,6 +204,14 @@ export class OpenAI implements LLMClient {
       // 401. The string is meaningless to them.
       authorization: `Bearer ${this.apiKey || 'sk-no-key'}`,
     }
+    // Apply embedder overrides last. `null` deletes a default; string
+    // sets/overrides. Use to inject endpoint-specific headers
+    // (e.g. `'HTTP-Referer'` for OpenRouter attribution) or swap auth
+    // schemes some compat endpoints require.
+    for (const [k, v] of Object.entries(this.headerOverrides)) {
+      if (v === null) delete h[k]
+      else h[k] = v
+    }
     return h
   }
 
@@ -259,4 +287,17 @@ export class OpenAI implements LLMClient {
 function tokenLimitField(model: string): 'max_tokens' | 'max_completion_tokens' {
   if (/^(gpt-5|o[1-9])/.test(model)) return 'max_completion_tokens'
   return 'max_tokens'
+}
+
+/** Lowercase the keys of a header overrides map so the merge against
+ *  our (lowercase) defaults is case-insensitive. HTTP headers are
+ *  case-insensitive per the spec; without this, an embedder passing
+ *  `'Authorization'` would be added as a separate entry rather than
+ *  overriding our `'authorization'`. */
+function lowercaseKeys(
+  obj: Readonly<Record<string, string | null>>,
+): Readonly<Record<string, string | null>> {
+  const out: Record<string, string | null> = {}
+  for (const [k, v] of Object.entries(obj)) out[k.toLowerCase()] = v
+  return out
 }

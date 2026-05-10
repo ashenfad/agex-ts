@@ -245,3 +245,81 @@ describe('Anthropic — dumpConfig', () => {
     expect(cfg.extras).toMatchObject({ temperature: 0.5, maxTokens: 4096 })
   })
 })
+
+describe('Anthropic — headers customization', () => {
+  it('passes through extra string headers alongside defaults', async () => {
+    const { fn, calls } = recordingFetch(happyPathEvents)
+    const client = new Anthropic({
+      apiKey: 'k',
+      fetchImpl: fn,
+      headers: { 'x-custom': 'value', 'http-referer': 'https://my-app.example' },
+    })
+    await collect(client.complete(trivialRequest))
+    const sent = calls[0]?.init.headers as Record<string, string>
+    expect(sent['x-custom']).toBe('value')
+    expect(sent['http-referer']).toBe('https://my-app.example')
+    // Defaults still present.
+    expect(sent['content-type']).toBe('application/json')
+    expect(sent['anthropic-version']).toBeDefined()
+    expect(sent['x-api-key']).toBe('k')
+  })
+
+  it('null value DELETES a default header (OpenRouter compat case)', async () => {
+    // The studio's exact reported case: OpenRouter's Anthropic-compat
+    // endpoint rejects `anthropic-version` in CORS preflight. The
+    // embedder passes `null` to drop it.
+    const { fn, calls } = recordingFetch(happyPathEvents)
+    const client = new Anthropic({
+      apiKey: 'k',
+      fetchImpl: fn,
+      headers: { 'anthropic-version': null },
+    })
+    await collect(client.complete(trivialRequest))
+    const sent = calls[0]?.init.headers as Record<string, string>
+    expect('anthropic-version' in sent).toBe(false)
+    // Other defaults untouched.
+    expect(sent['content-type']).toBe('application/json')
+    expect(sent['x-api-key']).toBe('k')
+  })
+
+  it('string value OVERRIDES a default header', async () => {
+    const { fn, calls } = recordingFetch(happyPathEvents)
+    const client = new Anthropic({
+      apiKey: 'k',
+      fetchImpl: fn,
+      headers: { 'anthropic-version': '2099-01-01' },
+    })
+    await collect(client.complete(trivialRequest))
+    const sent = calls[0]?.init.headers as Record<string, string>
+    expect(sent['anthropic-version']).toBe('2099-01-01')
+  })
+
+  it('header names are case-insensitive (HTTP semantics)', async () => {
+    // Embedder passes Title-Case; should override our lowercase
+    // default rather than landing as a separate entry.
+    const { fn, calls } = recordingFetch(happyPathEvents)
+    const client = new Anthropic({
+      apiKey: 'k',
+      fetchImpl: fn,
+      headers: { 'Anthropic-Version': null, 'X-Custom': 'mixed-case' },
+    })
+    await collect(client.complete(trivialRequest))
+    const sent = calls[0]?.init.headers as Record<string, string>
+    // Default (lowercase) was deleted, not duplicated.
+    expect('anthropic-version' in sent).toBe(false)
+    expect('Anthropic-Version' in sent).toBe(false)
+    // Custom landed as lowercase.
+    expect(sent['x-custom']).toBe('mixed-case')
+    expect('X-Custom' in sent).toBe(false)
+  })
+
+  it('omitted headers option preserves all defaults (no behavior change)', async () => {
+    const { fn, calls } = recordingFetch(happyPathEvents)
+    const client = new Anthropic({ apiKey: 'k', fetchImpl: fn })
+    await collect(client.complete(trivialRequest))
+    const sent = calls[0]?.init.headers as Record<string, string>
+    expect(sent['content-type']).toBe('application/json')
+    expect(sent['anthropic-version']).toBeDefined()
+    expect(sent['x-api-key']).toBe('k')
+  })
+})

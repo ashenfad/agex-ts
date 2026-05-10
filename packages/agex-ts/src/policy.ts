@@ -67,27 +67,37 @@ interface TerminalRegistration extends RegistrationCommon {
   readonly handler: TerminalCommandHandler
 }
 
-/** Identifier-shape regex for host-bound registration names.
+/** Identifier-shape regex for names that become JS bindings.
  *
- *  Host-bound names land as top-level scope bindings AND as
- *  AsyncFunction parameter names, so they must be valid JS
- *  identifiers (no hyphens, no scopes). URL-shipped names use
- *  `URL_NAME_RE` (much more permissive) — they're only ever import
- *  specifiers compared via string equality, not JS identifiers. */
+ *  Used for host-bound fn / cls / namespace registrations (which land
+ *  as top-level scope bindings AND as AsyncFunction parameter names)
+ *  and for terminal command names (CLI tokens; convention favors
+ *  identifier-shape). Both use cases require the name to be a valid
+ *  JS identifier — no hyphens, no scopes.
+ *
+ *  Names that DON'T become JS bindings — URL-shipped registration
+ *  specifiers, skill names (which become VFS path segments at
+ *  `/skills/<name>/SKILL.md`) — use `RELAXED_NAME_RE` instead. */
 const NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
 
-/** Permitted shape for URL-shipped registration names — npm-style
- *  import specifiers. Allows hyphens, scopes (`@scope/pkg`),
- *  subpaths (`pkg/sub`), dots, etc. The agent's import statement is
- *  matched against this string verbatim, so `apache-arrow` registers
- *  fine and the agent writes `import { Table } from 'apache-arrow'`
- *  exactly as their training data suggests.
+/** Relaxed name shape for non-binding-producing registrations.
+ *
+ *  Two use cases share these rules:
+ *  - **URL-shipped fn / cls / namespace**: the name is an npm-style
+ *    import specifier compared verbatim against the agent's
+ *    `import { x } from '<name>'`. Allows `apache-arrow`,
+ *    `@scope/pkg`, `pkg/sub`, etc. — exactly as the agent's training
+ *    data suggests.
+ *  - **Skills**: the name becomes a VFS path segment at
+ *    `/skills/<name>/SKILL.md`. Path segments accept hyphens
+ *    (`interactive-app`), dots (`v1.docs`), etc. — they're not JS
+ *    identifiers. Mirrors agex-py's kebab-case skill convention.
  *
  *  The bounds are intentionally loose: any non-empty string with no
- *  whitespace and no control characters. Agent imports can't contain
- *  whitespace anyway (it'd break the parser), and control chars in
- *  registration names are always typos. */
-const URL_NAME_RE = /^[^\s\p{Cc}]+$/u
+ *  whitespace and no control characters. Whitespace would break import
+ *  parsers / VFS path segments; control chars in names are always
+ *  typos. */
+const RELAXED_NAME_RE = /^[^\s\p{Cc}]+$/u
 
 export class PolicyBuilder {
   readonly #fns = new Map<string, RegisteredFn>()
@@ -147,7 +157,11 @@ export class PolicyBuilder {
   }
 
   registerSkill(name: string, content: string): void {
-    this.#assertNameValid(name, 'skill')
+    // Skill names become VFS path segments at `/skills/<name>/SKILL.md`,
+    // not JS identifiers — accept the path-friendly shapes
+    // (`interactive-app`, `data-export`, etc.) the agex-py side uses by
+    // convention. See `RELAXED_NAME_RE` for the rules.
+    this.#assertNameValid(name, 'skill', true)
     this.#assertNameAvailable(name)
     if (typeof content !== 'string') {
       throw new RegistrationError(`skill ${name}: content must be a string`)
@@ -200,19 +214,21 @@ export class PolicyBuilder {
 
   // -- Internal -----------------------------------------------------------
 
-  #assertNameValid(name: string, kind: string, urlShipped = false): void {
+  #assertNameValid(name: string, kind: string, relaxed = false): void {
     if (typeof name !== 'string' || name.length === 0) {
       throw new RegistrationError(`${kind}: name must be a non-empty string`)
     }
-    if (urlShipped) {
-      // URL-shipped names are import specifiers (string-equality
-      // matched against `import { ... } from '<name>'`), never JS
-      // identifiers. Allow npm-style specifiers (`apache-arrow`,
-      // `@scope/pkg`, `pkg/sub`) — reject only whitespace and
-      // control chars, which would break the import parser anyway.
-      if (!URL_NAME_RE.test(name)) {
+    if (relaxed) {
+      // Relaxed names cover URL-shipped registration specifiers
+      // (`apache-arrow`, `@scope/pkg`) and skill names (`interactive-
+      // app`, used as VFS path segments at `/skills/<name>/SKILL.md`).
+      // Neither becomes a JS identifier; both need to accept the
+      // hyphenated / scoped / dotted shapes their respective
+      // ecosystems use. Reject only whitespace and control chars,
+      // which would break import parsers / path lookups.
+      if (!RELAXED_NAME_RE.test(name)) {
         throw new RegistrationError(
-          `${kind} '${name}': URL-shipped name must be a non-empty import specifier (no whitespace, no control characters). For host-bound registrations the name must additionally be a valid JS identifier; URL-shipped accepts npm-style specifiers like 'apache-arrow' or '@scope/pkg'.`,
+          `${kind} '${name}': name must be non-empty with no whitespace or control characters. Accepts hyphens, scopes, subpaths, and dots — e.g. 'apache-arrow', '@scope/pkg', 'interactive-app'.`,
         )
       }
       return

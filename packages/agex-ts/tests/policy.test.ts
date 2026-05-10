@@ -115,8 +115,50 @@ describe('PolicyBuilder — name validation routing (host-bound vs URL-shipped)'
     expect(() =>
       p.registerCls('apache-arrow.Cls', { url: 'https://example.com/x.js' }),
     ).not.toThrow()
-    // Skill / terminal don't have a URL path — keep strict.
-    expect(() => p.registerSkill('apache-arrow.skill', '...')).toThrow(/JS identifier/)
+    // Terminal commands are CLI tokens — keep strict (JS-identifier shape).
+    expect(() =>
+      p.registerTerminal('apache-arrow', { description: 'x', handler: async () => undefined }),
+    ).toThrow(/JS identifier/)
+  })
+})
+
+describe('PolicyBuilder — skill name validation (path-segment relaxed)', () => {
+  // Skill names become VFS path segments at `/skills/<name>/SKILL.md`,
+  // not JS bindings — accept the hyphenated / scoped / dotted shapes
+  // the agex-py side uses by convention (`interactive-app`, etc.).
+
+  it('accepts kebab-case names', () => {
+    const p = new PolicyBuilder()
+    expect(() => p.registerSkill('interactive-app', '# Interactive App\n')).not.toThrow()
+    expect(p.snapshot().skills.get('interactive-app')?.kind).toBe('skill')
+  })
+
+  it('accepts @scope/name', () => {
+    const p = new PolicyBuilder()
+    expect(() => p.registerSkill('@team/onboarding', '# Onboarding\n')).not.toThrow()
+  })
+
+  it('accepts dotted names', () => {
+    const p = new PolicyBuilder()
+    expect(() => p.registerSkill('data.export', '# Data Export\n')).not.toThrow()
+  })
+
+  it('rejects empty', () => {
+    const p = new PolicyBuilder()
+    expect(() => p.registerSkill('', '# x\n')).toThrow(/non-empty string/)
+  })
+
+  it('rejects whitespace', () => {
+    const p = new PolicyBuilder()
+    expect(() => p.registerSkill('bad name', '# x\n')).toThrow(/whitespace/)
+    expect(() => p.registerSkill(' leading', '# x\n')).toThrow(/whitespace/)
+    expect(() => p.registerSkill('trailing ', '# x\n')).toThrow(/whitespace/)
+  })
+
+  it('rejects newlines and control characters', () => {
+    const p = new PolicyBuilder()
+    expect(() => p.registerSkill('bad\nname', '# x\n')).toThrow(/whitespace|control/)
+    expect(() => p.registerSkill('bad\x00name', '# x\n')).toThrow(/control/)
   })
 })
 

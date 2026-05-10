@@ -557,6 +557,35 @@ describe('workerRuntime — fs / cache bridge', () => {
     const value = (result.outcome as { kind: 'success'; value: { message: string } }).value
     expect(value.message).toMatch(/unsupported encoding 'base64'/)
   })
+
+  it('fs.readText / fs.readFile / fs.writeText / fs.writeFile aliases all work via the bridge', async () => {
+    // Sanity that the four ergonomic aliases (Deno-style readText /
+    // writeText, Node-standard readFile / writeFile) reach the agent
+    // through the bridge proxy with the same semantics they have in
+    // the eval runtime. A single round-trip exercises all of them so
+    // a regression in any alias surfaces here.
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const ctx = makeCtx()
+    const code = `
+      // Write via Deno-flavored shortcut, read back via Node-standard.
+      await fs.writeText('/a.txt', 'via-writeText')
+      const a = await fs.readFile('/a.txt', 'utf8')
+      // Write via Node-standard alias, read back via Deno-flavored.
+      await fs.writeFile('/b.txt', 'via-writeFile')
+      const b = await fs.readText('/b.txt')
+      // readFile() with no encoding still returns Uint8Array
+      // (matches Node fs.readFile semantics).
+      await fs.writeFile('/c.bin', new Uint8Array([1, 2, 3]))
+      const c = await fs.readFile('/c.bin')
+      taskSuccess({ a, b, cIsBytes: c instanceof Uint8Array, cFirst: c[0] })
+    `
+    const result = await rt.execute(code, ctx)
+    expect(result.outcome).toEqual({
+      kind: 'success',
+      value: { a: 'via-writeText', b: 'via-writeFile', cIsBytes: true, cFirst: 1 },
+    })
+  })
 })
 
 describe('workerRuntime — fn / namespace bridge', () => {

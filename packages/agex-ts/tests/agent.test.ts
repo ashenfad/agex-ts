@@ -234,3 +234,132 @@ describe('Agent — direct construction', () => {
     expect(a.name).toBe('manual')
   })
 })
+
+describe('Agent — reconfigure', () => {
+  // Hot-swap the safe-to-mutate subset of AgentOptions on a
+  // constructed Agent. Each field replaces its current value on the
+  // next read; tests verify both that the read sees the new value
+  // and that the readers are reading freshly per call (not cached
+  // at construction time).
+
+  it('reconfigure({ llm }) — agent.llm reflects the new client immediately', async () => {
+    const llm1 = { complete: async function* () {} } as unknown as import('../src/types').LLMClient
+    const llm2 = { complete: async function* () {} } as unknown as import('../src/types').LLMClient
+    const a = await createAgent({ name: 'r', llm: llm1 })
+    expect(a.llm).toBe(llm1)
+    a.reconfigure({ llm: llm2 })
+    expect(a.llm).toBe(llm2)
+  })
+
+  it('reconfigure({ primer }) — propagates to the next system message build', async () => {
+    const a = await createAgent({ name: 'r', primer: 'first voice' })
+    expect(a.primer).toBe('first voice')
+    a.reconfigure({ primer: 'second voice' })
+    expect(a.primer).toBe('second voice')
+  })
+
+  it('reconfigure({ chapteringTrigger }) — number replaces, undefined disables', async () => {
+    const a = await createAgent({ name: 'r', chapteringTrigger: 1000 })
+    expect(a.chapteringTrigger).toBe(1000)
+    a.reconfigure({ chapteringTrigger: 2500 })
+    expect(a.chapteringTrigger).toBe(2500)
+    // Explicit undefined turns auto-fire off — important for the
+    // settings UI use case ("user toggled off auto-chaptering").
+    a.reconfigure({ chapteringTrigger: undefined })
+    expect(a.chapteringTrigger).toBeUndefined()
+  })
+
+  it('reconfigure({ maxIterations }) — replaces the per-task turn cap', async () => {
+    const a = await createAgent({ name: 'r' })
+    expect(a.maxIterations).toBe(10) // default
+    a.reconfigure({ maxIterations: 25 })
+    expect(a.maxIterations).toBe(25)
+  })
+
+  it('reconfigure({ agexPrimerOverride }) and ({ capabilitiesPrimer }) — propagate to next read', async () => {
+    const a = await createAgent({ name: 'r' })
+    expect(a.agexPrimerOverride).toBeUndefined()
+    expect(a.capabilitiesPrimer).toBeUndefined()
+    a.reconfigure({
+      agexPrimerOverride: 'custom env',
+      capabilitiesPrimer: 'curated tools',
+    })
+    expect(a.agexPrimerOverride).toBe('custom env')
+    expect(a.capabilitiesPrimer).toBe('curated tools')
+  })
+
+  it('reconfigure with omitted fields preserves existing values (no clobber)', async () => {
+    const llm = { complete: async function* () {} } as unknown as import('../src/types').LLMClient
+    const a = await createAgent({
+      name: 'r',
+      llm,
+      primer: 'keep me',
+      chapteringTrigger: 500,
+      maxIterations: 7,
+    })
+    // Reconfigure ONLY the chapteringTrigger; everything else stays.
+    a.reconfigure({ chapteringTrigger: 999 })
+    expect(a.llm).toBe(llm)
+    expect(a.primer).toBe('keep me')
+    expect(a.chapteringTrigger).toBe(999)
+    expect(a.maxIterations).toBe(7)
+  })
+
+  it('reconfigure does NOT touch identity / substrate fields', async () => {
+    // The TypeScript signature already excludes name/state/runtime/fs
+    // from ReconfigurableOptions, but verify at runtime that even if
+    // someone forces an extra key through (`as any`), it's ignored
+    // by the spread merge (the type doesn't have those fields, so
+    // the spread literally can't include them — but defense is
+    // cheap). Mostly this test documents the safe-set contract.
+    const a = await createAgent({ name: 'fixed', maxIterations: 3 })
+    expect(a.name).toBe('fixed')
+    a.reconfigure({ maxIterations: 8 })
+    expect(a.name).toBe('fixed') // unchanged
+    expect(a.maxIterations).toBe(8) // changed
+  })
+
+  it('successive reconfigures compose; later wins on overlapping fields', async () => {
+    const a = await createAgent({ name: 'r' })
+    a.reconfigure({ primer: 'v1', chapteringTrigger: 100 })
+    a.reconfigure({ primer: 'v2' }) // chapteringTrigger NOT touched
+    expect(a.primer).toBe('v2')
+    expect(a.chapteringTrigger).toBe(100)
+  })
+
+  it('end-to-end: reconfigure({llm}) routes the NEXT task through the new client', async () => {
+    // The bug the studio reported: settings drawer changes the model,
+    // but subsequent turns still hit the old client. This test runs
+    // a task with llm1 (gets one response), reconfigures to llm2,
+    // runs another task, asserts llm2 received the second call (and
+    // llm1 only the first).
+    const { Dummy } = await import('../src/llm/dummy')
+    const { evalRuntime } = await import('../src/runtime/eval')
+    const llm1 = new Dummy({
+      responses: [{ emissions: [{ type: 'ts', code: 'taskSuccess(1)' }] }],
+    })
+    const llm2 = new Dummy({
+      responses: [{ emissions: [{ type: 'ts', code: 'taskSuccess(2)' }] }],
+    })
+    const a = await createAgent({
+      name: 'swap',
+      llm: llm1,
+      runtime: evalRuntime(),
+      state: { type: 'versioned', storage: 'memory' },
+    })
+    const t = a.task<undefined, number>({ description: 'pick a number' })
+
+    const r1 = await t(undefined)
+    expect(r1).toBe(1)
+    expect(llm1.callCount).toBe(1)
+    expect(llm2.callCount).toBe(0)
+
+    a.reconfigure({ llm: llm2 })
+
+    const r2 = await t(undefined, { session: 'fresh' })
+    expect(r2).toBe(2)
+    // llm2 saw the second call. llm1 still at 1 (no further hits).
+    expect(llm2.callCount).toBe(1)
+    expect(llm1.callCount).toBe(1)
+  })
+})

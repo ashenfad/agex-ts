@@ -96,6 +96,26 @@ export interface AgentOptions {
   readonly capabilitiesPrimer?: string
 }
 
+/**
+ * Subset of `AgentOptions` that's safe to hot-swap on a constructed
+ * `Agent` via `reconfigure(...)`. Each field replaces its current
+ * value on the next read (next LLM call / next task boundary, see
+ * `Agent.reconfigure` for per-field timing).
+ *
+ * Excluded: `name`, `state`, `runtime`, `fs`. Mutating those mid-
+ * session would orphan per-session resources or break invariants
+ * the substrate depends on. To change them, dispose and recreate.
+ */
+export interface ReconfigurableOptions {
+  readonly llm?: LLMClient
+  readonly primer?: string
+  readonly agexPrimerOverride?: string
+  readonly capabilitiesPrimer?: string
+  readonly chapteringTrigger?: number
+  readonly chapterPrimer?: string
+  readonly maxIterations?: number
+}
+
 /** Async factory — handles the awaitable parts of state setup. */
 export async function createAgent(opts: AgentOptions): Promise<Agent> {
   const stateResolver = await connectState(opts.state ?? { type: 'live' })
@@ -230,7 +250,12 @@ function resolveName(
 }
 
 export class Agent {
-  readonly #opts: AgentOptions
+  // Mutable so `reconfigure({...})` can hot-swap the safe-to-mutate
+  // subset of options (llm, primer, chaptering settings, etc.).
+  // Replacement is whole-object via spread, so the existing readers
+  // (which all dereference through `this.#opts.<field>` per call) see
+  // the new value on their next read.
+  #opts: AgentOptions
   readonly #stateResolver: StateResolver
   readonly #policy = new PolicyBuilder()
   readonly #vfs: VfsManager
@@ -555,6 +580,42 @@ export class Agent {
   async dispose(): Promise<void> {
     const runtime = this.#opts.runtime
     if (runtime !== undefined) await runtime.dispose()
+  }
+
+  /**
+   * Hot-swap the safe-to-mutate subset of `AgentOptions`. Useful for
+   * embedders with a settings UI ("user changed model in the drawer")
+   * where reconstructing the agent would orphan per-session state,
+   * runtime resources, etc.
+   *
+   * Each provided field replaces its current value; omitted fields
+   * stay as they were. Pass `undefined` to clear a value (e.g.
+   * `chapteringTrigger: undefined` turns auto-chaptering off).
+   *
+   * Takes effect on the **next read**, which for most fields is the
+   * next LLM call / next task boundary:
+   * - `llm`: next turn uses the new client. In-flight HTTP requests
+   *   continue with the old client; nothing mid-stream is touched.
+   * - `primer` / `agexPrimerOverride` / `capabilitiesPrimer`: next
+   *   task's system message reflects the change. Note that the LLM
+   *   provider's prompt cache will invalidate when the system text
+   *   changes.
+   * - `chapteringTrigger`: takes effect at the next task-boundary
+   *   chaptering check. Setting to `undefined` disables auto-fire.
+   * - `chapterPrimer`: applied if/when the chapter task next runs.
+   * - `maxIterations`: applied at the start of the next task.
+   *
+   * NOT included: `name`, `state`, `runtime`, `fs`. Mutating those
+   * mid-session would orphan per-session resources or break
+   * invariants the substrate depends on. If you need to change them,
+   * `dispose()` and `createAgent({...})` again.
+   */
+  reconfigure(opts: ReconfigurableOptions): void {
+    // Whole-object replacement so the existing readers (which all
+    // dereference through `this.#opts.<field>` per call) pick up the
+    // new value on their next read. Spread is OK because the safe
+    // subset is all primitives / refs that don't need deep merging.
+    this.#opts = { ...this.#opts, ...opts }
   }
 
   // -- Inspection / time-travel ------------------------------------------

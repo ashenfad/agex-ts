@@ -80,7 +80,7 @@ type OutputPart =
   | { type: 'image'; format: 'png' | 'jpeg' | 'webp'; data: string; altText?: string }
 ```
 
-What the agent's tool emissions produced as observable output. `console.log` calls become `text` parts; `viewImage(...)` calls become `image` parts; terminal stdout becomes `text`. The renderer pairs `emissionId` back to the originating tool-use block when building tool-result turns.
+What the agent's tool emissions produced as observable output. `console.log` calls become `text` parts by default; image-shaped values (`{format,data}` objects, `data:image/...;base64,...` strings, or PNG/JPEG/WebP `Uint8Array`s) split out into `image` parts; terminal stdout becomes `text`. The renderer pairs `emissionId` back to the originating tool-use block when building tool-result turns.
 
 ### `SuccessEvent`
 

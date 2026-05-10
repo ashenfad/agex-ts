@@ -41,6 +41,7 @@ interface FnRegistration extends RegistrationCommon {
   readonly url?: string
   readonly export?: string
   readonly paramsSchema?: RegisteredFn['paramsSchema']
+  readonly wantsContext?: boolean
 }
 
 interface ClsRegistration extends RegistrationCommon {
@@ -119,6 +120,15 @@ export class PolicyBuilder {
       // ignore the schema; reject loudly instead.
       throw new RegistrationError(
         `fn '${name}': paramsSchema can't be combined with { url } — URL-shipped fns are called natively in the worker realm where the host-side schema check doesn't apply. If you need validation, fold it into the imported function.`,
+      )
+    }
+    if (opts.url !== undefined && opts.wantsContext === true) {
+      // `wantsContext` injects a host-realm `ctx` argument at the
+      // host-side dispatch site. URL-shipped fns are called natively
+      // in the worker realm with no host-side hook, so the flag
+      // would silently no-op; reject loudly instead.
+      throw new RegistrationError(
+        `fn '${name}': wantsContext can't be combined with { url } — URL-shipped fns are called natively in the worker realm; host-side ctx injection has no hook there.`,
       )
     }
     this.#fns.set(name, omitUndefined({ kind: 'fn', name, ...opts }) as RegisteredFn)

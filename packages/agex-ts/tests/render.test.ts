@@ -964,7 +964,7 @@ describe('BUILTIN_PRIMER', () => {
     expect(BUILTIN_PRIMER).toContain('taskSuccess')
     expect(BUILTIN_PRIMER).toContain('taskFail')
     expect(BUILTIN_PRIMER).toContain('taskClarify')
-    expect(BUILTIN_PRIMER).toContain('viewImage')
+    expect(BUILTIN_PRIMER).toContain('Image inspection')
     expect(BUILTIN_PRIMER).toContain('cache')
     expect(BUILTIN_PRIMER).toContain('inputs')
     expect(BUILTIN_PRIMER).toContain('/chapters/')

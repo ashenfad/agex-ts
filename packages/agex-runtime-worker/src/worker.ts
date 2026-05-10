@@ -8,7 +8,9 @@
  *      injected names land directly in scope. Same shape as
  *      `evalRuntime`, just inside a Worker realm.
  *   2. Inject the v1 surface: `taskSuccess`, `taskFail`,
- *      `taskClarify`, `viewImage`, a captured `console`, proxy
+ *      `taskClarify`, a captured `console` (image-aware — `console.log`
+ *      of `{format,data}` / data URLs / PNG/JPEG/WebP `Uint8Array`s
+ *      becomes `image` parts), proxy
  *      objects for `fs` / `cache`, registered host functions
  *      (`agent.fn`), registered namespaces (`agent.namespace`),
  *      and registered classes (`agent.cls`). Functions and
@@ -90,10 +92,30 @@ function makeConsole(executeId: number): Console {
   // (`log` / `info` / `warn` / `error`). Anything else falls through
   // to a no-op so user code calling, say, `console.table(...)` doesn't
   // throw — matches `evalRuntime`'s behavior.
+  //
+  // Image-shaped values are split out into `image` parts (mirrors the
+  // host-realm console-capture pipeline): `{format,data}`, data URLs,
+  // and `Uint8Array`s with PNG/JPEG/WebP magic bytes. Mixed args
+  // produce ordered parts (text-then-image-then-text).
   const emit = (level: 'log' | 'info' | 'warn' | 'error', args: unknown[]): void => {
-    const text = args.map(safeStringify).join(' ')
-    const part: OutputPart = { type: 'text', text: level === 'log' ? text : `[${level}] ${text}` }
-    post({ type: 'output', executeId, part })
+    const buf: unknown[] = []
+    const flush = (): void => {
+      if (buf.length === 0) return
+      const text = buf.map(safeStringify).join(' ')
+      const out = level === 'log' ? text : `[${level}] ${text}`
+      post({ type: 'output', executeId, part: { type: 'text', text: out } })
+      buf.length = 0
+    }
+    for (const a of args) {
+      const img = detectImage(a)
+      if (img !== null) {
+        flush()
+        post({ type: 'output', executeId, part: { type: 'image', ...img } })
+      } else {
+        buf.push(a)
+      }
+    }
+    flush()
   }
   const noop = (): void => {}
   return {
@@ -143,10 +165,65 @@ function safeStringify(v: unknown): string {
   }
 }
 
-function viewImageFor(executeId: number) {
-  return (image: { format: 'png' | 'jpeg' | 'webp'; data: string }): void => {
-    post({ type: 'output', executeId, part: { type: 'image', ...image } })
+/** Inline copy of `agex-ts/console-capture`'s `detectImage` rules, kept
+ *  in-realm so the worker bundle doesn't need to pull in
+ *  `node:async_hooks`. Three accept rules: `{format,data}` objects,
+ *  `data:image/...;base64,...` strings, and `Uint8Array`s whose first
+ *  ~12 bytes match a PNG / JPEG / WebP magic. Returns `null` for non-
+ *  image values. */
+function detectImage(value: unknown): { format: 'png' | 'jpeg' | 'webp'; data: string } | null {
+  if (
+    value !== null &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    !(value instanceof Uint8Array)
+  ) {
+    const v = value as { format?: unknown; data?: unknown }
+    if (
+      (v.format === 'png' || v.format === 'jpeg' || v.format === 'webp') &&
+      typeof v.data === 'string' &&
+      v.data.length > 0
+    ) {
+      return { format: v.format, data: v.data }
+    }
   }
+  if (typeof value === 'string') {
+    const m = /^data:image\/(png|jpeg|webp);base64,(.+)$/.exec(value)
+    if (m !== null && m[1] !== undefined && m[2] !== undefined) {
+      return { format: m[1] as 'png' | 'jpeg' | 'webp', data: m[2] }
+    }
+  }
+  if (value instanceof Uint8Array && value.byteLength >= 12) {
+    if (value[0] === 0x89 && value[1] === 0x50 && value[2] === 0x4e && value[3] === 0x47) {
+      return { format: 'png', data: bytesToBase64(value) }
+    }
+    if (value[0] === 0xff && value[1] === 0xd8 && value[2] === 0xff) {
+      return { format: 'jpeg', data: bytesToBase64(value) }
+    }
+    if (
+      value[0] === 0x52 &&
+      value[1] === 0x49 &&
+      value[2] === 0x46 &&
+      value[3] === 0x46 &&
+      value[8] === 0x57 &&
+      value[9] === 0x45 &&
+      value[10] === 0x42 &&
+      value[11] === 0x50
+    ) {
+      return { format: 'webp', data: bytesToBase64(value) }
+    }
+  }
+  return null
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = ''
+  const chunkSize = 8192
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length))
+    binary += String.fromCharCode(...chunk)
+  }
+  return btoa(binary)
 }
 
 // ---------------------------------------------------------------------------
@@ -906,7 +983,6 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
     taskSuccess,
     taskFail,
     taskClarify,
-    viewImage: viewImageFor(executeId),
     console: makeConsole(executeId),
     // Node-fs-style ergonomic wrapper around the bridged proxy. The
     // agent can write `await fs.read(path, 'utf8')` to get a string

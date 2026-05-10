@@ -177,6 +177,21 @@ export interface ActionEvent extends EventBase {
 
 export type ImageFormat = 'png' | 'jpeg' | 'webp'
 
+/** Trailing-arg context passed to a registered host fn that opts in
+ *  via `wantsContext: true` on its registration.
+ *
+ *  - `console`: routes through the same image-aware pipeline as agent
+ *    code's `console.log`. Use this in browser-host embedders where
+ *    ALS-based capture isn't available.
+ *  - `signal`: fires when the agent task is cancelled. In the worker
+ *    runtime this reflects the per-execute external signal only.
+ *
+ *  See `runtime/console-capture` for the implementation. */
+export interface HostFnContext {
+  readonly console: Console
+  readonly signal: AbortSignal
+}
+
 export type OutputPart =
   | { readonly type: 'text'; readonly text: string }
   | {
@@ -468,6 +483,13 @@ export interface RegisteredFn extends RegistrationCommon {
    *  (host-bound only — URL-shipped fns are agent-callable
    *  natively in the worker realm). */
   readonly paramsSchema?: StandardSchemaV1
+  /** When true, the framework appends a `HostFnContext` as the
+   *  trailing positional argument when invoking the handler. The
+   *  context exposes `console` (routes through the same image-aware
+   *  pipeline as agent code's `console.log`) and `signal` (fires on
+   *  task cancellation). Host-bound only — combining with `url` is
+   *  rejected at registration. */
+  readonly wantsContext?: boolean
 }
 
 /** Filter spec for class/namespace member visibility. A function returns

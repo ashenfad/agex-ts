@@ -85,7 +85,13 @@ Cache values must be structured-clone-able when they cross any worker boundary; 
 
 ### Image inspection
 
-\`viewImage(image)\` sends an image to your own vision so you can inspect it on the next turn.  \`image\` should be \`{ format: 'png' | 'jpeg' | 'webp', data: <base64 string> }\`.
+\`console.log\` accepts image-shaped values and renders them inline so you can inspect them on the next turn.  Three shapes are recognized:
+
+- \`{ format: 'png' | 'jpeg' | 'webp', data: <base64 string> }\`
+- A \`data:image/(png|jpeg|webp);base64,...\` string
+- A \`Uint8Array\` whose first ~12 bytes match a PNG / JPEG / WebP magic
+
+Mixed args render in order: \`console.log('shot:', bytes)\` produces a text part followed by an image part.  If you want to *inspect* raw bytes (hex, length, etc.) without the image-render path firing, slice or stringify them first — \`console.log(bytes.byteLength)\` or \`console.log(Array.from(bytes.slice(0, 16)))\` won't be misrouted.
 
 ### Chapters
 
@@ -97,7 +103,7 @@ If you have skills available (listed near the top of this primer), each one live
 
 ## Task Control
 
-Your \`ts_action\` returning normally means "keep going" — \`console.log\` / \`viewImage\` output and any expression result render back to you at the start of the next turn.  Use a terminator only when you want to signal a definitive outcome:
+Your \`ts_action\` returning normally means "keep going" — \`console.log\` output (text or image — see *Image inspection* above) and any expression result render back to you at the start of the next turn.  Use a terminator only when you want to signal a definitive outcome:
 
 - **\`taskSuccess(result)\`** — task complete; \`result\` is returned to the caller.
 - **\`taskClarify(message)\`** — blocked, need human input (ambiguity, missing credentials, critical choice).

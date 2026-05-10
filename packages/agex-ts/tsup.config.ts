@@ -11,6 +11,8 @@ export default defineConfig({
     'src/runtime/eval.ts',
     'src/runtime/module-loader.ts',
     'src/runtime/wrap-fs.ts',
+    'src/runtime/console-capture.ts',
+    'src/runtime/console-capture.browser.ts',
     'src/render/index.ts',
     'src/providers/index.ts',
   ],

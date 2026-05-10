@@ -138,6 +138,188 @@ describe('evalRuntime — captured console output', () => {
       { type: 'text', text: 'world' },
     ])
   })
+
+  it('console.log of {format,data} produces an image part', async () => {
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const result = await r.execute(
+      'console.log({ format: "png", data: "abc" }); taskSuccess(null)',
+      makeContext(),
+    )
+    expect(result.outputs).toEqual([{ type: 'image', format: 'png', data: 'abc' }])
+  })
+
+  it('console.log of Uint8Array with PNG magic produces an image part', async () => {
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const result = await r.execute(
+      'const bytes = new Uint8Array([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,0,0,0,13]); console.log(bytes); taskSuccess(null)',
+      makeContext(),
+    )
+    expect(result.outputs).toHaveLength(1)
+    expect(result.outputs[0]).toMatchObject({ type: 'image', format: 'png' })
+  })
+
+  it('mixed console.log args split into ordered parts', async () => {
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const result = await r.execute(
+      'console.log("shot:", { format: "png", data: "abc" }); taskSuccess(null)',
+      makeContext(),
+    )
+    expect(result.outputs).toEqual([
+      { type: 'text', text: 'shot:' },
+      { type: 'image', format: 'png', data: 'abc' },
+    ])
+  })
+})
+
+describe('evalRuntime — registered host fn console capture', () => {
+  it('console.log inside a registered fn lands in agent outputs', async () => {
+    const policy: Policy = {
+      ...emptyPolicy,
+      fns: new Map([
+        [
+          'shout',
+          {
+            kind: 'fn',
+            name: 'shout',
+            fn: async (msg: unknown): Promise<string> => {
+              console.log('host fn says:', msg)
+              return 'ok'
+            },
+          },
+        ],
+      ]),
+    }
+    const r = evalRuntime()
+    await r.init(policy)
+    const result = await r.execute(
+      'await shout("hello from agent"); taskSuccess(null)',
+      makeContext(),
+    )
+    expect(result.outputs).toEqual([{ type: 'text', text: 'host fn says: hello from agent' }])
+  })
+
+  it('host fn console.log of image-shaped value produces an image part', async () => {
+    const policy: Policy = {
+      ...emptyPolicy,
+      fns: new Map([
+        [
+          'screenshot',
+          {
+            kind: 'fn',
+            name: 'screenshot',
+            fn: async (): Promise<void> => {
+              console.log({ format: 'png', data: 'fakebase64' })
+            },
+          },
+        ],
+      ]),
+    }
+    const r = evalRuntime()
+    await r.init(policy)
+    const result = await r.execute('await screenshot(); taskSuccess(null)', makeContext())
+    expect(result.outputs).toEqual([{ type: 'image', format: 'png', data: 'fakebase64' }])
+  })
+})
+
+describe('evalRuntime — wantsContext', () => {
+  it('appends ctx as trailing arg only when wantsContext: true', async () => {
+    let received: unknown[] | null = null
+    const captureReg = {
+      kind: 'fn' as const,
+      name: 'capture',
+      wantsContext: true,
+      fn: async (...args: unknown[]): Promise<void> => {
+        received = args
+      },
+    }
+    const policy: Policy = {
+      ...emptyPolicy,
+      fns: new Map([['capture', captureReg]]),
+    }
+    const r = evalRuntime()
+    await r.init(policy)
+    await r.execute('await capture(1, 2); taskSuccess(null)', makeContext())
+    expect(received).not.toBeNull()
+    const args = received as unknown as unknown[]
+    expect(args.length).toBe(3)
+    expect(args[0]).toBe(1)
+    expect(args[1]).toBe(2)
+    expect(args[2]).toMatchObject({ console: expect.anything(), signal: expect.anything() })
+  })
+
+  it('handler without wantsContext receives only agent args', async () => {
+    let received: unknown[] | null = null
+    const plainReg = {
+      kind: 'fn' as const,
+      name: 'plain',
+      fn: async (...args: unknown[]): Promise<void> => {
+        received = args
+      },
+    }
+    const policy: Policy = {
+      ...emptyPolicy,
+      fns: new Map([['plain', plainReg]]),
+    }
+    const r = evalRuntime()
+    await r.init(policy)
+    await r.execute('await plain(1, 2); taskSuccess(null)', makeContext())
+    expect(received).toEqual([1, 2])
+  })
+
+  it('ctx.console.log lands as image part for image-shaped value', async () => {
+    const shootReg = {
+      kind: 'fn' as const,
+      name: 'shoot',
+      wantsContext: true,
+      fn: async (...args: unknown[]): Promise<void> => {
+        const ctx = args[1] as { console: Console; signal: AbortSignal }
+        ctx.console.log({ format: 'png', data: 'ctxbase64' })
+      },
+    }
+    const policy: Policy = {
+      ...emptyPolicy,
+      fns: new Map([['shoot', shootReg]]),
+    }
+    const r = evalRuntime()
+    await r.init(policy)
+    const result = await r.execute('await shoot(null); taskSuccess(null)', makeContext())
+    expect(result.outputs).toEqual([{ type: 'image', format: 'png', data: 'ctxbase64' }])
+  })
+
+  it('ctx.signal flips when external task is cancelled mid-call', async () => {
+    const ac = new AbortController()
+    let observedAborted: boolean | null = null
+    const waitReg = {
+      kind: 'fn' as const,
+      name: 'wait',
+      wantsContext: true,
+      fn: async (...args: unknown[]): Promise<void> => {
+        const ctx = args[0] as { console: Console; signal: AbortSignal }
+        expect(ctx.signal.aborted).toBe(false)
+        // Trigger external abort, then yield so the linked
+        // listener flips our local signal before we read it.
+        ac.abort()
+        await new Promise((r) => setTimeout(r, 0))
+        observedAborted = ctx.signal.aborted
+      },
+    }
+    const policy: Policy = {
+      ...emptyPolicy,
+      fns: new Map([['wait', waitReg]]),
+    }
+    const r = evalRuntime()
+    await r.init(policy)
+    const ctx: ExecuteContext = {
+      fs: new MemoryFS(),
+      cache: new CacheImpl(new Live(), 'default'),
+      signal: ac.signal,
+    }
+    await r.execute('await wait(); taskSuccess(null)', ctx)
+    expect(observedAborted).toBe(true)
+  })
 })
 
 describe('evalRuntime — fs / cache injection', () => {

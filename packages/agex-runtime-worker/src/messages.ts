@@ -21,10 +21,12 @@
  *   - `ready`        — sent once at module top, after the worker
  *     scope has set up its message listener. The host awaits this
  *     before posting any `execute`.
- *   - `output`       — captured `console.*` (and `viewImage(...)`)
- *     becomes one or more `OutputPart`s. Streamed live so the
- *     parent agent loop can forward through `onEvent` while the
- *     emission is still running.
+ *   - `output`       — captured `console.*` becomes one or more
+ *     `OutputPart`s (image-shaped values — `{format,data}` objects,
+ *     `data:image/...` strings, or PNG/JPEG/WebP `Uint8Array`s — split
+ *     out into `image` parts; everything else into `text`). Streamed
+ *     live so the parent agent loop can forward through `onEvent`
+ *     while the emission is still running.
  *   - `bridgeCall`     — RPC for `fs.*` / `cache.*` / registered
  *     fn / registered namespace member / static method on a
  *     registered class. The host dispatches the call and replies

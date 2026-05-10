@@ -73,7 +73,7 @@ export interface AgentOptions {
    *  framework auto-registers a chapter task with the default
    *  primer (override via `chapterPrimer`). Without this option,
    *  no chapter task is registered and chaptering never runs. */
-  readonly chapteringTrigger?: number
+  readonly chapteringTrigger?: number | undefined
   /** Override the default primer the auto-registered chapter task
    *  uses. Most embedders should leave this undefined —
    *  `DEFAULT_CHAPTER_PRIMER` describes the boundary-based
@@ -111,7 +111,9 @@ export interface ReconfigurableOptions {
   readonly primer?: string
   readonly agexPrimerOverride?: string
   readonly capabilitiesPrimer?: string
-  readonly chapteringTrigger?: number
+  // `| undefined` is load-bearing under exactOptionalPropertyTypes:
+  // callers explicitly pass `undefined` to disable auto-chaptering.
+  readonly chapteringTrigger?: number | undefined
   readonly chapterPrimer?: string
   readonly maxIterations?: number
 }
@@ -133,6 +135,11 @@ export interface FnRegistration {
   readonly hostFsAccess?: boolean
   readonly networkAccess?: boolean
   readonly paramsSchema?: import('@standard-schema/spec').StandardSchemaV1
+  /** When true, the framework appends a `HostFnContext` (`{ console,
+   *  signal }`) as the trailing positional argument to the handler.
+   *  See `HostFnContext` in `agex-ts/types`. Host-bound only —
+   *  combining with `url` is rejected at registration. */
+  readonly wantsContext?: boolean
 }
 
 /** Options accepted by `agent.cls()`. The class is the first

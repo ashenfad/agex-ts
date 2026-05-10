@@ -211,6 +211,27 @@ describe('workerRuntime', () => {
     expect(result.outcome).toEqual({ kind: 'success', value: 'done' })
   })
 
+  it('console.log of {format,data} produces an image part (in-Worker realm)', async () => {
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const result = await rt.execute(
+      `console.log({ format: 'png', data: 'abc' })\ntaskSuccess(null)`,
+      makeCtx(),
+    )
+    expect(result.outputs).toEqual([{ type: 'image', format: 'png', data: 'abc' }])
+  })
+
+  it('console.log of Uint8Array with PNG magic produces an image part (in-Worker)', async () => {
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const result = await rt.execute(
+      'const bytes = new Uint8Array([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,0,0,0,13])\nconsole.log(bytes)\ntaskSuccess(null)',
+      makeCtx(),
+    )
+    expect(result.outputs).toHaveLength(1)
+    expect(result.outputs[0]).toMatchObject({ type: 'image', format: 'png' })
+  })
+
   it('translates taskFail into outcome.kind === "fail"', async () => {
     const rt = runtime()
     await rt.init(EMPTY_POLICY)
@@ -626,6 +647,37 @@ describe('workerRuntime — fn / namespace bridge', () => {
     const result = await rt.execute(code, makeCtx())
     expect(result.outcome).toEqual({ kind: 'success', value: [1, 2, 3] })
     expect(counter).toBe(3)
+  })
+
+  // Implicit (ALS-based) host-fn console capture works on Node-host
+  // only; browser-host (no `node:async_hooks`) requires the explicit
+  // `ctx.console` path. The Node-host implicit case is exercised in
+  // agex-ts's `eval-runtime.test.ts`; the explicit ctx case is covered
+  // by the `wantsContext` test below.
+
+  it('wantsContext appends ctx; ctx.console.log lands in outputs', async () => {
+    const rt = runtime()
+    const reg: RegisteredFn = {
+      kind: 'fn',
+      name: 'shoot',
+      wantsContext: true,
+      fn: async (...args: unknown[]) => {
+        const ctx = args[1] as { console: Console; signal: AbortSignal }
+        ctx.console.log({ format: 'png', data: 'ctxbase64' })
+        return 'ok'
+      },
+    }
+    const fns = new Map<string, RegisteredFn>([['shoot', reg]])
+    const policy: Policy = {
+      fns,
+      classes: new Map(),
+      namespaces: new Map(),
+      skills: new Map(),
+      terminals: new Map(),
+    }
+    await rt.init(policy)
+    const result = await rt.execute('await shoot(null); taskSuccess(null)', makeCtx())
+    expect(result.outputs).toEqual([{ type: 'image', format: 'png', data: 'ctxbase64' }])
   })
 
   it('surfaces a registered fn throw as a rejected promise in user code', async () => {

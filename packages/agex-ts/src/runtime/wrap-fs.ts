@@ -1,19 +1,26 @@
 /**
- * `wrapAgentFs(fs)` — Node-fs-style ergonomic wrapper around the
- * underlying `FileSystem` protocol that the agent sees as `fs`.
+ * `wrapAgentFs(fs)` — ergonomic wrapper around the underlying
+ * `FileSystem` protocol that the agent sees as `fs`.
  *
  * The termish-ts `FileSystem` protocol is bytes-only by design (it's
  * a general async-storage abstraction; backends shouldn't care about
- * JS-specific encodings). But agents reach for the conventional Node
- * fs surface they were trained on:
+ * JS-specific encodings). But agents reach for whichever ecosystem's
+ * file-IO convention comes to mind first — Node, Deno, browser web
+ * APIs — and they're not always the same person across turns. This
+ * wrapper accepts the most common reflexes and routes them all to
+ * the bytes-only protocol underneath:
  *
- *   const text = await fs.read(path, 'utf8')   // string, not bytes
- *   await fs.write(path, 'hello world')        // string in, encoded
+ *   const text = await fs.read(path, 'utf8')     // Node-style with encoding
+ *   const text = await fs.readFile(path, 'utf8') // Node-standard alias
+ *   const text = await fs.readText(path)         // Deno-flavored shortcut
  *
- * This wrapper accepts those shapes and translates to the bytes-
- * only protocol underneath. Bytes-form still works identically for
- * code that wants the raw form. Mirrors Node's `fs.readFile` /
- * `fs.writeFile` semantics for the encoding-aware overloads.
+ *   await fs.write(path, 'hello')                // Node-style, string ok
+ *   await fs.writeFile(path, 'hello')            // Node-standard alias
+ *   await fs.writeText(path, 'hello')            // Deno-flavored shortcut
+ *
+ * Bytes-form still works identically for code that wants the raw
+ * form: `fs.read(path)` / `fs.write(path, bytes)` / `fs.readFile(path)`
+ * / `fs.writeFile(path, bytes)`.
  *
  * Used at the agex injection boundary in both `evalRuntime` (host
  * realm) and `agex-runtime-worker` (the bridged fs proxy that runs
@@ -57,31 +64,53 @@ function decodeBytes(bytes: Uint8Array, encoding: string): string {
  * string<->bytes shuffle.
  */
 export function wrapAgentFs<F extends Pick<FileSystem, 'read' | 'write'>>(fs: F): F {
-  // Proxy lets us intercept just `read`/`write` while delegating
-  // every other method (existing or future) to the underlying
+  // Build the read/write helpers as closures over the target so the
+  // alias methods can share a single implementation rather than
+  // duplicating the encoding-shuffle logic per alias.
+  const doRead = async (path: string, encoding?: string): Promise<Uint8Array | string> => {
+    const bytes = await fs.read(path)
+    if (encoding === undefined) return bytes
+    return decodeBytes(bytes, encoding)
+  }
+  const doWrite = async (
+    path: string,
+    content: Uint8Array | string,
+    mode?: 'w' | 'a',
+  ): Promise<void> => {
+    const bytes = typeof content === 'string' ? utf8Encoder.encode(content) : content
+    // The underlying signature takes (path, bytes, mode?). Mode
+    // pass-through preserves the existing 'a' append semantics.
+    return fs.write(path, bytes, mode)
+  }
+  // `readText` / `writeText` are the Deno-flavored shortcuts: text
+  // is the only shape, no encoding arg needed (UTF-8 implied).
+  const doReadText = (path: string): Promise<string> => doRead(path, 'utf8') as Promise<string>
+  const doWriteText = (path: string, str: string, mode?: 'w' | 'a'): Promise<void> =>
+    doWrite(path, str, mode)
+
+  // Method aliases the agent's reflex might reach for. `read`/`write`
+  // are the canonical termish-ts surface; `readFile`/`writeFile` mirror
+  // Node's standard names; `readText`/`writeText` are the Deno-flavored
+  // shortcuts. All collapse to the same backing implementation — there's
+  // no behavior difference between aliases.
+  const aliases: Record<string, unknown> = {
+    read: doRead,
+    readFile: doRead,
+    readText: doReadText,
+    write: doWrite,
+    writeFile: doWrite,
+    writeText: doWriteText,
+  }
+
+  // Proxy lets us intercept the alias set while delegating every
+  // other method (existing or future) to the underlying
   // implementation without listing them. Important because the
   // worker bridge proxy has its own surface that may grow over
   // time — we don't want to accidentally hide methods.
   return new Proxy(fs as object, {
     get(target, prop, receiver) {
-      if (prop === 'read') {
-        return async (path: string, encoding?: string): Promise<Uint8Array | string> => {
-          const bytes = await (target as F).read(path)
-          if (encoding === undefined) return bytes
-          return decodeBytes(bytes, encoding)
-        }
-      }
-      if (prop === 'write') {
-        return async (
-          path: string,
-          content: Uint8Array | string,
-          mode?: 'w' | 'a',
-        ): Promise<void> => {
-          const bytes = typeof content === 'string' ? utf8Encoder.encode(content) : content
-          // The underlying signature takes (path, bytes, mode?). Mode
-          // pass-through preserves the existing 'a' append semantics.
-          return (target as F).write(path, bytes, mode)
-        }
+      if (typeof prop === 'string' && prop in aliases) {
+        return aliases[prop]
       }
       const value = Reflect.get(target, prop, receiver)
       // Bind class methods to the real target so they can access

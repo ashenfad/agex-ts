@@ -269,6 +269,83 @@ describe('evalRuntime — fs ergonomic wrappers (Node-fs-style)', () => {
     expect(text).toBe('first\nsecond\n')
   })
 
+  it('fs.readText(path) — Deno-flavored shortcut returns string (no encoding arg)', async () => {
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const ctx = makeContext()
+    await ctx.fs.write('/x.txt', new TextEncoder().encode('hello'))
+    const result = await r.execute(`taskSuccess(await fs.readText('/x.txt'))`, ctx)
+    expect(result.outcome).toEqual({ kind: 'success', value: 'hello' })
+  })
+
+  it('fs.writeText(path, str) — Deno-flavored shortcut writes UTF-8', async () => {
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const ctx = makeContext()
+    await r.execute(`await fs.writeText('/x.txt', 'hello world'); taskSuccess(null)`, ctx)
+    const text = new TextDecoder().decode(await ctx.fs.read('/x.txt'))
+    expect(text).toBe('hello world')
+  })
+
+  it('fs.readFile(path, "utf8") — Node-standard alias works the same as fs.read', async () => {
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const ctx = makeContext()
+    await ctx.fs.write('/data.csv', new TextEncoder().encode('a,b\n1,2\n'))
+    const result = await r.execute(
+      `
+      const text = await fs.readFile('/data.csv', 'utf8')
+      const bytes = await fs.readFile('/data.csv')
+      taskSuccess({ text, isBytes: bytes instanceof Uint8Array })
+    `,
+      ctx,
+    )
+    expect(result.outcome).toEqual({
+      kind: 'success',
+      value: { text: 'a,b\n1,2\n', isBytes: true },
+    })
+  })
+
+  it('fs.writeFile(path, content) — Node-standard alias accepts strings and bytes', async () => {
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const ctx = makeContext()
+    await r.execute(
+      `
+      await fs.writeFile('/a.txt', 'string-form')
+      await fs.writeFile('/b.bin', new Uint8Array([1, 2, 3]))
+      taskSuccess(null)
+    `,
+      ctx,
+    )
+    expect(new TextDecoder().decode(await ctx.fs.read('/a.txt'))).toBe('string-form')
+    expect(Array.from(await ctx.fs.read('/b.bin'))).toEqual([1, 2, 3])
+  })
+
+  it('all read aliases share the same backing implementation (no semantic drift)', async () => {
+    // Sanity that aliases are not just wired but actually point at
+    // the same underlying logic. If someone refactors the aliases
+    // table and accidentally diverges (e.g. readFile starts
+    // ignoring encoding), this test catches it.
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const ctx = makeContext()
+    await ctx.fs.write('/x.txt', new TextEncoder().encode('shared'))
+    const result = await r.execute(
+      `
+      const a = await fs.read('/x.txt', 'utf8')
+      const b = await fs.readFile('/x.txt', 'utf8')
+      const c = await fs.readText('/x.txt')
+      taskSuccess({ allEqual: a === b && b === c, a })
+    `,
+      ctx,
+    )
+    expect(result.outcome).toEqual({
+      kind: 'success',
+      value: { allEqual: true, a: 'shared' },
+    })
+  })
+
   it('non-read/write methods still pass through (proxy delegation)', async () => {
     // The wrapper Proxy intercepts only `read` and `write`; everything
     // else (exists, mkdir, list, etc.) must delegate to the underlying

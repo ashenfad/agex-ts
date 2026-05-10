@@ -173,6 +173,63 @@ try {
 }
 ```
 
+## `agent.reconfigure(opts)`
+
+```ts
+interface ReconfigurableOptions {
+  readonly llm?: LLMClient
+  readonly primer?: string
+  readonly agexPrimerOverride?: string
+  readonly capabilitiesPrimer?: string
+  readonly chapteringTrigger?: number
+  readonly chapterPrimer?: string
+  readonly maxIterations?: number
+}
+
+reconfigure(opts: ReconfigurableOptions): void
+```
+
+Hot-swap the safe-to-mutate subset of `AgentOptions` on a constructed agent. Useful for embedders with a settings UI ("user changed model in the drawer"), where reconstructing the agent would orphan per-session state and runtime resources.
+
+Each provided field replaces its current value; omitted fields stay as they were. Pass `undefined` explicitly to clear a value (e.g. `chapteringTrigger: undefined` turns auto-chaptering off).
+
+**Per-field timing — when changes take effect:**
+
+| Field | Takes effect on... |
+|---|---|
+| `llm` | Next LLM call. In-flight HTTP requests continue with the old client. |
+| `primer` / `agexPrimerOverride` / `capabilitiesPrimer` | Next task's system message. (Note: invalidates the LLM provider's prompt cache for system text.) |
+| `chapteringTrigger` | Next task-boundary chaptering check. `undefined` disables. |
+| `chapterPrimer` | Next chapter task run. |
+| `maxIterations` | Start of the next task. |
+
+**Excluded fields** (require dispose + recreate): `name`, `state`, `runtime`, `fs`. Mutating these mid-session would orphan per-session resources or break invariants the substrate depends on. The TypeScript signature prevents you from accidentally including them.
+
+**Example: settings drawer** ("user changed model"):
+
+```ts
+function onSettingsChange(newSettings: Settings) {
+  agent.reconfigure({ llm: buildLlmClient(newSettings) })
+  // Next task uses the new model. No teardown, no state re-attach.
+}
+```
+
+**Example: turn off auto-chaptering**:
+
+```ts
+agent.reconfigure({ chapteringTrigger: undefined })
+```
+
+**Example: composing several settings**:
+
+```ts
+agent.reconfigure({
+  llm: newLlm,
+  primer: 'New voice',
+  maxIterations: 25,
+})
+```
+
 ## Properties
 
 | Property | Type | Purpose |

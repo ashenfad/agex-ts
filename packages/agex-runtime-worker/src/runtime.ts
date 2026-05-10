@@ -485,13 +485,21 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
     primerAddendum(): string | undefined {
       const route = opts.routeFetchToVfs
       if (route === undefined || route === false) return undefined
+      // Build scope description + a concrete example using the
+      // actual configured prefixes (when in array mode) so the
+      // primer doesn't mislead an embedder who carved out a non-
+      // default VFS namespace.
       const scope = Array.isArray(route)
         ? `under these prefixes: ${route.map((p) => `\`${p}\``).join(', ')}`
         : 'for any path-absolute URL'
+      const examplePath = Array.isArray(route) ? `${route[0] ?? '/'}foo.csv` : '/data/foo.csv'
+      const arrayCaveat = Array.isArray(route)
+        ? "  Path-absolute URLs that DO NOT match a listed prefix pass through to the network unchanged — that namespace is the host's, not yours."
+        : ''
       return [
         '## Filesystem is fetch-accessible',
         '',
-        `This runtime routes \`fetch(...)\` calls to your VFS ${scope} (GET/HEAD only).  That means library functions that internally call \`fetch\` — Arquero's \`loadCSV\`, Plotly's loaders, JSON/URL fetchers in any data lib — read from the same VFS your \`fs.read\` reaches, without an explicit bytes-shuttling step.  Mental model: when a registered library asks you for a "URL", a path like \`/data/foo.csv\` resolves against the VFS first.  Absolute URLs (\`https://...\`) and relative URLs (\`./foo\`) are unaffected — they go to the network as usual.`,
+        `This runtime routes \`fetch(...)\` calls to your VFS ${scope} (GET/HEAD only).  That means library functions that internally call \`fetch\` — Arquero's \`loadCSV\`, Plotly's loaders, JSON/URL fetchers in any data lib — read from the same VFS your \`fs.read\` reaches, without an explicit bytes-shuttling step.  Mental model: when a registered library asks you for a "URL", a path like \`${examplePath}\` resolves against the VFS first.  Absolute URLs (\`https://...\`) and relative URLs (\`./foo\`) are unaffected — they go to the network as usual.${arrayCaveat}`,
       ].join('\n')
     },
   }

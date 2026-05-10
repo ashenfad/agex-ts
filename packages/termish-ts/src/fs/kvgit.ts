@@ -26,6 +26,7 @@
 
 import type { Staged } from 'kvgit-ts'
 import type { Decoder, Encoder } from 'kvgit-ts'
+import superjson from 'superjson'
 import { basename, dirname, joinPath, resolve } from './path'
 import type { FileInfo, FileMetadata, FileSystem } from './protocol'
 
@@ -94,17 +95,25 @@ export const fileRecordDecoder: Decoder = (bytes) => {
 }
 
 /** Encoder that handles both `FileRecord` payloads and arbitrary
- *  JSON-able values via a one-byte type tag. Use this on the unified
+ *  structured values via a one-byte type tag. Use this on the unified
  *  `Staged` an agex-ts agent shares between its state backend and its
  *  kvgit-backed VFS — one `staged.commit()` then captures both atomically.
  *
  *  Wire format:
  *  - `0x46` (`F`) / `0x44` (`D`): existing FileRecord layout.
- *  - `0x4a` (`J`): byte 0 = tag, bytes 1+ = UTF-8 JSON.
+ *  - `0x4a` (`J`): byte 0 = tag, bytes 1+ = UTF-8 superjson payload.
+ *
+ *  The non-FileRecord path goes through `superjson` rather than plain
+ *  JSON so that values containing `Uint8Array`, `Map`, `Set`, `Date`,
+ *  `BigInt`, etc. roundtrip with their types preserved. Plain JSON
+ *  silently corrupts these (e.g. `Uint8Array` becomes a numeric-keyed
+ *  plain object that fails any subsequent `decoder.decode(value)` call).
+ *  superjson encodes the type info as a sidecar in the wire payload —
+ *  the bytes are still valid JSON, just with a `{json, meta}` envelope.
  */
 export const polymorphicEncoder: Encoder = (value) => {
   if (isFileRecord(value)) return fileRecordEncoder(value)
-  const json = enc.encode(JSON.stringify(value))
+  const json = enc.encode(superjson.stringify(value))
   const out = new Uint8Array(1 + json.byteLength)
   out[0] = TYPE_JSON
   out.set(json, 1)
@@ -117,7 +126,7 @@ export const polymorphicDecoder: Decoder = (bytes) => {
   }
   const tag = bytes[0]
   if (tag === TYPE_JSON) {
-    return JSON.parse(dec.decode(bytes.subarray(1)))
+    return superjson.parse(dec.decode(bytes.subarray(1)))
   }
   if (tag === TYPE_FILE || tag === TYPE_DIR) {
     return fileRecordDecoder(bytes)

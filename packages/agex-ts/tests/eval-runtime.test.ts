@@ -1254,4 +1254,27 @@ describe('evalRuntime — missing-await detection', () => {
     expect(result.outcome).toEqual({ kind: 'continue' })
     expect(result.error?.name).toBe('MissingAwaitError')
   })
+
+  it('top-level return still flips bodySettled (try/finally wrap)', async () => {
+    // Regression: a top-level `return` would skip an appended
+    // `__agexBodyDone()` statement, leaving bodySettled false. A late
+    // terminator from a non-awaited async path would then re-throw
+    // (because !bodySettled) instead of being recorded as a
+    // MissingAwaitError. The try/finally wrap around the body fixes
+    // this — the finally clause runs through every exit path.
+    const r = evalRuntime()
+    await r.init(emptyPolicy)
+    const ctx = makeContext()
+    const code = `
+      async function delayed() {
+        await Promise.resolve()
+        taskSuccess('late')
+      }
+      delayed()
+      return
+    `
+    const result = await r.execute(code, ctx)
+    expect(result.outcome).toEqual({ kind: 'continue' })
+    expect(result.error?.name).toBe('MissingAwaitError')
+  })
 })

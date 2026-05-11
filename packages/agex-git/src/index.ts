@@ -1,4 +1,16 @@
 // Public surface — populated as the port lands.
+export { FileNotFoundError, VirtualGit } from './core'
+export { isBinary, unifiedDiff } from './diff'
+export {
+  AgentGitError,
+  BranchExists,
+  BranchNotFound,
+  BranchNotMerged,
+  NothingToCommit,
+  PathSpecError,
+  PendingChanges,
+  UnbornBranch,
+} from './errors'
 export { DEFAULT_BRANCH, METADATA_KEY, Metadata } from './metadata'
 export {
   HASH_PREFIX_MIN_LEN,
@@ -11,4 +23,4 @@ export {
   virtualParents,
   walkVirtualAncestry,
 } from './refs'
-export { isBinary, unifiedDiff } from './diff'
+export type { AgentCommit, Status } from './types'

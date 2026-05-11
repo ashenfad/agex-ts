@@ -16,14 +16,17 @@ content and the updated metadata blob atomically.
 
 ## Status
 
-Foundation only — `metadata`, `refs`, and `diff` helpers are landed.
-The `VirtualGit` class and termish-ts CLI adapter ship in follow-up
-commits.
+Read-only operations land via `VirtualGit`: `currentBranch` /
+`listBranches` / `head` / `resolveRef` / `status` / `log` / `show` /
+`diff`. Mutating operations (`add` / `rm` / `commit` / `reset` /
+`branch` / `checkout` / `merge`) and the termish-ts CLI adapter ship
+in follow-up commits.
 
 ## Public surface
 
 ```ts
 import {
+  VirtualGit,
   Metadata,
   METADATA_KEY,
   DEFAULT_BRANCH,
@@ -33,6 +36,13 @@ import {
   mergeBase,
   unifiedDiff,
   isBinary,
+  // Errors
+  AgentGitError,
+  InvalidRef,
+  FileNotFoundError,
+  // Result types
+  type AgentCommit,
+  type Status,
 } from 'agex-git'
 ```
 

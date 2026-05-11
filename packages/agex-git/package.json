@@ -1,0 +1,41 @@
+{
+  "name": "agex-git",
+  "version": "0.0.1",
+  "description": "Agent-view git over a kvgit-ts Staged. Termish-ts host command for in-VFS commit / branch / diff.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsup",
+    "prepare": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "agex-ts": "workspace:*",
+    "kvgit-ts": "workspace:*",
+    "termish-ts": "workspace:*",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "peerDependencies": {
+    "agex-ts": "workspace:*",
+    "kvgit-ts": "workspace:*",
+    "termish-ts": "workspace:*"
+  },
+  "dependencies": {
+    "@types/diff": "^7.0.0",
+    "diff": "^7.0.0"
+  }
+}

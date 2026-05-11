@@ -86,6 +86,34 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.19.17)(@vitest/browser@2.1.9)(msw@2.14.2(@types/node@22.19.17)(typescript@5.9.3))
 
+  packages/agex-git:
+    dependencies:
+      '@types/diff':
+        specifier: ^7.0.0
+        version: 7.0.2
+      diff:
+        specifier: ^7.0.0
+        version: 7.0.0
+    devDependencies:
+      agex-ts:
+        specifier: workspace:*
+        version: link:../agex-ts
+      kvgit-ts:
+        specifier: workspace:*
+        version: link:../kvgit-ts
+      termish-ts:
+        specifier: workspace:*
+        version: link:../termish-ts
+      tsup:
+        specifier: ^8.3.5
+        version: 8.5.1(postcss@8.5.13)(tsx@4.21.0)(typescript@5.9.3)
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.19.17)(@vitest/browser@2.1.9)(msw@2.14.2(@types/node@22.19.17)(typescript@5.9.3))
+
   packages/agex-openai:
     devDependencies:
       agex-ts:
@@ -833,6 +861,9 @@ packages:
   '@types/command-line-usage@5.0.4':
     resolution: {integrity: sha512-BwR5KP3Es/CSht0xqBcUXS3qCAUVXwpRKsV2+arxeb65atasuXG9LykC9Ab10Cw3s2raH92ZqOeILaQbsB2ACg==}
 
+  '@types/diff@7.0.2':
+    resolution: {integrity: sha512-JSWRMozjFKsGlEjiiKajUjIJVKuKdE3oVy2DNtK+fUo8q82nhFZ2CPQwicAIkXrofahDXrWJ7mjelvZphMS98Q==}
+
   '@types/estree@1.0.8':
     resolution: {integrity: sha512-dWHzHa2WqEXI/O1E9OjrocMTKJl2mSrEolh1Iomrv6U+JuNwaHXsXx9bLu5gG7BUWFIN0skIQJQ/L1rIex4X6w==}
 
@@ -1062,6 +1093,10 @@ packages:
   dequal@2.0.3:
     resolution: {integrity: sha512-0je+qPKHEMohvfRTCEo3CrPG6cAzAYgmzKyxRiYSSDkS6eGJdyVJm7WaYA5ECaAD9wLB2T4EEeymA5aFVcYXCA==}
     engines: {node: '>=6'}
+
+  diff@7.0.0:
+    resolution: {integrity: sha512-PJWHUb1RFevKCwaFA9RlG5tCd+FO5iRh9A8HEtkmBH2Li03iJriB6m6JIN4rGz3K3JLawI7/veA1xzRKP6ISBw==}
+    engines: {node: '>=0.3.1'}
 
   dom-accessibility-api@0.5.16:
     resolution: {integrity: sha512-X7BJ2yElsnOJ30pZF4uIIDfBEVgF4XEBxL9Bxhy6dnrm5hkzqmsWHGTiHqRiITNhMyFLyAiWndIJP7Z1NTteDg==}
@@ -2174,6 +2209,8 @@ snapshots:
 
   '@types/command-line-usage@5.0.4': {}
 
+  '@types/diff@7.0.2': {}
+
   '@types/estree@1.0.8': {}
 
   '@types/node@20.19.39':
@@ -2415,6 +2452,8 @@ snapshots:
   deep-eql@5.0.2: {}
 
   dequal@2.0.3: {}
+
+  diff@7.0.0: {}
 
   dom-accessibility-api@0.5.16: {}
 

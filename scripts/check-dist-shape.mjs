@@ -52,6 +52,7 @@ const PACKAGES = [
   'agex-openai',
   'agex-gemini',
   'agex-runtime-worker',
+  'agex-git',
 ]
 
 async function* walkJsFiles(dir) {

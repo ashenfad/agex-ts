@@ -16,11 +16,12 @@ content and the updated metadata blob atomically.
 
 ## Status
 
-Read-only operations land via `VirtualGit`: `currentBranch` /
-`listBranches` / `head` / `resolveRef` / `status` / `log` / `show` /
-`diff`. Mutating operations (`add` / `rm` / `commit` / `reset` /
-`branch` / `checkout` / `merge`) and the termish-ts CLI adapter ship
-in follow-up commits.
+Working-tree operations land via `VirtualGit`: read-only
+(`currentBranch` / `listBranches` / `head` / `resolveRef` / `status` /
+`log` / `show` / `diff`) plus mutating (`add` / `rm` / `commit` /
+`reset`). Branch operations (`createBranch` / `deleteBranch` /
+`checkout` / `merge`) and the termish-ts CLI adapter ship in
+follow-up commits.
 
 ## Public surface
 

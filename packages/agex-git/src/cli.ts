@@ -125,16 +125,25 @@ function usage(): string {
 }
 
 /** Translate any agent-git error into a termish `TerminalError`,
- *  prefixed with the subcommand for context. Anything else
- *  re-throws unchanged so unexpected errors surface as bugs rather
- *  than silently as user errors. */
+ *  prefixed with the subcommand for context. The git handler runs
+ *  in the host realm (same process as `VirtualGit`), so prototype-
+ *  chain checks against `AgentGitError` / `InvalidRef` /
+ *  `FileNotFoundError` are reliable here — no serialization seam
+ *  between throw and catch. */
 function asTerminalError(prefix: string, e: unknown): TerminalError {
   if (e instanceof AgentGitError || e instanceof InvalidRef || e instanceof FileNotFoundError) {
     return new TerminalError(`${prefix}: ${e.message}`)
   }
   if (e instanceof TerminalError) return e
   if (e instanceof Error) return new TerminalError(`${prefix}: ${e.message}`)
-  return new TerminalError(`${prefix}: ${String(e)}`)
+  // Defensive fallback for non-Error throws. Prefer a string-typed
+  // `.message` if present so an `{ message: '...' }` thrown literal
+  // produces a readable line instead of `[object Object]`.
+  const message =
+    typeof e === 'object' && e !== null && typeof (e as { message?: unknown }).message === 'string'
+      ? (e as { message: string }).message
+      : String(e)
+  return new TerminalError(`${prefix}: ${message}`)
 }
 
 // ---------------------------------------------------------------------------

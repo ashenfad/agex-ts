@@ -11,7 +11,7 @@ import type { CommandHandler } from '../context'
 import { gunzip, gzip, tar, unzip, zip } from './archive'
 import { diff } from './diff'
 import { basename, cd, cp, dirname, ls, mkdir, mv, pwd, rm, touch } from './filesystem'
-import { cat, echo, head, tail, tee } from './io'
+import { cat, echo, head, printf, tail, tee } from './io'
 import { find, grep } from './search'
 import { sed } from './sed'
 import { cut, sort, tr, uniq, wc } from './text'
@@ -31,6 +31,7 @@ export const BUILTINS: ReadonlyMap<string, CommandHandler> = new Map<string, Com
   ['dirname', dirname],
   // I/O
   ['echo', echo],
+  ['printf', printf],
   ['cat', cat],
   ['head', head],
   ['tail', tail],

@@ -50,6 +50,74 @@ describe('echo', () => {
   })
 })
 
+describe('printf', () => {
+  it('writes a literal format with no trailing newline', async () => {
+    expect(await execute('printf hello', new MemoryFS())).toBe('hello')
+  })
+
+  it('interprets \\n / \\t / \\r in the format', async () => {
+    expect(await execute("printf 'a\\nb\\tc\\rd'", new MemoryFS())).toBe('a\nb\tc\rd')
+  })
+
+  it('interprets \\\\ as a single backslash', async () => {
+    expect(await execute("printf 'a\\\\b'", new MemoryFS())).toBe('a\\b')
+  })
+
+  it('substitutes %s', async () => {
+    expect(await execute("printf '%s,%s' foo bar", new MemoryFS())).toBe('foo,bar')
+  })
+
+  it('substitutes %d / %i', async () => {
+    expect(await execute("printf '%d %i' 42 -7", new MemoryFS())).toBe('42 -7')
+  })
+
+  it('substitutes %x and %X (hex)', async () => {
+    expect(await execute("printf '%x %X' 255 255", new MemoryFS())).toBe('ff FF')
+  })
+
+  it('substitutes %o (octal)', async () => {
+    expect(await execute("printf '%o' 8", new MemoryFS())).toBe('10')
+  })
+
+  it('substitutes %c (first char of arg)', async () => {
+    expect(await execute("printf '%c' hello", new MemoryFS())).toBe('h')
+  })
+
+  it('emits literal %% as %', async () => {
+    expect(await execute("printf '100%%'", new MemoryFS())).toBe('100%')
+  })
+
+  it('width-pads %5d (right-align)', async () => {
+    expect(await execute("printf '%5d' 42", new MemoryFS())).toBe('   42')
+  })
+
+  it('width-pads %-5s (left-align)', async () => {
+    expect(await execute("printf '%-5sX' ab", new MemoryFS())).toBe('ab   X')
+  })
+
+  it('reapplies the format until args are exhausted (POSIX behavior)', async () => {
+    expect(await execute("printf '%s\\n' a b c", new MemoryFS())).toBe('a\nb\nc\n')
+  })
+
+  it('missing args default to empty / 0', async () => {
+    expect(await execute("printf '%s,%d' foo", new MemoryFS())).toBe('foo,0')
+  })
+
+  it('redirects to file (no silent failure)', async () => {
+    const fs = new MemoryFS()
+    await execute("printf 'a\\nb\\n' > /out.txt", fs)
+    expect(text(await fs.read('/out.txt'))).toBe('a\nb\n')
+  })
+
+  it('errors with no args', async () => {
+    await expect(execute('printf', new MemoryFS())).rejects.toThrow(TerminalError)
+  })
+
+  it('unknown conversion is emitted verbatim and consumes no arg', async () => {
+    expect(await execute("printf '%q,%s' foo", new MemoryFS())).toBe('%q,foo')
+  })
+})
+
 describe('cat', () => {
   it('reads stdin when no files', async () => {
     expect(await execute('echo hi | cat', new MemoryFS())).toBe('hi\n')

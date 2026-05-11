@@ -94,8 +94,14 @@ const TERMINAL_SCHEMA: ToolSchema = {
         type: 'string',
         description:
           'Shell commands to run. Supported: ls, cat, head, tail, grep, find, wc, ' +
-          'sort, uniq, cut, diff, jq, cp, mv, rm, mkdir, touch, pwd, cd, echo, tee, ' +
-          'tar, gzip, gunzip, zip, unzip.',
+          'sort, uniq, cut, tr, sed, diff, xargs, cp, mv, rm, mkdir, touch, pwd, cd, ' +
+          'basename, dirname, echo, printf, tee, tar, gzip, gunzip, zip, unzip. ' +
+          'Notes: (1) no shell variable expansion — `$VAR` references and `X=42` ' +
+          'assignments are not interpreted (each command is a thin handler, not a ' +
+          'full shell). (2) `cd` is persistent — the working directory carries over ' +
+          'to the next call within this session. (3) Within a single call commands ' +
+          'halt on first error; chain with `;`, `&&`, `||` to control flow ' +
+          '(`cmd || true` for best-effort).',
       },
     },
   },

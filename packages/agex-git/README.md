@@ -16,16 +16,42 @@ content and the updated metadata blob atomically.
 
 ## Status
 
-Library API complete. `VirtualGit` exposes:
+Functionally complete. `VirtualGit` library API + termish-ts CLI
+adapter both shipped:
+
 - **Read-only**: `currentBranch` / `listBranches` / `head` /
   `resolveRef` / `status` / `log` / `show` / `diff`
 - **Working-tree**: `add` / `rm` / `commit` / `reset`
 - **Branches**: `createBranch` / `deleteBranch` / `checkout` /
   `merge` (3-way "source wins" + fast-forward + already-up-to-date)
+- **CLI**: `registerGit(agent)` mounts the skill at
+  `/skills/git/SKILL.md` and registers `git` as a host terminal
+  command — agents run `git status`, `git commit -m '...'`,
+  `git log --oneline`, etc. inside `terminal_action`.
 
-The termish-ts CLI adapter (`registerGit(agent)` so `git status` /
-`git commit -m '...'` work in `terminal_action`) ships in the next
-commit.
+## Quick start
+
+```ts
+import { createAgent } from 'agex-ts'
+import { registerGit } from 'agex-git'
+
+const agent = await createAgent({
+  name: 'my-agent',
+  state: { type: 'versioned', storage: 'memory' },
+  fs: { type: 'kvgit' },
+  // ...
+})
+registerGit(agent)
+```
+
+For programmatic use (without termish), drive `VirtualGit` directly:
+
+```ts
+import { VirtualGit } from 'agex-git'
+
+const vg = new VirtualGit(staged.versioned, staged)
+await vg.commit('initial')
+```
 
 ## Public surface
 

@@ -1,4 +1,5 @@
-// Public surface — populated as the port lands.
+// Public surface.
+export { makeGitHandler, registerGit } from './cli'
 export { FileNotFoundError, VirtualGit } from './core'
 export { isBinary, unifiedDiff } from './diff'
 export {

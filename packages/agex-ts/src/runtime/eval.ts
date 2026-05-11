@@ -293,11 +293,15 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
         const names = Object.keys(injected)
         // Append a sourceURL pragma so AsyncFunction-emitted stack
         // traces refer to "<ts_action>" instead of "<anonymous>".
-        // Also append the bodySettled-flip call as the last sync
-        // statement of the body — guarantees that any microtask
-        // queued during body execution (the orphaned async chain
-        // case) sees `bodySettled === true` when it resumes.
-        const annotated = `${prepared.code}\n;__agexBodyDone();\n//# sourceURL=<ts_action>\n`
+        // Wrap the body in `try { ... } finally { __agexBodyDone() }`
+        // so the bodySettled flag flips on every exit path — fall-
+        // through, terminator-throw, top-level `return`, and any
+        // unexpected throw. Without the try/finally, a top-level
+        // `return` would bypass the flag flip, leaving any later
+        // microtask resumption with `bodySettled === false` (which
+        // would re-throw a terminator instead of recording it as a
+        // missing-await).
+        const annotated = `try {\n${prepared.code}\n} finally { __agexBodyDone() }\n//# sourceURL=<ts_action>\n`
         const fn = new AsyncFunction(...names, annotated)
 
         // Race the user code against the abort signal. The user

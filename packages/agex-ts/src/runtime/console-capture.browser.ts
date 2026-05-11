@@ -61,7 +61,10 @@ export function makeHostFnContext(args: {
       if (prop === 'warn') return make('warn')
       if (prop === 'error') return make('error')
       if (prop === 'info') return make('info')
-      return Reflect.get(target, prop, receiver)
+      // Bind unrouted methods (table/time/dir/...) to the real console
+      // so browser implementations don't `Illegal invocation` on them.
+      const value = Reflect.get(target, prop, receiver)
+      return typeof value === 'function' ? value.bind(realConsole) : value
     },
   })
   return { console: ctxConsole, signal }

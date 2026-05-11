@@ -75,7 +75,7 @@ export function installConsoleProxy(): void {
           }
         }
       }
-      return Reflect.get(target, prop, receiver)
+      return reflectBoundToReal(target, prop, receiver)
     },
   })
 }
@@ -114,10 +114,21 @@ export function makeHostFnContext(args: {
       if (prop === 'warn') return make('warn')
       if (prop === 'error') return make('error')
       if (prop === 'info') return make('info')
-      return Reflect.get(target, prop, receiver)
+      return reflectBoundToReal(target, prop, receiver)
     },
   })
   return { console: ctxConsole, signal }
+}
+
+/** Proxy fall-through for the unrouted Console methods (`table`,
+ *  `time`, `dir`, `group`, ...). Browser Console implementations
+ *  validate the `this` binding against an internal slot and throw
+ *  `TypeError: Illegal invocation` if these methods are invoked with
+ *  `this === <Proxy>`. Re-binding to `realConsole` before returning
+ *  the function makes the call site's implicit `this` harmless. */
+function reflectBoundToReal(target: object, prop: string | symbol, receiver: unknown): unknown {
+  const value = Reflect.get(target, prop, receiver)
+  return typeof value === 'function' ? value.bind(realConsole) : value
 }
 
 /** Walk `args`, route image-shaped values to `image` parts and

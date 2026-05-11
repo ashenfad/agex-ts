@@ -240,6 +240,50 @@ describe('makeHostFnContext', () => {
     expect(tableSpy).toHaveBeenCalled()
     tableSpy.mockRestore()
   })
+
+  it('non-routed methods are bound to the real console (no Illegal invocation)', () => {
+    // Browser Console implementations (Chrome/Firefox/WebKit) check
+    // `this` against an internal slot for methods like `table`,
+    // `time`, `dir`, etc. and throw `TypeError: Illegal invocation`
+    // when invoked with `this === <Proxy>`. Simulate that by
+    // installing a stub on the real console whose body asserts `this
+    // === realConsole` — the test fails if our Proxy returned an
+    // unbound reference.
+    const real = _getRealConsoleForTests()
+    let seenThis: unknown = null
+    const original = real.table
+    // biome-ignore lint/suspicious/noExplicitAny: console.table arity
+    real.table = function (this: unknown, ..._args: any[]): void {
+      seenThis = this
+    }
+    try {
+      const ctx = makeHostFnContext({ outputs: [], signal: new AbortController().signal })
+      ctx.console.table([{ a: 1 }])
+      expect(seenThis).toBe(real)
+    } finally {
+      real.table = original
+    }
+  })
+})
+
+describe('global proxy — Illegal invocation guard', () => {
+  it('binds unrouted methods to the real console', () => {
+    const real = _getRealConsoleForTests()
+    let seenThis: unknown = null
+    const original = real.dir
+    // biome-ignore lint/suspicious/noExplicitAny: console.dir arity
+    real.dir = function (this: unknown, ..._args: any[]): void {
+      seenThis = this
+    }
+    try {
+      // The proxy is permanently installed on `globalThis.console`.
+      // Access via `console.dir` — same call shape browser code uses.
+      console.dir({ x: 1 })
+      expect(seenThis).toBe(real)
+    } finally {
+      real.dir = original
+    }
+  })
 })
 
 describe('bytesToBase64', () => {

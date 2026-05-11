@@ -138,6 +138,40 @@ describe('emission dispatch — terminal', () => {
     const outputs = events.filter((e) => e.type === 'output')
     expect(outputs.length).toBeGreaterThan(0)
   })
+
+  it('on partial pipeline failure surfaces preceding stdout alongside the error', async () => {
+    // Regression: when a multi-pipeline terminal command halts on a
+    // failing pipeline, the stdout captured from earlier pipelines was
+    // dropped — the agent only saw the error part. termish-ts stashes
+    // the captured output on `TerminalError.partialOutput`; the
+    // dispatcher now forwards it as a leading text part.
+    const { agent } = await makeAgent([
+      // Round 1: terminal halts after `nope` — earlier `echo`s should
+      // still be surfaced. Dispatch loop returns 'continue' on the
+      // failure, the agent asks the LLM for the next turn.
+      r({ type: 'terminal', commands: 'echo first; echo second; nope' }),
+      // Round 2: terminator so the task ends.
+      r({ type: 'ts', code: 'taskSuccess(null)' }),
+    ])
+    const fn = agent.task<undefined, null>({ description: 'Mixed output.' })
+    const events: Array<{ type: string; parts?: ReadonlyArray<unknown> }> = []
+    await fn(undefined, { onEvent: (e) => void events.push(e) })
+    const out = events.find(
+      (e) =>
+        e.type === 'output' &&
+        (e.parts ?? []).some((p) => (p as { type: string }).type === 'error'),
+    )
+    expect(out).toBeDefined()
+    const parts = out?.parts as ReadonlyArray<{
+      type: string
+      text?: string
+      errorMessage?: string
+    }>
+    // Two parts: the captured stdout (text) followed by the error.
+    expect(parts.map((p) => p.type)).toEqual(['text', 'error'])
+    expect(parts[0]?.text).toBe('first\nsecond\n')
+    expect(parts[1]?.errorMessage).toMatch(/nope: command not found/)
+  })
 })
 
 describe('OutputEvent emissionId stamping', () => {

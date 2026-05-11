@@ -85,6 +85,192 @@ function expandEscapes(text: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// printf
+// ---------------------------------------------------------------------------
+
+/**
+ * `printf FORMAT [ARGUMENT...]` — write FORMAT, substituting `%`
+ *  conversion specs from ARGUMENTs. Unlike `echo`, no trailing newline
+ *  is appended; backslash escapes in the format are interpreted by
+ *  default (matching POSIX printf, which differs from echo's opt-in
+ *  `-e`).
+ *
+ *  Supported conversions (the common shell-printf subset; non-numeric
+ *  precision/width formatting beyond `%5d` / `%5s` is not implemented):
+ *  - `%s` — string
+ *  - `%d` / `%i` — integer (base 10)
+ *  - `%x` / `%X` — integer in hex (lower / upper)
+ *  - `%o` — integer in octal
+ *  - `%c` — single character (first char of arg)
+ *  - `%%` — literal `%`
+ *  - `%[N]s` / `%[N]d` etc. — left-pad to width N
+ *  - `%-Ns` — left-align in width N
+ *
+ *  Backslash escapes in the format: `\n`, `\t`, `\r`, `\\`, `\a`,
+ *  `\b`, `\0`. Anything else stays as `\X`.
+ *
+ *  If more arguments are supplied than the format consumes, the format
+ *  is reapplied (matching POSIX). If fewer, missing values are empty
+ *  string / 0.
+ */
+export const printf: CommandHandler = async (ctx) => {
+  if (ctx.args.length === 0) {
+    throw new TerminalError('printf: usage: printf format [arguments]')
+  }
+  const format = expandPrintfEscapes(ctx.args[0] as string)
+  const args = ctx.args.slice(1)
+  // Re-apply format until args are exhausted (POSIX behavior). If the
+  // format consumes no args, run once.
+  let cursor = 0
+  let producedAny = false
+  while (cursor < args.length || !producedAny) {
+    const before = cursor
+    const { text, consumed } = applyPrintfFormat(format, args, cursor)
+    ctx.stdout.write(text)
+    cursor += consumed
+    producedAny = true
+    // No specs consumed args — don't loop forever on a literal-only format.
+    if (consumed === 0 || cursor === before) break
+  }
+}
+
+/** Backslash-escape interpretation for printf's format string. POSIX
+ *  printf interprets these by default (echo opts in via `-e`). */
+function expandPrintfEscapes(text: string): string {
+  let out = ''
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i] as string
+    if (c === '\\' && i + 1 < text.length) {
+      const next = text[i + 1] as string
+      switch (next) {
+        case 'n':
+          out += '\n'
+          break
+        case 't':
+          out += '\t'
+          break
+        case 'r':
+          out += '\r'
+          break
+        case '\\':
+          out += '\\'
+          break
+        case 'a':
+          out += '\x07'
+          break
+        case 'b':
+          out += '\b'
+          break
+        case '0':
+          out += '\x00'
+          break
+        default:
+          out += `\\${next}`
+      }
+      i++
+    } else {
+      out += c
+    }
+  }
+  return out
+}
+
+/** Apply the format once, consuming arguments from `args[cursor..]`.
+ *  Returns the formatted text and the number of args consumed. */
+function applyPrintfFormat(
+  format: string,
+  args: readonly string[],
+  cursor: number,
+): { text: string; consumed: number } {
+  let out = ''
+  let consumed = 0
+  let i = 0
+  while (i < format.length) {
+    const c = format[i] as string
+    if (c !== '%') {
+      out += c
+      i++
+      continue
+    }
+    // Parse `%[-][width]conv`.
+    let j = i + 1
+    let leftAlign = false
+    if (format[j] === '-') {
+      leftAlign = true
+      j++
+    }
+    let widthStr = ''
+    while (j < format.length && /\d/.test(format[j] as string)) {
+      widthStr += format[j] as string
+      j++
+    }
+    const conv = format[j]
+    if (conv === undefined) {
+      out += format.slice(i) // trailing `%` — emit literally
+      break
+    }
+    const width = widthStr === '' ? 0 : Number.parseInt(widthStr, 10)
+    if (conv === '%') {
+      out += '%'
+      i = j + 1
+      continue
+    }
+    const arg = args[cursor + consumed]
+    const formatted = formatPrintfConv(conv, arg, width, leftAlign)
+    if (formatted === null) {
+      // Unknown conversion — emit verbatim and don't consume an arg.
+      out += format.slice(i, j + 1)
+    } else {
+      out += formatted
+      consumed++
+    }
+    i = j + 1
+  }
+  return { text: out, consumed }
+}
+
+function formatPrintfConv(
+  conv: string,
+  arg: string | undefined,
+  width: number,
+  leftAlign: boolean,
+): string | null {
+  let body: string
+  switch (conv) {
+    case 's':
+      body = arg ?? ''
+      break
+    case 'd':
+    case 'i': {
+      const n = Number.parseInt(arg ?? '0', 10)
+      body = String(Number.isNaN(n) ? 0 : n)
+      break
+    }
+    case 'x':
+    case 'X': {
+      const n = Number.parseInt(arg ?? '0', 10)
+      const hex = (Number.isNaN(n) ? 0 : n).toString(16)
+      body = conv === 'X' ? hex.toUpperCase() : hex
+      break
+    }
+    case 'o': {
+      const n = Number.parseInt(arg ?? '0', 10)
+      body = (Number.isNaN(n) ? 0 : n).toString(8)
+      break
+    }
+    case 'c':
+      body = (arg ?? '').slice(0, 1)
+      break
+    default:
+      return null
+  }
+  if (width > body.length) {
+    return leftAlign ? body.padEnd(width, ' ') : body.padStart(width, ' ')
+  }
+  return body
+}
+
+// ---------------------------------------------------------------------------
 // cat
 // ---------------------------------------------------------------------------
 

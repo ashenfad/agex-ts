@@ -19,6 +19,7 @@
  */
 
 import type { StandardSchemaV1 } from '@standard-schema/spec'
+import { TerminalError } from 'termish-ts'
 import type { Agent } from './agent'
 import { runChaptering, shouldTriggerChaptering } from './chaptering'
 import { dispatchFileEdit, dispatchFileWrite, dispatchTerminal } from './dispatcher'
@@ -420,7 +421,14 @@ async function dispatchEmissions(
           await emit(outputEvent, eventLog, onEvent)
         }
       } catch (e) {
-        await emitErrorOutput(e, agentName, emissionId, eventLog, onEvent)
+        // TerminalError carries any partial stdout captured before the
+        // failing pipeline (`interpreter.ts` accumulates output across
+        // pipelines and stashes it on `partialOutput`). Surface it
+        // alongside the error so the agent can see what made it
+        // through — otherwise multi-step terminal scripts that fail
+        // late look like atomic-all-or-nothing.
+        const partial = e instanceof TerminalError ? e.partialOutput : ''
+        await emitErrorOutput(e, agentName, emissionId, eventLog, onEvent, partial)
         return { kind: 'continue', lastError: describeError(e) }
       }
     }
@@ -437,15 +445,21 @@ async function emitErrorOutput(
   emissionId: string,
   eventLog: { add(e: AgentEvent): Promise<string> },
   onEvent: ((e: AgentEvent) => void | Promise<void>) | undefined,
+  precedingStdout = '',
 ): Promise<void> {
   const errorName = e instanceof Error ? e.name || 'Error' : 'Error'
   const errorMessage = e instanceof Error ? e.message : String(e)
+  const parts: OutputPart[] = []
+  if (precedingStdout.length > 0) {
+    parts.push({ type: 'text', text: precedingStdout })
+  }
+  parts.push({ type: 'error', errorName, errorMessage })
   const outputEvent: OutputEvent = {
     type: 'output',
     timestamp: new Date().toISOString(),
     agentName,
     emissionId,
-    parts: [{ type: 'error', errorName, errorMessage }],
+    parts,
   }
   await emit(outputEvent, eventLog, onEvent)
 }

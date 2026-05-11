@@ -16,12 +16,16 @@ content and the updated metadata blob atomically.
 
 ## Status
 
-Working-tree operations land via `VirtualGit`: read-only
-(`currentBranch` / `listBranches` / `head` / `resolveRef` / `status` /
-`log` / `show` / `diff`) plus mutating (`add` / `rm` / `commit` /
-`reset`). Branch operations (`createBranch` / `deleteBranch` /
-`checkout` / `merge`) and the termish-ts CLI adapter ship in
-follow-up commits.
+Library API complete. `VirtualGit` exposes:
+- **Read-only**: `currentBranch` / `listBranches` / `head` /
+  `resolveRef` / `status` / `log` / `show` / `diff`
+- **Working-tree**: `add` / `rm` / `commit` / `reset`
+- **Branches**: `createBranch` / `deleteBranch` / `checkout` /
+  `merge` (3-way "source wins" + fast-forward + already-up-to-date)
+
+The termish-ts CLI adapter (`registerGit(agent)` so `git status` /
+`git commit -m '...'` work in `terminal_action`) ships in the next
+commit.
 
 ## Public surface
 

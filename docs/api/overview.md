@@ -13,6 +13,10 @@ This is the technical reference for every public type and method in agex-ts. **N
 - **[Events](events.md)** — `AgentEvent` types, `EventLog`, `ChapterEvent`, the on-event stream.
 - **[Errors](errors.md)** — `TaskFailError`, `TaskClarifyError`, `CancelledError`, `RegistrationError`, `SchemaError`, `isTaskControlError`.
 
+## Optional surfaces
+
+- **[Git](git.md)** — `agex-git` package. Adds a `git`-style command (status / commit / branch / diff / merge) to the agent's `terminal_action`, layered over the kvgit-backed VFS. Opt in via `registerGit(agent)`.
+
 ## Import patterns
 
 ```ts
@@ -32,6 +36,9 @@ import { connectGemini }    from '@agex-ts/gemini'
 
 // Production runtime
 import { workerRuntime } from '@agex-ts/runtime-worker'
+
+// Optional: agent-view git
+import { registerGit } from 'agex-git'
 ```
 
 ## API design

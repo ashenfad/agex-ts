@@ -180,20 +180,22 @@ export async function resolveRef(ref: string, vkv: Versioned, metadata: Metadata
     if (Number.isNaN(n) || `${n}` !== tail || n < 0) {
       throw new InvalidRef(`invalid ref '${ref}'`)
     }
-    const ancestry: string[] = []
+    // Single-pass walk: stop as soon as we reach the N-th ancestor.
+    // Long histories on `HEAD~1` shouldn't pay the full materialize
+    // cost. Counts every visited commit so the too-deep error can
+    // still report the ancestry length when we run off the end.
+    let count = 0
     for await (const h of walkVirtualAncestry(vkv, metadata.head)) {
-      ancestry.push(h)
+      if (count === n) return h
+      count++
     }
-    if (ancestry.length === 0) {
+    if (count === 0) {
       throw new InvalidRef(`HEAD is unborn (branch '${metadata.current}' has no commits)`)
     }
-    if (n >= ancestry.length) {
-      const plural = ancestry.length === 1 ? '' : 's'
-      throw new InvalidRef(
-        `'${ref}' is beyond the history (${ancestry.length} commit${plural} on branch '${metadata.current}')`,
-      )
-    }
-    return ancestry[n] as string
+    const plural = count === 1 ? '' : 's'
+    throw new InvalidRef(
+      `'${ref}' is beyond the history (${count} commit${plural} on branch '${metadata.current}')`,
+    )
   }
 
   // Branch names take precedence over hash prefixes — matches real git.

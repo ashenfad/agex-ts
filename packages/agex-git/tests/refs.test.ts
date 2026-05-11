@@ -183,10 +183,46 @@ describe('resolveRef', () => {
     expect(await resolveRef('HEAD~2', vkv, meta)).toBe(a)
   })
 
-  it('HEAD~N beyond history raises', async () => {
+  it('HEAD~N beyond history raises with the count in the message', async () => {
     const a = await agentCommit(staged, 'a', '1', 'first')
     const meta = new Metadata({ branches: { main: a } })
     await expect(resolveRef('HEAD~5', vkv, meta)).rejects.toThrow(/beyond/)
+    // The error preserves the ancestry length even though the walk
+    // exits early — important for the agent to know "you wanted N
+    // but there are only K".
+    await expect(resolveRef('HEAD~5', vkv, meta)).rejects.toThrow(/1 commit /)
+  })
+
+  it('HEAD~N walks lazily — exits as soon as the N-th ancestor is found', async () => {
+    // The walk should not visit ancestors beyond the requested
+    // index. Build a 5-deep chain, then count how many times the
+    // fake `commitInfo` is queried while resolving `HEAD~1`. Once
+    // we've returned `b`, no further commit-info calls should fire.
+    const a = await agentCommit(staged, 'a', '1', 'first')
+    const b = await agentCommit(staged, 'a', '2', 'second', { virtualParents: [a] })
+    const c = await agentCommit(staged, 'a', '3', 'third', { virtualParents: [b] })
+    const d = await agentCommit(staged, 'a', '4', 'fourth', { virtualParents: [c] })
+    const e = await agentCommit(staged, 'a', '5', 'fifth', { virtualParents: [d] })
+    const meta = new Metadata({ branches: { main: e } })
+
+    // Resolve HEAD~1 and observe how far the walk got by counting
+    // commitInfo invocations on a spy.
+    let calls = 0
+    const spy: Pick<Versioned, 'commitInfo' | 'history'> = {
+      async commitInfo(h?: string) {
+        calls++
+        return vkv.commitInfo(h)
+      },
+      history(hash?: string, opts?: { allParents?: boolean }) {
+        return vkv.history(hash, opts)
+      },
+    }
+    const result = await resolveRef('HEAD~1', spy as Versioned, meta)
+    expect(result).toBe(d)
+    // Walking from HEAD requires: commitInfo(e) to find e's parent
+    // (1 call), then we have HEAD~0 = e, advance to HEAD~1 = d and
+    // return. Should be at most ~2 calls, definitely not 5.
+    expect(calls).toBeLessThanOrEqual(2)
   })
 
   it('HEAD~ with non-integer raises', async () => {

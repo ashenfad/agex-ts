@@ -17,6 +17,7 @@
 
 import type { Staged, Versioned } from 'kvgit-ts'
 import { isBinary, unifiedDiff as renderUnifiedDiff } from './diff'
+import { AgentGitError, NothingToCommit, PathSpecError } from './errors'
 import { Metadata } from './metadata'
 import { InvalidRef, resolveRef, virtualParents, walkVirtualAncestry } from './refs'
 import type { AgentCommit, Status } from './types'
@@ -314,6 +315,266 @@ export class VirtualGit {
       out.push(renderUnifiedDiff(oldText, newText, display, display))
     }
     return out.join('')
+  }
+
+  // -- Working-tree application ------------------------------------------
+
+  /** Persist pending Staged changes as an unmessaged kvgit commit.
+   *
+   *  Used after checkout / reset / fast-forward merge to bring the
+   *  kvgit physical chain in line with virtual semantics *before* the
+   *  next agent commit. Without this, a subsequent selective
+   *  `staged.commit({keys: ...})` would inherit unrelated keys from
+   *  the physical parent (e.g. a file removed by checkout would
+   *  re-appear in the next commit because selective flush ignores
+   *  removals outside its key set).
+   *
+   *  Equivalent to what the agent loop's between-turns auto-commit
+   *  does at task boundaries — just done synchronously so two virtual
+   *  operations in the same `terminal_action` stay self-consistent. */
+  async #flushAlignment(): Promise<void> {
+    if (this.#staged.hasChanges) {
+      await this.#staged.commit({})
+    }
+  }
+
+  /** Make the live working view match `targetHash` (visible keys only).
+   *
+   *  Writes through `Staged` so the next substrate-level commit
+   *  carries the change forward as a forward kvgit commit, leaving
+   *  real kvgit HEAD on its native chain. Non-VFS keys (event log,
+   *  REPL namespace, agent memory) are NOT touched. */
+  async #applyFileView(targetHash: string): Promise<void> {
+    const target = await this.#staged.checkout(targetHash)
+    if (target === null) {
+      throw new InvalidRef(`commit '${targetHash.slice(0, 7)}' not found`)
+    }
+
+    // Snapshot key sets first — `staged.keys()` and `target.keys()`
+    // are async iterators, and we'll be mutating the buffer below.
+    const curKeys = new Set<string>()
+    for await (const k of this.#staged.keys()) {
+      if (this.isVisible(k)) curKeys.add(k)
+    }
+    const targetKeys = new Set<string>()
+    for await (const k of target.keys()) {
+      if (this.isVisible(k)) targetKeys.add(k)
+    }
+
+    for (const key of curKeys) {
+      if (!targetKeys.has(key)) this.#staged.delete(key)
+    }
+    for (const key of targetKeys) {
+      const targetVal = await target.get<FileRecord | undefined>(key)
+      if (targetVal === undefined) continue
+      const curVal = curKeys.has(key) ? await this.#staged.get<FileRecord | undefined>(key) : null
+      if (!fileContentEqual(curVal, targetVal)) {
+        this.#staged.set(key, targetVal)
+      }
+    }
+  }
+
+  // -- add / rm ----------------------------------------------------------
+
+  /** Stage paths for the next commit.
+   *
+   *  `["."]` or `["-A"]` stages every currently-modified file.
+   *  Non-existent / unmodified paths raise {@link PathSpecError},
+   *  matching real git's `pathspec` behaviour. Paths that are unchanged
+   *  but exist (in the working tree or at HEAD) are accepted as a
+   *  no-op — `git add unchanged.txt` doesn't error in real git. */
+  async add(paths: ReadonlyArray<string>): Promise<void> {
+    if (paths.length === 0) throw new PathSpecError('nothing specified')
+
+    const meta = await this.#loadMetadata()
+    const modified = await this.#modifiedKeys(meta)
+
+    if (paths.length === 1 && (paths[0] === '.' || paths[0] === '-A')) {
+      for (const k of modified) meta.index.add(k)
+      meta.save(this.#staged)
+      return
+    }
+
+    // Build the universe of "known" keys: working tree + branch tip.
+    // Either is sufficient justification to `add` a path.
+    const known = new Set<string>()
+    for await (const k of this.#staged.keys()) {
+      if (this.isVisible(k)) known.add(k)
+    }
+    if (meta.head !== null) {
+      const headSnap = await this.#staged.checkout(meta.head)
+      if (headSnap !== null) {
+        for await (const k of headSnap.keys()) {
+          if (this.isVisible(k)) known.add(k)
+        }
+      }
+    }
+
+    for (const path of paths) {
+      const key = this.encode(path)
+      if (!known.has(key) && !modified.has(key)) {
+        throw new PathSpecError(`pathspec '${path}' did not match any files`)
+      }
+      meta.index.add(key)
+    }
+    meta.save(this.#staged)
+  }
+
+  /** Remove paths from the working tree and stage the deletion.
+   *
+   *  Returns silently on success. With `recursive: true`, removes every
+   *  visible key whose decoded path is exactly `path` or starts with
+   *  `path/`. A path that's already gone from the working tree but is
+   *  still tracked at HEAD is accepted (re-stages the deletion idempotently
+   *  — matches real git's behaviour after a shell `rm`). */
+  async rm(paths: ReadonlyArray<string>, opts: { recursive?: boolean } = {}): Promise<void> {
+    if (paths.length === 0) throw new PathSpecError('nothing specified')
+    const recursive = opts.recursive === true
+
+    const meta = await this.#loadMetadata()
+
+    for (const path of paths) {
+      const internal = this.encode(path)
+
+      if (recursive) {
+        // Snapshot keys first — we'll mutate the buffer below.
+        const allKeys: string[] = []
+        for await (const k of this.#staged.keys()) {
+          if (this.isVisible(k)) allKeys.push(k)
+        }
+        const trimmed = path.replace(/\/+$/, '')
+        const candidates: string[] = []
+        for (const key of allKeys) {
+          const decoded = this.decode(key)
+          // `decoded` is repo-root relative (no leading `/`); the path
+          // arg may be either form. Normalize both for comparison.
+          const decodedAbs = `/${decoded}`
+          const pathAbs = trimmed.startsWith('/') ? trimmed : `/${trimmed}`
+          if (decodedAbs === pathAbs || decodedAbs.startsWith(`${pathAbs}/`)) {
+            candidates.push(key)
+          }
+        }
+        if (candidates.length === 0) {
+          throw new PathSpecError(`pathspec '${path}' did not match any files`)
+        }
+        for (const key of candidates) {
+          this.#staged.delete(key)
+          meta.index.add(key)
+        }
+      } else {
+        if (await this.#staged.has(internal)) {
+          this.#staged.delete(internal)
+          meta.index.add(internal)
+        } else {
+          // File isn't in the working tree. Real git still accepts
+          // `git rm` on a path tracked at HEAD that was already
+          // deleted from the workspace — idempotently re-stages the
+          // deletion. Without this, an agent can't `git rm` a file
+          // they already removed via shell `rm`.
+          let inHead = false
+          if (meta.head !== null) {
+            const headSnap = await this.#staged.checkout(meta.head)
+            if (headSnap !== null) inHead = await headSnap.has(internal)
+          }
+          if (!inHead) {
+            throw new PathSpecError(`pathspec '${path}' did not match any files`)
+          }
+          meta.index.add(internal)
+        }
+      }
+    }
+    meta.save(this.#staged)
+  }
+
+  // -- commit ------------------------------------------------------------
+
+  /** Record a new agent commit on the current branch.
+   *
+   *  Selective when `meta.index` is non-empty (only those keys are
+   *  flushed); full when the index is empty. Modified content is
+   *  re-staged into the buffer so a selective flush picks up files
+   *  that the agent loop's auto-commit already pushed through to
+   *  kvgit between turns.
+   *
+   *  Updates the branch ref in metadata and clears the index on
+   *  success. The metadata write is staged for the next substrate
+   *  flush to persist. */
+  async commit(message: string): Promise<AgentCommit> {
+    const meta = await this.#loadMetadata()
+    const modified = await this.#modifiedKeys(meta)
+    if (modified.size === 0) {
+      throw new NothingToCommit('nothing to commit, working tree clean')
+    }
+
+    let keysToCommit: Set<string>
+    if (meta.index.size > 0) {
+      keysToCommit = new Set<string>()
+      for (const k of meta.index) {
+        if (modified.has(k)) keysToCommit.add(k)
+      }
+      if (keysToCommit.size === 0) {
+        throw new NothingToCommit('nothing to commit (staged files match the branch tip)')
+      }
+    } else {
+      keysToCommit = new Set(modified)
+    }
+
+    // Re-stage current values so a selective flush picks them up even
+    // when the framework's auto-commit already pushed them through to
+    // kvgit between turns. Deletions that landed in kvgit remain
+    // absent from the new commit naturally (parented to the latest
+    // kvgit HEAD which already excludes them).
+    for (const key of keysToCommit) {
+      const curVal = await this.#staged.get<FileRecord | undefined>(key)
+      if (curVal !== undefined) {
+        this.#staged.set(key, curVal)
+      } else if (await this.#staged.has(key)) {
+        // Defensive: key is still in some buffered form despite
+        // get() returning undefined — force the deletion so the
+        // selective commit flushes it.
+        this.#staged.delete(key)
+      }
+    }
+
+    const info: Record<string, unknown> = {
+      message,
+      files: [...keysToCommit].map((k) => this.decode(k)).sort(),
+      virtualBranch: meta.current,
+      virtualParents: meta.head !== null ? [meta.head] : [],
+    }
+    const result = await this.#staged.commit({ keys: keysToCommit, info })
+    const newHash = result.commit
+    if (newHash === null) {
+      throw new AgentGitError('commit was abandoned (conflict)')
+    }
+
+    meta.branches.set(meta.current, newHash)
+    meta.index.clear()
+    meta.save(this.#staged)
+
+    return this.#makeCommit(newHash)
+  }
+
+  // -- reset -------------------------------------------------------------
+
+  /** Restore the working tree to `target` and rewind the branch ref.
+   *
+   *  `target` is a commit hash already resolved by the caller. Only
+   *  `--hard` is supported. This is a *virtual* reset: kvgit HEAD is
+   *  not moved. The branch ref in metadata is rewound to `target` so
+   *  subsequent `git log` / `HEAD~N` reflect the reset, matching real
+   *  git's `reset --hard` behaviour. */
+  async reset(target: string, opts: { hard?: boolean } = {}): Promise<void> {
+    const hard = opts.hard ?? true
+    if (!hard) throw new AgentGitError('only --hard is supported')
+
+    const meta = await this.#loadMetadata()
+    await this.#applyFileView(target)
+
+    meta.branches.set(meta.current, target)
+    meta.index.clear()
+    meta.save(this.#staged)
+    await this.#flushAlignment()
   }
 }
 

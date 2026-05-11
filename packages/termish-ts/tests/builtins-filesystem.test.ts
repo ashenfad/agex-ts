@@ -135,6 +135,22 @@ describe('ls', () => {
     expect(await execute('ls /foo.txt', fs)).toBe('/foo.txt\n')
   })
 
+  it('lists multiple file paths inline (no `path:` headers, no blank lines)', async () => {
+    const fs = new MemoryFS()
+    await fs.write('/a.txt', bytes(''))
+    await fs.write('/b.txt', bytes(''))
+    expect(await execute('ls /a.txt /b.txt', fs)).toBe('/a.txt\n/b.txt\n')
+  })
+
+  it('separates multiple directory listings with a blank line and `dir:` headers', async () => {
+    const fs = new MemoryFS()
+    await fs.mkdir('/d1')
+    await fs.mkdir('/d2')
+    await fs.write('/d1/a', bytes(''))
+    await fs.write('/d2/b', bytes(''))
+    expect(await execute('ls /d1 /d2', fs)).toBe('/d1:\na\n\n/d2:\nb\n')
+  })
+
   it('-d lists the directory entry itself', async () => {
     const fs = new MemoryFS()
     await fs.mkdir('/d')

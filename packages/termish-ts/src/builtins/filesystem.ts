@@ -81,12 +81,27 @@ export const ls: CommandHandler = async (ctx) => {
     'ls',
   )
   const paths = parsed.positional.length > 0 ? parsed.positional : ['.']
-  const showHeaders = paths.length > 1
   const fs = ctx.fs
+
+  // POSIX-style header policy: `dir:` headers only appear when more
+  // than one *directory* will be listed (or when files and dirs are
+  // mixed — files print first inline, then each dir gets a header).
+  // Single-target invocations and pure-file lists never get headers.
+  // Pre-classify so we know whether a header is needed before looping.
+  const classified: Array<{ path: string; kind: 'file' | 'dir' | 'missing' }> = []
+  for (const p of paths) {
+    if (await fs.isFile(p)) classified.push({ path: p, kind: 'file' })
+    else if (await fs.isDir(p)) classified.push({ path: p, kind: 'dir' })
+    else classified.push({ path: p, kind: 'missing' })
+  }
+  const dirCount = classified.filter((c) => c.kind === 'dir').length
+  const fileCount = classified.filter((c) => c.kind === 'file').length
+  const showHeaders = dirCount > 1 || (dirCount >= 1 && fileCount >= 1)
 
   for (let i = 0; i < paths.length; i++) {
     const path = paths[i] as string
-    if (showHeaders) ctx.stdout.write(`${path}:\n`)
+    const kind = classified[i]?.kind ?? 'missing'
+    if (showHeaders && kind === 'dir') ctx.stdout.write(`${path}:\n`)
 
     try {
       // -d + directory: list the directory itself, not its contents.
@@ -102,7 +117,7 @@ export const ls: CommandHandler = async (ctx) => {
         } else {
           ctx.stdout.write(`${path}\n`)
         }
-        if (i < paths.length - 1) ctx.stdout.write('\n')
+        maybeSeparator(ctx, classified, i)
         continue
       }
 
@@ -119,7 +134,7 @@ export const ls: CommandHandler = async (ctx) => {
         } else {
           ctx.stdout.write(`${path}\n`)
         }
-        if (i < paths.length - 1) ctx.stdout.write('\n')
+        maybeSeparator(ctx, classified, i)
         continue
       }
 
@@ -175,8 +190,23 @@ export const ls: CommandHandler = async (ctx) => {
       throw new TerminalError(`ls: cannot access '${path}': ${describeError(e)}`)
     }
 
-    if (i < paths.length - 1) ctx.stdout.write('\n')
+    maybeSeparator(ctx, classified, i)
   }
+}
+
+/** Write a blank-line separator between this entry and the next *only*
+ *  when both are directories (POSIX-ish: `ls dir1 dir2` puts a blank
+ *  line between the two listings; consecutive file args print together
+ *  without separators). */
+function maybeSeparator(
+  ctx: CommandContext,
+  classified: ReadonlyArray<{ kind: 'file' | 'dir' | 'missing' }>,
+  i: number,
+): void {
+  if (i >= classified.length - 1) return
+  const here = classified[i]?.kind
+  const next = classified[i + 1]?.kind
+  if (here === 'dir' && next === 'dir') ctx.stdout.write('\n')
 }
 
 // ---------------------------------------------------------------------------

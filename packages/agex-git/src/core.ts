@@ -17,9 +17,25 @@
 
 import type { Staged, Versioned } from 'kvgit-ts'
 import { isBinary, unifiedDiff as renderUnifiedDiff } from './diff'
-import { AgentGitError, NothingToCommit, PathSpecError } from './errors'
+import {
+  AgentGitError,
+  BranchExists,
+  BranchNotFound,
+  BranchNotMerged,
+  NothingToCommit,
+  PathSpecError,
+  PendingChanges,
+  UnbornBranch,
+} from './errors'
 import { Metadata } from './metadata'
-import { InvalidRef, resolveRef, virtualParents, walkVirtualAncestry } from './refs'
+import {
+  InvalidRef,
+  allAncestors,
+  mergeBase,
+  resolveRef,
+  virtualParents,
+  walkVirtualAncestry,
+} from './refs'
 import type { AgentCommit, Status } from './types'
 
 /** Polymorphic-codec FileRecord shape. Defined locally because
@@ -575,6 +591,218 @@ export class VirtualGit {
     meta.index.clear()
     meta.save(this.#staged)
     await this.#flushAlignment()
+  }
+
+  // -- branch operations -------------------------------------------------
+
+  /** Create a new virtual branch pointing at the current branch's tip.
+   *
+   *  Throws {@link BranchExists} if `name` already names a branch and
+   *  {@link UnbornBranch} if the current branch has no commits
+   *  (mirroring real git's "Not a valid object name"). */
+  async createBranch(name: string): Promise<void> {
+    if (name.length === 0) throw new AgentGitError('branch name required')
+
+    const meta = await this.#loadMetadata()
+    if (meta.branches.has(name)) {
+      throw new BranchExists(`branch '${name}' already exists`)
+    }
+    if (meta.head === null) {
+      throw new UnbornBranch(`cannot create branch '${name}': '${meta.current}' has no commits yet`)
+    }
+    meta.branches.set(name, meta.head)
+    meta.save(this.#staged)
+  }
+
+  /** Delete a virtual branch.
+   *
+   *  Without `force: true`, refuses to delete a branch whose tip
+   *  isn't reachable from the current branch (i.e., would lose
+   *  commits). */
+  async deleteBranch(name: string, opts: { force?: boolean } = {}): Promise<void> {
+    const force = opts.force === true
+    const meta = await this.#loadMetadata()
+    if (!meta.branches.has(name)) {
+      throw new BranchNotFound(`branch '${name}' not found`)
+    }
+    if (name === meta.current) {
+      throw new AgentGitError(`cannot delete branch '${name}' currently checked out`)
+    }
+
+    if (!force) {
+      const tip = meta.branches.get(name) as string
+      const reachable = await allAncestors(this.#vkv, meta.head)
+      if (!reachable.has(tip)) {
+        throw new BranchNotMerged(
+          `branch '${name}' is not fully merged.\nUse force-delete to discard its commits.`,
+        )
+      }
+    }
+
+    meta.branches.delete(name)
+    meta.save(this.#staged)
+  }
+
+  /** Switch the current virtual branch.
+   *
+   *  `create: true` creates the branch first (like `git checkout -b`).
+   *  Without `force: true`, refuses if the working tree has visible
+   *  modifications relative to the current branch tip — the
+   *  equivalent of real git's "would be overwritten by checkout"
+   *  guard, but content-based instead of buffer-based so it catches
+   *  edits the framework auto-commit already flushed through kvgit.
+   *
+   *  On success the working tree is rewritten to match the target
+   *  branch (visible keys only — non-VFS state is untouched), the
+   *  branch ref in metadata advances, and the index clears. */
+  async checkout(name: string, opts: { create?: boolean; force?: boolean } = {}): Promise<void> {
+    if (name.length === 0) throw new AgentGitError('branch name required')
+    const create = opts.create === true
+    const force = opts.force === true
+
+    const meta = await this.#loadMetadata()
+
+    if (create) {
+      if (meta.branches.has(name)) {
+        throw new BranchExists(`branch '${name}' already exists`)
+      }
+      if (meta.head === null) {
+        throw new UnbornBranch(
+          `cannot create branch '${name}': '${meta.current}' has no commits yet`,
+        )
+      }
+      meta.branches.set(name, meta.head)
+    }
+
+    if (!meta.branches.has(name)) {
+      throw new BranchNotFound(`branch '${name}' does not exist`)
+    }
+
+    if (name === meta.current && !create) {
+      return // no-op
+    }
+
+    if (!force) {
+      const modified = await this.#modifiedKeys(meta)
+      if (modified.size > 0) {
+        throw new PendingChanges(
+          "your local changes would be lost.\nPlease commit your changes (git commit -m '...') before switching branches.",
+        )
+      }
+    }
+
+    const target = meta.branches.get(name) as string
+    await this.#applyFileView(target)
+
+    meta.current = name
+    meta.index.clear()
+    meta.save(this.#staged)
+    await this.#flushAlignment()
+  }
+
+  // -- merge -------------------------------------------------------------
+
+  /** Merge the `source` virtual branch into the current branch.
+   *
+   *  Returns the merge commit (or fast-forward target) on success, or
+   *  `null` when already up to date.
+   *
+   *  Semantics (v1):
+   *  - `source` reachable from current → already up to date.
+   *  - Current reachable from source → fast-forward (no merge commit;
+   *    branch ref just advances to `source`).
+   *  - Otherwise → "source wins" merge. Files differing between the
+   *    two tips take `source`'s value; files unique to current are
+   *    kept; files unique to source are added; files removed on
+   *    source are removed. No three-way text merge is attempted. */
+  async merge(source: string, opts: { force?: boolean } = {}): Promise<AgentCommit | null> {
+    if (source.length === 0) throw new AgentGitError('branch name required')
+    const force = opts.force === true
+
+    const meta = await this.#loadMetadata()
+    if (source === meta.current) {
+      throw new AgentGitError('cannot merge a branch into itself')
+    }
+    if (!meta.branches.has(source)) {
+      throw new BranchNotFound(`branch '${source}' not found`)
+    }
+
+    const sourceTip = meta.branches.get(source) as string
+    const currentTip = meta.head
+    if (currentTip === null) {
+      throw new UnbornBranch(`current branch '${meta.current}' has no commits to merge into`)
+    }
+
+    if (sourceTip === currentTip) return null // already up to date
+
+    // If source is an ancestor of current, current already has it.
+    if ((await allAncestors(this.#vkv, currentTip)).has(sourceTip)) return null
+
+    if (!force) {
+      const modified = await this.#modifiedKeys(meta)
+      if (modified.size > 0) {
+        throw new PendingChanges(
+          "your local changes would be overwritten.\nPlease commit your changes (git commit -m '...') before merging.",
+        )
+      }
+    }
+
+    // Fast-forward when current is in source's ancestry.
+    if ((await allAncestors(this.#vkv, sourceTip)).has(currentTip)) {
+      await this.#applyFileView(sourceTip)
+      meta.branches.set(meta.current, sourceTip)
+      meta.index.clear()
+      meta.save(this.#staged)
+      await this.#flushAlignment()
+      return this.#makeCommit(sourceTip)
+    }
+
+    // True merge: apply only the changes `source` made *since the
+    // merge base*. Files current changed independently of source are
+    // left alone; files both branches changed (a real conflict in
+    // 3-way merge terms) take source's value — v1's "theirs wins on
+    // conflict" approximation.
+    const base = await mergeBase(this.#vkv, currentTip, sourceTip)
+    if (base === null) {
+      throw new AgentGitError('merge: no common ancestor (refusing to merge unrelated histories)')
+    }
+    const diff = await this.#vkv.diff(base, sourceTip)
+    const affected = new Set<string>()
+    for (const k of diff.added) if (this.isVisible(k)) affected.add(k)
+    for (const k of diff.modified) if (this.isVisible(k)) affected.add(k)
+    for (const k of diff.removed) if (this.isVisible(k)) affected.add(k)
+
+    const sourceSnap = await this.#staged.checkout(sourceTip)
+    if (sourceSnap === null) {
+      throw new AgentGitError(`merge: source commit '${sourceTip.slice(0, 7)}' not found`)
+    }
+
+    for (const key of affected) {
+      if (diff.removed.has(key)) {
+        if (await this.#staged.has(key)) this.#staged.delete(key)
+      } else {
+        const val = await sourceSnap.get<FileRecord | undefined>(key)
+        if (val !== undefined) this.#staged.set(key, val)
+      }
+    }
+
+    const info: Record<string, unknown> = {
+      message: `Merge branch '${source}'`,
+      files: [...affected].map((k) => this.decode(k)).sort(),
+      virtualBranch: meta.current,
+      virtualParents: [currentTip, sourceTip],
+    }
+    const result = await this.#staged.commit({ keys: affected, info })
+    const newHash = result.commit
+    if (newHash === null) {
+      throw new AgentGitError('merge: commit was abandoned (conflict)')
+    }
+
+    meta.branches.set(meta.current, newHash)
+    meta.index.clear()
+    meta.save(this.#staged)
+
+    return this.#makeCommit(newHash)
   }
 }
 

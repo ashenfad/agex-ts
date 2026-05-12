@@ -266,6 +266,72 @@ describe('mv', () => {
     await fs.write('/a', bytes('v'))
     await expect(execute('mv /a', fs)).rejects.toThrow(/missing operand/)
   })
+
+  it('moves a file INTO an existing directory (single source, dir destination)', async () => {
+    // Bug repro: previously `mv /file /dir/` overwrote the path
+    // `/dir` instead of placing the file under it, because the
+    // handler called `rename(src, dst)` without inspecting whether
+    // `dst` was a directory.
+    const fs = new MemoryFS()
+    await fs.write('/file.txt', bytes('content'))
+    await fs.mkdir('/dir', { parents: true })
+    await execute('mv /file.txt /dir/', fs)
+    expect(await fs.exists('/file.txt')).toBe(false)
+    expect(text(await fs.read('/dir/file.txt'))).toBe('content')
+  })
+
+  it('moves multiple sources into a directory', async () => {
+    const fs = new MemoryFS()
+    await fs.write('/a', bytes('A'))
+    await fs.write('/b', bytes('B'))
+    await fs.write('/c', bytes('C'))
+    await fs.mkdir('/dst', { parents: true })
+    await execute('mv /a /b /c /dst', fs)
+    expect(text(await fs.read('/dst/a'))).toBe('A')
+    expect(text(await fs.read('/dst/b'))).toBe('B')
+    expect(text(await fs.read('/dst/c'))).toBe('C')
+    expect(await fs.exists('/a')).toBe(false)
+  })
+
+  it('rejects multi-source when destination is not a directory', async () => {
+    const fs = new MemoryFS()
+    await fs.write('/a', bytes('A'))
+    await fs.write('/b', bytes('B'))
+    await fs.write('/dst', bytes('existing'))
+    await expect(execute('mv /a /b /dst', fs)).rejects.toThrow(/not a directory/)
+    // Nothing should have moved.
+    expect(text(await fs.read('/a'))).toBe('A')
+    expect(text(await fs.read('/b'))).toBe('B')
+  })
+
+  it("rejects a trailing-slash target that doesn't exist as a directory", async () => {
+    // POSIX-strict: `mv a b/` where `b` is missing (or a file)
+    // should fail rather than silently rename to `b`. Protects
+    // against the original bug shape.
+    const fs = new MemoryFS()
+    await fs.write('/a', bytes('A'))
+    await expect(execute('mv /a /nope/', fs)).rejects.toThrow(/Not a directory/)
+    expect(text(await fs.read('/a'))).toBe('A')
+
+    await fs.write('/file', bytes('F'))
+    await expect(execute('mv /a /file/', fs)).rejects.toThrow(/Not a directory/)
+  })
+
+  it('refuses to move a directory into itself', async () => {
+    const fs = new MemoryFS()
+    await fs.mkdir('/d/sub', { parents: true })
+    await expect(execute('mv /d /d/sub', fs)).rejects.toThrow(/subdirectory of itself/)
+  })
+
+  it('-f overrides -n (force wins)', async () => {
+    // POSIX: when both are given, -f takes precedence.
+    const fs = new MemoryFS()
+    await fs.write('/src', bytes('new'))
+    await fs.write('/dst', bytes('old'))
+    await execute('mv -n -f /src /dst', fs)
+    expect(text(await fs.read('/dst'))).toBe('new')
+    expect(await fs.exists('/src')).toBe(false)
+  })
 })
 
 describe('rm', () => {

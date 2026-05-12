@@ -179,35 +179,83 @@ export function detectImage(value: unknown): { format: ImageFormat; data: string
       return { format: v.format, data: v.data }
     }
   }
-  // Rule B — data URL string
+  // Rule B — data URL string. The MIME label is host-supplied and
+  // easily forged by accident (e.g. logging `dataUrl.slice(0, 40)`
+  // for a debug print), so apply two gates symmetric with Rule C:
+  //   - Payload must be long enough to plausibly be an image
+  //     (smallest valid PNG ≈ 70 bytes → 96 base64 chars).
+  //   - First 12 decoded bytes must match the declared format.
+  // Both guards matter independently: a 40-char slice of a real PNG
+  // data URL still carries valid PNG magic in its prefix, so magic
+  // alone wouldn't catch it.
   if (typeof value === 'string') {
     const m = /^data:image\/(png|jpeg|webp);base64,(.+)$/.exec(value)
     if (m !== null && m[1] !== undefined && m[2] !== undefined) {
-      return { format: m[1] as ImageFormat, data: m[2] }
+      const declared = m[1] as ImageFormat
+      const payload = m[2]
+      if (payload.length >= MIN_IMAGE_BASE64_LENGTH) {
+        const prefix = decodeBase64Prefix(payload, 12)
+        if (prefix !== null && detectMagicFormat(prefix) === declared) {
+          return { format: declared, data: payload }
+        }
+      }
     }
   }
   // Rule C — Uint8Array with magic bytes
-  if (value instanceof Uint8Array && value.byteLength >= 12) {
-    if (value[0] === 0x89 && value[1] === 0x50 && value[2] === 0x4e && value[3] === 0x47) {
-      return { format: 'png', data: bytesToBase64(value) }
-    }
-    if (value[0] === 0xff && value[1] === 0xd8 && value[2] === 0xff) {
-      return { format: 'jpeg', data: bytesToBase64(value) }
-    }
-    if (
-      value[0] === 0x52 &&
-      value[1] === 0x49 &&
-      value[2] === 0x46 &&
-      value[3] === 0x46 &&
-      value[8] === 0x57 &&
-      value[9] === 0x45 &&
-      value[10] === 0x42 &&
-      value[11] === 0x50
-    ) {
-      return { format: 'webp', data: bytesToBase64(value) }
-    }
+  if (value instanceof Uint8Array) {
+    const fmt = detectMagicFormat(value)
+    if (fmt !== null) return { format: fmt, data: bytesToBase64(value) }
   }
   return null
+}
+
+/** Smallest plausible image as base64. The minimum valid PNG is
+ *  ~70 bytes (signature + IHDR + IDAT + IEND); 96 base64 chars
+ *  encodes 72 bytes, comfortably above that floor while still
+ *  letting genuinely tiny images through. */
+const MIN_IMAGE_BASE64_LENGTH = 96
+
+/** Inspect the first 12 bytes for PNG / JPEG / WebP signatures. */
+function detectMagicFormat(b: Uint8Array): ImageFormat | null {
+  if (b.byteLength < 12) return null
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'png'
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'jpeg'
+  if (
+    b[0] === 0x52 &&
+    b[1] === 0x49 &&
+    b[2] === 0x46 &&
+    b[3] === 0x46 &&
+    b[8] === 0x57 &&
+    b[9] === 0x45 &&
+    b[10] === 0x42 &&
+    b[11] === 0x50
+  ) {
+    return 'webp'
+  }
+  return null
+}
+
+/** Decode the first `byteCount` bytes from a base64 string. Returns
+ *  `null` if the input is too short or fails to decode (e.g. caller
+ *  logged a truncated slice that no longer parses as valid base64). */
+function decodeBase64Prefix(b64: string, byteCount: number): Uint8Array | null {
+  // 4 base64 chars → 3 bytes; round up to the nearest 4-char group.
+  const charsNeeded = Math.ceil(byteCount / 3) * 4
+  if (b64.length < charsNeeded) return null
+  const slice = b64.slice(0, charsNeeded)
+  try {
+    if (typeof Buffer !== 'undefined') {
+      const buf = Buffer.from(slice, 'base64')
+      return buf.byteLength >= byteCount ? new Uint8Array(buf.subarray(0, byteCount)) : null
+    }
+    const binary = atob(slice)
+    if (binary.length < byteCount) return null
+    const out = new Uint8Array(byteCount)
+    for (let i = 0; i < byteCount; i++) out[i] = binary.charCodeAt(i)
+    return out
+  } catch {
+    return null
+  }
 }
 
 /** Convert bytes to base64. Uses `Buffer` on Node, falls back to

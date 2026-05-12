@@ -215,6 +215,30 @@ export function makeTask<I, O>(
           options.onEvent,
         )
 
+        // No-action nudge. If the model emitted only text/thinking
+        // (no ts/terminal/write_file/edit_file) the task can't
+        // advance — the next iteration would replay the same context
+        // and the model tends to loop on its own narration. Surface
+        // a synthetic OutputEvent with no emissionId so the renderer
+        // routes it into the next user turn as plain text. Bracketed
+        // `[System reminder]` framing parallels the assistant-side
+        // `[Task complete]` / `[Task failed]` closure markers so the
+        // model reads it as meta, not as caller content.
+        if (outcome.kind === 'continue' && !hasActionableEmission(emissions)) {
+          const reminderEvent: OutputEvent = {
+            type: 'output',
+            timestamp: new Date().toISOString(),
+            agentName: agent.name,
+            parts: [
+              {
+                type: 'text',
+                text: '[System reminder] The previous turn produced only narration — no action tool was dispatched. Call taskSuccess(...) (or taskFail(...)) inside ts_action to finish the task, or dispatch an action tool (ts_action / terminal_action / write_file / edit_file) to keep working. Text alone does not advance the task.',
+              },
+            ],
+          }
+          await emit(reminderEvent, eventLog, options.onEvent)
+        }
+
         // Terminal outcomes
         if (outcome.kind === 'success') {
           let result = outcome.value as O
@@ -532,4 +556,19 @@ async function validateOrThrow<T>(
 
 function throwMissing(field: 'llm' | 'runtime'): never {
   throw new Error(`agent.task: missing required ${field} (pass via createAgent({ ${field}: ... }))`)
+}
+
+/** Did the action emit at least one tool call that drives the task?
+ *  Text and thinking are pure narration — they're in the event log
+ *  for the agent's own use but produce no side effects, so an action
+ *  composed entirely of them leaves the loop in the same state it
+ *  started. */
+function hasActionableEmission(emissions: ReadonlyArray<Emission>): boolean {
+  return emissions.some(
+    (em) =>
+      em.type === 'ts' ||
+      em.type === 'terminal' ||
+      em.type === 'fileWrite' ||
+      em.type === 'fileEdit',
+  )
 }

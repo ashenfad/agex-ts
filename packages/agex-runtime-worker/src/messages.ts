@@ -41,7 +41,7 @@
  *     Host looks up the live instance and calls the method against
  *     it; reply is a normal `bridgeResponse`.
  *   - `result`         — terminal message for an `execute` call.
- *     Carries the resolved `TaskOutcome` (success / fail / clarify
+ *     Carries the resolved `TaskOutcome` (success / fail
  *     / continue) plus an optional unexpected error (parse
  *     failure, uncaught exception that wasn't a task-control raise).
  *

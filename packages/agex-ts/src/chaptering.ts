@@ -366,7 +366,7 @@ interface BoundaryRange {
  *  silent flip to the trim interpretation is caught immediately.
  *
  *  Outcome detection: for TaskStartEvent boundaries, scan the events
- *  in the boundary's range for a closing event (success/fail/clarify/
+ *  in the boundary's range for a closing event (success/fail/
  *  cancelled). Filtered indices are skipped during the scan so a
  *  closed chapter scope's terminator inside an in-progress parent's
  *  range doesn't get misread as the parent's own outcome. The first
@@ -413,8 +413,8 @@ export function buildBoundaryIndex(events: ReadonlyArray<AgentEvent>): {
 /** True if at least one boundary in `ranges` represents foldable
  *  content: a ChapterEvent (always completable) or a TaskStartEvent
  *  whose range contains a closing outcome event (success / fail /
- *  clarify / cancelled). The currently-running task is *not*
- *  completable — its boundary range has no closing event yet.
+ *  cancelled). The currently-running task is *not* completable — its
+ *  boundary range has no closing event yet.
  *
  *  Important: scan past `__chapter__`-scoped events when looking for
  *  the parent's terminator. Boundary ranges absorb trailing filtered
@@ -423,13 +423,7 @@ export function buildBoundaryIndex(events: ReadonlyArray<AgentEvent>): {
  *  misread as the parent's own completion — the chapter task's
  *  `success` would land in the loop and we'd return `true` for an
  *  in-progress parent. Apply the same `includeOpen=true` filter the
- *  index builder uses to skip those indices.
- *
- *  `clarify` counts as a completion: a clarified task is closed
- *  (waiting on the human, not continuing), so its outcome is fixed
- *  and the chapter message can capture both the question and the
- *  surrounding context. Matches `describeBoundary`, which has had a
- *  clarify branch since the boundary index was introduced. */
+ *  index builder uses to skip those indices. */
 /** Exported for unit testing. Not part of the public API surface. */
 export function hasCompletableBoundary(
   events: ReadonlyArray<AgentEvent>,
@@ -442,12 +436,7 @@ export function hasCompletableBoundary(
     for (let j = r.start + 1; j < r.end; j++) {
       if (skip.has(j)) continue
       const ev = events[j] as AgentEvent
-      if (
-        ev.type === 'success' ||
-        ev.type === 'fail' ||
-        ev.type === 'clarify' ||
-        ev.type === 'cancelled'
-      ) {
+      if (ev.type === 'success' || ev.type === 'fail' || ev.type === 'cancelled') {
         return true
       }
     }
@@ -476,7 +465,6 @@ function describeBoundary(
     const ev = events[j] as AgentEvent
     if (ev.type === 'success') return `${head}${trailer} → success`
     if (ev.type === 'fail') return `${head}${trailer} → fail "${truncate(ev.message, 60)}"`
-    if (ev.type === 'clarify') return `${head}${trailer} → clarify "${truncate(ev.message, 60)}"`
     if (ev.type === 'cancelled') return `${head}${trailer} → cancelled`
   }
   return `${head}${trailer} (in progress)`

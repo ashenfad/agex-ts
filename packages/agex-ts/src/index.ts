@@ -27,7 +27,6 @@ export {
   FatalError,
   RegistrationError,
   SchemaError,
-  TaskClarifyError,
   TaskFailError,
   TransientError,
   isTaskControlError,

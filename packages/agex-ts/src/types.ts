@@ -25,7 +25,6 @@ export {
   RegistrationError,
   SchemaError,
   TASK_CONTROL_BRAND,
-  TaskClarifyError,
   TaskFailError,
   TransientError,
   type BrandedTaskError,
@@ -234,11 +233,6 @@ export interface FailEvent extends EventBase {
   readonly message: string
 }
 
-export interface ClarifyEvent extends EventBase {
-  readonly type: 'clarify'
-  readonly message: string
-}
-
 export interface CancelledEvent extends EventBase {
   readonly type: 'cancelled'
   readonly taskName: string
@@ -289,7 +283,6 @@ export type AgentEvent =
   | OutputEvent
   | SuccessEvent
   | FailEvent
-  | ClarifyEvent
   | CancelledEvent
   | ErrorEvent
   | FileEvent
@@ -333,7 +326,6 @@ export type TaskFn<I, O> = (input: I, options?: TaskCallOptions) => Promise<O>
 export type TaskOutcome =
   | { readonly kind: 'success'; readonly value: unknown }
   | { readonly kind: 'fail'; readonly message: string }
-  | { readonly kind: 'clarify'; readonly message: string }
   /** No terminal action — agent wants another turn. */
   | { readonly kind: 'continue' }
 

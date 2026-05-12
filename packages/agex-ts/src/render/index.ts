@@ -143,7 +143,7 @@ export interface NeutralTurn {
  *      when present, a synthesized "wrote /path" line for file
  *      emissions on success, or "(no observation)" for silent
  *      `ts` / `terminal` blocks.
- *    - `success` / `fail` / `clarify` / `cancelled` become brief
+ *    - `success` / `fail` / `cancelled` become brief
  *      assistant text turns ("[Task 'X' complete]" etc.) so the
  *      model sees prior tasks closing out before the next one
  *      opens. Without this, two consecutive task starts in the
@@ -243,11 +243,6 @@ export function renderEvents(events: ReadonlyArray<AgentEvent>): NeutralTurn[] {
       case 'fail': {
         flushUser()
         turns.push(closingAssistantTurn(`[Task failed: ${event.message}]`))
-        break
-      }
-      case 'clarify': {
-        flushUser()
-        turns.push(closingAssistantTurn(`[Task needs clarification: ${event.message}]`))
         break
       }
       case 'cancelled': {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createAgent } from '../src/agent'
-import { TaskClarifyError, TaskFailError } from '../src/errors'
+import { TaskFailError } from '../src/errors'
 import { Dummy } from '../src/llm/dummy'
 import { evalRuntime } from '../src/runtime/eval'
 import type { AgentEvent, LLMResponse, TokenChunk } from '../src/types'
@@ -37,17 +37,11 @@ describe('task — multi-turn success', () => {
   })
 })
 
-describe('task — taskFail and taskClarify', () => {
+describe('task — taskFail', () => {
   it('rejects with TaskFailError on taskFail', async () => {
     const { agent } = await makeAgent([r({ type: 'ts', code: 'taskFail("nope")' })])
     const fn = agent.task<undefined, void>({ description: 'Fail.' })
     await expect(fn(undefined)).rejects.toBeInstanceOf(TaskFailError)
-  })
-
-  it('rejects with TaskClarifyError on taskClarify', async () => {
-    const { agent } = await makeAgent([r({ type: 'ts', code: 'taskClarify("which?")' })])
-    const fn = agent.task<undefined, void>({ description: 'Clarify.' })
-    await expect(fn(undefined)).rejects.toBeInstanceOf(TaskClarifyError)
   })
 })
 

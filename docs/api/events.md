@@ -104,17 +104,6 @@ interface FailEvent extends EventBase {
 
 The agent called `taskFail(message)`. The framework throws `TaskFailError` to the caller.
 
-### `ClarifyEvent`
-
-```ts
-interface ClarifyEvent extends EventBase {
-  readonly type: 'clarify'
-  readonly message: string
-}
-```
-
-The agent called `taskClarify(message)` — needs human input. Distinct from `fail`. The framework throws `TaskClarifyError`.
-
 ### `CancelledEvent`
 
 ```ts
@@ -137,7 +126,7 @@ interface ErrorEvent extends EventBase {
 }
 ```
 
-Unexpected error: parse failure, transform error, runtime crash, etc. Distinct from task-control errors (fail / clarify / cancelled), which surface as their own event types. `error` events are filtered out of the LLM render.
+Unexpected error: parse failure, transform error, runtime crash, etc. Distinct from task-control errors (fail / cancelled), which surface as their own event types. `error` events are filtered out of the LLM render.
 
 ### `FileEvent`
 
@@ -189,7 +178,6 @@ type AgentEvent =
   | OutputEvent
   | SuccessEvent
   | FailEvent
-  | ClarifyEvent
   | CancelledEvent
   | ErrorEvent
   | FileEvent

@@ -10,7 +10,7 @@
  *      provider signatures intact).
  *   4. Dispatch each emission. `ts` runs through `RuntimeAdapter`;
  *      richer dispatch (file ops, terminal) lands in the next commit.
- *   5. Resolve the task on `taskSuccess` / `taskFail` / `taskClarify`;
+ *   5. Resolve the task on `taskSuccess` / `taskFail`;
  *      otherwise loop until `maxIterations`.
  *
  * Cancellation: the host `AbortSignal` is threaded into both the
@@ -23,19 +23,12 @@ import { TerminalError } from 'termish-ts'
 import type { Agent } from './agent'
 import { runChaptering, shouldTriggerChaptering } from './chaptering'
 import { dispatchFileEdit, dispatchFileWrite, dispatchTerminal } from './dispatcher'
-import {
-  CancelledError,
-  SchemaError,
-  TaskClarifyError,
-  TaskFailError,
-  isCancelledError,
-} from './errors'
+import { CancelledError, SchemaError, TaskFailError, isCancelledError } from './errors'
 import type { EventLogImpl } from './event-log'
 import { buildSystemMessage, buildTaskMessage, makeToolUseId, renderEvents } from './render'
 import type {
   ActionEvent,
   AgentEvent,
-  ClarifyEvent,
   Emission,
   ExecuteContext,
   FailEvent,
@@ -245,17 +238,6 @@ export function makeTask<I, O>(
           await maybeFireBoundaryChaptering(agent, session, eventLog, signal, options.onEvent)
           throw new TaskFailError(outcome.message)
         }
-        if (outcome.kind === 'clarify') {
-          const clarifyEvent: ClarifyEvent = {
-            type: 'clarify',
-            timestamp: new Date().toISOString(),
-            agentName: agent.name,
-            message: outcome.message,
-          }
-          await emit(clarifyEvent, eventLog, options.onEvent)
-          await maybeFireBoundaryChaptering(agent, session, eventLog, signal, options.onEvent)
-          throw new TaskClarifyError(outcome.message)
-        }
         // outcome.kind === 'continue' → next iteration
         lastError = outcome.lastError
       }
@@ -307,7 +289,7 @@ export function makeTask<I, O>(
 
 /**
  * Internal result of walking an action's emissions. Mirrors
- * `TaskOutcome` for terminal cases (success / fail / clarify) and
+ * `TaskOutcome` for terminal cases (success / fail) and
  * extends `continue` with an optional `lastError` carried up to the
  * outer loop so a later `maxIterations` exhaust can surface "the most
  * recent error before we gave up" — matches agex-py's `last_error`.
@@ -315,7 +297,6 @@ export function makeTask<I, O>(
 type DispatchResult =
   | { readonly kind: 'success'; readonly value: unknown }
   | { readonly kind: 'fail'; readonly message: string }
-  | { readonly kind: 'clarify'; readonly message: string }
   | { readonly kind: 'continue'; readonly lastError?: string }
 
 async function dispatchEmissions(
@@ -484,7 +465,7 @@ async function emit(
 }
 
 /** Fire chaptering at a task boundary. Called from each terminal-
- *  outcome path (success / fail / clarify, including the budget-
+ *  outcome path (success / fail, including the budget-
  *  exhaustion fail) after the terminal event lands in the log but
  *  before the task call returns or throws.
  *

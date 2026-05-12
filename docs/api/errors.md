@@ -4,7 +4,7 @@ agex-ts has two distinct error categories: **task-control errors** the agent rai
 
 ## Task-control errors
 
-These three are raised by the framework on the caller's side when the agent calls `taskFail`, `taskClarify`, or the task is cancelled. Each maps to one event in the log.
+These two are raised by the framework on the caller's side when the agent calls `taskFail` or the task is cancelled. Each maps to one event in the log.
 
 ### `TaskFailError`
 
@@ -28,31 +28,6 @@ try {
 ```
 
 The agent's message is preserved as `e.message`. A `FailEvent` lands in the session's log.
-
-### `TaskClarifyError`
-
-```ts
-class TaskClarifyError extends Error {
-  readonly name: 'TaskClarifyError'
-  readonly message: string
-}
-```
-
-The agent needs human input — ambiguity, missing credentials, critical choice — and is choosing to stop rather than guess. Often the typical "we'll continue this" terminator in chat-style applications.
-
-```ts
-try {
-  await summarize(items, { session: 'alice' })
-} catch (e) {
-  if (e instanceof TaskClarifyError) {
-    // Show the agent's question to the user; resume the session with their answer
-    const reply = await promptUser(e.message)
-    await summarize([...items, reply], { session: 'alice' })
-  }
-}
-```
-
-A `ClarifyEvent` lands in the log. The session's substrate is intact — resuming with the same `session` continues the same conversation.
 
 ### `CancelledError`
 
@@ -86,11 +61,11 @@ A `CancelledEvent` lands in the log with the iteration count completed before th
 import { isTaskControlError } from 'agex-ts'
 
 if (isTaskControlError(e)) {
-  // e is TaskFailError | TaskClarifyError | CancelledError
+  // e is TaskFailError | CancelledError
 }
 ```
 
-Use to handle all three in one branch.
+Use to handle both in one branch.
 
 ## Framework errors
 
@@ -164,7 +139,7 @@ class AgentError extends Error {
 }
 ```
 
-Base class for agex-ts's error hierarchy. `instanceof AgentError` matches all framework errors but not `TaskFailError` / `TaskClarifyError` (which are control flow, not framework failures).
+Base class for agex-ts's error hierarchy. `instanceof AgentError` matches all framework errors but not `TaskFailError` / `CancelledError` (which are control flow, not framework failures).
 
 ## Patterns
 
@@ -175,29 +150,9 @@ try {
   await myTask(input)
 } catch (e) {
   if (e instanceof TaskFailError)     handleAgentFail(e)
-  else if (e instanceof TaskClarifyError) handleAgentClarify(e)
   else if (e instanceof CancelledError)   handleCancel(e)
   else if (e instanceof RegistrationError) reportConfigBug(e)
   else if (e instanceof SchemaError)       reportInputBug(e)
   else throw e  // unexpected — let it bubble
-}
-```
-
-### Resuming a clarified task
-
-```ts
-async function withClarification(input, session) {
-  while (true) {
-    try {
-      return await myTask(input, { session })
-    } catch (e) {
-      if (e instanceof TaskClarifyError) {
-        const answer = await promptUser(e.message)
-        input = mergeAnswer(input, answer)
-        continue  // same session — agent's history is preserved
-      }
-      throw e
-    }
-  }
 }
 ```

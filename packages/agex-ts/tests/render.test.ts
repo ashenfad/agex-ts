@@ -412,14 +412,13 @@ describe('renderEvents', () => {
     }
   })
 
-  it('renders terminal task events (success/fail/clarify/cancelled) as closing assistant turns', () => {
+  it('renders terminal task events (success/fail/cancelled) as closing assistant turns', () => {
     // These mark the end of a task. Without explicit closure, two
     // tasks back-to-back would look like the model started a new
     // task mid-action — confusing it about its own history.
     const events: AgentEvent[] = [
       { type: 'success', timestamp: ts, agentName: 'a', result: 1 },
       { type: 'fail', timestamp: ts, agentName: 'a', message: 'nope' },
-      { type: 'clarify', timestamp: ts, agentName: 'a', message: 'huh?' },
       {
         type: 'cancelled',
         timestamp: ts,
@@ -429,15 +428,13 @@ describe('renderEvents', () => {
       },
     ]
     const turns = renderEvents(events)
-    expect(turns.map((t) => t.role)).toEqual(['assistant', 'assistant', 'assistant', 'assistant'])
+    expect(turns.map((t) => t.role)).toEqual(['assistant', 'assistant', 'assistant'])
     const texts = turns.map((t) => (t.content[0]?.type === 'text' ? t.content[0].text : ''))
     expect(texts[0]).toBe('[Task complete]')
     expect(texts[1]).toContain('Task failed')
     expect(texts[1]).toContain('nope')
-    expect(texts[2]).toContain('clarification')
-    expect(texts[2]).toContain('huh?')
-    expect(texts[3]).toContain("'t' cancelled")
-    expect(texts[3]).toContain('3 iterations')
+    expect(texts[2]).toContain("'t' cancelled")
+    expect(texts[2]).toContain('3 iterations')
   })
 
   it('skips framework-only events (error / file / systemNote)', () => {
@@ -963,7 +960,6 @@ describe('BUILTIN_PRIMER', () => {
     expect(BUILTIN_PRIMER).toContain('terminal_action')
     expect(BUILTIN_PRIMER).toContain('taskSuccess')
     expect(BUILTIN_PRIMER).toContain('taskFail')
-    expect(BUILTIN_PRIMER).toContain('taskClarify')
     expect(BUILTIN_PRIMER).toContain('Image inspection')
     expect(BUILTIN_PRIMER).toContain('cache')
     expect(BUILTIN_PRIMER).toContain('inputs')

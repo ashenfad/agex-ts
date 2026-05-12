@@ -258,7 +258,6 @@ function renderEventMarkdown(e: AgentEvent): string {
     case 'success':
       return `${header}\n\nResult:\n\n\`\`\`\n${safeJson(e.result)}\n\`\`\`\n`
     case 'fail':
-    case 'clarify':
       return `${header}\n\n${e.message}\n`
     case 'cancelled':
       return `${header}\n\n${e.taskName}: cancelled after ${e.iterationsCompleted} iterations\n`

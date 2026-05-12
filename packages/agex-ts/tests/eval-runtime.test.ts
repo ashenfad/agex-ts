@@ -37,13 +37,6 @@ describe('evalRuntime — task control', () => {
     expect(result.outcome).toEqual({ kind: 'fail', message: 'nope' })
   })
 
-  it('taskClarify returns outcome.clarify', async () => {
-    const r = evalRuntime()
-    await r.init(emptyPolicy)
-    const result = await r.execute('taskClarify("which one?")', makeContext())
-    expect(result.outcome).toEqual({ kind: 'clarify', message: 'which one?' })
-  })
-
   it('falling off the end returns outcome.continue', async () => {
     const r = evalRuntime()
     await r.init(emptyPolicy)
@@ -1173,22 +1166,6 @@ describe('evalRuntime — missing-await detection', () => {
     expect(result.outcome).toEqual({ kind: 'continue' })
     expect(result.error?.name).toBe('MissingAwaitError')
     expect(result.error?.message).toMatch(/taskFail\(\)/)
-  })
-
-  it('catches taskClarify from a non-awaited async function', async () => {
-    const r = evalRuntime()
-    await r.init(emptyPolicy)
-    const code = `
-      async function ask() {
-        await Promise.resolve()
-        taskClarify('which one?')
-      }
-      ask()
-    `
-    const result = await r.execute(code, makeContext())
-    expect(result.outcome).toEqual({ kind: 'continue' })
-    expect(result.error?.name).toBe('MissingAwaitError')
-    expect(result.error?.message).toMatch(/taskClarify\(\)/)
   })
 
   it('regression: properly awaited terminators still settle the action correctly', async () => {

@@ -240,14 +240,6 @@ describe('workerRuntime', () => {
     expect(result.outcome).toEqual({ kind: 'fail', message: 'nope' })
   })
 
-  it('translates taskClarify into outcome.kind === "clarify"', async () => {
-    const rt = runtime()
-    await rt.init(EMPTY_POLICY)
-    const result = await rt.execute('taskClarify("which one?")', makeCtx())
-    expect(result.error).toBeNull()
-    expect(result.outcome).toEqual({ kind: 'clarify', message: 'which one?' })
-  })
-
   it('returns continue when the emission settles without a task-control raise', async () => {
     const rt = runtime()
     await rt.init(EMPTY_POLICY)

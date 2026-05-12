@@ -21,7 +21,7 @@ interface TaskDefinition<I, O> {
 type TaskFn<I, O> = (input: I, options?: TaskCallOptions) => Promise<O>
 ```
 
-Returns a typed function. Each call drives the agent's action loop: render the system prompt, send to the LLM, dispatch each emission, observe outputs, iterate until the agent calls `taskSuccess` / `taskFail` / `taskClarify` (or hits `maxIterations`).
+Returns a typed function. Each call drives the agent's action loop: render the system prompt, send to the LLM, dispatch each emission, observe outputs, iterate until the agent calls `taskSuccess` / `taskFail` (or hits `maxIterations`).
 
 ```ts
 const summarize = agent.task<string[], string>({
@@ -136,19 +136,18 @@ What happens inside one `await summarize(...)` call:
     - Append `ActionEvent` carrying the emissions.
     - Check chaptering trigger; run chapter task if needed.
     - Dispatch each emission (`ts` → runtime; `terminal` → termish; `fileWrite` / `fileEdit` → VFS).
-    - If outcome is `success` / `fail` / `clarify` — log the corresponding event and return.
+    - If outcome is `success` / `fail` — log the corresponding event and return.
     - Otherwise (continue), iterate.
 7. **Loop budget exhausted** — log a `FailEvent` and throw `TaskFailError`.
 
 ## Outcomes
 
-The agent decides task lifecycle by calling one of three injected functions inside its TS:
+The agent decides task lifecycle by calling one of two injected functions inside its TS:
 
 | Call | Result |
 |---|---|
 | `taskSuccess(value)` | Validate `value` against `def.output` if set; resolve the task with the validated value. |
 | `taskFail(message)` | Reject the task with `TaskFailError(message)`. The agent has decided the task is impossible. |
-| `taskClarify(message)` | Reject with `TaskClarifyError(message)`. The agent needs human input — distinct from failure. |
 
 A turn that doesn't call any of these falls off the end and the loop iterates. See [Errors](errors.md).
 

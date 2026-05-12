@@ -76,21 +76,6 @@ describe('hasCompletableBoundary', () => {
     expect(hasCompletableBoundary(events, ranges)).toBe(true)
   })
 
-  it('true when a parent has clarified — clarify counts as completion', () => {
-    const events: AgentEvent[] = [
-      taskStart('parent', 0),
-      action(1),
-      {
-        type: 'clarify',
-        timestamp: ts(2),
-        agentName: 't',
-        message: 'which one?',
-      },
-    ]
-    const { ranges } = buildBoundaryIndex(events)
-    expect(hasCompletableBoundary(events, ranges)).toBe(true)
-  })
-
   it('true when there is a prior chapter event in the index', () => {
     const events: AgentEvent[] = [chapter('phase-1', 0), taskStart('parent', 1), action(2)]
     const { ranges } = buildBoundaryIndex(events)

@@ -38,6 +38,7 @@ const agent = await createAgent({
 | `chapterPrimer` | `string` | `DEFAULT_CHAPTER_PRIMER` | Override the auto-registered chapter task's primer. Most embedders should leave this undefined. Ignored when `chapteringTrigger` is undefined. |
 | `agexPrimerOverride` | `string` | `undefined` | Replace the built-in environment description. Use only if you really mean to override agex-ts's conventions. |
 | `capabilitiesPrimer` | `string` | `undefined` | Replace the auto-rendered Registered Resources section with curated prose. The runtime adapter still injects everything registered. |
+| `namespaceResolver` | `(specifier) => string \| Promise<string \| null> \| null` | `undefined` | Host fallback for unregistered import specifiers. Returns a URL the runtime dynamic-imports, or `null` to deny (the agent gets `Cannot find module 'X'`). See [Registration § namespaceResolver](registration.md#namespaceresolver). |
 
 `AgentOptions` is `readonly` — passing the same object to multiple `createAgent` calls is fine.
 

@@ -1108,7 +1108,10 @@ describe('evalRuntime — import syntax for registered names', () => {
     expect(result.outcome).toEqual({ kind: 'success', value: 22 })
   })
 
-  it('passes through (and breaks) imports of unregistered specifiers', async () => {
+  it('imports of unregistered specifiers fail with `Cannot find module`', async () => {
+    // Without a namespaceResolver configured, unrecognized bare
+    // specifiers route through __load and produce the standardized
+    // "module missing" error the agent's training data recognizes.
     const r = evalRuntime()
     await r.init(emptyPolicy)
     const result = await r.execute(
@@ -1119,7 +1122,145 @@ describe('evalRuntime — import syntax for registered names', () => {
       makeContext(),
     )
     expect(result.outcome).toEqual({ kind: 'continue' })
-    expect(result.error?.message).toMatch(/import statement/)
+    expect(result.error?.message).toMatch(/Cannot find module 'react'/)
+  })
+})
+
+describe('evalRuntime — namespaceResolver', () => {
+  // Same fixture used by the URL-shipped tests above. Its full path
+  // is what a host-supplied resolver would return for a bare specifier.
+  const FIXTURE_URL = new URL('./fixtures/url-runtime-fixture.js', import.meta.url).href
+
+  it('resolves an unregistered specifier via the host resolver', async () => {
+    const r = evalRuntime()
+    const seen: string[] = []
+    await r.init(emptyPolicy, {
+      namespaceResolver: (name) => {
+        seen.push(name)
+        return name === 'fixture' ? FIXTURE_URL : null
+      },
+    })
+    const result = await r.execute(
+      `
+      import { double } from 'fixture'
+      taskSuccess(double(21))
+    `,
+      makeContext(),
+    )
+    expect(result.outcome).toEqual({ kind: 'success', value: 42 })
+    expect(seen).toEqual(['fixture'])
+  })
+
+  it('supports an async resolver', async () => {
+    const r = evalRuntime()
+    await r.init(emptyPolicy, {
+      namespaceResolver: async (name) => (name === 'fixture' ? FIXTURE_URL : null),
+    })
+    const result = await r.execute(
+      `
+      import { double } from 'fixture'
+      taskSuccess(double(10))
+    `,
+      makeContext(),
+    )
+    expect(result.outcome).toEqual({ kind: 'success', value: 20 })
+  })
+
+  it('falls through to "Cannot find module" when the resolver returns null', async () => {
+    const r = evalRuntime()
+    await r.init(emptyPolicy, { namespaceResolver: () => null })
+    const result = await r.execute(
+      `
+      import * as react from 'react'
+      taskSuccess(react)
+    `,
+      makeContext(),
+    )
+    expect(result.outcome).toEqual({ kind: 'continue' })
+    expect(result.error?.message).toMatch(/Cannot find module 'react'/)
+  })
+
+  it('treats a thrown resolver as null (no module found)', async () => {
+    const r = evalRuntime()
+    await r.init(emptyPolicy, {
+      namespaceResolver: () => {
+        throw new Error('resolver boom')
+      },
+    })
+    const result = await r.execute(
+      `
+      import * as x from 'whatever'
+      taskSuccess(x)
+    `,
+      makeContext(),
+    )
+    expect(result.outcome).toEqual({ kind: 'continue' })
+    expect(result.error?.message).toMatch(/Cannot find module 'whatever'/)
+  })
+
+  it('registered names take precedence over the resolver', async () => {
+    // The rewriter routes registered names through the host-bound
+    // path (no __load), so the resolver never sees them — even if it
+    // would otherwise produce a URL.
+    const r = evalRuntime()
+    let called = false
+    const policy: Policy = {
+      ...emptyPolicy,
+      namespaces: new Map([
+        [
+          'math',
+          {
+            kind: 'namespace' as const,
+            name: 'math',
+            target: { add: (a: number, b: number) => a + b },
+          },
+        ],
+      ]),
+    }
+    await r.init(policy, {
+      namespaceResolver: () => {
+        called = true
+        return FIXTURE_URL
+      },
+    })
+    const result = await r.execute(
+      `
+      import { add } from 'math'
+      taskSuccess(add(2, 3))
+    `,
+      makeContext(),
+    )
+    expect(result.outcome).toEqual({ kind: 'success', value: 5 })
+    expect(called).toBe(false)
+  })
+
+  it('caches the first resolution across executes — resolver fires once per specifier', async () => {
+    const r = evalRuntime()
+    let calls = 0
+    await r.init(emptyPolicy, {
+      namespaceResolver: (name) => {
+        calls++
+        return name === 'fixture' ? FIXTURE_URL : null
+      },
+    })
+    const ctx = makeContext()
+    const first = await r.execute(
+      `
+      import { double } from 'fixture'
+      taskSuccess(double(21))
+    `,
+      ctx,
+    )
+    expect(first.outcome).toEqual({ kind: 'success', value: 42 })
+    const second = await r.execute(
+      `
+      import { double } from 'fixture'
+      taskSuccess(double(50))
+    `,
+      ctx,
+    )
+    expect(second.outcome).toEqual({ kind: 'success', value: 100 })
+    expect(calls).toBe(1)
   })
 })
 

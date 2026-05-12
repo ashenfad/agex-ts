@@ -43,11 +43,13 @@ import type {
   ExecResult,
   ExecuteContext,
   MemberFilter,
+  NamespaceResolver,
   OutputPart,
   Policy,
   RegisteredCls,
   RegisteredNs,
   RuntimeAdapter,
+  RuntimeInitOptions,
   TaskOutcome,
 } from 'agex-ts/types'
 import {
@@ -175,6 +177,7 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
   // and the matching wire-form the worker's stub builder expects.
   let policyRef: Policy | null = null
   let configurePayload: ConfigureMessage | null = null
+  let namespaceResolver: NamespaceResolver | undefined
 
   function spawn(): void {
     const w = new Worker(workerUrl, { type: 'module' })
@@ -212,7 +215,7 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
   }
 
   return {
-    async init(policy: Policy): Promise<void> {
+    async init(policy: Policy, initOpts: RuntimeInitOptions = {}): Promise<void> {
       // Capture the policy so:
       //   1. `handleBridgeCall` can dispatch `fn` / `namespace`
       //      calls against the live registrations.
@@ -224,7 +227,12 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
       // policy mutation. If the embedder wants new registrations,
       // they need a fresh runtime instance.
       policyRef = policy
-      configurePayload = buildConfigure(policy, opts.routeFetchToVfs)
+      namespaceResolver = initOpts.namespaceResolver
+      configurePayload = buildConfigure(
+        policy,
+        opts.routeFetchToVfs,
+        namespaceResolver !== undefined,
+      )
     },
 
     async execute(code: string, ctx: ExecuteContext): Promise<ExecResult> {
@@ -425,6 +433,10 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
           }
           if (m?.type === 'instanceCall' && m.executeId === executeId) {
             void handleInstanceCall(m, instances, instanceClasses, w)
+            return
+          }
+          if (m?.type === 'resolveNamespace' && m.executeId === executeId) {
+            void handleResolveNamespace(m, namespaceResolver, w)
             return
           }
           if (m?.type === 'result' && m.executeId === executeId) {
@@ -779,6 +791,31 @@ async function handleNewInstance(
  *  call the named method on it (validating against the same
  *  visibility filter used at configure time), reply with the
  *  return value. */
+/** Handle the worker's `resolveNamespace` request: invoke the host's
+ *  `namespaceResolver`, post back the URL (or `null` to deny) the
+ *  resolver returned. Errors / missing resolver collapse to `null`. */
+async function handleResolveNamespace(
+  msg: Extract<Worker2HostMessage, { type: 'resolveNamespace' }>,
+  resolver: NamespaceResolver | undefined,
+  w: Worker,
+): Promise<void> {
+  const { executeId, callId, specifier } = msg
+  let url: string | null = null
+  if (resolver !== undefined) {
+    try {
+      url = (await Promise.resolve(resolver(specifier))) ?? null
+    } catch {
+      url = null
+    }
+  }
+  try {
+    w.postMessage({ type: 'resolveNamespaceResponse', executeId, callId, url })
+  } catch {
+    // Worker is gone; ignore — the awaiting __load promise will be
+    // cancelled when the execute settles.
+  }
+}
+
 async function handleInstanceCall(
   msg: Extract<Worker2HostMessage, { type: 'instanceCall' }>,
   instances: Map<number, unknown>,
@@ -917,6 +954,7 @@ function postBridgeResponse(
 function buildConfigure(
   policy: Policy,
   routeFetchToVfs: boolean | ReadonlyArray<string> | undefined,
+  hasNamespaceResolver: boolean,
 ): ConfigureMessage {
   const fns: string[] = []
   const namespaces: Array<{ name: string; members: ReadonlyArray<string> }> = []
@@ -985,6 +1023,7 @@ function buildConfigure(
     classes,
     urlModules,
     ...(routeFetchToVfs !== undefined && routeFetchToVfs !== false && { routeFetchToVfs }),
+    ...(hasNamespaceResolver && { hasNamespaceResolver: true }),
   }
 }
 

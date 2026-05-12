@@ -40,6 +40,7 @@ import type {
   LLMClient,
   MemberConfig,
   MemberFilter,
+  NamespaceResolver,
   Policy,
   RuntimeAdapter,
   StateConfig,
@@ -94,6 +95,14 @@ export interface AgentOptions {
    *  injects everything that's registered) — this only affects
    *  what the agent SEES in the system prompt. */
   readonly capabilitiesPrimer?: string
+  /** When set, unregistered import specifiers in the agent's
+   *  emitted code are passed to this function. Returning a URL
+   *  imports that module; returning null (or throwing) denies the
+   *  import (agent sees a `Cannot find module 'X'` error on its
+   *  next turn). May be sync or async. Resolver doesn't appear in
+   *  the system message — agents discover availability by trying
+   *  the import. See `NamespaceResolver` in `agex-ts/types`. */
+  readonly namespaceResolver?: NamespaceResolver
 }
 
 /**
@@ -357,6 +366,12 @@ export class Agent {
    *  this isn't set. */
   get runtime(): RuntimeAdapter | undefined {
     return this.#opts.runtime
+  }
+
+  /** The configured namespace resolver, if any. When set, the runtime
+   *  routes unregistered import specifiers through this function. */
+  get namespaceResolver(): NamespaceResolver | undefined {
+    return this.#opts.namespaceResolver
   }
 
   /** The token threshold above which chaptering fires (if a chapter

@@ -202,6 +202,38 @@ URL-shipped registrations exist in the worker realm; the host has no hook into i
 
 Pre-wrap the export in a thinner module if you need a narrower surface or per-call validation.
 
+## `namespaceResolver`
+
+Set on `AgentOptions`, not via a registration call. A callable the runtime invokes whenever the agent's `import` references a specifier the registry doesn't know:
+
+```ts
+namespaceResolver?: (specifier: string) =>
+  string | Promise<string | null> | null
+```
+
+Return a URL the runtime should dynamic-import (the resolved namespace becomes available to the agent), or `null` to deny — denials surface as `Cannot find module 'X'` in the agent's next observation.
+
+```ts
+const agent = createAgent({
+  name: 'researcher',
+  llm,
+  runtime,
+  namespaceResolver: (name) => {
+    if (BARE_PIN.has(name)) return BARE_PIN.get(name)!  // your pinning policy
+    return `https://esm.sh/${name}`                     // or just route through esm.sh
+  },
+})
+```
+
+How it relates to the rest of registration:
+
+- **Registered names win.** If a name is in the registry (live or URL-shipped), the rewriter routes the import through the registered path; the resolver never sees it.
+- **Sticky per session.** The first resolution for a given specifier is cached for the lifetime of the runtime adapter — subsequent imports of the same name reuse the URL.
+- **Whole module is exposed.** Same as `agent.namespace({ url })` with no `export`: the agent gets the full namespace object. Use a registered URL-shipped registration if you want to pluck a specific export or rename.
+- **Worker mode round-trips via RPC.** When the runtime is `workerRuntime`, the worker posts `resolveNamespace` to the host, which calls your resolver and posts the URL back — so the resolver runs in host code (closures over host state are fine).
+
+A thrown resolver is treated as `null`. The resolver's URL must be ESM-resolvable from wherever the runtime executes (host realm for `evalRuntime`, worker realm for `workerRuntime`).
+
 ## Capability flags
 
 Two flags propagate to the registration record for adapters to consult:

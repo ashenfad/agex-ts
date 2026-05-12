@@ -694,6 +694,11 @@ function serializeError(e: unknown): SerializedError {
  *  one execute runs at a time (host-side guard), so a single slot is
  *  enough. Cleared when the AsyncFunction settles. */
 let activeBridge: BridgeChannel | null = null
+/** Mirrors `activeBridge`'s lifecycle. Used by `__load`'s
+ *  resolver-RPC path so it can stamp the right executeId on
+ *  outbound `resolveNamespace` messages without exposing
+ *  BridgeChannel's private `executeId`. */
+let currentExecuteId: number | null = null
 
 /** Most recent `configure` payload from the host. Set once after
  *  boot, possibly overwritten on a respawn (host re-sends after a
@@ -726,6 +731,40 @@ const urlPromiseCache = new Map<string, Promise<unknown>>()
  *  Constructed once at module load — the Function constructor's
  *  cost is paid at boot, not per import. */
 const rawImport = new Function('url', 'return import(url)') as (url: string) => Promise<unknown>
+
+// ---------------------------------------------------------------------------
+// namespaceResolver RPC
+// ---------------------------------------------------------------------------
+
+/** Pending `resolveNamespace` requests, keyed by callId. The host
+ *  replies with `resolveNamespaceResponse`; we resolve the matching
+ *  promise. Cleared when the worker is garbage collected (worker
+ *  lifecycle is per-execute → respawn). */
+const pendingResolveCalls = new Map<number, (url: string | null) => void>()
+let nextResolveCallId = 1
+
+/** Ask the host to resolve `specifier` to a URL. Returns `null` when
+ *  the host's resolver returns null OR no resolver is configured (the
+ *  `__load` caller already gated on `configured.hasNamespaceResolver`
+ *  before calling this — so a `null` here means the resolver itself
+ *  said no). */
+function resolveNamespaceViaHost(executeId: number, specifier: string): Promise<string | null> {
+  const callId = nextResolveCallId++
+  return new Promise<string | null>((resolve) => {
+    pendingResolveCalls.set(callId, resolve)
+    post({ type: 'resolveNamespace', executeId, callId, specifier })
+  })
+}
+
+function handleResolveNamespaceResponse(msg: {
+  callId: number
+  url: string | null
+}): void {
+  const resolver = pendingResolveCalls.get(msg.callId)
+  if (resolver === undefined) return
+  pendingResolveCalls.delete(msg.callId)
+  resolver(msg.url)
+}
 
 /** Process a `configure` message: store the payload + record the
  *  URL-shipped registration specs. No imports fire here — the actual
@@ -904,37 +943,52 @@ function __load(name: string): Promise<unknown> {
   const cached = urlPromiseCache.get(name)
   if (cached !== undefined) return cached
   const spec = urlSpecs.get(name)
-  if (spec === undefined) {
-    // Unreachable in normal operation — the rewriter only emits
-    // `__load(name)` for names known to the policy as URL-shipped.
-    // Defend with a clear error if it ever does fire.
-    return Promise.reject(
-      new Error(`workerRuntime: __load('${name}') called for an unregistered URL-shipped name`),
-    )
-  }
-  const p = (async () => {
-    try {
-      const mod = (await rawImport(spec.url)) as Record<string, unknown>
-      const value = spec.export === undefined ? mod : mod[spec.export]
-      if (value === undefined) {
-        const e = new Error(
-          `Could not load registered module '${name}' (${spec.url}): module has no '${spec.export}' export (named exports: ${Object.keys(mod).join(', ') || '<none>'})`,
+  if (spec !== undefined) {
+    // Registered URL-shipped name — fetch and pluck the named export.
+    const p = (async () => {
+      try {
+        const mod = (await rawImport(spec.url)) as Record<string, unknown>
+        const value = spec.export === undefined ? mod : mod[spec.export]
+        if (value === undefined) {
+          const e = new Error(
+            `Could not load registered module '${name}' (${spec.url}): module has no '${spec.export}' export (named exports: ${Object.keys(mod).join(', ') || '<none>'})`,
+          )
+          e.name = 'ImportError'
+          throw e
+        }
+        return value
+      } catch (raw) {
+        // Already wrapped → re-throw as-is so the cached rejection
+        // stays informative across retries.
+        if (raw instanceof Error && raw.name === 'ImportError') throw raw
+        const reason = raw instanceof Error ? raw.message : String(raw)
+        const wrapped = new Error(
+          `Could not load registered module '${name}' (${spec.url}): ${reason}`,
         )
-        e.name = 'ImportError'
-        throw e
+        wrapped.name = 'ImportError'
+        throw wrapped
       }
-      return value
-    } catch (raw) {
-      // Already wrapped → re-throw as-is so the cached rejection
-      // stays informative across retries.
-      if (raw instanceof Error && raw.name === 'ImportError') throw raw
-      const reason = raw instanceof Error ? raw.message : String(raw)
-      const wrapped = new Error(
-        `Could not load registered module '${name}' (${spec.url}): ${reason}`,
-      )
-      wrapped.name = 'ImportError'
-      throw wrapped
+    })()
+    urlPromiseCache.set(name, p)
+    p.catch(() => undefined)
+    return p
+  }
+  // Unregistered name. If the host has a namespaceResolver configured
+  // (signalled via configure.hasNamespaceResolver), RPC over for the
+  // URL; otherwise fail with the standardized "module missing" error
+  // the agent's training data recognizes.
+  const p = (async () => {
+    if (configured?.hasNamespaceResolver === true && currentExecuteId !== null) {
+      const url = await resolveNamespaceViaHost(currentExecuteId, name)
+      if (url !== null) {
+        // Cache the resolution as a urlSpec entry so subsequent
+        // imports take the registered path (sticky resolution per
+        // worker lifetime).
+        urlSpecs.set(name, { url })
+        return await rawImport(url)
+      }
     }
+    throw new Error(`Cannot find module '${name}'`)
   })()
   urlPromiseCache.set(name, p)
   // Defang the unhandled-rejection warning if nothing has awaited
@@ -969,6 +1023,7 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
 
   const bridge = new BridgeChannel(executeId)
   activeBridge = bridge
+  currentExecuteId = executeId
 
   const injected: Record<string, unknown> = {
     taskSuccess,
@@ -1053,6 +1108,7 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
       }
     } catch (e) {
       activeBridge = null
+      currentExecuteId = null
       post({
         type: 'result',
         executeId,
@@ -1122,6 +1178,7 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
   // handlers triggered by the rejection still see the right channel.
   bridge.cancelPending(makeCancelledError('execute settled with pending bridge calls'))
   activeBridge = null
+  currentExecuteId = null
   post({ type: 'result', executeId, outcome, error })
 }
 
@@ -1165,6 +1222,10 @@ self.addEventListener('message', (ev: MessageEvent<Host2WorkerMessage>) => {
   }
   if (msg?.type === 'bridgeResponse') {
     activeBridge?.handleResponse(msg)
+    return
+  }
+  if (msg?.type === 'resolveNamespaceResponse') {
+    handleResolveNamespaceResponse(msg)
     return
   }
 })

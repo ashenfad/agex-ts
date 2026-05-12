@@ -247,13 +247,20 @@ function decodeUtf8(bytes: Uint8Array): string {
 // ---------------------------------------------------------------------------
 
 /** Return a copy of `messages` with a `cache_control` breakpoint on
- *  the last content block of `messages[cacheIndex]`. Out-of-range
- *  indices are silently ignored.
+ *  the last cacheable content block of `messages[cacheIndex]`.
+ *  Out-of-range indices are silently ignored.
  *
  *  Anthropic applies caching to the prefix ending at the marked
  *  block — the client typically targets the second-to-last message
  *  (the last "completed" turn) so the breakpoint covers everything
- *  the model has already seen. */
+ *  the model has already seen.
+ *
+ *  Caveat: Anthropic 400s if `cache_control` is set on an empty text
+ *  block. The neutral renderer / parser deliberately keep empty or
+ *  whitespace-only text blocks in the log so assistant turns aren't
+ *  empty, so we walk backward within the targeted message to find
+ *  the last block that's safe to mark. If nothing in the message is
+ *  cacheable, the breakpoint is dropped silently. */
 export function applyCacheControl(
   messages: ReadonlyArray<AnthropicMessage>,
   cacheIndex: number,
@@ -264,13 +271,28 @@ export function applyCacheControl(
   }
   const cc: AnthropicCacheControl = { type: 'ephemeral', ttl }
   return messages.map((msg, i) => {
-    if (i !== cacheIndex || msg.content.length === 0) return { ...msg }
-    const lastIdx = msg.content.length - 1
+    if (i !== cacheIndex) return { ...msg }
+    const targetIdx = findCacheableBlockIndex(msg.content)
+    if (targetIdx === null) return { ...msg }
     const newContent: AnthropicContentBlock[] = msg.content.map((b, j) =>
-      j === lastIdx ? withCacheControl(b, cc) : b,
+      j === targetIdx ? withCacheControl(b, cc) : b,
     )
     return { role: msg.role, content: newContent }
   })
+}
+
+/** Index of the last block in `content` that can carry `cache_control`,
+ *  or `null` if none qualify. Empty text blocks are the only blocks
+ *  Anthropic rejects outright; everything else (images, tool_use,
+ *  tool_result, thinking, non-empty text) is fine. */
+function findCacheableBlockIndex(content: ReadonlyArray<AnthropicContentBlock>): number | null {
+  for (let i = content.length - 1; i >= 0; i--) {
+    const b = content[i]
+    if (b === undefined) continue
+    if (b.type === 'text' && b.text.length === 0) continue
+    return i
+  }
+  return null
 }
 
 function withCacheControl(

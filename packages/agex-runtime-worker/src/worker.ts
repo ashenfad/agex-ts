@@ -8,8 +8,8 @@
  *      injected names land directly in scope. Same shape as
  *      `evalRuntime`, just inside a Worker realm.
  *   2. Inject the v1 surface: `taskSuccess`, `taskFail`,
- *      `taskClarify`, a captured `console` (image-aware — `console.log`
- *      of `{format,data}` / data URLs / PNG/JPEG/WebP `Uint8Array`s
+ *      a captured `console` (image-aware — `console.log` of
+ *      `{format,data}` / data URLs / PNG/JPEG/WebP `Uint8Array`s
  *      becomes `image` parts), proxy
  *      objects for `fs` / `cache`, registered host functions
  *      (`agent.fn`), registered namespaces (`agent.namespace`),
@@ -23,10 +23,10 @@
  *      registrations (worker-side imports, no RPC) are still
  *      follow-up PRs.
  *   3. Resolve the emission's outcome from the way the AsyncFunction
- *      settles: a `taskSuccess` raise → success; a `TaskFailError` /
- *      `TaskClarifyError` raise → fail / clarify; clean return →
- *      `continue` with no value; any other throw → unexpected error
- *      (the host turns this into a fail with a message).
+ *      settles: a `taskSuccess` raise → success; a `TaskFailError`
+ *      raise → fail; clean return → `continue` with no value; any
+ *      other throw → unexpected error (the host turns this into a
+ *      fail with a message).
  *   4. Post `result` back. Any captured `console.*` calls in (1)
  *      already streamed as `output` messages, so the host has them
  *      before `result` arrives.
@@ -63,16 +63,12 @@ class TaskSuccessSignal {
   constructor(readonly value: unknown) {}
 }
 
-/** Mirrors `agex-ts`'s `TaskFailError` / `TaskClarifyError` shapes,
- *  but defined locally so the worker bundle doesn't have to import
- *  the whole agex-ts core. Detection is by `name` (set on the
- *  prototype) — same convention `agex-ts/errors.isTaskControlError`
- *  uses on the host side. */
+/** Mirrors `agex-ts`'s `TaskFailError` shape, but defined locally so
+ *  the worker bundle doesn't have to import the whole agex-ts core.
+ *  Detection is by `name` (set on the prototype) — same convention
+ *  `agex-ts/errors.isTaskControlError` uses on the host side. */
 class TaskFailSignal extends Error {
   override readonly name = 'TaskFailError'
-}
-class TaskClarifySignal extends Error {
-  override readonly name = 'TaskClarifyError'
 }
 
 // ---------------------------------------------------------------------------
@@ -953,15 +949,14 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
   const { code, executeId } = msg
 
   // Per-execute "late terminator" slot. Recorded inside the wrapped
-  // taskSuccess/Fail/Clarify before the throw, so even if the throw
-  // becomes an unhandled rejection (because the agent called the
-  // terminator from an async path it didn't `await`), we still know
-  // what they meant. After the body settles we use this to surface a
-  // "missing await" hint instead of a silent "no observation" turn.
+  // taskSuccess/Fail before the throw, so even if the throw becomes
+  // an unhandled rejection (because the agent called the terminator
+  // from an async path it didn't `await`), we still know what they
+  // meant. After the body settles we use this to surface a "missing
+  // await" hint instead of a silent "no observation" turn.
   let lateTerminator:
     | { kind: 'success'; value: unknown }
     | { kind: 'fail'; message: string }
-    | { kind: 'clarify'; message: string }
     | null = null
   const taskSuccess = (value: unknown): never => {
     if (lateTerminator === null) lateTerminator = { kind: 'success', value }
@@ -971,10 +966,6 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
     if (lateTerminator === null) lateTerminator = { kind: 'fail', message }
     throw new TaskFailSignal(message)
   }
-  const taskClarify = (message: string): never => {
-    if (lateTerminator === null) lateTerminator = { kind: 'clarify', message }
-    throw new TaskClarifySignal(message)
-  }
 
   const bridge = new BridgeChannel(executeId)
   activeBridge = bridge
@@ -982,7 +973,6 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
   const injected: Record<string, unknown> = {
     taskSuccess,
     taskFail,
-    taskClarify,
     console: makeConsole(executeId),
     // Node-fs-style ergonomic wrapper around the bridged proxy. The
     // agent can write `await fs.read(path, 'utf8')` to get a string
@@ -1087,8 +1077,6 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
       outcome = { kind: 'success', value: e.value }
     } else if (e instanceof TaskFailSignal) {
       outcome = { kind: 'fail', message: e.message }
-    } else if (e instanceof TaskClarifySignal) {
-      outcome = { kind: 'clarify', message: e.message }
     } else {
       error = serializeError(e)
     }
@@ -1109,11 +1097,7 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
   if (outcome.kind === 'continue' && error === null && bridge.pendingCount > 0) {
     const onUnhandled = (ev: PromiseRejectionEvent): void => {
       const reason = ev.reason as unknown
-      if (
-        reason instanceof TaskSuccessSignal ||
-        reason instanceof TaskFailSignal ||
-        reason instanceof TaskClarifySignal
-      ) {
+      if (reason instanceof TaskSuccessSignal || reason instanceof TaskFailSignal) {
         ev.preventDefault()
       }
     }
@@ -1148,13 +1132,9 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
  *  fire-and-forget. Mirrors `eval.ts`'s `makeMissingAwaitError` so
  *  embedders see the same message regardless of runtime. */
 function makeMissingAwaitError(
-  late:
-    | { kind: 'success'; value: unknown }
-    | { kind: 'fail'; message: string }
-    | { kind: 'clarify'; message: string },
+  late: { kind: 'success'; value: unknown } | { kind: 'fail'; message: string },
 ): Error {
-  const kind =
-    late.kind === 'success' ? 'taskSuccess' : late.kind === 'fail' ? 'taskFail' : 'taskClarify'
+  const kind = late.kind === 'success' ? 'taskSuccess' : 'taskFail'
   const e = new Error(
     `${kind}() was called from an async function that wasn't awaited at the top level — the terminator fired AFTER ts_action returned, so this turn produced no observable outcome. Add \`await\` before the call (e.g. \`await generateReport()\`) so the terminator unwinds before the action returns. If you genuinely meant to fire-and-forget, prefix the call with \`void\` (the standard JS/TS idiom for intentionally discarding a Promise).`,
   )

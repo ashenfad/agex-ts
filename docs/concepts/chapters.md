@@ -32,7 +32,7 @@ When the agent sees this in its rendered context, it gets the summary plus a pat
 
 ### The chapter task
 
-When a task completes (success / fail / clarify, including the budget-exhausted fail) and the most recent `ActionEvent`'s `inputTokens` exceeds the configured `chapteringTrigger`, the framework invokes the `__chapter__` task. Chaptering fires at task boundaries — never mid-action — so a task always either completes cleanly or runs into the limit and ends, with chaptering happening *between* tasks. This is a regular agex-ts task — auto-registered when `chapteringTrigger` is set, runs through the same action loop as any other task, sees the agent's registered fns / namespaces / classes.
+When a task completes (success / fail, including the budget-exhausted fail) and the most recent `ActionEvent`'s `inputTokens` exceeds the configured `chapteringTrigger`, the framework invokes the `__chapter__` task. Chaptering fires at task boundaries — never mid-action — so a task always either completes cleanly or runs into the limit and ends, with chaptering happening *between* tasks. This is a regular agex-ts task — auto-registered when `chapteringTrigger` is set, runs through the same action loop as any other task, sees the agent's registered fns / namespaces / classes.
 
 A consequence: a single long-running task with no completed sub-tasks gets no relief from chaptering — its only boundary is in-progress until it ends. The deferred [overflow-protection mechanism](https://github.com/ashenfad/agex-ts/blob/main/roadmap.md) covers that case (force task end + chapter + optional resume) when it lands.
 

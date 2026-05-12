@@ -1,17 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import {
-  CancelledError,
-  TaskClarifyError,
-  TaskFailError,
-  TransientError,
-  isTaskControlError,
-} from '../src/errors'
+import { CancelledError, TaskFailError, TransientError, isTaskControlError } from '../src/errors'
 import type { AgentEvent, Emission, ExecResult, TokenChunk } from '../src/types'
 
 describe('errors — task-control brand', () => {
-  it('marks all three task-control variants', () => {
+  it('marks task-control variants', () => {
     expect(isTaskControlError(new TaskFailError('nope'))).toBe(true)
-    expect(isTaskControlError(new TaskClarifyError('?'))).toBe(true)
     expect(isTaskControlError(new CancelledError())).toBe(true)
   })
 

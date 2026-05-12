@@ -247,9 +247,6 @@ export function prettyEvents(event: AgentEvent, opts: PrettyEventOptions = {}): 
     case 'fail':
       write(`[fail] ${event.message}`)
       return
-    case 'clarify':
-      write(`[clarify] ${event.message}`)
-      return
     case 'cancelled':
       write(`[cancelled] ${event.taskName} after ${event.iterationsCompleted} iterations`)
       return

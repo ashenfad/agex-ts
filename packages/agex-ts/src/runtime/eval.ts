@@ -13,7 +13,7 @@
  * - Injects the active policy's `fns` and `namespaces` as
  *   identifiers — same as the worker runtime would expose, just
  *   without the message-passing layer.
- * - Injects `taskSuccess`, `taskFail`, `taskClarify`, `cache`, `fs`
+ * - Injects `taskSuccess`, `taskFail`, `cache`, `fs`
  *   — the standard task-loop bindings the agent's emitted code
  *   expects.
  * - Installs a process-wide ALS-gated `console` proxy so `console.log`
@@ -35,7 +35,7 @@
  */
 
 import tsBlankSpace from 'ts-blank-space'
-import { CancelledError, TaskClarifyError, TaskFailError, isTaskControlError } from '../errors'
+import { CancelledError, TaskFailError, isTaskControlError } from '../errors'
 import type {
   ExecResult,
   ExecuteContext,
@@ -146,8 +146,8 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
 
       let outcome: TaskOutcome = { kind: 'continue' }
       // Per-execute "late terminator" slot. Recorded inside the wrapped
-      // taskSuccess/Fail/Clarify before the throw, so we still know
-      // what the agent meant even when the body has already settled
+      // taskSuccess/Fail before the throw, so we still know what the
+      // agent meant even when the body has already settled
       // (i.e., the call came from a non-awaited async path). After
       // the body settles, `bodySettled` flips and the wrapped
       // terminators stop throwing — they just record and return.
@@ -170,11 +170,6 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
         if (bodySettled) return undefined as never
         throw new TaskFailError(message)
       }
-      const taskClarify = (message: string): never => {
-        recordLate({ kind: 'clarify', message })
-        if (bodySettled) return undefined as never
-        throw new TaskClarifyError(message)
-      }
       // Build the injected name list. Functions go in directly;
       // namespaces are exposed as objects keyed by member name.
       // `inputs` is the validated task input — stable across every
@@ -194,7 +189,6 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
       const injected: Record<string, unknown> = {
         taskSuccess,
         taskFail,
-        taskClarify,
         cache: ctx.cache,
         // Node-fs-style ergonomic wrapper. The agent can write
         // `await fs.read(path, 'utf8')` to get a string back, or
@@ -318,14 +312,13 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
           })
           await Promise.race([userPromise, cancellation])
         })
-        // Promise resolved with no taskSuccess / taskFail / taskClarify —
+        // Promise resolved with no taskSuccess / taskFail —
         // the agent wants another turn.
       } catch (e) {
         if (e instanceof TaskFailErrorButForSuccess) {
           outcome = { kind: 'success', value: e.value }
         } else if (isTaskControlError(e)) {
           if (e.name === 'TaskFailError') outcome = { kind: 'fail', message: e.message }
-          else if (e.name === 'TaskClarifyError') outcome = { kind: 'clarify', message: e.message }
           else if (e.name === 'CancelledError') error = e as Error
         } else {
           error = e instanceof Error ? e : new Error(String(e))
@@ -376,13 +369,7 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
  */
 function makeMissingAwaitError(late: TaskOutcome): Error {
   const kind =
-    late.kind === 'success'
-      ? 'taskSuccess'
-      : late.kind === 'fail'
-        ? 'taskFail'
-        : late.kind === 'clarify'
-          ? 'taskClarify'
-          : 'task terminator'
+    late.kind === 'success' ? 'taskSuccess' : late.kind === 'fail' ? 'taskFail' : 'task terminator'
   const e = new Error(
     `${kind}() was called from an async function that wasn't awaited at the top level — the terminator fired AFTER ts_action returned, so this turn produced no observable outcome. Add \`await\` before the call (e.g. \`await generateReport()\`) so the terminator unwinds before the action returns. If you genuinely meant to fire-and-forget, prefix the call with \`void\` (the standard JS/TS idiom for intentionally discarding a Promise).`,
   )

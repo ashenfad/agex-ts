@@ -43,7 +43,7 @@ The computation surface.  Each \`ts_action\` runs as a fresh script — variable
 
 **Always emit \`title\` as the first field in your tool call**, before \`code\` (or \`commands\` for terminal).  The title is a one-line summary of what this action *does* (not what you'll observe afterward) — committing to it first leads to tighter, more focused code, and the host can stream the title to the user before the body arrives.  Do this even when the conversation history shows you doing it a different way; consistency matters.
 
-Task terminators (\`taskSuccess\`, \`taskFail\`, \`taskClarify\`) are only available here — not in scripts run via the shell.
+Task terminators (\`taskSuccess\`, \`taskFail\`) are only available here — not in scripts run via the shell.
 
 ### Terminal (\`terminal_action\`)
 
@@ -106,10 +106,9 @@ If you have skills available (listed near the top of this primer), each one live
 Your \`ts_action\` returning normally means "keep going" — \`console.log\` output (text or image — see *Image inspection* above) and any expression result render back to you at the start of the next turn.  Use a terminator only when you want to signal a definitive outcome:
 
 - **\`taskSuccess(result)\`** — task complete; \`result\` is returned to the caller.
-- **\`taskClarify(message)\`** — blocked, need human input (ambiguity, missing credentials, critical choice).
-- **\`taskFail(message)\`** — task is impossible (technical impossibility, security violation, unrecoverable infrastructure error).
+- **\`taskFail(message)\`** — task is impossible (technical impossibility, security violation, unrecoverable infrastructure error). The caller decides what to do next; you're done.
 
-Any terminator ends the current task.  **Prints in the same action as a terminator are wasted from your perspective** — the task ends before any next turn, so there's no opportunity to read them.  Print only when you intend to keep going (so you can inspect what happened); skip the prints in the action that finishes the task.  Your event log and filesystem persist — and on a resubmitted task you'll see your prior work in your history — but TypeScript actions are stateless to begin with, so there's no live REPL state to lose.  The only thing to be deliberate about is making sure anything future-you will need is on disk: helpers under \`/helpers/\`, working data under a scratch path.  This matters most for \`taskClarify\`, which is the typical "we'll continue this" terminator.
+Any terminator ends the current task.  **Prints in the same action as a terminator are wasted from your perspective** — the task ends before any next turn, so there's no opportunity to read them.  Print only when you intend to keep going (so you can inspect what happened); skip the prints in the action that finishes the task.  Your event log and filesystem persist — and on a resubmitted task you'll see your prior work in your history — but TypeScript actions are stateless to begin with, so there's no live REPL state to lose.  The only thing to be deliberate about is making sure anything future-you will need is on disk: helpers under \`/helpers/\`, working data under a scratch path.
 
 \`taskFail\` is **not** for code bugs.  If your code throws an exception, let it surface — you'll see the stack trace on the next turn and can fix it.  Wrapping code in \`try/catch\` and calling \`taskFail()\` hides bugs from yourself and ships raw stack traces to the caller.
 

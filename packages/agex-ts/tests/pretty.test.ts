@@ -158,12 +158,11 @@ describe('prettyEvents', () => {
     expect(lines()).toEqual(['[stdout] hello', '[stdout] <image png>'])
   })
 
-  it('formats terminal events (success/fail/clarify/cancelled/error)', () => {
+  it('formats terminal events (success/fail/cancelled/error)', () => {
     const { write, lines } = captureLines()
     const events: AgentEvent[] = [
       { type: 'success', timestamp: ts, agentName: 'a', result: 1 },
       { type: 'fail', timestamp: ts, agentName: 'a', message: 'nope' },
-      { type: 'clarify', timestamp: ts, agentName: 'a', message: 'huh?' },
       {
         type: 'cancelled',
         timestamp: ts,
@@ -184,7 +183,6 @@ describe('prettyEvents', () => {
     expect(lines()).toEqual([
       '[success]',
       '[fail] nope',
-      '[clarify] huh?',
       '[cancelled] t after 3 iterations',
       '[error] TypeError: bad',
     ])

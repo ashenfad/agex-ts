@@ -420,11 +420,9 @@ describe('chaptering — multi-turn parent task triggers at the boundary', () =>
     //    + chapter=1 = 6.
     expect(llm.callCount).toBe(6)
     // 3. Visible terminal events: A success, B success, C success.
-    //    No fail/clarify/cancelled. (Chapter task's own success
-    //    doesn't propagate through onEvent.)
-    const terminals = events.filter(
-      (e) => e.type === 'success' || e.type === 'fail' || e.type === 'clarify',
-    )
+    //    No fail/cancelled. (Chapter task's own success doesn't
+    //    propagate through onEvent.)
+    const terminals = events.filter((e) => e.type === 'success' || e.type === 'fail')
     expect(terminals.length).toBe(3)
     expect(terminals.every((e) => e.type === 'success')).toBe(true)
   })

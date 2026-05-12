@@ -5,7 +5,7 @@
  * code is logged as an `OutputEvent` containing a typed `'error'`
  * `OutputPart`, and the loop continues so the agent can self-correct.
  * Mirrors agex-py's `recoverable_error` semantics — only `TaskSuccess`,
- * `TaskFail`, `TaskClarify`, and cancellation are terminators.
+ * `TaskFail` and cancellation are terminators.
  */
 
 import { describe, expect, it } from 'vitest'
@@ -231,8 +231,7 @@ describe('Agent-code errors are recoverable', () => {
     expect(events.find((e) => e.type === 'cancelled')).toBeDefined()
   })
 
-  it('TaskFail / TaskClarify still work as terminators (not converted to error parts)', async () => {
-    // TaskFail
+  it('TaskFail still works as a terminator (not converted to error parts)', async () => {
     const failResponses: LLMResponse[] = [{ emissions: [{ type: 'ts', code: 'taskFail("nope")' }] }]
     const failAgent = await createAgent({
       name: 'fa',
@@ -240,25 +239,13 @@ describe('Agent-code errors are recoverable', () => {
       runtime: evalRuntime(),
       state: { type: 'versioned', storage: 'memory' },
     })
-    await expect(failAgent.task({ description: 'fail' })(undefined)).rejects.toThrow(/nope/)
-
-    // TaskClarify
-    const clarifyResponses: LLMResponse[] = [
-      { emissions: [{ type: 'ts', code: 'taskClarify("which one?")' }] },
-    ]
-    const clarifyAgent = await createAgent({
-      name: 'cl',
-      llm: new Dummy({ responses: clarifyResponses }),
-      runtime: evalRuntime(),
-      state: { type: 'versioned', storage: 'memory' },
-    })
-    const clarifyEvents: AgentEvent[] = []
+    const failEvents: AgentEvent[] = []
     await expect(
-      clarifyAgent.task({ description: 'clarify' })(undefined, {
-        onEvent: (e) => void clarifyEvents.push(e),
+      failAgent.task({ description: 'fail' })(undefined, {
+        onEvent: (e) => void failEvents.push(e),
       }),
-    ).rejects.toThrow(/which one/)
-    expect(clarifyEvents.find((e) => e.type === 'clarify')).toBeDefined()
+    ).rejects.toThrow(/nope/)
+    expect(failEvents.find((e) => e.type === 'fail')).toBeDefined()
   })
 
   it('stdout printed before the error lands in the same OutputEvent as the error part', async () => {

@@ -114,7 +114,7 @@ describe('buildChaptersOverlay — per-event markdown', () => {
     expect(text).toContain('reasoning')
   })
 
-  it('renders output / success / fail / clarify / cancelled / error', async () => {
+  it('renders output / success / fail / cancelled / error', async () => {
     const ch: ChapterEvent = {
       type: 'chapter',
       timestamp: ts,
@@ -122,7 +122,7 @@ describe('buildChaptersOverlay — per-event markdown', () => {
       name: 'p',
       message: 'm',
       slug: 'p',
-      eventRefs: ['o', 's', 'f', 'c', 'x', 'e'],
+      eventRefs: ['o', 's', 'f', 'x', 'e'],
     }
     const files = await overlayFor(ch, {
       o: {
@@ -136,7 +136,6 @@ describe('buildChaptersOverlay — per-event markdown', () => {
       },
       s: { type: 'success', timestamp: ts, agentName: 'a', result: { ok: true } },
       f: { type: 'fail', timestamp: ts, agentName: 'a', message: 'nope' },
-      c: { type: 'clarify', timestamp: ts, agentName: 'a', message: '?' },
       x: {
         type: 'cancelled',
         timestamp: ts,
@@ -159,9 +158,8 @@ describe('buildChaptersOverlay — per-event markdown', () => {
     expect(out('/p/events/001-output.md')).toContain('image: png')
     expect(out('/p/events/002-success.md')).toContain('"ok": true')
     expect(out('/p/events/003-fail.md')).toContain('nope')
-    expect(out('/p/events/004-clarify.md')).toContain('?')
-    expect(out('/p/events/005-cancelled.md')).toContain('after 3 iterations')
-    expect(out('/p/events/006-error.md')).toContain('TypeError: oops')
+    expect(out('/p/events/004-cancelled.md')).toContain('after 3 iterations')
+    expect(out('/p/events/005-error.md')).toContain('TypeError: oops')
   })
 
   it('skips refs that the resolver returns undefined for', async () => {

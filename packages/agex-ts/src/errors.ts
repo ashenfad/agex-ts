@@ -3,12 +3,12 @@
  *
  * Two flavors:
  *
- * 1. **Task-control errors** (`TaskFailError`, `TaskClarifyError`) are
+ * 1. **Task-control errors** (`TaskFailError`, `CancelledError`) are
  *    thrown from inside a `ts` emission by the agent's call to the
- *    injected `taskFail()` / `taskClarify()`. They carry a brand
- *    symbol so the runtime adapter can recognize them across realms
- *    (a worker can't share `instanceof` with the host, but it can
- *    inspect a property tag).
+ *    injected `taskFail()` (or by the runtime when a task is
+ *    cancelled). They carry a brand symbol so the runtime adapter
+ *    can recognize them across realms (a worker can't share
+ *    `instanceof` with the host, but it can inspect a property tag).
  *
  * 2. **Framework errors** (`AgentError` and its subclasses) are
  *    thrown by agex-ts itself — registration violations, runtime
@@ -21,7 +21,7 @@
 export const TASK_CONTROL_BRAND = '__agex_task_control__'
 
 export interface BrandedTaskError extends Error {
-  readonly [TASK_CONTROL_BRAND]: 'fail' | 'clarify' | 'cancelled'
+  readonly [TASK_CONTROL_BRAND]: 'fail' | 'cancelled'
 }
 
 /** Returns true if `e` is a task-control error from any realm. */
@@ -40,15 +40,6 @@ export class TaskFailError extends Error {
   constructor(message: string) {
     super(message)
     this.name = 'TaskFailError'
-  }
-}
-
-/** Thrown by `taskClarify(message)` inside a `ts` emission. */
-export class TaskClarifyError extends Error {
-  readonly [TASK_CONTROL_BRAND] = 'clarify' as const
-  constructor(message: string) {
-    super(message)
-    this.name = 'TaskClarifyError'
   }
 }
 

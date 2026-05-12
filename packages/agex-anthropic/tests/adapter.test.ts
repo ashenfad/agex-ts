@@ -219,4 +219,53 @@ describe('applyCacheControl', () => {
     const out = applyCacheControl([empty], 0)
     expect(out[0]?.content).toEqual([])
   })
+
+  it('walks back past a trailing empty text block — Anthropic 400s if cache_control sits on one', () => {
+    // The neutral renderer / parser deliberately keep empty or
+    // whitespace-only text in the log so assistant turns aren't
+    // empty; we mustn't pin the breakpoint to one of those.
+    const m: AnthropicMessage = {
+      role: 'assistant',
+      content: [
+        { type: 'text', text: 'real content' },
+        { type: 'text', text: '' },
+      ],
+    }
+    const out = applyCacheControl([m], 0)
+    const blocks = out[0]?.content ?? []
+    const first = blocks[0]
+    const second = blocks[1]
+    if (first?.type !== 'text') throw new Error('expected text')
+    if (second?.type !== 'text') throw new Error('expected text')
+    expect(first.cache_control).toEqual({ type: 'ephemeral', ttl: '1h' })
+    expect(second.cache_control).toBeUndefined()
+  })
+
+  it("drops the breakpoint silently when no block is cacheable (rather than 400'ing)", () => {
+    const m: AnthropicMessage = {
+      role: 'assistant',
+      content: [{ type: 'text', text: '' }],
+    }
+    const out = applyCacheControl([m], 0)
+    const block = out[0]?.content[0]
+    if (block?.type !== 'text') throw new Error('expected text')
+    expect(block.cache_control).toBeUndefined()
+  })
+
+  it('cacheable non-text blocks (tool_use / image / thinking) are valid targets', () => {
+    // Empty-text rejection is text-block-specific. tool_use,
+    // tool_result, image, thinking can all carry cache_control even
+    // when they have no `text` field.
+    const m: AnthropicMessage = {
+      role: 'assistant',
+      content: [{ type: 'tool_use', id: 'u1', name: 'ts_action', input: {} }],
+    }
+    const out = applyCacheControl([m], 0)
+    const block = out[0]?.content[0]
+    if (block?.type !== 'tool_use') throw new Error('expected tool_use')
+    expect((block as { cache_control?: unknown }).cache_control).toEqual({
+      type: 'ephemeral',
+      ttl: '1h',
+    })
+  })
 })

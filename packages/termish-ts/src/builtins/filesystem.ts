@@ -323,16 +323,48 @@ export const mv: CommandHandler = async (ctx) => {
         noClobber: { aliases: ['-n', '--no-clobber'] },
       },
       minPositional: 2,
-      maxPositional: 2,
     },
     'mv',
   )
-  const [src, dst] = parsed.positional as [string, string]
-  if (parsed.flags.noClobber === true && (await ctx.fs.exists(dst))) return
-  try {
-    await ctx.fs.rename(src, dst)
-  } catch (e) {
-    throw new TerminalError(`mv: cannot stat '${src}': ${describeError(e)}`)
+  // Last positional is the destination; everything before is a source.
+  // Matches POSIX `mv` and our own `cp`. Multi-source mandates that
+  // the destination is an existing directory.
+  const sources = parsed.positional.slice(0, -1)
+  const dstArg = parsed.positional[parsed.positional.length - 1] as string
+  const force = parsed.flags.force === true
+  // POSIX: -f overrides -n.
+  const noClobber = !force && parsed.flags.noClobber === true
+
+  const dstIsDir = await ctx.fs.isDir(dstArg)
+  const trailingSlash = dstArg.endsWith('/') && dstArg !== '/'
+
+  if (trailingSlash && !dstIsDir) {
+    throw new TerminalError(`mv: target '${dstArg}': Not a directory`)
+  }
+  if (sources.length > 1 && !dstIsDir) {
+    throw new TerminalError(`mv: target '${dstArg}' is not a directory`)
+  }
+
+  // Strip a single trailing slash for joining; root keeps its slash.
+  const dstNormalized = trailingSlash ? dstArg.slice(0, -1) : dstArg
+
+  for (const src of sources) {
+    const target = dstIsDir ? joinPath(dstNormalized, pathBasename(src.replace(/\/$/, ''))) : dstArg
+    // Reject "move into self" symmetric with cp's check — would be
+    // unrecoverable (rename would shuffle the tree partially).
+    if (dstIsDir) {
+      const srcAbs = resolve(src, ctx.fs.getcwd())
+      const targetAbs = resolve(target, ctx.fs.getcwd())
+      if (targetAbs === srcAbs || targetAbs.startsWith(`${srcAbs}/`)) {
+        throw new TerminalError(`mv: cannot move '${src}' to a subdirectory of itself, '${target}'`)
+      }
+    }
+    if (noClobber && (await ctx.fs.exists(target))) continue
+    try {
+      await ctx.fs.rename(src, target)
+    } catch (e) {
+      throw new TerminalError(`mv: cannot stat '${src}': ${describeError(e)}`)
+    }
   }
 }
 

@@ -35,6 +35,24 @@ export {
  *  without depending on termish-ts directly. */
 export type VirtualFileSystem = FileSystem
 
+/**
+ * Optional host-supplied resolver for unregistered import specifiers.
+ *
+ * When the agent's emitted code contains `import x from 'foo'` and
+ * `'foo'` isn't in the registered namespace map, the runtime calls
+ * the resolver. Returning a URL imports that module; returning `null`
+ * (or throwing) denies the import — the agent sees a `Cannot find
+ * module 'foo'` error on its next turn.
+ *
+ * The resolver may be sync or async; the worker's import-resolution
+ * path awaits async returns naturally.
+ *
+ * Resolution priority: registered namespace → resolver → error.
+ * A specifier matched by a registered namespace never reaches the
+ * resolver.
+ */
+export type NamespaceResolver = (specifier: string) => string | Promise<string | null> | null
+
 // ---------------------------------------------------------------------------
 // Emissions — the LLM's per-turn outputs that the agent loop dispatches
 // ---------------------------------------------------------------------------
@@ -357,11 +375,18 @@ export interface ExecResult {
   readonly outputTokens?: number
 }
 
+export interface RuntimeInitOptions {
+  readonly namespaceResolver?: NamespaceResolver
+}
+
 export interface RuntimeAdapter {
   /** One-time initialization. Called when the agent first runs a task.
    *  Receives the registration policy so the adapter can configure
-   *  module resolution. */
-  init(policy: Policy): Promise<void>
+   *  module resolution. The optional `namespaceResolver` is the
+   *  agent's host-supplied callable for unregistered import
+   *  specifiers; runtimes should route unrecognized names through it
+   *  before erroring with `Cannot find module`. */
+  init(policy: Policy, opts?: RuntimeInitOptions): Promise<void>
   /** Run a single `ts` emission. */
   execute(code: string, ctx: ExecuteContext): Promise<ExecResult>
   /** Release resources. Called when the agent is disposed. */

@@ -39,9 +39,11 @@ import { CancelledError, TaskFailError, isTaskControlError } from '../errors'
 import type {
   ExecResult,
   ExecuteContext,
+  NamespaceResolver,
   OutputPart,
   Policy,
   RuntimeAdapter,
+  RuntimeInitOptions,
   TaskOutcome,
 } from '../types'
 import { installConsoleProxy, makeHostFnContext, runWithCapture } from './console-capture'
@@ -67,6 +69,7 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
   // real console.
   installConsoleProxy()
   let policy: Policy | null = null
+  let resolver: NamespaceResolver | undefined
   const timeoutMs = opts.timeoutMs ?? 5000
   // URL-shipped registration specs, keyed by registered name.
   // Populated at `init()` but NOT imported — the dynamic `import()`
@@ -84,32 +87,56 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
     const cached = urlPromiseCache.get(name)
     if (cached !== undefined) return cached
     const spec = urlSpecs.get(name)
-    if (spec === undefined) {
-      return Promise.reject(
-        new Error(`evalRuntime: __load('${name}') called for an unregistered URL-shipped name`),
-      )
-    }
-    const p = (async () => {
-      try {
-        const mod = (await import(spec.url)) as Record<string, unknown>
-        const value = spec.key === undefined ? mod : mod[spec.key]
-        if (value === undefined) {
-          const e = new Error(
-            `Could not load registered module '${name}' (${spec.url}): module has no '${spec.key}' export (named exports: ${Object.keys(mod).join(', ') || '<none>'})`,
+    if (spec !== undefined) {
+      // Registered URL-shipped name — fetch and pluck the named export.
+      const p = (async () => {
+        try {
+          const mod = (await import(spec.url)) as Record<string, unknown>
+          const value = spec.key === undefined ? mod : mod[spec.key]
+          if (value === undefined) {
+            const e = new Error(
+              `Could not load registered module '${name}' (${spec.url}): module has no '${spec.key}' export (named exports: ${Object.keys(mod).join(', ') || '<none>'})`,
+            )
+            e.name = 'ImportError'
+            throw e
+          }
+          return value
+        } catch (raw) {
+          if (raw instanceof Error && raw.name === 'ImportError') throw raw
+          const reason = raw instanceof Error ? raw.message : String(raw)
+          const wrapped = new Error(
+            `Could not load registered module '${name}' (${spec.url}): ${reason}`,
           )
-          e.name = 'ImportError'
-          throw e
+          wrapped.name = 'ImportError'
+          throw wrapped
         }
-        return value
-      } catch (raw) {
-        if (raw instanceof Error && raw.name === 'ImportError') throw raw
-        const reason = raw instanceof Error ? raw.message : String(raw)
-        const wrapped = new Error(
-          `Could not load registered module '${name}' (${spec.url}): ${reason}`,
-        )
-        wrapped.name = 'ImportError'
-        throw wrapped
+      })()
+      urlPromiseCache.set(name, p)
+      p.catch(() => undefined)
+      return p
+    }
+    // Unregistered name. If a resolver is configured, ask it for a
+    // URL; otherwise (or if it returns null / throws) fail with the
+    // standardized `Cannot find module 'X'` error the agent's
+    // training data recognizes as the canonical "module missing"
+    // signal.
+    const p = (async () => {
+      if (resolver !== undefined) {
+        let url: string | null = null
+        try {
+          url = await Promise.resolve(resolver(name))
+        } catch {
+          url = null
+        }
+        if (url !== null) {
+          // Cache the resolution as a urlSpec entry so subsequent
+          // imports take the registered path (even if the resolver
+          // changed — module resolution is sticky once a name lands).
+          urlSpecs.set(name, { url, key: undefined })
+          return await import(url)
+        }
       }
+      throw new Error(`Cannot find module '${name}'`)
     })()
     urlPromiseCache.set(name, p)
     p.catch(() => undefined)
@@ -117,8 +144,9 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
   }
 
   return {
-    async init(p: Policy): Promise<void> {
+    async init(p: Policy, initOpts: RuntimeInitOptions = {}): Promise<void> {
       policy = p
+      resolver = initOpts.namespaceResolver
       urlSpecs.clear()
       urlPromiseCache.clear()
       // Record specs only — no imports fire here. Same `key`

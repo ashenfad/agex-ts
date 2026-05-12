@@ -78,6 +78,19 @@ const v = new Vec(3, 4)
 taskSuccess({ avg: m, magnitude: v.magnitude() })
 ```
 
+If you want the agent to reach for arbitrary npm-style imports without pre-registering each one, add a `namespaceResolver` on `AgentOptions` — the runtime calls it for any specifier the registry doesn't know:
+
+```ts
+const agent = await createAgent({
+  name: 'data',
+  llm,
+  runtime: evalRuntime(),
+  namespaceResolver: (name) => `https://esm.sh/${name}`,
+})
+```
+
+See [Registration § namespaceResolver](api/registration.md#namespaceresolver) for the contract and tradeoffs.
+
 ## Tasks: typed contracts
 
 `agent.task({...})` returns a typed function. The agent fills in the body.

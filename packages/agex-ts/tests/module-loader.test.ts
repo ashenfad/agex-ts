@@ -149,12 +149,15 @@ import '/helpers/d'
     expect(c.default).toBe(4)
   })
 
-  it('passes through non-VFS imports (react, node:fs) unchanged', async () => {
+  it('rewrites non-VFS imports to `__load` calls (resolver-handled or fail at runtime)', async () => {
+    // Unrecognized bare specifiers route through __load, which the
+    // runtime's resolver fallback handles or fails with the
+    // standardized `Cannot find module 'X'` error.
     const fs = new MemoryFS()
     const src = "import { useState } from 'react'\nimport fs from 'node:fs'"
     const out = await prepareScript(src, fs)
-    expect(out.code).toContain("from 'react'")
-    expect(out.code).toContain("from 'node:fs'")
+    expect(out.code).toContain('await __load("react")')
+    expect(out.code).toContain('await __load("node:fs")')
   })
 
   it('resolves helper-of-helper imports recursively', async () => {

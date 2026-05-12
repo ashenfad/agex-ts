@@ -156,6 +156,11 @@ export interface ConfigureMessage {
    *  hitting the network. See `WorkerRuntimeOptions.routeFetchToVfs`
    *  for the user-facing semantics. Absent → no shim installed. */
   readonly routeFetchToVfs?: boolean | ReadonlyArray<string>
+  /** When true, the agent has a host-side `namespaceResolver`
+   *  configured. The worker's `__load(name)` will RPC the host via
+   *  `resolveNamespace` when a name isn't in `urlModules`. Default
+   *  false: unrecognized names fail with `Cannot find module 'X'`. */
+  readonly hasNamespaceResolver?: boolean
 }
 
 export type Host2WorkerMessage =
@@ -207,6 +212,14 @@ export type Host2WorkerMessage =
       readonly callId: number
       readonly ok: false
       readonly error: SerializedError
+    }
+  | {
+      /** Reply to a worker-initiated `resolveNamespace`. The URL (or
+       *  `null` to deny) the host's resolver returned. */
+      readonly type: 'resolveNamespaceResponse'
+      readonly executeId: number
+      readonly callId: number
+      readonly url: string | null
     }
 
 export type Worker2HostMessage =
@@ -267,4 +280,14 @@ export type Worker2HostMessage =
       readonly executeId: number
       readonly outcome: TaskOutcome
       readonly error: SerializedError | null
+    }
+  | {
+      /** Worker's `__load(name)` got a name not in `urlSpecs` and the
+       *  agent has a host-side `namespaceResolver` configured. Asks
+       *  the host for the URL to fetch. Host replies with
+       *  `resolveNamespaceResponse` (URL or null). */
+      readonly type: 'resolveNamespace'
+      readonly executeId: number
+      readonly callId: number
+      readonly specifier: string
     }

@@ -318,16 +318,24 @@ export async function prepareScriptForWire(
       out = out.slice(0, imp.start) + replacement + out.slice(imp.end)
       continue
     }
-    if (registeredNames.has(imp.path)) {
-      if (imp.isReexport) {
-        out = `${out.slice(0, imp.start)}/* re-export skipped */${out.slice(imp.end)}`
-        continue
-      }
-      const replacement = urlNames.has(imp.path)
-        ? rewriteAsUrlLoad(imp.binding, imp.path)
-        : rewriteAsRegisteredAccess(imp.binding, imp.path)
-      out = out.slice(0, imp.start) + replacement + out.slice(imp.end)
+    // Re-exports aren't valid in script context; strip them.
+    if (imp.isReexport) {
+      out = `${out.slice(0, imp.start)}/* re-export skipped */${out.slice(imp.end)}`
+      continue
     }
+    // Three rewrite buckets for non-VFS specifiers:
+    //   - Host-bound registered names → `__registered['name']` lookup.
+    //     Cheapest path; no async, value already in scope.
+    //   - URL-shipped registered names → `await __load('name')`.
+    //   - Anything else → `await __load('name')` too. The runtime's
+    //     `__load` decides what to do: hand off to the host's
+    //     `namespaceResolver` if configured, else throw `Cannot find
+    //     module 'X'`. Either way, the failure path is uniform.
+    const isHostBound = registeredNames.has(imp.path) && !urlNames.has(imp.path)
+    const replacement = isHostBound
+      ? rewriteAsRegisteredAccess(imp.binding, imp.path)
+      : rewriteAsUrlLoad(imp.binding, imp.path)
+    out = out.slice(0, imp.start) + replacement + out.slice(imp.end)
   }
   return { code: out, helpers }
 }

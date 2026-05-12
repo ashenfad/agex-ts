@@ -1435,6 +1435,86 @@ describe('workerRuntime — URL-shipped registrations', () => {
   })
 })
 
+describe('workerRuntime — namespaceResolver', () => {
+  let disposers: Array<() => Promise<void>> = []
+  afterEach(async () => {
+    await Promise.all(disposers.map((d) => d()))
+    disposers = []
+  })
+
+  function runtime() {
+    const rt = workerRuntime({ workerUrl: TEST_WORKER_URL, timeoutMs: 2_000 })
+    disposers.push(() => rt.dispose())
+    return rt
+  }
+
+  // Same fixture used by URL-shipped tests above. The host-side
+  // resolver returns this URL when the agent imports an unregistered
+  // specifier; the worker round-trips via `resolveNamespace` RPC and
+  // dynamic-imports the URL inside the worker realm.
+  const FIXTURE_URL = new URL('./fixtures/url-module.ts', import.meta.url).href
+
+  it('resolves an unregistered specifier via the host resolver (RPC round-trip)', async () => {
+    const rt = runtime()
+    const seen: string[] = []
+    await rt.init(EMPTY_POLICY, {
+      namespaceResolver: (name) => {
+        seen.push(name)
+        return name === 'fixture' ? FIXTURE_URL : null
+      },
+    })
+    const code = `
+      import { Vec } from 'fixture'
+      const v = new Vec(3, 4)
+      taskSuccess(v.magnitude())
+    `
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: 5 })
+    expect(seen).toEqual(['fixture'])
+  })
+
+  it('falls through to "Cannot find module" when the resolver returns null', async () => {
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY, { namespaceResolver: () => null })
+    const code = `
+      import * as react from 'react'
+      taskSuccess(react)
+    `
+    const result = await rt.execute(code, makeCtx())
+    expect(result.outcome).toEqual({ kind: 'continue' })
+    expect(result.error?.message).toMatch(/Cannot find module 'react'/)
+  })
+
+  it('caches the first resolution across executes — resolver fires once per specifier', async () => {
+    const rt = runtime()
+    let calls = 0
+    await rt.init(EMPTY_POLICY, {
+      namespaceResolver: (name) => {
+        calls++
+        return name === 'fixture' ? FIXTURE_URL : null
+      },
+    })
+    const ctx = makeCtx()
+    const a = await rt.execute(
+      `
+      import { Vec } from 'fixture'
+      taskSuccess(new Vec(3, 4).magnitude())
+    `,
+      ctx,
+    )
+    expect(a.outcome).toEqual({ kind: 'success', value: 5 })
+    const b = await rt.execute(
+      `
+      import { Vec } from 'fixture'
+      taskSuccess(new Vec(6, 8).magnitude())
+    `,
+      ctx,
+    )
+    expect(b.outcome).toEqual({ kind: 'success', value: 10 })
+    expect(calls).toBe(1)
+  })
+})
+
 describe('workerRuntime — /helpers/*.ts ESM', () => {
   let disposers: Array<() => Promise<void>> = []
   afterEach(async () => {
@@ -1721,11 +1801,10 @@ describe('workerRuntime — import syntax for registered names', () => {
     expect(result.outcome).toEqual({ kind: 'success', value: 22 })
   })
 
-  it('passes through (and breaks) imports of unregistered specifiers', async () => {
-    // `import 'react'` doesn't match any registered name and isn't
-    // a VFS path — passes through unchanged. AsyncFunction throws
-    // SyntaxError, which surfaces as a clean execute error. The
-    // message points the agent at what they tried to import.
+  it('imports of unregistered specifiers fail with `Cannot find module`', async () => {
+    // Without a namespaceResolver configured, unrecognized bare
+    // specifiers route through __load and produce the standardized
+    // "module missing" error the agent's training data recognizes.
     const rt = runtime()
     await rt.init(EMPTY_POLICY)
     const code = `
@@ -1734,7 +1813,7 @@ describe('workerRuntime — import syntax for registered names', () => {
     `
     const result = await rt.execute(code, makeCtx())
     expect(result.outcome).toEqual({ kind: 'continue' })
-    expect(result.error?.message).toMatch(/import statement/)
+    expect(result.error?.message).toMatch(/Cannot find module 'react'/)
   })
 })
 

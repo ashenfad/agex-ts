@@ -107,7 +107,11 @@ export function makeTask<I, O>(
     }
 
     // -- Initialize runtime ----------------------------------------------
-    await runtimeAdapter.init(agent.policy())
+    await runtimeAdapter.init(agent.policy(), {
+      ...(agent.namespaceResolver !== undefined && {
+        namespaceResolver: agent.namespaceResolver,
+      }),
+    })
 
     // Make sure registered skills are visible at /skills/<name>/SKILL.md
     // before the agent starts running.

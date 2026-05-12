@@ -39,19 +39,41 @@ describe('detectImage', () => {
     expect(detectImage({ data: 'abc' })).toBeNull()
     expect(detectImage({ format: 'png', data: '' })).toBeNull()
   })
-  it('accepts data:image URLs', () => {
-    expect(detectImage('data:image/png;base64,iVBORw0KGgo')).toEqual({
+  it('accepts data:image URLs whose payload magic-bytes match the declared format and meet the length floor', () => {
+    // Payload's first 12 bytes round-trip to a valid PNG / WebP
+    // signature, and the payload as a whole clears the length floor
+    // (~96 base64 chars, the minimum plausible image size).
+    const padding = new Uint8Array(80) // → ~108 base64 chars on top of magic
+    const pngB64 = bytesToBase64(new Uint8Array([...PNG, ...padding]))
+    expect(detectImage(`data:image/png;base64,${pngB64}`)).toEqual({
       format: 'png',
-      data: 'iVBORw0KGgo',
+      data: pngB64,
     })
-    expect(detectImage('data:image/webp;base64,UklGR')).toEqual({
+    const webpB64 = bytesToBase64(new Uint8Array([...WEBP, ...padding]))
+    expect(detectImage(`data:image/webp;base64,${webpB64}`)).toEqual({
       format: 'webp',
-      data: 'UklGR',
+      data: webpB64,
     })
   })
   it('rejects unsupported data URL formats', () => {
     expect(detectImage('data:image/gif;base64,abc')).toBeNull()
     expect(detectImage('not a data url')).toBeNull()
+  })
+  it('rejects a truncated data URL — payload below the length floor', () => {
+    // Common debug shape: `console.log(dataUrl.slice(0, 40))`. The
+    // slice keeps the MIME prefix and the leading PNG magic bytes
+    // (so magic-byte validation alone wouldn't catch it), but the
+    // payload is far too short to be a real image — the provider
+    // would otherwise 400 on it.
+    const real = `data:image/png;base64,${bytesToBase64(new Uint8Array([...PNG, ...new Uint8Array(80)]))}`
+    expect(detectImage(real.slice(0, 40))).toBeNull()
+  })
+  it("rejects a data URL whose decoded prefix doesn't match the declared format", () => {
+    // Caller mislabels: a long payload that's actually JPEG bytes
+    // claims to be a PNG. Length passes but magic-byte check rejects.
+    const padding = new Uint8Array(80)
+    const jpegB64 = bytesToBase64(new Uint8Array([...JPEG, ...padding]))
+    expect(detectImage(`data:image/png;base64,${jpegB64}`)).toBeNull()
   })
   it('accepts Uint8Array with PNG/JPEG/WebP magic', () => {
     const png = detectImage(PNG)

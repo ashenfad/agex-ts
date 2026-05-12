@@ -116,6 +116,72 @@ describe('task — AbortSignal', () => {
   })
 })
 
+describe('task — no-action nudge', () => {
+  it('appends a [System reminder] output when the action emits only text', async () => {
+    // Narration-only turn. Without the nudge the agent's next turn
+    // sees the same context and tends to loop on "Done. Standing by."
+    const { agent } = await makeAgent([
+      r({ type: 'text', text: 'Done. Standing by.' }),
+      r({ type: 'ts', code: 'taskSuccess("ok")' }),
+    ])
+    const fn = agent.task<undefined, string>({ description: 'X.' })
+    const events: AgentEvent[] = []
+    const result = await fn(undefined, { onEvent: (e) => void events.push(e) })
+    expect(result).toBe('ok')
+    const reminders = events.filter(
+      (e) =>
+        e.type === 'output' &&
+        (e as { parts: ReadonlyArray<{ type: string; text?: string }> }).parts.some(
+          (p) => p.type === 'text' && (p.text ?? '').startsWith('[System reminder]'),
+        ),
+    )
+    expect(reminders).toHaveLength(1)
+  })
+
+  it('does NOT fire the nudge when the action contains an actionable emission', async () => {
+    // Even if the ts_action just continues (no terminator), an
+    // actionable emission counts — the agent could be deliberately
+    // running an exploratory turn.
+    const { agent } = await makeAgent([
+      r({ type: 'ts', code: '/* poke around */' }),
+      r({ type: 'ts', code: 'taskSuccess(1)' }),
+    ])
+    const fn = agent.task<undefined, number>({ description: 'X.' })
+    const events: AgentEvent[] = []
+    await fn(undefined, { onEvent: (e) => void events.push(e) })
+    const reminders = events.filter(
+      (e) =>
+        e.type === 'output' &&
+        (e as { parts: ReadonlyArray<{ type: string; text?: string }> }).parts.some(
+          (p) => p.type === 'text' && (p.text ?? '').startsWith('[System reminder]'),
+        ),
+    )
+    expect(reminders).toHaveLength(0)
+  })
+
+  it("the reminder reaches the model's next turn as plain user text", async () => {
+    // End-to-end check on the rendered conversation: after a
+    // narration-only turn, the next LLMRequest's last user turn
+    // should contain the reminder as plain text (not as a
+    // tool_result, because there's no tool_use to pair with).
+    const { agent, llm } = await makeAgent([
+      r({ type: 'text', text: 'thinking out loud' }),
+      r({ type: 'ts', code: 'taskSuccess(1)' }),
+    ])
+    const fn = agent.task<undefined, number>({ description: 'X.' })
+    await fn(undefined)
+    // Second LLM call sees the nudge in its incoming turns.
+    const secondCall = llm.allTurns[1] ?? []
+    const lastTurn = secondCall[secondCall.length - 1]
+    expect(lastTurn?.role).toBe('user')
+    const text = (lastTurn?.content ?? [])
+      .filter((p) => p.type === 'text')
+      .map((p) => (p as { text: string }).text)
+      .join('\n')
+    expect(text).toMatch(/\[System reminder\]/)
+  })
+})
+
 describe('task — missing config', () => {
   it('throws if no llm is configured', async () => {
     const a = await createAgent({ name: 'T', runtime: evalRuntime() })

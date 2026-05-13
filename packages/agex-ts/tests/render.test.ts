@@ -437,7 +437,7 @@ describe('renderEvents', () => {
     expect(texts[2]).toContain('3 iterations')
   })
 
-  it('skips framework-only events (error / file / systemNote)', () => {
+  it('skips framework-only events (error / systemNote / agent-source file)', () => {
     const events: AgentEvent[] = [
       {
         type: 'error',
@@ -453,12 +453,100 @@ describe('renderEvents', () => {
         timestamp: ts,
         agentName: 'a',
         source: 'agent',
+        added: ['/foo'],
+        modified: [],
+        removed: [],
+      },
+    ]
+    expect(renderEvents(events)).toEqual([])
+  })
+
+  it('surfaces user-source FileEvents as a [System reminder] in the next user turn', () => {
+    // Embedder drops files into the VFS mid-session — the agent
+    // can't see VFS changes until it probes, so we route the event
+    // into the next user turn as a system-flavored reminder.
+    const events: AgentEvent[] = [
+      {
+        type: 'file',
+        timestamp: ts,
+        agentName: 'a',
+        source: 'user',
+        added: ['/inbox/foo.png', '/inbox/data.csv'],
+        modified: ['/helpers/utils.ts'],
+        removed: ['/old.txt'],
+      },
+    ]
+    const turns = renderEvents(events)
+    expect(turns).toHaveLength(1)
+    const turn = turns[0]
+    expect(turn?.role).toBe('user')
+    const text = (turn?.content ?? [])
+      .filter((p) => p.type === 'text')
+      .map((p) => (p as { text: string }).text)
+      .join('\n')
+    expect(text).toMatch(/^\[System reminder\] User changes to VFS/)
+    expect(text).toMatch(/added: \/inbox\/foo\.png, \/inbox\/data\.csv/)
+    expect(text).toMatch(/modified: \/helpers\/utils\.ts/)
+    expect(text).toMatch(/removed: \/old\.txt/)
+  })
+
+  it('skips a user-source FileEvent with no actual changes', () => {
+    // Defensive: an embedder might emit a no-op event. Don't
+    // inject an empty bracketed line.
+    const events: AgentEvent[] = [
+      {
+        type: 'file',
+        timestamp: ts,
+        agentName: 'a',
+        source: 'user',
         added: [],
         modified: [],
         removed: [],
       },
     ]
     expect(renderEvents(events)).toEqual([])
+  })
+
+  it('merges a user-source FileEvent into the tool_result user turn that follows an action', () => {
+    // When the FileEvent lands between an action and the next
+    // taskStart/action, the reminder text rides in the same user
+    // turn as that action's tool_results — Anthropic/OpenAI both
+    // accept text + tool_result blocks side by side, and we don't
+    // want to split the user turn.
+    const action: ActionEvent = {
+      type: 'action',
+      timestamp: ts,
+      agentName: 'a',
+      emissions: [{ type: 'ts', code: 'console.log(1)' }],
+    }
+    const output: OutputEvent = {
+      type: 'output',
+      timestamp: ts,
+      agentName: 'a',
+      emissionId: makeToolUseId(ts, 0),
+      parts: [{ type: 'text', text: 'one' }],
+    }
+    const fileEvent: AgentEvent = {
+      type: 'file',
+      timestamp: ts,
+      agentName: 'a',
+      source: 'user',
+      added: ['/inbox/foo.png'],
+      modified: [],
+      removed: [],
+    }
+    const turns = renderEvents([action, output, fileEvent])
+    // assistant action + single user turn (tool_result + reminder).
+    expect(turns).toHaveLength(2)
+    const userTurn = turns[1]
+    expect(userTurn?.role).toBe('user')
+    const hasToolResult = (userTurn?.content ?? []).some((p) => p.type === 'toolResult')
+    const text = (userTurn?.content ?? [])
+      .filter((p) => p.type === 'text')
+      .map((p) => (p as { text: string }).text)
+      .join('\n')
+    expect(hasToolResult).toBe(true)
+    expect(text).toMatch(/\[System reminder\] User changes to VFS — added: \/inbox\/foo\.png/)
   })
 })
 

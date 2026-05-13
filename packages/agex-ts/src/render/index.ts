@@ -34,6 +34,7 @@ import type {
   AgentEvent,
   ChapterEvent,
   Emission,
+  FileEvent,
   ImageFormat,
   OutputPart,
 } from '../types'
@@ -120,8 +121,13 @@ export interface NeutralTurn {
 /** Render a sequence of events as a neutral conversation. The
  *  returned turns are ordered chronologically. Skipped events:
  *
- *    - `error` / `file` / `systemNote` — framework metadata, not
- *      conversation
+ *    - `error` / `systemNote` — framework metadata, not conversation
+ *    - `file` with `source: 'agent'` — already covered by the
+ *      per-emission tool_result for `fileWrite` / `fileEdit`
+ *
+ * `file` with `source: 'user'` is surfaced as a `[System reminder]`
+ * line in the next user turn so the agent notices files the
+ * embedder dropped into the VFS mid-session.
  *
  * Rendered events:
  *
@@ -254,8 +260,24 @@ export function renderEvents(events: ReadonlyArray<AgentEvent>): NeutralTurn[] {
         )
         break
       }
+      case 'file': {
+        // User-source FileEvents represent the embedder dropping
+        // files into the VFS mid-session. The agent can't see this
+        // change until it probes with `ls`, so surface it as a
+        // `[System reminder]` line in the next user turn — same
+        // `pendingTrailingParts` hook the no-action nudge uses, so
+        // it merges naturally with any pending tool_results.
+        //
+        // Agent-source FileEvents stay skipped: the per-emission
+        // tool_result for `fileWrite` / `fileEdit` already conveys
+        // what the agent did.
+        if (event.source === 'user') {
+          const summary = renderUserFileEventText(event)
+          if (summary !== null) pendingTrailingParts.push({ type: 'text', text: summary })
+        }
+        break
+      }
       case 'error':
-      case 'file':
       case 'systemNote':
         break
       default: {
@@ -275,6 +297,20 @@ export function renderEvents(events: ReadonlyArray<AgentEvent>): NeutralTurn[] {
  *  hint so the agent can drill in via its VFS tools. */
 export function renderChapterText(event: ChapterEvent): string {
   return `📖 Chapter: "${event.name}"\n\n${event.message}\n\nFull details: /chapters/${event.slug}/`
+}
+
+/** Render a user-source FileEvent as a bracketed system-reminder
+ *  line for the next user turn. Returns `null` if the event carries
+ *  no actual changes (all three lists empty), so the caller skips
+ *  injecting an empty reminder. Format mirrors the no-action nudge
+ *  bracket style so the model reads both as framework meta. */
+export function renderUserFileEventText(event: FileEvent): string | null {
+  const sections: string[] = []
+  if (event.added.length > 0) sections.push(`added: ${event.added.join(', ')}`)
+  if (event.modified.length > 0) sections.push(`modified: ${event.modified.join(', ')}`)
+  if (event.removed.length > 0) sections.push(`removed: ${event.removed.join(', ')}`)
+  if (sections.length === 0) return null
+  return `[System reminder] User changes to VFS — ${sections.join('; ')}`
 }
 
 /** Stable deterministic toolUseId for a given action position. The

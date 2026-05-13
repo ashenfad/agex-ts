@@ -74,14 +74,14 @@ A Virtual Filesystem is your durable workspace.  TypeScript actions and shell co
 
 ### Cache (\`cache\`)
 
-A persistent typed key-value store scoped to your agent session — survives across actions and tasks, isolated per session.  Use it for in-memory data structures you want to remember without round-tripping through the filesystem.
+A persistent typed key-value store scoped to your agent session — survives across actions and tasks, isolated per session.  Use it for plain data you want to remember without round-tripping through the filesystem.
 
-- \`await cache.set('model', fittedModel)\` — store
-- \`await cache.get('model')\` — retrieve, returns \`undefined\` if absent
-- \`await cache.delete('model')\` — forget
+- \`await cache.set('rows', parsedRows)\` — store
+- \`await cache.get('rows')\` — retrieve, returns \`undefined\` if absent
+- \`await cache.delete('rows')\` — forget
 - \`await cache.keys()\` — see what's there
 
-Cache values must be structured-clone-able when they cross any worker boundary; functions, closures, and live host instances don't survive — use them only within a single action and persist their state via plain data.  For files (text, binaries, generated artifacts), prefer the VFS — cache is for in-memory data structures.
+**Cache only what survives a round-trip.**  Cache values cross between the worker and the host on every read/write, which means they pass through \`structuredClone\` (or JSON when state is persisted), so methods and class identity are stripped.  Plain data — objects, arrays, strings, numbers, \`Date\`, \`Map\`, \`Set\`, \`Uint8Array\` — survives intact.  Class instances do not: a cached Arquero table comes back as a bag of properties with no \`.filter()\` / \`.rollup()\` / \`.toCSV()\`, a cached DuckDB connection comes back useless, a fitted model loses its \`.predict()\`.  Convert to a portable shape on set and rebuild on get — e.g. \`cache.set('t', table.toCSV())\` paired with \`arquero.fromCSV(await cache.get('t'))\`, or \`cache.set('rows', table.objects())\` for an array of plain rows.  References stay live within a single action (no boundary crossing), but assume every other turn pays a round-trip.  For files (text, binaries, generated artifacts), prefer the VFS — cache is for small in-memory data.
 
 ### Image inspection
 

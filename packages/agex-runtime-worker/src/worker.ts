@@ -137,24 +137,41 @@ function makeConsole(executeId: number): Console {
   } as any
 }
 
+/** Per-arg cap for captured-console output. Applied uniformly across
+ *  every type so a `console.log(JSON.stringify(big))` (string path)
+ *  is bounded just like `console.log(big)` (object path) — the two
+ *  idioms used to diverge wildly, with the string variant bypassing
+ *  the cap entirely and blowing past LLM context windows on the
+ *  next turn. 50 KB leaves room for honest debugging output
+ *  (formatted JSON dumps, log-line bundles) while tripping the
+ *  truncation marker on data-URI floods, base64-embedded
+ *  resources, and the like. */
+const MAX_CAPTURE_BYTES = 50_000
+
+function _cap(s: string): string {
+  return s.length > MAX_CAPTURE_BYTES
+    ? `${s.slice(0, MAX_CAPTURE_BYTES)}…(truncated, original ${s.length} bytes)`
+    : s
+}
+
 /** Best-effort string conversion — picks `JSON.stringify` for plain
- *  objects, falls back to `String(...)` for everything else. Caps
- *  long output so a runaway `console.log(hugeObj)` doesn't blow the
- *  message channel. */
+ *  objects, falls back to `String(...)` for everything else. Every
+ *  branch funnels through `_cap` so the cap is honored regardless of
+ *  how the agent arrived at its log argument. */
 function safeStringify(v: unknown): string {
   if (v === null) return 'null'
   if (v === undefined) return 'undefined'
   const t = typeof v
-  if (t === 'string') return v as string
+  if (t === 'string') return _cap(v as string)
   if (t === 'number' || t === 'boolean' || t === 'bigint') return String(v)
   if (t === 'function') return '[function]'
   try {
     const json = JSON.stringify(v)
-    if (json === undefined) return String(v) // e.g. circular caught by stringify
-    return json.length > 10_000 ? `${json.slice(0, 10_000)}…(truncated)` : json
+    if (json === undefined) return _cap(String(v)) // e.g. circular caught by stringify
+    return _cap(json)
   } catch {
     try {
-      return String(v)
+      return _cap(String(v))
     } catch {
       return '[unserializable]'
     }

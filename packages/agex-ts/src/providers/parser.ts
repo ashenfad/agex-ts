@@ -61,7 +61,16 @@ const EDIT_FILE_KEY_MAP: Readonly<Record<string, TokenChunkType>> = {
   content: 'fileContent',
 }
 
-function keyMapFor(toolName: ToolName): Readonly<Record<string, TokenChunkType>> {
+const EMPTY_KEY_MAP: Readonly<Record<string, TokenChunkType>> = Object.freeze({})
+
+function keyMapFor(toolName: string): Readonly<Record<string, TokenChunkType>> {
+  // Parameter typed as `string` rather than `ToolName` because the
+  // runtime value comes straight from the LLM's tool_use block —
+  // models occasionally hallucinate a tool name that isn't in our
+  // registered schema set, and we need to fail soft. Returning an
+  // empty map means `feedArgs` lookups skip silently while raw
+  // bytes still accumulate for `finalize`'s synthetic-TextEmission
+  // fallback.
   switch (toolName) {
     case TOOL_TS:
       return TS_KEY_MAP
@@ -71,11 +80,18 @@ function keyMapFor(toolName: ToolName): Readonly<Record<string, TokenChunkType>>
       return WRITE_FILE_KEY_MAP
     case TOOL_EDIT_FILE:
       return EDIT_FILE_KEY_MAP
+    default:
+      return EMPTY_KEY_MAP
   }
 }
 
 class CallState {
-  readonly toolName: ToolName
+  // `string`, not `ToolName`, because models occasionally hallucinate
+  // a tool name that isn't in our schema set. We accept whatever the
+  // provider streams and let `keyMapFor` + `buildEmission` route the
+  // unknown case through the synthetic-TextEmission fallback rather
+  // than crash.
+  readonly toolName: string
   readonly emissionIndex: number
   /** Per-call opaque signature the provider wants round-tripped on
    *  subsequent turns (Gemini's `thoughtSignature`). Threaded onto
@@ -86,7 +102,7 @@ class CallState {
   private readonly rawBuf: string[] = []
   private readonly keyMap: Readonly<Record<string, TokenChunkType>>
 
-  constructor(toolName: ToolName, emissionIndex: number, signature?: Uint8Array) {
+  constructor(toolName: string, emissionIndex: number, signature?: Uint8Array) {
     this.toolName = toolName
     this.emissionIndex = emissionIndex
     if (signature !== undefined) this.signature = signature
@@ -143,7 +159,19 @@ class CallState {
     const args = parsed as Record<string, unknown>
     const emission = this.buildEmission(args)
     if (emission === null) {
-      return fallback('required fields missing (e.g. path / search)')
+      // Distinguish "unknown tool" from "required field missing"
+      // in the fallback message — the former points the model at
+      // its schema, the latter at the args it sent.
+      const known =
+        this.toolName === TOOL_TS ||
+        this.toolName === TOOL_TERMINAL ||
+        this.toolName === TOOL_WRITE_FILE ||
+        this.toolName === TOOL_EDIT_FILE
+      return fallback(
+        known
+          ? 'required fields missing (e.g. path / search)'
+          : `unknown tool name "${this.toolName}" — not in the registered schema set`,
+      )
     }
     return {
       type: 'emission',
@@ -164,6 +192,11 @@ class CallState {
         return buildWriteFileEmission(args, this.signature)
       case TOOL_EDIT_FILE:
         return buildEditFileEmission(args, this.signature)
+      default:
+        // Unknown tool name (LLM hallucination). Return null so
+        // `finalize()` routes through the synthetic-TextEmission
+        // fallback that names the offending tool.
+        return null
     }
   }
 }

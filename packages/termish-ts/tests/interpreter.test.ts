@@ -262,3 +262,58 @@ describe('execute — empty / whitespace input', () => {
     expect(await execute('   \t  ', new MemoryFS())).toBe('')
   })
 })
+
+describe('execute — maxOutputChars', () => {
+  it('passes output through unchanged when under the cap', async () => {
+    const fs = new MemoryFS()
+    await fs.write('/small.txt', bytes('hello'))
+    const out = await execute('cat /small.txt', fs, { maxOutputChars: 100 })
+    expect(out).toBe('hello')
+  })
+
+  it('truncates and appends a marker when output exceeds the cap', async () => {
+    const fs = new MemoryFS()
+    const payload = 'x'.repeat(500)
+    await fs.write('/big.txt', bytes(payload))
+    const out = await execute('cat /big.txt', fs, { maxOutputChars: 100 })
+    expect(out.startsWith('x'.repeat(100))).toBe(true)
+    expect(out).toContain('<truncated: 400 more characters')
+    expect(out).toContain('head/tail/grep/sed')
+  })
+
+  it('does not split a surrogate pair at the cap boundary', async () => {
+    const fs = new MemoryFS()
+    // 𝄞 (U+1D11E) encodes as a high+low surrogate pair in JS strings.
+    // If the cap lands between the two units, the marker should appear
+    // before the pair, not in the middle of it.
+    const payload = `aaaaaaaaa${'𝄞'.repeat(50)}`
+    await fs.write('/u.txt', bytes(payload))
+    const out = await execute('cat /u.txt', fs, { maxOutputChars: 10 })
+    // The 10th UTF-16 code unit is a high surrogate; cap should pull
+    // back to 9 so we don't emit a lone half-pair.
+    expect(out.startsWith('aaaaaaaaa')).toBe(true)
+    expect(out).toContain('<truncated:')
+  })
+
+  it('treats maxOutputChars=0 / undefined as "no cap"', async () => {
+    const fs = new MemoryFS()
+    const payload = 'y'.repeat(1000)
+    await fs.write('/big.txt', bytes(payload))
+    expect(await execute('cat /big.txt', fs, { maxOutputChars: 0 })).toBe(payload)
+    expect(await execute('cat /big.txt', fs)).toBe(payload)
+  })
+
+  it('caps partialOutput on TerminalError too', async () => {
+    const fs = new MemoryFS()
+    await fs.write('/big.txt', bytes('z'.repeat(500)))
+    // First pipeline accumulates output, second fails.
+    try {
+      await execute('cat /big.txt; cat /missing', fs, { maxOutputChars: 100 })
+      throw new Error('expected throw')
+    } catch (e) {
+      expect(e).toBeInstanceOf(TerminalError)
+      const partial = (e as TerminalError).partialOutput
+      expect(partial).toContain('<truncated: 400 more characters')
+    }
+  })
+})

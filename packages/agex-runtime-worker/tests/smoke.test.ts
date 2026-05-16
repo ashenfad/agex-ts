@@ -232,6 +232,51 @@ describe('workerRuntime', () => {
     expect(result.outputs[0]).toMatchObject({ type: 'image', format: 'png' })
   })
 
+  it('caps oversized object args via safeStringify', async () => {
+    // Direct `console.log(bigObj)` — went through JSON.stringify
+    // path. Has had a cap forever; pin it explicitly so a future
+    // refactor can't silently regress.
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const result = await rt.execute(
+      `const big = { x: 'a'.repeat(200000) }\nconsole.log(big)\ntaskSuccess(null)`,
+      makeCtx(),
+    )
+    expect(result.outputs).toHaveLength(1)
+    const text = (result.outputs[0] as { text: string }).text
+    expect(text.length).toBeLessThan(60_000)
+    expect(text).toMatch(/…\(truncated, original \d+ bytes\)$/)
+  })
+
+  it('caps oversized string args (covers console.log(JSON.stringify(big)) idiom)', async () => {
+    // The bug this guards: the agent stringifies a big object
+    // themselves and logs the resulting STRING. The string path
+    // used to be uncapped while the object path was capped at
+    // 10K, so this idiom blew past LLM context windows on the
+    // next turn. Both paths now share the same cap.
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const result = await rt.execute(
+      `const big = JSON.stringify({ x: 'a'.repeat(200000) })\nconsole.log(big)\ntaskSuccess(null)`,
+      makeCtx(),
+    )
+    expect(result.outputs).toHaveLength(1)
+    const text = (result.outputs[0] as { text: string }).text
+    expect(text.length).toBeLessThan(60_000)
+    expect(text).toMatch(/…\(truncated, original \d+ bytes\)$/)
+  })
+
+  it('leaves small log output untouched (no marker)', async () => {
+    // Regression guard: the cap path must be exact-tail-append, not
+    // wrap-everything. A normal `console.log('hi')` shouldn't gain
+    // a stray "(truncated)" marker just because the formatter
+    // touched it.
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const result = await rt.execute(`console.log('hello', { x: 1 })\ntaskSuccess(null)`, makeCtx())
+    expect(result.outputs).toEqual([{ type: 'text', text: 'hello {"x":1}' }])
+  })
+
   it('translates taskFail into outcome.kind === "fail"', async () => {
     const rt = runtime()
     await rt.init(EMPTY_POLICY)

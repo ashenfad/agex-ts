@@ -165,6 +165,51 @@ describe('cat', () => {
   it('errors on a missing file', async () => {
     await expect(execute('cat /nope', new MemoryFS())).rejects.toBeInstanceOf(TerminalError)
   })
+
+  it('refuses binary content (NUL byte present)', async () => {
+    const fs = new MemoryFS()
+    await fs.write('/bin', new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x00, 0x01, 0x02, 0x03]))
+    await expect(execute('cat /bin', fs)).rejects.toMatchObject({
+      name: 'TerminalError',
+      message: expect.stringContaining('appears to be binary'),
+    })
+  })
+
+  it('refuses binary content (high control-char ratio, no NUL)', async () => {
+    const fs = new MemoryFS()
+    // 200 bytes of 0x01 (control char, not NUL) — well over the 1% threshold.
+    const buf = new Uint8Array(200)
+    buf.fill(0x01)
+    await fs.write('/garbled', buf)
+    await expect(execute('cat /garbled', fs)).rejects.toMatchObject({
+      message: expect.stringContaining('appears to be binary'),
+    })
+  })
+
+  it('passes UTF-8 text with high bytes (multi-byte sequences are not binary)', async () => {
+    const fs = new MemoryFS()
+    const utf8 = 'héllo — 世界\n'
+    await fs.write('/utf8.txt', bytes(utf8))
+    expect(await execute('cat /utf8.txt', fs)).toBe(utf8)
+  })
+
+  it('passes a JS source file with an embedded base64 image (printable ASCII)', async () => {
+    // The original failure case: a TS file with a giant base64 blob.
+    // That content is all printable ASCII, so binary detection MUST
+    // let it through — the executeScript output cap is the safety net
+    // for this case, not the binary sniff.
+    const fs = new MemoryFS()
+    const b64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'.repeat(100)
+    const src = `export const img = "data:image/png;base64,${b64}"\n`
+    await fs.write('/embed.ts', bytes(src))
+    expect(await execute('cat /embed.ts', fs)).toBe(src)
+  })
+
+  it('passes an empty file', async () => {
+    const fs = new MemoryFS()
+    await fs.write('/empty', new Uint8Array(0))
+    expect(await execute('cat /empty', fs)).toBe('')
+  })
 })
 
 describe('head', () => {

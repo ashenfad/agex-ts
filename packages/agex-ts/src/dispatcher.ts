@@ -75,6 +75,14 @@ export async function dispatchFileEdit(
   await fs.write(emission.path, encoder.encode(next))
 }
 
+/** Default max-chars cap on terminal output handed back to the agent.
+ *  A multi-MB blob (e.g. `cat` against a file with an embedded base64
+ *  image) can otherwise blow the next turn's input window. ~200K chars
+ *  is roughly 50K tokens — leaves room for normal source-file reads
+ *  while bounding the worst case. termish-ts appends a marker pointing
+ *  the agent at `head/tail/grep/sed` when it trips. */
+const DEFAULT_TERMINAL_OUTPUT_CAP = 200_000
+
 export async function dispatchTerminal(
   commands: string,
   fs: VirtualFileSystem,
@@ -89,5 +97,9 @@ export async function dispatchTerminal(
     // termish-ts's CommandHandler; cast through unknown is safe.
     hostCommands.set(name, reg.handler as unknown as CommandHandler)
   }
-  return execute(commands, fs, { commands: hostCommands, signal })
+  return execute(commands, fs, {
+    commands: hostCommands,
+    signal,
+    maxOutputChars: DEFAULT_TERMINAL_OUTPUT_CAP,
+  })
 }

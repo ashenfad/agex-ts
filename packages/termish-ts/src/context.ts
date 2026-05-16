@@ -34,6 +34,16 @@ export interface CommandContext {
    *  `find -exec`) thread this through so host-injected commands
    *  remain reachable in nested invocations. */
   readonly commands: ReadonlyMap<string, CommandHandler>
+  /** True when this command's stdout will flow to the script's
+   *  returned output (last command in its pipeline, no output
+   *  redirect). False when the stdout will be consumed by a
+   *  downstream pipe stage or shunted to a file via `>` / `>>`.
+   *
+   *  Builtins use this to gate diagnostics that only make sense when
+   *  the output reaches a human/agent caller — e.g. `cat` refuses to
+   *  dump binary content when `agentSink=true`, but stays out of the
+   *  way for `cat /binary > /copy` or `cat /nul-sep | xargs -0`. */
+  readonly agentSink: boolean
 }
 
 export interface CommandResult {

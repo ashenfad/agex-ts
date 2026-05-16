@@ -315,3 +315,61 @@ describe('parseToolEvents — invariants', () => {
     if (firstArgIdx >= 0) expect(startIdx).toBeLessThan(firstArgIdx)
   })
 })
+
+describe('parseToolEvents — unknown tool names (LLM hallucination)', () => {
+  // Reproduces a real crash: providers were typed as if the tool
+  // name had to be one of the four registered schemas, but the LLM
+  // sometimes invents a tool name (e.g. `write_file_v2`). Before
+  // this hardening, `CallState.feedArgs` would crash on
+  // `undefined.<key>` and the error escaped the agent loop. Now
+  // the call drops with a synthetic TextEmission naming the
+  // offending tool.
+
+  it('does not crash on arg deltas for an unknown tool', async () => {
+    const events = callEvents(
+      'a',
+      'write_file_v2',
+      '{"file_path":"x.txt","content":"hi"}',
+      [5, 12, 22],
+    )
+    // The bug would throw mid-iteration; if we get a clean
+    // collection at all, the defensive path is working.
+    const tokens = await collect(parseToolEvents(fromArray(events)))
+    // No per-key streaming chunks for an unknown tool (no keyMap).
+    expect(tokens.find((t) => t.type === 'filePath')).toBeUndefined()
+    expect(tokens.find((t) => t.type === 'fileContent')).toBeUndefined()
+  })
+
+  it('synthesizes a TextEmission naming the unknown tool', async () => {
+    const events = callEvents('a', 'made_up_tool', '{"foo":"bar"}')
+    const emissions = emissionsOf(await collect(parseToolEvents(fromArray(events))))
+    expect(emissions).toHaveLength(1)
+    expect(emissions[0]?.type).toBe('text')
+    if (emissions[0]?.type === 'text') {
+      expect(emissions[0].text).toContain('made_up_tool')
+      expect(emissions[0].text).toContain('unknown tool name')
+    }
+  })
+
+  it('still surfaces a toolStart token for the unknown tool', async () => {
+    const events = callEvents('a', 'made_up_tool', '{"x":1}')
+    const tokens = await collect(parseToolEvents(fromArray(events)))
+    const toolStart = tokens.find((t) => t.type === 'toolStart')
+    expect(toolStart).toBeDefined()
+    expect(toolStart?.content).toBe('made_up_tool')
+  })
+
+  it('does not let a hallucinated tool starve a following valid call', async () => {
+    // Interleaved: bad tool call followed by a real ts_action.
+    // Both should produce an emission; the bad one synthesizes a
+    // fallback, the good one builds a TsEmission as usual.
+    const events = [
+      ...callEvents('a', 'phantom', '{"q":"?"}'),
+      ...callEvents('b', 'ts_action', '{"code":"42"}'),
+    ]
+    const emissions = emissionsOf(await collect(parseToolEvents(fromArray(events))))
+    expect(emissions).toHaveLength(2)
+    expect(emissions[0]?.type).toBe('text')
+    expect(emissions[1]?.type).toBe('ts')
+  })
+})

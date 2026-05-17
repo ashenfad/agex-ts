@@ -115,19 +115,56 @@ might need later.
 /** True when the latest `ActionEvent.inputTokens` is at or above
  *  `threshold`. Returns false if no threshold is configured, or if
  *  no ActionEvent has been logged yet, or if its `inputTokens` is
- *  unset (provider didn't report). */
+ *  unset (provider didn't report).
+ *
+ *  `lastFiredActionTimestamp` gates against the **stale-trigger
+ *  loop**: after chaptering folds a range, the most recent
+ *  ActionEvent's `inputTokens` still reflects the pre-fold context
+ *  size (the provider measured it then; we don't re-estimate). If
+ *  another task boundary fires before a fresh LLM call lands —
+ *  e.g. a parent task that emits `taskSuccess(subTask())` so its
+ *  most-recent action was measured before subTask's chaptering ran
+ *  — the trigger would fire again on the same stale measurement
+ *  and waste an LLM call on a redundant chapter task.
+ *
+ *  When `lastFiredActionTimestamp` matches the latest ActionEvent's
+ *  timestamp, we treat that measurement as already-consumed and
+ *  return false. The next genuine LLM call produces a new
+ *  ActionEvent (different timestamp), the gate clears, and the
+ *  trigger can fire again if the new measurement is still over
+ *  threshold. */
 export function shouldTriggerChaptering(
   events: ReadonlyArray<AgentEvent>,
   threshold: number | undefined,
+  lastFiredActionTimestamp?: string,
 ): boolean {
   if (threshold === undefined) return false
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i] as AgentEvent
     if (e.type === 'action') {
-      return (e.inputTokens ?? 0) >= threshold
+      if ((e.inputTokens ?? 0) < threshold) return false
+      if (lastFiredActionTimestamp !== undefined && e.timestamp === lastFiredActionTimestamp) {
+        return false
+      }
+      return true
     }
   }
   return false
+}
+
+/** Per-`EventLogImpl` marker for "the ActionEvent timestamp at which
+ *  we last fired chaptering on this session." Read by
+ *  `shouldTriggerChaptering` (stale-measurement gate) and written by
+ *  the boundary-fire path in `task.ts`. WeakMap-keyed so dropped
+ *  logs don't leak. */
+const lastFiredActionByLog = new WeakMap<EventLogImpl, string>()
+
+export function getLastFiredActionTimestamp(log: EventLogImpl): string | undefined {
+  return lastFiredActionByLog.get(log)
+}
+
+export function markChapteringFired(log: EventLogImpl, actionTimestamp: string): void {
+  lastFiredActionByLog.set(log, actionTimestamp)
 }
 
 /** Recursion guard — chaptering doesn't fire while its own chapter

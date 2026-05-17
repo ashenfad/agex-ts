@@ -42,6 +42,34 @@ describe('shouldTriggerChaptering', () => {
     ]
     expect(shouldTriggerChaptering(events, 1000)).toBe(false)
   })
+
+  it('skips when the latest action matches lastFiredActionTimestamp (stale-trigger gate)', () => {
+    // The latest ActionEvent's inputTokens still reflects pre-fold
+    // context — provider measured it then, we don't re-estimate. If
+    // another boundary check fires before a fresh LLM call lands,
+    // this gate prevents re-firing on the same stale measurement.
+    const events: AgentEvent[] = [
+      { type: 'action', timestamp: 't0', agentName: 'a', emissions: [], inputTokens: 5000 },
+    ]
+    // Without the gate — fires.
+    expect(shouldTriggerChaptering(events, 1000)).toBe(true)
+    // With the gate matching the latest action's timestamp — skips.
+    expect(shouldTriggerChaptering(events, 1000, 't0')).toBe(false)
+    // A different stamped timestamp doesn't apply — fires.
+    expect(shouldTriggerChaptering(events, 1000, 't-prior')).toBe(true)
+  })
+
+  it('clears the gate once a new ActionEvent lands', () => {
+    // Two ActionEvents in sequence; a stamp on the older one doesn't
+    // block firing on the newer one. Simulates "we fired on t0; then
+    // the LLM produced a fresh action t1; check should fire again."
+    const events: AgentEvent[] = [
+      { type: 'action', timestamp: 't0', agentName: 'a', emissions: [], inputTokens: 5000 },
+      { type: 'action', timestamp: 't1', agentName: 'a', emissions: [], inputTokens: 5000 },
+    ]
+    expect(shouldTriggerChaptering(events, 1000, 't0')).toBe(true)
+    expect(shouldTriggerChaptering(events, 1000, 't1')).toBe(false)
+  })
 })
 
 const finishTurn: LLMResponse = {
@@ -213,6 +241,94 @@ describe('chaptering — chapterTask integration', () => {
     )
     expect(chapterTaskStarts.length).toBe(1)
     expect(parentEvents.filter((e) => e.type === 'chapter').length).toBe(1)
+  })
+
+  it('does not re-fire on a stale ActionEvent at the next boundary (back-to-back chaptering gate)', async () => {
+    // Scenario this guards against:
+    //   1. Sub-task S runs inside parent P's emission code
+    //      (`await sub_task(); taskSuccess(null)`).
+    //   2. S's success boundary fires chaptering.
+    //   3. The chapter task's own ActionEvent lands in the log with
+    //      `inputTokens` measured against parent's pre-fold context
+    //      (stale-high).
+    //   4. Control returns to parent's emission, parent's
+    //      `taskSuccess` runs, parent's success boundary fires.
+    //
+    // Without the gate, step 4 walks back to the chapter task's
+    // stale-high ActionEvent and re-triggers chaptering — burning a
+    // second chapter-task LLM call. With the gate, the stamp from
+    // step 2's fire (latest action at completion = chapter task's
+    // action) makes step 4 skip.
+    //
+    // Test forces the bug to surface by providing exactly the LLM
+    // responses the *correct* (single-fire) path consumes. If the
+    // gate fails, the Dummy queue runs dry on the spurious second
+    // chapter task call and the test throws.
+    const responses: LLMResponse[] = [
+      // setup: tasks A and B complete with low inputTokens.
+      finishTurn,
+      finishTurn,
+      // parent P's only LLM call — emits TS that delegates to
+      // sub-task S then finishes. inputTokens reflect P's pre-S
+      // context (stale-high after S folds).
+      {
+        emissions: [{ type: 'ts', code: 'await sub_task(); taskSuccess(null)' }],
+        inputTokens: 6000,
+      },
+      // sub-task S's only turn — heavy, trips chaptering at S's
+      // success boundary.
+      heavyFinishTurn,
+      // chapter task — folds A+B. inputTokens deliberately HIGH so
+      // that, absent the gate, the chapter task's own ActionEvent
+      // would itself look "over threshold" on the next boundary
+      // check and re-trigger.
+      {
+        emissions: [
+          {
+            type: 'ts',
+            code: 'taskSuccess([{ start: 1, end: 2, name: "warmup", message: "A and B" }])',
+          },
+        ],
+        inputTokens: 8000,
+      },
+      // No further responses — a spurious second chapter-task call
+      // would consume nothing and the Dummy throws.
+    ]
+    const llm = new Dummy({ responses })
+    const agent = await createAgent({
+      name: 'A',
+      llm,
+      runtime: evalRuntime(),
+      chapteringTrigger: 1000,
+    })
+    const subTask = agent.task<undefined, null>({ description: 'Sub-task S.' })
+    agent.fn(async () => subTask(undefined), {
+      name: 'sub_task',
+      description: 'Run sub-task S.',
+    })
+
+    const events: AgentEvent[] = []
+    const onEvent = (e: AgentEvent) => void events.push(e)
+    const taskA = agent.task<undefined, null>({ description: 'Task A.' })
+    const taskB = agent.task<undefined, null>({ description: 'Task B.' })
+    const taskP = agent.task<undefined, null>({ description: 'Parent task P.' })
+    await taskA(undefined, { onEvent })
+    await taskB(undefined, { onEvent })
+    await taskP(undefined, { onEvent })
+
+    // Read the parent log directly — onEvent on a wrapping task
+    // doesn't propagate into a nested task call made through a
+    // registered host fn, so we inspect the log of record.
+    const log = await agent.events('default')
+    const logged: AgentEvent[] = []
+    for await (const e of log.iter()) logged.push(e)
+
+    // Exactly one chapter — fired by S, not re-fired by P.
+    expect(logged.filter((e) => e.type === 'chapter').length).toBe(1)
+    // 5 LLM calls total: A, B, P-emission, S-emission, chapter task.
+    // A spurious second chapter task call would push this to 6 (and
+    // throw because the queue is exhausted).
+    expect(llm.callCount).toBe(5)
   })
 
   it('chaptering does not recurse — the chapter task itself does not trigger chaptering', async () => {

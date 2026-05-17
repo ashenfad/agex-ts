@@ -21,7 +21,12 @@
 import type { StandardSchemaV1 } from '@standard-schema/spec'
 import { TerminalError } from 'termish-ts'
 import type { Agent } from './agent'
-import { runChaptering, shouldTriggerChaptering } from './chaptering'
+import {
+  getLastFiredActionTimestamp,
+  markChapteringFired,
+  runChaptering,
+  shouldTriggerChaptering,
+} from './chaptering'
 import { dispatchFileEdit, dispatchFileWrite, dispatchTerminal } from './dispatcher'
 import { CancelledError, SchemaError, TaskFailError, isCancelledError } from './errors'
 import type { EventLogImpl } from './event-log'
@@ -520,10 +525,31 @@ async function maybeFireBoundaryChaptering(
   if (agent.getChapterTask() === undefined) return
   if (signal.aborted) return
   const allEvents = await collectEvents(eventLog)
-  if (!shouldTriggerChaptering(allEvents, agent.chapteringTrigger)) return
+  const lastFiredTs = getLastFiredActionTimestamp(eventLog)
+  if (!shouldTriggerChaptering(allEvents, agent.chapteringTrigger, lastFiredTs)) return
   await runChaptering(allEvents, eventLog, agent, session, signal, async (e) => {
     if (onEvent !== undefined) await onEvent(e)
   })
+  // Stamp the latest action in the (possibly mutated) log so that any
+  // subsequent boundary check skips re-firing until a NEW action has
+  // landed. Catches:
+  //   - the triggering action itself (e.g. a parent task whose
+  //     boundary fires right after a sub-task's chaptering completes,
+  //     where its most-recent action was measured pre-fold);
+  //   - the chapter task's own actions (measured during the chapter
+  //     task's LLM call, against the parent's pre-fold context, so
+  //     stale-high post-fold).
+  // Stamp unconditionally — also covers runChaptering early bails
+  // (no completable boundary, signal aborted) so we don't re-fire on
+  // the same triggering action next boundary.
+  const postEvents = await collectEvents(eventLog)
+  for (let i = postEvents.length - 1; i >= 0; i--) {
+    const e = postEvents[i] as AgentEvent
+    if (e.type === 'action') {
+      markChapteringFired(eventLog, e.timestamp)
+      break
+    }
+  }
 }
 
 function deriveTaskName<I, O>(def: TaskDefinition<I, O>): string {

@@ -112,6 +112,12 @@ Any terminator ends the current task.  **Prints in the same action as a terminat
 
 \`taskFail\` is **not** for code bugs.  If your code throws an exception, let it surface — you'll see the stack trace on the next turn and can fix it.  Wrapping code in \`try/catch\` and calling \`taskFail()\` hides bugs from yourself and ships raw stack traces to the caller.
 
+### Prose vs. the terminator
+
+You can also write **free-form prose** between or around your tool calls.  This is a **logging side-channel** to the caller (whether the caller is a human user, a parent task, or a system embedder) — surfaced in real time alongside your tool activity.  Use it for short status notes during multi-turn work (\`"loaded 5k rows, computing summaries…"\`): the kind of thing you'd write to a log so an observer knows what you're doing while a long task is in flight.
+
+The side-channel is **not** the task's return value.  Whatever the caller actually receives back is the value passed to \`taskSuccess(...)\` (or the error in \`taskFail(...)\`).  Keep the two channels distinct: short status notes go in prose, the final result goes in the terminator.  If the same content appears in both — a long prose answer plus a \`taskSuccess\` carrying that same answer — the caller surfaces it twice for no benefit.  Pick the terminator and skip the prose for that turn.
+
 ## Inputs
 
 The task input is available as the \`inputs\` variable in \`ts_action\`.  Its shape is described in the per-task instructions (the user message that initiated the task).  Don't reach for a JSON parse of the prompt — the values are already deserialized objects ready to use.

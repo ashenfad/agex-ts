@@ -1156,18 +1156,30 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
   }
 
   // Late-terminator detection: the AsyncFunction body settled cleanly
-  // with no terminator caught synchronously, but there are pending
-  // bridge calls — strong signal that the agent fired async work
-  // (`fs.read`, registered fns, etc.) without awaiting it. Drain the
-  // bridge so the deferred chain has a chance to complete; if a
-  // terminator fires from that path, our instrumentation captures it
-  // in `lateTerminator` (recorded BEFORE the throw, so it survives the
-  // throw becoming an unhandled rejection).
+  // with no terminator caught synchronously. Two ways the agent can
+  // still have queued a terminator from an unawaited async path:
   //
-  // Suppress the matching unhandled-rejection events while we drain so
-  // the worker realm's default rejection handling doesn't log noise
+  //   (a) Bridge-mediated — `await fs.read(...)` / registered fn /
+  //       namespace call inside an async wrapper that wasn't awaited.
+  //       Detectable by `bridge.pendingCount > 0` at body settle.
+  //       Drain the bridge so the deferred chain completes.
+  //
+  //   (b) Purely local — e.g. `void proposeIdeas()` where the wrapper
+  //       calls `taskSuccess(...)` synchronously and the throw becomes
+  //       an orphan promise rejection. `bridge.pendingCount` is 0 here
+  //       (no bridge traffic at all), but `lateTerminator` was already
+  //       recorded synchronously inside the throw path. Without a
+  //       microtask drain + check this case posted back
+  //       `{outcome: continue, error: null}` and the agent saw no
+  //       observation at all.
+  //
+  // The wrapped terminators (`taskSuccess` / `taskFail` above) record
+  // their intent into `lateTerminator` BEFORE throwing, so either path
+  // leaves a usable signal we can synthesize a MissingAwaitError from.
+  // Suppress matching unhandled-rejection events during the drain so
+  // the worker realm's default rejection logging doesn't print noise
   // for what we're explicitly handling.
-  if (outcome.kind === 'continue' && error === null && bridge.pendingCount > 0) {
+  if (outcome.kind === 'continue' && error === null) {
     const onUnhandled = (ev: PromiseRejectionEvent): void => {
       const reason = ev.reason as unknown
       if (reason instanceof TaskSuccessSignal || reason instanceof TaskFailSignal) {
@@ -1176,10 +1188,20 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
     }
     self.addEventListener('unhandledrejection', onUnhandled)
     try {
-      // 2s upper bound is generous for a deferred chain to complete;
-      // the host's per-emission timeout (default 5s in tests) bounds
-      // the total wait separately.
-      await bridge.drain(2000)
+      if (bridge.pendingCount > 0) {
+        // 2s upper bound is generous for a deferred chain to complete;
+        // the host's per-emission timeout (default 5s in tests) bounds
+        // the total wait separately.
+        await bridge.drain(2000)
+      } else {
+        // No bridge traffic — give purely-local orphan async chains a
+        // chance to settle. Microtask drain bounded at 16 ticks so we
+        // don't spin forever on a genuine "fire and forget the wrong
+        // thing" case the agent intended.
+        for (let i = 0; i < 16 && lateTerminator === null; i++) {
+          await Promise.resolve()
+        }
+      }
     } finally {
       self.removeEventListener('unhandledrejection', onUnhandled)
     }

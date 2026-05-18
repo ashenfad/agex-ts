@@ -878,6 +878,76 @@ describe('workerRuntime — fn / namespace bridge', () => {
     expect(r2.outcome).toEqual({ kind: 'success', value: 2 })
   })
 
+  it('surfaces MissingAwaitError for purely-local orphan async path (no bridge traffic)', async () => {
+    // Regression: the agent writes
+    //   async function propose() { taskSuccess(payload) }
+    //   void propose()
+    // expecting the inner taskSuccess to terminate the turn. Async-
+    // wrapper semantics turn the throw inside `propose()` into an
+    // orphan promise rejection (discarded by `void`); the outer body
+    // settles cleanly. Earlier the worker's late-terminator detection
+    // was gated on `bridge.pendingCount > 0` and skipped this path
+    // entirely, so the agent saw no observation and no error on the
+    // next turn — pure silence. The drain now runs unconditionally
+    // (microtasks-only when no bridge traffic) so `lateTerminator`
+    // gets picked up.
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const result = await rt.execute(
+      `
+      async function propose() {
+        taskSuccess({ headline: 'I would have fired this' });
+      }
+      void propose();
+      `,
+      makeCtx(),
+    )
+    expect(result.outcome).toEqual({ kind: 'continue' })
+    expect(result.error).not.toBeNull()
+    expect(result.error?.name).toBe('MissingAwaitError')
+    expect(result.error?.message).toContain('taskSuccess')
+    expect(result.error?.message).toContain('await')
+  })
+
+  it('surfaces MissingAwaitError for unawaited taskFail in a local async wrapper', async () => {
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const result = await rt.execute(
+      `
+      async function bail() { taskFail('local async fail'); }
+      void bail();
+      `,
+      makeCtx(),
+    )
+    expect(result.outcome).toEqual({ kind: 'continue' })
+    expect(result.error).not.toBeNull()
+    expect(result.error?.name).toBe('MissingAwaitError')
+    expect(result.error?.message).toContain('taskFail')
+  })
+
+  it('surfaces MissingAwaitError when the orphan path crosses microtask boundaries', async () => {
+    // Same pattern as above but with an actual `await` inside the
+    // wrapper, so `taskSuccess` fires AFTER the outer body has
+    // already settled. The microtask drain on the late-terminator
+    // path is what makes this catchable.
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const result = await rt.execute(
+      `
+      async function propose() {
+        await Promise.resolve();
+        await Promise.resolve();
+        taskSuccess('after microtasks');
+      }
+      void propose();
+      `,
+      makeCtx(),
+    )
+    expect(result.outcome).toEqual({ kind: 'continue' })
+    expect(result.error).not.toBeNull()
+    expect(result.error?.name).toBe('MissingAwaitError')
+  })
+
   it('rejects orphan bridge Promises when an execute settles (no leak across executes)', async () => {
     // Execute #1's user code dispatches `slow()` and pins the
     // Promise on globalThis (which persists across executes in the

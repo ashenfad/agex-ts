@@ -634,6 +634,12 @@ export interface EventLog {
   /** Read-only view at a historical commit hash. Returns `null` if
    *  the underlying state isn't versioned. */
   at(commitHash: string): Promise<EventLog | null>
+  /** Fetch a single event by its state key. Returns `null` if no
+   *  event lives at that key. The originals replaced by
+   *  `replaceRange` remain at their state keys (only the active
+   *  index is rewritten), so callers holding a `ChapterEvent`'s
+   *  `eventRefs` can use this to resolve the underlying events. */
+  byKey(stateKey: string): Promise<AgentEvent | null>
 }
 
 // ---------------------------------------------------------------------------

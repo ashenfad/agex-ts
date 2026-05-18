@@ -79,6 +79,15 @@ export class EventLogImpl implements EventLog {
     }
   }
 
+  /** Read an event by its state key. The chaptering primitive
+   *  (`replaceRange`) leaves the originals at their keys when it
+   *  rewrites the active index — callers holding a
+   *  `ChapterEvent.eventRefs` array can resolve them via this. */
+  async byKey(stateKey: string): Promise<AgentEvent | null> {
+    const v = await this.#state.get<AgentEvent>(stateKey)
+    return v ?? null
+  }
+
   async at(commitHash: string): Promise<EventLog | null> {
     if (!isVersioned(this.#state)) return null
     // Time-travel via kvgit checkout is a future enhancement — the

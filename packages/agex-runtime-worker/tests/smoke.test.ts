@@ -245,7 +245,7 @@ describe('workerRuntime', () => {
     expect(result.outputs).toHaveLength(1)
     const text = (result.outputs[0] as { text: string }).text
     expect(text.length).toBeLessThan(60_000)
-    expect(text).toMatch(/…\(truncated, original \d+ bytes\)$/)
+    expect(text).toMatch(/…\(truncated, original \d+ chars\)$/)
   })
 
   it('caps oversized string args (covers console.log(JSON.stringify(big)) idiom)', async () => {
@@ -263,7 +263,7 @@ describe('workerRuntime', () => {
     expect(result.outputs).toHaveLength(1)
     const text = (result.outputs[0] as { text: string }).text
     expect(text.length).toBeLessThan(60_000)
-    expect(text).toMatch(/…\(truncated, original \d+ bytes\)$/)
+    expect(text).toMatch(/…\(truncated, original \d+ chars\)$/)
   })
 
   it('leaves small log output untouched (no marker)', async () => {

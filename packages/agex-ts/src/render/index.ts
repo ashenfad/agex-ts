@@ -54,6 +54,7 @@ export {
   TOOL_TERMINAL,
   TOOL_WRITE_FILE,
   TOOL_EDIT_FILE,
+  KNOWN_TOOL_NAMES,
   toolSchemas,
   type ToolSchema,
   type ToolSchemaOptions,

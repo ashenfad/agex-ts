@@ -23,7 +23,14 @@
  *  ride alongside tool calls in the order the model produced them.
  */
 
-import { TOOL_EDIT_FILE, TOOL_TERMINAL, TOOL_TS, TOOL_WRITE_FILE, type ToolName } from '../render'
+import {
+  KNOWN_TOOL_NAMES,
+  TOOL_EDIT_FILE,
+  TOOL_TERMINAL,
+  TOOL_TS,
+  TOOL_WRITE_FILE,
+  type ToolName,
+} from '../render'
 import type {
   Emission,
   FileEditEmission,
@@ -162,13 +169,8 @@ class CallState {
       // Distinguish "unknown tool" from "required field missing"
       // in the fallback message — the former points the model at
       // its schema, the latter at the args it sent.
-      const known =
-        this.toolName === TOOL_TS ||
-        this.toolName === TOOL_TERMINAL ||
-        this.toolName === TOOL_WRITE_FILE ||
-        this.toolName === TOOL_EDIT_FILE
       return fallback(
-        known
+        KNOWN_TOOL_NAMES.has(this.toolName as ToolName)
           ? 'required fields missing (e.g. path / search)'
           : `unknown tool name "${this.toolName}" — not in the registered schema set`,
       )

@@ -31,6 +31,17 @@ export const TOOL_TERMINAL = 'terminal_action' as const
 export const TOOL_WRITE_FILE = 'write_file' as const
 export const TOOL_EDIT_FILE = 'edit_file' as const
 
+/** Runtime registry of every known tool name. Kept next to the
+ *  literal constants so adding a fifth tool here is a one-line edit
+ *  that both `ToolName` (compile-time) and call sites doing runtime
+ *  membership checks (e.g. parser fallback messaging) pick up. */
+export const KNOWN_TOOL_NAMES: ReadonlySet<ToolName> = new Set([
+  TOOL_TS,
+  TOOL_TERMINAL,
+  TOOL_WRITE_FILE,
+  TOOL_EDIT_FILE,
+])
+
 export interface ToolSchema {
   readonly name: ToolName
   readonly description: string

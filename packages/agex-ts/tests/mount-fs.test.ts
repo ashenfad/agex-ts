@@ -1,4 +1,4 @@
-import { MemoryFS } from 'termish-ts/fs/memory'
+import { MemoryFS } from '@agex-ts/termish/fs/memory'
 import { describe, expect, it } from 'vitest'
 import { ChaptersOverlay } from '../src/fs/chapters-overlay'
 import { MountFS } from '../src/fs/mount'

@@ -23,7 +23,7 @@
  * its backing map atomically.
  */
 
-import type { FileInfo, FileMetadata, FileSystem } from 'termish-ts'
+import type { FileInfo, FileMetadata, FileSystem } from '@agex-ts/termish'
 import type { AgentEvent, ChapterEvent, Emission } from '../types'
 
 const enc = new TextEncoder()

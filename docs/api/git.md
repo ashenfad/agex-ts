@@ -14,11 +14,11 @@ The agent must use the unified kvgit substrate — file content shares one `Vers
 import { createAgent } from 'agex-ts'
 import { registerGit } from '@agex-ts/git'
 import { workerRuntime } from '@agex-ts/runtime-worker'
-import { connectAnthropic } from '@agex-ts/anthropic'
+import { Anthropic } from '@agex-ts/anthropic'
 
 const agent = await createAgent({
   name: 'analyst',
-  llm: connectAnthropic({ model: 'claude-sonnet-4-6' }),
+  llm: new Anthropic({ model: 'claude-sonnet-4-6', apiKey: process.env.ANTHROPIC_API_KEY }),
   runtime: workerRuntime({ workerUrl: new URL('./worker.js', import.meta.url) }),
   state: { type: 'versioned', storage: 'indexeddb' },
   fs: { type: 'kvgit' },
@@ -66,9 +66,9 @@ Refs accepted everywhere a ref is taken: `HEAD`, `HEAD~N` (`N >= 0`), branch nam
 For tests and library callers that want to drive git without going through `terminal_action`, the same operations are exposed as a `VirtualGit` class:
 
 ```ts
-import { Staged, VersionedKV } from 'kvgit-ts'
-import { Memory } from 'kvgit-ts/backends/memory'
-import { polymorphicDecoder, polymorphicEncoder } from 'termish-ts/fs/kvgit'
+import { Staged, VersionedKV } from '@agex-ts/kvgit'
+import { Memory } from '@agex-ts/kvgit/backends/memory'
+import { polymorphicDecoder, polymorphicEncoder } from '@agex-ts/termish/fs/kvgit'
 import { VirtualGit } from '@agex-ts/git'
 
 const vkv = await VersionedKV.open(new Memory())

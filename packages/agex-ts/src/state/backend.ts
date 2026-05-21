@@ -1,6 +1,6 @@
 /**
  * `StateBackend` — the minimal Map-shaped surface every state store
- * exposes. Both `Live` (in-process) and a kvgit-ts `Staged` wrapper
+ * exposes. Both `Live` (in-process) and a @agex-ts/kvgit `Staged` wrapper
  * satisfy it, so agex-ts core can read/write state without caring
  * which one is underneath.
  *

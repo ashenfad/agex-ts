@@ -71,28 +71,28 @@ export async function connectState(config: StateConfig = { type: 'live' }): Prom
 
   // Versioned path: one VersionedKV / Staged / KvgitState per session,
   // each over its own KVStore namespace. Imports are lazy so a Live-
-  // only embedder doesn't pull kvgit-ts / termish-ts into their
+  // only embedder doesn't pull @agex-ts/kvgit / @agex-ts/termish into their
   // bundle.
-  const { Staged, VersionedKV } = await import('kvgit-ts')
+  const { Staged, VersionedKV } = await import('@agex-ts/kvgit')
   const { KvgitState } = await import('./kvgit')
   const { polymorphicDecoder: polyDecoder, polymorphicEncoder: polyEncoder } = await import(
-    'termish-ts/fs/kvgit'
+    '@agex-ts/termish/fs/kvgit'
   )
 
   // Per-storage factory: produce a fresh `KVStore` keyed by session id.
   // This is where the substrate boundary lives — different stores for
   // different sessions means different commit chains.
-  let makeStore: (session: string) => Promise<import('kvgit-ts').KVStore>
+  let makeStore: (session: string) => Promise<import('@agex-ts/kvgit').KVStore>
   switch (config.storage) {
     case 'memory': {
-      const { Memory } = await import('kvgit-ts/backends/memory')
+      const { Memory } = await import('@agex-ts/kvgit/backends/memory')
       // Each session = a fresh `Memory()`; sessions are completely
       // isolated and ephemeral.
       makeStore = async () => new Memory()
       break
     }
     case 'indexeddb': {
-      const { IndexedDB } = await import('kvgit-ts/backends/idb')
+      const { IndexedDB } = await import('@agex-ts/kvgit/backends/idb')
       // Each session = its own IndexedDB database name. Default base
       // name is `kvgit`; sessions land at `kvgit/<session>` (a single
       // distinct database per session, so closing/reopening a session
@@ -104,7 +104,7 @@ export async function connectState(config: StateConfig = { type: 'live' }): Prom
       if (config.path === undefined) {
         throw new Error('connectState: storage "sqlite" requires a `path` option')
       }
-      const { Sqlite } = await import('kvgit-ts/backends/sqlite')
+      const { Sqlite } = await import('@agex-ts/kvgit/backends/sqlite')
       // `config.path` is treated as a directory; each session occupies
       // its own SQLite file under it. Differs from the prior single-
       // session shape that took `path` as a file path directly — pre-

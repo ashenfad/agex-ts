@@ -1,7 +1,7 @@
 /**
- * kvgit-ts public type contracts.
+ * @agex-ts/kvgit public type contracts.
  *
- * Canonical source for the public types of kvgit-ts. Implementations
+ * Canonical source for the public types of @agex-ts/kvgit. Implementations
  * (`Hamt`, `Keyset`, `VersionedKV`, `Staged`, `Namespaced`, the
  * backends) live in sibling files and import from here.
  */

@@ -1,6 +1,6 @@
 # @agex-ts/git
 
-Agent-view git over a `kvgit-ts` `Staged`. Surfaces `git status`,
+Agent-view git over a `@agex-ts/kvgit` `Staged`. Surfaces `git status`,
 `git commit -m '...'`, `git branch`, `git checkout`, `git log`,
 `git diff`, `git merge` (etc.) inside the agent's `terminal_action`
 sandbox — operating on VFS files, leaving the underlying kvgit
@@ -16,7 +16,7 @@ content and the updated metadata blob atomically.
 
 ## Status
 
-Functionally complete. `VirtualGit` library API + termish-ts CLI
+Functionally complete. `VirtualGit` library API + @agex-ts/termish CLI
 adapter both shipped:
 
 - **Read-only**: `currentBranch` / `listBranches` / `head` /

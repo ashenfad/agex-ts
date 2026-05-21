@@ -8,7 +8,7 @@ agex-ts treats the agent's whole world — event log, per-session cache, optiona
 |---|---|
 | **Session** | A framework-level identifier (`"alice"`, `"req-42"`, etc.). Each session resolves to its own `VersionedKV` — its own commit chain. |
 | **State backend** | The Map-shaped surface every component reads/writes against. `Live` (in-process, no versioning) or `KvgitState` (kvgit-backed). |
-| **`Staged`** | The buffered-writes layer kvgit-ts provides. Writes accumulate in memory; `commit()` flushes them as one atomic version. |
+| **`Staged`** | The buffered-writes layer @agex-ts/kvgit provides. Writes accumulate in memory; `commit()` flushes them as one atomic version. |
 | **Polymorphic encoder** | One `Staged` carries both file content (`FileRecord`) and arbitrary state values (JSON) via a single-byte type tag. |
 | **VFS** | The agent's filesystem. `MemoryFS` (ephemeral) or `KvgitFS` (versioned, sharing the session's `Staged`). |
 
@@ -50,7 +50,7 @@ Within a session's `VersionedKV`, two value shapes need to coexist on the same `
 - **JSON values** — state writes from the cache, event log entries, framework metadata.
 - **`FileRecord`** — file content from `KvgitFS`, with a binary header (type tag, ISO timestamps) and raw content bytes.
 
-Without coexistence, you'd need two `Staged` instances — and commits across them wouldn't be atomic. The polymorphic encoder (in `termish-ts/fs/kvgit`) puts a single byte at position 0 to discriminate:
+Without coexistence, you'd need two `Staged` instances — and commits across them wouldn't be atomic. The polymorphic encoder (in `@agex-ts/termish/fs/kvgit`) puts a single byte at position 0 to discriminate:
 
 | Tag | Meaning |
 |---|---|

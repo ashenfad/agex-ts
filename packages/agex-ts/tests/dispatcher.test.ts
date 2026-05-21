@@ -92,7 +92,7 @@ describe('emission dispatch — fileEdit', () => {
 })
 
 describe('emission dispatch — terminal', () => {
-  it('runs a termish-ts builtin pipeline', async () => {
+  it('runs a @agex-ts/termish builtin pipeline', async () => {
     const { agent } = await makeAgent([
       r(
         { type: 'fileWrite', path: '/lines.txt', content: 'b\na\nc\n', mode: 'write' },
@@ -142,7 +142,7 @@ describe('emission dispatch — terminal', () => {
   it('on partial pipeline failure surfaces preceding stdout alongside the error', async () => {
     // Regression: when a multi-pipeline terminal command halts on a
     // failing pipeline, the stdout captured from earlier pipelines was
-    // dropped — the agent only saw the error part. termish-ts stashes
+    // dropped — the agent only saw the error part. @agex-ts/termish stashes
     // the captured output on `TerminalError.partialOutput`; the
     // dispatcher now forwards it as a leading text part.
     const { agent } = await makeAgent([

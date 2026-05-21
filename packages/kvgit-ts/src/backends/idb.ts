@@ -24,7 +24,7 @@
 
 import type { KVStore } from '../types'
 
-const DEFAULT_DB_NAME = 'kvgit-ts'
+const DEFAULT_DB_NAME = 'kvgit'
 const DEFAULT_STORE_NAME = 'kv'
 const SCHEMA_VERSION = 1
 

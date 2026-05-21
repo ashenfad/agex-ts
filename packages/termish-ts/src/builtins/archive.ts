@@ -2,7 +2,7 @@
  * Archive commands: `gzip`, `gunzip`, `tar`, `zip`, `unzip`.
  *
  * gzip + zip are powered by `fflate`, lazy-loaded inside each handler
- * so that just importing `termish-ts` (or anything that depends on it,
+ * so that just importing `@agex-ts/termish` (or anything that depends on it,
  * like `agex-ts`) doesn't pull fflate's `createRequire('module')` path
  * into browser bundles. The cost of the dynamic import only fires when
  * a `gzip`/`tar`/`zip`/`unzip` command actually runs.
@@ -27,7 +27,7 @@ const decoder = new TextDecoder('utf-8', { fatal: false })
 const latin1 = new TextDecoder('latin1')
 const encoder = new TextEncoder()
 
-// fflate is lazy-loaded so that importing termish-ts (and transitively
+// fflate is lazy-loaded so that importing @agex-ts/termish (and transitively
 // agex-ts) doesn't pull fflate's `createRequire('module')` path into
 // browser bundles. Only `gzip`/`tar`/`zip`/`unzip` invocations pay the
 // load cost, and only on first use per process.

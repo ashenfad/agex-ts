@@ -14,7 +14,7 @@ const dbNames = new Set<string>()
 let counter = 0
 function uniqueDbName(): string {
   counter++
-  const name = `kvgit-ts-conformance-${Date.now()}-${counter}`
+  const name = `kvgit-conformance-${Date.now()}-${counter}`
   dbNames.add(name)
   return name
 }

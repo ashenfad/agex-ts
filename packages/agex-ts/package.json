@@ -93,8 +93,8 @@
   },
   "dependencies": {
     "@standard-schema/spec": "^1.1.0",
-    "kvgit-ts": "workspace:^",
-    "termish-ts": "workspace:^",
+    "@agex-ts/kvgit": "workspace:^",
+    "@agex-ts/termish": "workspace:^",
     "ts-blank-space": "^0.6.0"
   }
 }

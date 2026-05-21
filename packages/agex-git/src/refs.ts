@@ -14,7 +14,7 @@
  * translates {@link InvalidRef} into a `TerminalError`.
  */
 
-import type { Versioned } from 'kvgit-ts'
+import type { Versioned } from '@agex-ts/kvgit'
 import type { Metadata } from './metadata'
 
 /** Minimum hash prefix length accepted by {@link resolveRef}. Matches

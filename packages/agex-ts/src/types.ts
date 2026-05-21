@@ -10,8 +10,8 @@
  * the contract surface without dragging in any runtime.
  */
 
+import type { FileSystem } from '@agex-ts/termish'
 import type { StandardSchemaV1 } from '@standard-schema/spec'
-import type { FileSystem } from 'termish-ts'
 
 // ---------------------------------------------------------------------------
 // Re-exports
@@ -31,8 +31,8 @@ export {
 } from './errors'
 
 /** The agent's host-side virtual filesystem — same protocol as the
- *  termish-ts `FileSystem`. Re-exported so consumers can implement it
- *  without depending on termish-ts directly. */
+ *  @agex-ts/termish `FileSystem`. Re-exported so consumers can implement it
+ *  without depending on @agex-ts/termish directly. */
 export type VirtualFileSystem = FileSystem
 
 /**
@@ -69,7 +69,7 @@ export interface TsEmission {
   readonly signature?: Uint8Array
 }
 
-/** A shell pipeline the agent wants to run via termish-ts. */
+/** A shell pipeline the agent wants to run via @agex-ts/termish. */
 export interface TerminalEmission {
   readonly type: 'terminal'
   readonly commands: string
@@ -583,17 +583,17 @@ export interface RegisteredSkill {
 }
 
 /** A custom shell command surfaced through `terminal` emissions.
- *  Re-uses termish-ts's `CommandHandler` shape; the agent's shell
- *  pipeline executor merges these on top of termish-ts's builtins. */
+ *  Re-uses @agex-ts/termish's `CommandHandler` shape; the agent's shell
+ *  pipeline executor merges these on top of @agex-ts/termish's builtins. */
 export interface RegisteredTerminal extends RegistrationCommon {
   readonly kind: 'terminal'
   readonly name: string
   readonly handler: TerminalCommandHandler
 }
 
-/** A termish-ts-compatible command handler. We re-declare the shape
- *  here rather than importing the full termish-ts types so the type
- *  module's surface stays small. */
+/** A termish-compatible command handler. We re-declare the shape
+ *  here rather than importing the full @agex-ts/termish types so the
+ *  type module's surface stays small. */
 export type TerminalCommandHandler = (ctx: {
   readonly args: ReadonlyArray<string>
   readonly stdin: string
@@ -601,7 +601,7 @@ export type TerminalCommandHandler = (ctx: {
   readonly fs: VirtualFileSystem
   readonly env: Readonly<Record<string, string>>
   readonly signal: AbortSignal
-  // biome-ignore lint/suspicious/noConfusingVoidType: matches termish-ts's CommandHandler signature so handlers with no return statement type-check.
+  // biome-ignore lint/suspicious/noConfusingVoidType: matches @agex-ts/termish's CommandHandler signature so handlers with no return statement type-check.
 }) => Promise<{ exitCode: number; stderr: string } | undefined | void>
 
 /** The complete registration table. Built incrementally by
@@ -646,7 +646,7 @@ export interface EventLog {
 // State / FS configuration
 // ---------------------------------------------------------------------------
 
-/** How the agent's state is persisted. `versioned` uses kvgit-ts;
+/** How the agent's state is persisted. `versioned` uses @agex-ts/kvgit;
  *  `live` uses the in-process `Live` map. */
 export type StateConfig =
   | { readonly type: 'live' }
@@ -658,5 +658,5 @@ export type StateConfig =
     }
 
 /** How the agent's virtual filesystem is backed. `memory` uses
- *  termish-ts's `MemoryFS`; `kvgit` shares the agent's state. */
+ *  @agex-ts/termish's `MemoryFS`; `kvgit` shares the agent's state. */
 export type FSConfig = { readonly type: 'memory' } | { readonly type: 'kvgit' }

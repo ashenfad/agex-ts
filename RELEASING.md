@@ -48,7 +48,7 @@ pnpm changeset publish
 git push --follow-tags
 ```
 
-`pnpm changeset publish` runs `pnpm publish -r` under the hood — it respects the workspace dependency graph, so packages publish in topological order (`kvgit-ts` → `termish-ts` → `agex-ts` → providers).
+`pnpm changeset publish` runs `pnpm publish -r` under the hood — it respects the workspace dependency graph, so packages publish in topological order (`@agex-ts/kvgit` → `@agex-ts/termish` → `agex-ts` → providers).
 
 ### What gets re-published when an internal dep bumps
 

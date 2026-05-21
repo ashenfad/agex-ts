@@ -15,16 +15,16 @@
  *   `Agent`.
  */
 
+import { TerminalError } from '@agex-ts/termish'
+import { KvgitFS } from '@agex-ts/termish/fs/kvgit'
 import type { Agent, TerminalCommandHandler } from 'agex-ts'
-import { TerminalError } from 'termish-ts'
-import { KvgitFS } from 'termish-ts/fs/kvgit'
 import { FileNotFoundError, VirtualGit } from './core'
 import { isBinary } from './diff'
 import { AgentGitError } from './errors'
 import { InvalidRef } from './refs'
 import { GIT_SKILL_MD } from './skill'
 
-// `CommandContext` shape we receive from termish-ts via the agent's
+// `CommandContext` shape we receive from @agex-ts/termish via the agent's
 // dispatcher. `TerminalCommandHandler` is the agex-ts shape; both
 // are structurally compatible (`agex-ts` casts through `unknown`).
 type GitCommandContext = Parameters<TerminalCommandHandler>[0]
@@ -55,7 +55,7 @@ export function registerGit(agent: Agent): void {
 /**
  * Termish-compatible handler implementing the git CLI. Used as the
  * `agent.terminal(...)` registration directly; can also be invoked
- * through `termish-ts`'s `execute(...)` outside an agent (tests, ad-
+ * through `@agex-ts/termish`'s `execute(...)` outside an agent (tests, ad-
  * hoc tooling).
  *
  * Requires `ctx.fs` to be a {@link KvgitFS} (the substrate `VirtualGit`

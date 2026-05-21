@@ -6,7 +6,7 @@ Embeddable LLM-agent primitive for TypeScript. You define a typed task with `age
 
 ## Concept
 
-A [CodeAct](https://arxiv.org/abs/2402.01030)-style harness: the agent's action space is TypeScript code, not JSON tool calls. The agent's TS runs in an isolated Web Worker (via [`@agex-ts/runtime-worker`](https://www.npmjs.com/package/@agex-ts/runtime-worker)) or in-process via `evalRuntime` for tests. Per-session state is versioned by [`kvgit-ts`](https://www.npmjs.com/package/kvgit-ts); one commit captures cache, event log, and (optional) virtual filesystem together.
+A [CodeAct](https://arxiv.org/abs/2402.01030)-style harness: the agent's action space is TypeScript code, not JSON tool calls. The agent's TS runs in an isolated Web Worker (via [`@agex-ts/runtime-worker`](https://www.npmjs.com/package/@agex-ts/runtime-worker)) or in-process via `evalRuntime` for tests. Per-session state is versioned by [`@agex-ts/kvgit`](https://www.npmjs.com/package/@agex-ts/kvgit); one commit captures cache, event log, and (optional) virtual filesystem together.
 
 ## Quick start
 

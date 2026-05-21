@@ -1,7 +1,10 @@
 {
-  "name": "kvgit-ts",
+  "name": "@agex-ts/kvgit",
   "version": "0.1.0",
   "description": "Versioned key-value store with branches, commits, and three-way merges. TypeScript port of agex-py's kvgit.",
+  "publishConfig": {
+    "access": "public"
+  },
   "keywords": [
     "versioned",
     "key-value",

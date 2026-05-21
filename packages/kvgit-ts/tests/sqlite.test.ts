@@ -27,7 +27,7 @@ afterEach(async () => {
 })
 
 async function freshTempPath(name = 'kvgit.db'): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), 'kvgit-ts-sqlite-'))
+  const dir = await mkdtemp(join(tmpdir(), 'kvgit-sqlite-'))
   tempDirs.push(dir)
   return join(dir, name)
 }

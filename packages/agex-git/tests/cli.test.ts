@@ -1,7 +1,7 @@
-import { Staged, type Versioned, VersionedKV } from 'kvgit-ts'
-import { Memory } from 'kvgit-ts/backends/memory'
-import { type CommandHandler, TerminalError, execute } from 'termish-ts'
-import { KvgitFS, polymorphicDecoder, polymorphicEncoder } from 'termish-ts/fs/kvgit'
+import { Staged, type Versioned, VersionedKV } from '@agex-ts/kvgit'
+import { Memory } from '@agex-ts/kvgit/backends/memory'
+import { type CommandHandler, TerminalError, execute } from '@agex-ts/termish'
+import { KvgitFS, polymorphicDecoder, polymorphicEncoder } from '@agex-ts/termish/fs/kvgit'
 import { beforeEach, describe, expect, it } from 'vitest'
 import { makeGitHandler } from '../src/cli'
 
@@ -41,7 +41,7 @@ beforeEach(async () => {
 /** Run a git CLI string against the test fixtures and return stdout. */
 async function git(script: string): Promise<string> {
   // The agex-ts handler shape is structurally compatible with
-  // termish-ts's CommandHandler — both packages cast through unknown
+  // @agex-ts/termish's CommandHandler — both packages cast through unknown
   // at the dispatcher seam, so the same cast holds in tests.
   const handler = makeGitHandler as unknown as CommandHandler
   return execute(script, fs, { commands: new Map([['git', handler]]) })
@@ -80,7 +80,7 @@ describe('git CLI — top level', () => {
   })
 
   it('errors clearly when ctx.fs is not a KvgitFS', async () => {
-    const { MemoryFS } = await import('termish-ts/fs/memory')
+    const { MemoryFS } = await import('@agex-ts/termish/fs/memory')
     const memFs = new MemoryFS()
     const handler = makeGitHandler as unknown as CommandHandler
     await expect(

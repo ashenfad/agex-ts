@@ -17,11 +17,11 @@ For tests and examples, the in-process `evalRuntime` skips the worker boundary. 
 ```ts
 import { createAgent } from 'agex-ts'
 import { evalRuntime } from 'agex-ts/runtime-eval'
-import { connectAnthropic } from '@agex-ts/anthropic'
+import { Anthropic } from '@agex-ts/anthropic'
 
 const agent = await createAgent({
   name: 'greeter',
-  llm: connectAnthropic({ model: 'claude-sonnet-4-6' }),
+  llm: new Anthropic({ model: 'claude-sonnet-4-6', apiKey: process.env.ANTHROPIC_API_KEY }),
   runtime: evalRuntime(),
 })
 
@@ -42,7 +42,7 @@ The agent's action space is TypeScript that calls into the things you register. 
 ```ts
 const agent = await createAgent({
   name: 'data',
-  llm: connectAnthropic({ model: 'claude-sonnet-4-6' }),
+  llm: new Anthropic({ model: 'claude-sonnet-4-6', apiKey: process.env.ANTHROPIC_API_KEY }),
   runtime: evalRuntime(),
 })
 
@@ -133,11 +133,11 @@ For production, use `@agex-ts/runtime-worker` — agent code runs in an isolated
 ```ts
 import { createAgent } from 'agex-ts'
 import { workerRuntime } from '@agex-ts/runtime-worker'
-import { connectAnthropic } from '@agex-ts/anthropic'
+import { Anthropic } from '@agex-ts/anthropic'
 
 const agent = await createAgent({
   name: 'analyst',
-  llm: connectAnthropic({ model: 'claude-sonnet-4-6' }),
+  llm: new Anthropic({ model: 'claude-sonnet-4-6', apiKey: process.env.ANTHROPIC_API_KEY }),
   runtime: workerRuntime({
     workerUrl: new URL('./worker.js', import.meta.url),
   }),
@@ -165,11 +165,11 @@ Default session is `"default"`. Each caller (user, request, queue job) typically
 ```ts
 import { createAgent } from 'agex-ts'
 import { evalRuntime } from 'agex-ts/runtime-eval'
-import { connectAnthropic } from '@agex-ts/anthropic'
+import { Anthropic } from '@agex-ts/anthropic'
 
 const agent = await createAgent({
   name: 'arith',
-  llm: connectAnthropic({ model: 'claude-sonnet-4-6' }),
+  llm: new Anthropic({ model: 'claude-sonnet-4-6', apiKey: process.env.ANTHROPIC_API_KEY }),
   runtime: evalRuntime(),
 })
 

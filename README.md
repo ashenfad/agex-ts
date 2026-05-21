@@ -48,7 +48,7 @@ This is a small monorepo. Pick what you need:
 | [`@agex-ts/anthropic`](packages/agex-anthropic) | Anthropic provider (`connectAnthropic`). |
 | [`@agex-ts/openai`](packages/agex-openai) | OpenAI provider (`connectOpenAI`). |
 | [`@agex-ts/gemini`](packages/agex-gemini) | Gemini provider (`connectGemini`). |
-| [`agex-git`](packages/agex-git) | Agent-view `git` for `terminal_action` — branches / commits / diff / merge over the agent's VFS. Opt-in via `registerGit(agent)`. |
+| [`@agex-ts/git`](packages/agex-git) | Agent-view `git` for `terminal_action` — branches / commits / diff / merge over the agent's VFS. Opt-in via `registerGit(agent)`. |
 | [`kvgit-ts`](packages/kvgit-ts) | Versioned KV store with branches and merge. Powers `state` + the kvgit-backed VFS. Standalone-usable. |
 | [`termish-ts`](packages/termish-ts) | Async filesystem protocol + shell command interpreter. Powers the agent's `terminal_action` surface. Standalone-usable. |
 
@@ -80,7 +80,7 @@ import { defineConfig } from 'vite'
 
 export default defineConfig({
   optimizeDeps: {
-    exclude: ['agex-runtime-worker'],
+    exclude: ['@agex-ts/runtime-worker'],
   },
 })
 ```

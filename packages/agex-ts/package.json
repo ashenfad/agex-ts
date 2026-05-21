@@ -1,8 +1,26 @@
 {
   "name": "agex-ts",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Embeddable LLM-work primitive: typed-function task contract, code as the action space, kvgit-backed state. TypeScript port of agex-py.",
+  "keywords": [
+    "agent",
+    "llm",
+    "ai-agent",
+    "typescript",
+    "sandbox",
+    "code-execution",
+    "tool-use",
+    "browser"
+  ],
+  "author": "Adam Ashenfelter",
   "license": "MIT",
+  "homepage": "https://github.com/ashenfad/agex-ts/tree/main/packages/agex-ts#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ashenfad/agex-ts.git",
+    "directory": "packages/agex-ts"
+  },
+  "bugs": "https://github.com/ashenfad/agex-ts/issues",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -58,7 +76,7 @@
       "import": "./dist/providers/index.js"
     }
   },
-  "files": ["dist", "README.md"],
+  "files": ["dist", "README.md", "LICENSE"],
   "scripts": {
     "build": "tsup",
     "prepare": "tsup",
@@ -74,8 +92,8 @@
   },
   "dependencies": {
     "@standard-schema/spec": "^1.1.0",
-    "kvgit-ts": "workspace:*",
-    "termish-ts": "workspace:*",
+    "kvgit-ts": "workspace:^",
+    "termish-ts": "workspace:^",
     "ts-blank-space": "^0.6.0"
   }
 }

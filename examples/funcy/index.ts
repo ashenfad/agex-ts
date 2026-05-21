@@ -11,7 +11,7 @@
  *   GEMINI_API_KEY=... pnpm --filter funcy-example start
  */
 
-import { Gemini } from 'agex-gemini'
+import { Gemini } from '@agex-ts/gemini'
 import { createAgent, prettyTokens } from 'agex-ts'
 import { evalRuntime } from 'agex-ts/runtime-eval'
 

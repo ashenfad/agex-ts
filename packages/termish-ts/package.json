@@ -1,8 +1,25 @@
 {
   "name": "termish-ts",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Pure-TypeScript shell parser + builtins over an async FileSystem. TypeScript port of agex-py's termish (minus jq).",
+  "keywords": [
+    "shell",
+    "parser",
+    "filesystem",
+    "terminal",
+    "virtual-filesystem",
+    "typescript",
+    "browser"
+  ],
+  "author": "Adam Ashenfelter",
   "license": "MIT",
+  "homepage": "https://github.com/ashenfad/agex-ts/tree/main/packages/termish-ts#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ashenfad/agex-ts.git",
+    "directory": "packages/termish-ts"
+  },
+  "bugs": "https://github.com/ashenfad/agex-ts/issues",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -33,7 +50,7 @@
       "import": "./dist/fs/protocol.js"
     }
   },
-  "files": ["dist", "README.md"],
+  "files": ["dist", "README.md", "LICENSE"],
   "scripts": {
     "build": "tsup",
     "prepare": "tsup",
@@ -42,7 +59,7 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "kvgit-ts": "workspace:*",
+    "kvgit-ts": "workspace:^",
     "tsup": "^8.3.5",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"

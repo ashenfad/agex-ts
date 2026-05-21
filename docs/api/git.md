@@ -1,8 +1,8 @@
 # Git
 
-`agex-git` adds a `git`-style command to the agent's `terminal_action`, letting the agent checkpoint / branch / diff / merge its workspace files. Branches and commits are *virtual* — they live in the same kvgit substrate as the agent's state, so a `git commit` is a true snapshot of file content + agent memory together.
+`@agex-ts/git` adds a `git`-style command to the agent's `terminal_action`, letting the agent checkpoint / branch / diff / merge its workspace files. Branches and commits are *virtual* — they live in the same kvgit substrate as the agent's state, so a `git commit` is a true snapshot of file content + agent memory together.
 
-Ships as a separate package (`agex-git`) — opt in by calling `registerGit(agent)` once during setup.
+Ships as a separate package (`@agex-ts/git`) — opt in by calling `registerGit(agent)` once during setup.
 
 ## Prerequisites
 
@@ -12,7 +12,7 @@ The agent must use the unified kvgit substrate — file content shares one `Vers
 
 ```ts
 import { createAgent } from 'agex-ts'
-import { registerGit } from 'agex-git'
+import { registerGit } from '@agex-ts/git'
 import { workerRuntime } from '@agex-ts/runtime-worker'
 import { connectAnthropic } from '@agex-ts/anthropic'
 
@@ -69,7 +69,7 @@ For tests and library callers that want to drive git without going through `term
 import { Staged, VersionedKV } from 'kvgit-ts'
 import { Memory } from 'kvgit-ts/backends/memory'
 import { polymorphicDecoder, polymorphicEncoder } from 'termish-ts/fs/kvgit'
-import { VirtualGit } from 'agex-git'
+import { VirtualGit } from '@agex-ts/git'
 
 const vkv = await VersionedKV.open(new Memory())
 const staged = new Staged(vkv, { encoder: polymorphicEncoder, decoder: polymorphicDecoder })

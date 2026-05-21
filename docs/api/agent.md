@@ -12,12 +12,12 @@ Async factory — handles awaitable state setup (IDB / SQLite open). Returns a c
 
 ```ts
 import { createAgent } from 'agex-ts'
-import { connectAnthropic } from '@agex-ts/anthropic'
+import { Anthropic } from '@agex-ts/anthropic'
 import { evalRuntime } from 'agex-ts/runtime-eval'
 
 const agent = await createAgent({
   name: 'analyst',
-  llm: connectAnthropic({ model: 'claude-sonnet-4-6' }),
+  llm: new Anthropic({ model: 'claude-sonnet-4-6', apiKey: process.env.ANTHROPIC_API_KEY }),
   runtime: evalRuntime(),
   state: { type: 'versioned', storage: 'memory' },
 })
@@ -257,12 +257,12 @@ Used by `createAgent` internally. Direct construction is useful for tests that w
 ```ts
 import { createAgent } from 'agex-ts'
 import { evalRuntime } from 'agex-ts/runtime-eval'
-import { connectAnthropic } from '@agex-ts/anthropic'
+import { Anthropic } from '@agex-ts/anthropic'
 import { z } from 'zod'
 
 const agent = await createAgent({
   name: 'sales',
-  llm: connectAnthropic({ model: 'claude-sonnet-4-6' }),
+  llm: new Anthropic({ model: 'claude-sonnet-4-6', apiKey: process.env.ANTHROPIC_API_KEY }),
   runtime: evalRuntime(),
   state: { type: 'versioned', storage: 'memory' },
   chapteringTrigger: 50_000,

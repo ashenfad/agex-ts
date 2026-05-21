@@ -1,4 +1,4 @@
-# agex-git
+# @agex-ts/git
 
 Agent-view git over a `kvgit-ts` `Staged`. Surfaces `git status`,
 `git commit -m '...'`, `git branch`, `git checkout`, `git log`,
@@ -33,7 +33,7 @@ adapter both shipped:
 
 ```ts
 import { createAgent } from 'agex-ts'
-import { registerGit } from 'agex-git'
+import { registerGit } from '@agex-ts/git'
 
 const agent = await createAgent({
   name: 'my-agent',
@@ -47,7 +47,7 @@ registerGit(agent)
 For programmatic use (without termish), drive `VirtualGit` directly:
 
 ```ts
-import { VirtualGit } from 'agex-git'
+import { VirtualGit } from '@agex-ts/git'
 
 const vg = new VirtualGit(staged.versioned, staged)
 await vg.commit('initial')
@@ -74,7 +74,7 @@ import {
   // Result types
   type AgentCommit,
   type Status,
-} from 'agex-git'
+} from '@agex-ts/git'
 ```
 
 See agex-py's `agent_git` for the conceptual model.

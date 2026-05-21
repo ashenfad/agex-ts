@@ -4,4 +4,4 @@ Worker-isolated `RuntimeAdapter` for [agex-ts](../agex-ts). Browser-first (Web W
 
 > **Status:** Pre-alpha. Public API is unstable; pin a specific minor version.
 
-> **Vite users:** add `'agex-runtime-worker'` to `optimizeDeps.exclude` — see [Using with Vite](../../README.md#using-with-vite) in the top-level README.
+> **Vite users:** add `'@agex-ts/runtime-worker'` to `optimizeDeps.exclude` — see [Using with Vite](../../README.md#using-with-vite) in the top-level README.

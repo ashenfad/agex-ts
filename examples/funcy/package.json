@@ -11,8 +11,8 @@
     "start": "tsx index.ts"
   },
   "dependencies": {
-    "agex-gemini": "workspace:*",
-    "agex-ts": "workspace:*"
+    "@agex-ts/gemini": "workspace:^",
+    "agex-ts": "workspace:^"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

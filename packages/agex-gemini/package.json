@@ -1,8 +1,17 @@
 {
-  "name": "agex-gemini",
-  "version": "0.0.1",
+  "name": "@agex-ts/gemini",
+  "version": "0.1.0",
   "description": "Google Gemini provider for agex-ts. Lowers NeutralTurn[] to Gemini Content[]; streams via SSE; no SDK dep.",
+  "keywords": ["agex", "agex-ts", "agent", "llm", "gemini", "google", "provider"],
+  "author": "Adam Ashenfelter",
   "license": "MIT",
+  "homepage": "https://github.com/ashenfad/agex-ts/tree/main/packages/agex-gemini#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ashenfad/agex-ts.git",
+    "directory": "packages/agex-gemini"
+  },
+  "bugs": "https://github.com/ashenfad/agex-ts/issues",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -13,7 +22,7 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist", "README.md"],
+  "files": ["dist", "README.md", "LICENSE"],
   "scripts": {
     "build": "tsup",
     "prepare": "tsup",
@@ -22,12 +31,15 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "agex-ts": "workspace:*",
+    "agex-ts": "workspace:^",
     "tsup": "^8.3.5",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
   },
   "peerDependencies": {
-    "agex-ts": "workspace:*"
+    "agex-ts": "workspace:^"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

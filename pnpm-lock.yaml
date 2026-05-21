@@ -20,11 +20,11 @@ importers:
 
   examples/funcy:
     dependencies:
-      agex-gemini:
-        specifier: workspace:*
+      '@agex-ts/gemini':
+        specifier: workspace:^
         version: link:../../packages/agex-gemini
       agex-ts:
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../packages/agex-ts
     devDependencies:
       '@types/node':
@@ -39,11 +39,11 @@ importers:
 
   examples/mathy:
     dependencies:
-      agex-gemini:
-        specifier: workspace:*
+      '@agex-ts/gemini':
+        specifier: workspace:^
         version: link:../../packages/agex-gemini
       agex-ts:
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../../packages/agex-ts
     devDependencies:
       '@types/node':
@@ -59,7 +59,7 @@ importers:
   packages/agex-anthropic:
     devDependencies:
       agex-ts:
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../agex-ts
       tsup:
         specifier: ^8.3.5
@@ -74,7 +74,7 @@ importers:
   packages/agex-gemini:
     devDependencies:
       agex-ts:
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../agex-ts
       tsup:
         specifier: ^8.3.5
@@ -96,13 +96,13 @@ importers:
         version: 7.0.0
     devDependencies:
       agex-ts:
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../agex-ts
       kvgit-ts:
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../kvgit-ts
       termish-ts:
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../termish-ts
       tsup:
         specifier: ^8.3.5
@@ -117,7 +117,7 @@ importers:
   packages/agex-openai:
     devDependencies:
       agex-ts:
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../agex-ts
       tsup:
         specifier: ^8.3.5
@@ -142,13 +142,13 @@ importers:
         specifier: ^2.1.9
         version: 2.1.9(@types/node@22.19.17)(playwright@1.59.1)(typescript@5.9.3)(vite@5.4.21(@types/node@22.19.17))(vitest@2.1.9)
       agex-ts:
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../agex-ts
       playwright:
         specifier: ^1.59.1
         version: 1.59.1
       termish-ts:
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../termish-ts
       tsup:
         specifier: ^8.3.5
@@ -166,10 +166,10 @@ importers:
         specifier: ^1.1.0
         version: 1.1.0
       kvgit-ts:
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../kvgit-ts
       termish-ts:
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../termish-ts
       ts-blank-space:
         specifier: ^0.6.0
@@ -219,7 +219,7 @@ importers:
         version: 2.2.6
     devDependencies:
       kvgit-ts:
-        specifier: workspace:*
+        specifier: workspace:^
         version: link:../kvgit-ts
       tsup:
         specifier: ^8.3.5

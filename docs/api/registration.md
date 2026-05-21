@@ -162,7 +162,7 @@ agent.terminal(
 
 The handler receives a `CommandContext` (args, stdin, stdout, fs, signal — see termish-ts). The library shape (registered fns and namespaces) stays primary; the terminal is for CLI-flavored tooling and `--help`-and-pipelines idioms.
 
-The `agex-git` package is a worked example of the skill+terminal pair: `registerGit(agent)` mounts a markdown skill at `/skills/git/SKILL.md` and registers a `git` terminal command that wraps an in-VFS git surface. See [Git](git.md).
+The `@agex-ts/git` package is a worked example of the skill+terminal pair: `registerGit(agent)` mounts a markdown skill at `/skills/git/SKILL.md` and registers a `git` terminal command that wraps an in-VFS git surface. See [Git](git.md).
 
 ## URL-shipped registrations
 

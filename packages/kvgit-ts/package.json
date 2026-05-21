@@ -1,8 +1,27 @@
 {
   "name": "kvgit-ts",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Versioned key-value store with branches, commits, and three-way merges. TypeScript port of agex-py's kvgit.",
+  "keywords": [
+    "versioned",
+    "key-value",
+    "git",
+    "indexeddb",
+    "branches",
+    "merge",
+    "snapshot",
+    "typescript",
+    "browser"
+  ],
+  "author": "Adam Ashenfelter",
   "license": "MIT",
+  "homepage": "https://github.com/ashenfad/agex-ts/tree/main/packages/kvgit-ts#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ashenfad/agex-ts.git",
+    "directory": "packages/kvgit-ts"
+  },
+  "bugs": "https://github.com/ashenfad/agex-ts/issues",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -26,7 +45,7 @@
       "import": "./dist/backends/sqlite.js"
     }
   },
-  "files": ["dist", "README.md"],
+  "files": ["dist", "README.md", "LICENSE"],
   "scripts": {
     "build": "tsup",
     "prepare": "tsup",

@@ -1,8 +1,27 @@
 {
-  "name": "agex-git",
-  "version": "0.0.1",
+  "name": "@agex-ts/git",
+  "version": "0.1.0",
   "description": "Agent-view git over a kvgit-ts Staged. Termish-ts host command for in-VFS commit / branch / diff.",
+  "keywords": [
+    "agex",
+    "agex-ts",
+    "agent",
+    "git",
+    "virtual-filesystem",
+    "branches",
+    "diff",
+    "merge",
+    "typescript"
+  ],
+  "author": "Adam Ashenfelter",
   "license": "MIT",
+  "homepage": "https://github.com/ashenfad/agex-ts/tree/main/packages/agex-git#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ashenfad/agex-ts.git",
+    "directory": "packages/agex-git"
+  },
+  "bugs": "https://github.com/ashenfad/agex-ts/issues",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -13,7 +32,7 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist", "README.md"],
+  "files": ["dist", "README.md", "LICENSE"],
   "scripts": {
     "build": "tsup",
     "prepare": "tsup",
@@ -22,20 +41,23 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "agex-ts": "workspace:*",
-    "kvgit-ts": "workspace:*",
-    "termish-ts": "workspace:*",
+    "agex-ts": "workspace:^",
+    "kvgit-ts": "workspace:^",
+    "termish-ts": "workspace:^",
     "tsup": "^8.3.5",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
   },
   "peerDependencies": {
-    "agex-ts": "workspace:*",
-    "kvgit-ts": "workspace:*",
-    "termish-ts": "workspace:*"
+    "agex-ts": "workspace:^",
+    "kvgit-ts": "workspace:^",
+    "termish-ts": "workspace:^"
   },
   "dependencies": {
     "@types/diff": "^7.0.0",
     "diff": "^7.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

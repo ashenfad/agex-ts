@@ -1,8 +1,27 @@
 {
-  "name": "agex-runtime-worker",
-  "version": "0.0.1",
+  "name": "@agex-ts/runtime-worker",
+  "version": "0.1.0",
   "description": "Worker-isolated RuntimeAdapter for agex-ts. Browser-first (Web Worker); ts-blank-space transpile by default with a transform hook for embedders that need fuller TS coverage (e.g. esbuild-wasm).",
+  "keywords": [
+    "agex",
+    "agex-ts",
+    "agent",
+    "web-worker",
+    "sandbox",
+    "runtime",
+    "isolation",
+    "browser",
+    "typescript"
+  ],
+  "author": "Adam Ashenfelter",
   "license": "MIT",
+  "homepage": "https://github.com/ashenfad/agex-ts/tree/main/packages/agex-runtime-worker#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ashenfad/agex-ts.git",
+    "directory": "packages/agex-runtime-worker"
+  },
+  "bugs": "https://github.com/ashenfad/agex-ts/issues",
   "type": "module",
   "engines": {
     "node": ">=20"
@@ -16,7 +35,7 @@
       "import": "./dist/worker.js"
     }
   },
-  "files": ["dist", "README.md"],
+  "files": ["dist", "README.md", "LICENSE"],
   "scripts": {
     "build": "tsup",
     "prepare": "tsup",
@@ -29,17 +48,20 @@
   "devDependencies": {
     "@duckdb/duckdb-wasm": "1.33.1-dev45.0",
     "@vitest/browser": "^2.1.9",
-    "agex-ts": "workspace:*",
+    "agex-ts": "workspace:^",
     "playwright": "^1.59.1",
-    "termish-ts": "workspace:*",
+    "termish-ts": "workspace:^",
     "tsup": "^8.3.5",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
   },
   "peerDependencies": {
-    "agex-ts": "workspace:*"
+    "agex-ts": "workspace:^"
   },
   "dependencies": {
     "ts-blank-space": "^0.6.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

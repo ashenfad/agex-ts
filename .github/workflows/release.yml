@@ -1,0 +1,70 @@
+name: Release
+
+# Triggered when a `v*` tag is pushed (the standard "cut a release"
+# gesture). `workflow_dispatch` lets you re-run a failed publish from
+# the Actions UI without re-tagging.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# `id-token: write` is required for OIDC: GitHub Actions issues a
+# short-lived JWT during this run, npm verifies it against the
+# Trusted Publisher configured on each package, and the resulting
+# publish carries a Sigstore provenance attestation. No static
+# NPM_TOKEN secret is involved.
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  release:
+    name: Test and publish to npm with provenance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          # `registry-url` makes setup-node write an `.npmrc` that
+          # points pnpm/npm at the public registry — required for the
+          # OIDC token-exchange step to know where to authenticate.
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      # Same gate as ci.yml — catches browser-hostile patterns leaking
+      # into any dist before they ship.
+      - name: Bundle-shape check
+        run: pnpm check:dist
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test (Node + fake-indexeddb)
+        run: pnpm test
+
+      # `--provenance` triggers OIDC: pnpm asks GitHub for a JWT,
+      # presents it to npm, and npm attaches a Sigstore attestation
+      # linking the tarball to this exact workflow run. The green
+      # "Provenance" badge on npmjs.com is what consumers see.
+      #
+      # `--no-git-checks` skips pnpm's "is the working tree clean?"
+      # gate, which is meaningless in CI (the runner always has a
+      # clean checkout).
+      - name: Publish to npm with provenance
+        run: pnpm publish -r --provenance --no-git-checks

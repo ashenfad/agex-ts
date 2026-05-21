@@ -1,8 +1,8 @@
-import { Staged, VersionedKV } from 'kvgit-ts'
-import { Memory } from 'kvgit-ts/backends/memory'
-import { KvgitFS, polymorphicDecoder, polymorphicEncoder } from 'termish-ts/fs/kvgit'
-import { MemoryFS } from 'termish-ts/fs/memory'
-import type { FileSystem } from 'termish-ts/fs/protocol'
+import { Staged, VersionedKV } from '@agex-ts/kvgit'
+import { Memory } from '@agex-ts/kvgit/backends/memory'
+import { KvgitFS, polymorphicDecoder, polymorphicEncoder } from '@agex-ts/termish/fs/kvgit'
+import { MemoryFS } from '@agex-ts/termish/fs/memory'
+import type { FileSystem } from '@agex-ts/termish/fs/protocol'
 import { describe, expect, it } from 'vitest'
 import { VfsManager } from '../src/vfs'
 

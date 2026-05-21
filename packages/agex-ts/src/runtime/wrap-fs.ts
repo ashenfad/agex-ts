@@ -2,7 +2,7 @@
  * `wrapAgentFs(fs)` — ergonomic wrapper around the underlying
  * `FileSystem` protocol that the agent sees as `fs`.
  *
- * The termish-ts `FileSystem` protocol is bytes-only by design (it's
+ * The @agex-ts/termish `FileSystem` protocol is bytes-only by design (it's
  * a general async-storage abstraction; backends shouldn't care about
  * JS-specific encodings). But agents reach for whichever ecosystem's
  * file-IO convention comes to mind first — Node, Deno, browser web
@@ -27,7 +27,7 @@
  * in the worker realm). Same wrapper, same agent-visible surface.
  */
 
-import type { FileSystem } from 'termish-ts'
+import type { FileSystem } from '@agex-ts/termish'
 
 const utf8Decoder = new TextDecoder('utf-8')
 const utf8Encoder = new TextEncoder()
@@ -89,7 +89,7 @@ export function wrapAgentFs<F extends Pick<FileSystem, 'read' | 'write'>>(fs: F)
     doWrite(path, str, mode)
 
   // Method aliases the agent's reflex might reach for. `read`/`write`
-  // are the canonical termish-ts surface; `readFile`/`writeFile` mirror
+  // are the canonical @agex-ts/termish surface; `readFile`/`writeFile` mirror
   // Node's standard names; `readText`/`writeText` are the Deno-flavored
   // shortcuts. All collapse to the same backing implementation — there's
   // no behavior difference between aliases.

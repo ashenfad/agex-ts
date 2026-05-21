@@ -1,5 +1,5 @@
 /**
- * `KvgitFS` — `FileSystem` backed by a kvgit-ts `Staged`.
+ * `KvgitFS` — `FileSystem` backed by a @agex-ts/kvgit `Staged`.
  *
  * Every path becomes a key in the staging buffer. Writes accumulate
  * locally; the user calls `commit()` to flush them as a single
@@ -20,12 +20,12 @@
  * any JSON parsing in the hot path, and lets `read()` slice straight
  * into a Uint8Array.
  *
- * Peer-dep on kvgit-ts. Import only via `termish-ts/fs/kvgit`; importing
+ * Peer-dep on @agex-ts/kvgit. Import only via `@agex-ts/termish/fs/kvgit`; importing
  * the main entry never pulls kvgit in.
  */
 
-import type { Staged } from 'kvgit-ts'
-import type { Decoder, Encoder } from 'kvgit-ts'
+import type { Staged } from '@agex-ts/kvgit'
+import type { Decoder, Encoder } from '@agex-ts/kvgit'
 import superjson from 'superjson'
 import { basename, dirname, joinPath, resolve } from './path'
 import type { FileInfo, FileMetadata, FileSystem } from './protocol'

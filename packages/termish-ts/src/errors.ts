@@ -1,5 +1,5 @@
 /**
- * Error types for termish-ts.
+ * Error types for @agex-ts/termish.
  *
  * `TerminalError` is the catch-all for command execution failures —
  * it carries any partial output captured before the failure so a

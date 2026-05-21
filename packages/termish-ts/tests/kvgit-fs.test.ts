@@ -1,5 +1,5 @@
-import { Staged, VersionedKV } from 'kvgit-ts'
-import { Memory } from 'kvgit-ts/backends/memory'
+import { Staged, VersionedKV } from '@agex-ts/kvgit'
+import { Memory } from '@agex-ts/kvgit/backends/memory'
 import { describe, expect, it } from 'vitest'
 import {
   KvgitFS,

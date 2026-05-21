@@ -1,4 +1,4 @@
-# kvgit-ts
+# @agex-ts/kvgit
 
 Versioned key-value store with branches, commits, and three-way merges. A TypeScript port of [agex-py's kvgit](https://github.com/ashenfad/kvgit), redesigned around async storage so it works equally well in Node and the browser.
 
@@ -10,4 +10,4 @@ A `Map<string, T>` with git-like history. Every `commit()` creates a checkpoint;
 
 ## Design
 
-The canonical type contracts live in [`src/types.ts`](./src/types.ts). For how kvgit-ts is used inside agex-ts, see [agex-ts's State & Sessions concepts doc](../../docs/concepts/state-and-sessions.md).
+The canonical type contracts live in [`src/types.ts`](./src/types.ts). For how @agex-ts/kvgit is used inside agex-ts, see [agex-ts's State & Sessions concepts doc](../../docs/concepts/state-and-sessions.md).

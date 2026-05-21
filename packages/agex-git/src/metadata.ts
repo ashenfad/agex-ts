@@ -10,13 +10,13 @@
  *
  * The blob is a plain object round-tripped through whatever encoder
  * the surrounding `Staged` is configured with — in production agex-ts
- * setups that's the polymorphic codec from `termish-ts/fs/kvgit`,
+ * setups that's the polymorphic codec from `@agex-ts/termish/fs/kvgit`,
  * which routes plain objects through `superjson`. The blob doesn't
  * start with the `f:` / `d:` `KvgitFS` prefixes, so the agent's VFS
  * never treats it as a file.
  */
 
-import type { Staged } from 'kvgit-ts'
+import type { Staged } from '@agex-ts/kvgit'
 
 /**
  * Reserved kvgit key. Plain object value, encoded via the surrounding

@@ -33,7 +33,7 @@ const result = await summarize([3, 1, 4, 1, 5, 9, 2, 6])
 - **Typed function tasks** — `agent.task({...})` declares the input/output contract; the agent fulfills it. [Standard Schema](https://standardschema.dev/) (Zod, Valibot, ArkType, …) for runtime validation.
 - **Curated TS environment** — register exactly which functions, classes, and namespaces the agent can use. Per-member visibility filters. URL-shipped registrations let you hand the agent a whole library by URL without RPC bridging per call.
 - **Worker-isolated runtime** — agent code runs in a Web Worker; no shared globals, no DOM access. In-process `evalRuntime` for tests.
-- **Versioned per-session state** — agent's cache, event log, and (optional) virtual filesystem are versioned per session. One `agent.commit(session)` captures everything atomically. Time-travel via `agent.eventsAt(hash, session)`. Built on [kvgit-ts](packages/kvgit-ts).
+- **Versioned per-session state** — agent's cache, event log, and (optional) virtual filesystem are versioned per session. One `agent.commit(session)` captures everything atomically. Time-travel via `agent.eventsAt(hash, session)`. Built on [@agex-ts/kvgit](packages/kvgit-ts).
 - **Agent-directed compaction** — when context grows, the agent writes its own chapter summaries. Originals stay browsable at `/chapters/<slug>/`. See [Chapters](docs/concepts/chapters.md).
 - **Multi-agent flows are regular control flow** — sub-agents are functions; orchestrators call them like any other. No workflow DSL.
 
@@ -49,8 +49,8 @@ This is a small monorepo. Pick what you need:
 | [`@agex-ts/openai`](packages/agex-openai) | OpenAI provider (`OpenAI`). |
 | [`@agex-ts/gemini`](packages/agex-gemini) | Gemini provider (`Gemini`). |
 | [`@agex-ts/git`](packages/agex-git) | Agent-view `git` for `terminal_action` — branches / commits / diff / merge over the agent's VFS. Opt-in via `registerGit(agent)`. |
-| [`kvgit-ts`](packages/kvgit-ts) | Versioned KV store with branches and merge. Powers `state` + the kvgit-backed VFS. Standalone-usable. |
-| [`termish-ts`](packages/termish-ts) | Async filesystem protocol + shell command interpreter. Powers the agent's `terminal_action` surface. Standalone-usable. |
+| [`@agex-ts/kvgit`](packages/kvgit-ts) | Versioned KV store with branches and merge. Powers `state` + the kvgit-backed VFS. Standalone-usable. |
+| [`@agex-ts/termish`](packages/termish-ts) | Async filesystem protocol + shell command interpreter. Powers the agent's `terminal_action` surface. Standalone-usable. |
 
 ## Documentation
 

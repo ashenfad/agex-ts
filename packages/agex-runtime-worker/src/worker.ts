@@ -245,7 +245,7 @@ function bytesToBase64(bytes: Uint8Array): string {
 // ---------------------------------------------------------------------------
 
 /** Methods we expose on the worker-side `fs` proxy. Mirrors
- *  termish-ts's `FileSystem` surface. The same list is enforced on
+ *  @agex-ts/termish's `FileSystem` surface. The same list is enforced on
  *  the host so an unrecognized method name throws cleanly instead
  *  of reaching for a prototype-chain method. Note that `getcwd` is
  *  sync host-side but becomes `Promise<string>` here — it has to

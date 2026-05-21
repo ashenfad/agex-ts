@@ -98,15 +98,15 @@ importers:
         specifier: ^7.0.0
         version: 7.0.0
     devDependencies:
+      '@agex-ts/kvgit':
+        specifier: workspace:^
+        version: link:../kvgit-ts
+      '@agex-ts/termish':
+        specifier: workspace:^
+        version: link:../termish-ts
       agex-ts:
         specifier: workspace:^
         version: link:../agex-ts
-      kvgit-ts:
-        specifier: workspace:^
-        version: link:../kvgit-ts
-      termish-ts:
-        specifier: workspace:^
-        version: link:../termish-ts
       tsup:
         specifier: ^8.3.5
         version: 8.5.1(postcss@8.5.13)(tsx@4.21.0)(typescript@5.9.3)
@@ -138,6 +138,9 @@ importers:
         specifier: ^0.6.0
         version: 0.6.2
     devDependencies:
+      '@agex-ts/termish':
+        specifier: workspace:^
+        version: link:../termish-ts
       '@duckdb/duckdb-wasm':
         specifier: 1.33.1-dev45.0
         version: 1.33.1-dev45.0
@@ -150,9 +153,6 @@ importers:
       playwright:
         specifier: ^1.59.1
         version: 1.59.1
-      termish-ts:
-        specifier: workspace:^
-        version: link:../termish-ts
       tsup:
         specifier: ^8.3.5
         version: 8.5.1(postcss@8.5.13)(tsx@4.21.0)(typescript@5.9.3)
@@ -165,15 +165,15 @@ importers:
 
   packages/agex-ts:
     dependencies:
+      '@agex-ts/kvgit':
+        specifier: workspace:^
+        version: link:../kvgit-ts
+      '@agex-ts/termish':
+        specifier: workspace:^
+        version: link:../termish-ts
       '@standard-schema/spec':
         specifier: ^1.1.0
         version: 1.1.0
-      kvgit-ts:
-        specifier: workspace:^
-        version: link:../kvgit-ts
-      termish-ts:
-        specifier: workspace:^
-        version: link:../termish-ts
       ts-blank-space:
         specifier: ^0.6.0
         version: 0.6.2
@@ -227,12 +227,12 @@ importers:
         specifier: ^2.2.6
         version: 2.2.6
     devDependencies:
+      '@agex-ts/kvgit':
+        specifier: workspace:^
+        version: link:../kvgit-ts
       '@types/node':
         specifier: ^22.10.0
         version: 22.19.17
-      kvgit-ts:
-        specifier: workspace:^
-        version: link:../kvgit-ts
       tsup:
         specifier: ^8.3.5
         version: 8.5.1(postcss@8.5.13)(tsx@4.21.0)(typescript@5.9.3)

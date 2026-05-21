@@ -119,7 +119,7 @@ class KvgitState implements VersionedStateBackend {
 }
 ```
 
-Wraps a kvgit-ts `Staged` — writes go to the buffer; `commit()` flushes them. The underlying `Staged` is exposed via the `staged` getter for callers that need kvgit-specific surfaces (branch ops, etc.).
+Wraps a @agex-ts/kvgit `Staged` — writes go to the buffer; `commit()` flushes them. The underlying `Staged` is exposed via the `staged` getter for callers that need kvgit-specific surfaces (branch ops, etc.).
 
 The `Agent` exposes most of the useful surface via per-session host APIs (`agent.commit(session, opts)`, `agent.commitInfo(hash, session)`, `agent.history(hash, { session })`, `agent.eventsAt(hash, session)`) — direct `KvgitState` access is for advanced cases.
 
@@ -135,7 +135,7 @@ Within a versioned session, both file content (`FileRecord` from `KvgitFS`) and 
 
 Discrimination on encode: a value with all four `FileRecord` keys (`isDir`, `createdAt`, `modifiedAt`, `content` as `Uint8Array`) goes through the file branch; everything else through JSON. The structure is collision-proof against legitimate JSON values (which can't naturally carry a `Uint8Array`).
 
-The encoder is exported from `termish-ts/fs/kvgit` as `polymorphicEncoder` / `polymorphicDecoder`. agex-ts uses it automatically when `state: { type: 'versioned', ... }` is configured. Custom embedders building their own state stack can import it directly.
+The encoder is exported from `@agex-ts/termish/fs/kvgit` as `polymorphicEncoder` / `polymorphicDecoder`. agex-ts uses it automatically when `state: { type: 'versioned', ... }` is configured. Custom embedders building their own state stack can import it directly.
 
 ## Atomicity
 

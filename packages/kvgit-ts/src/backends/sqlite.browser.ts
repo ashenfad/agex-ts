@@ -1,7 +1,7 @@
 /**
  * Browser-condition stub for the sqlite backend.
  *
- * The real `kvgit-ts/backends/sqlite` module imports `node:module` to
+ * The real `@agex-ts/kvgit/backends/sqlite` module imports `node:module` to
  * load `node:sqlite` — both Node-only. When a browser bundler (Vite,
  * Rollup, esbuild, webpack) resolves this sub-path under the
  * `"browser"` exports condition, it picks this file instead, so
@@ -23,11 +23,11 @@ export interface SqliteOptions {
 
 export class Sqlite implements KVStore {
   private constructor() {
-    throw new Error('kvgit-ts: the sqlite backend is Node-only and not available in browsers')
+    throw new Error('@agex-ts/kvgit: the sqlite backend is Node-only and not available in browsers')
   }
 
   static async open(_opts: SqliteOptions = {}): Promise<Sqlite> {
-    throw new Error('kvgit-ts: the sqlite backend is Node-only and not available in browsers')
+    throw new Error('@agex-ts/kvgit: the sqlite backend is Node-only and not available in browsers')
   }
 
   // Method stubs — never reached because the constructor / factory throw

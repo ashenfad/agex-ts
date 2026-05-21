@@ -6,9 +6,9 @@
  *                            session VFS
  *   - `dispatchFileEdit`   → search/replace inside an existing file in
  *                            the VFS, honoring `matchAll`
- *   - `dispatchTerminal`   → run the commands string through termish-ts,
+ *   - `dispatchTerminal`   → run the commands string through @agex-ts/termish,
  *                            with the agent's registered terminal handlers
- *                            merged on top of termish-ts's builtins
+ *                            merged on top of @agex-ts/termish's builtins
  *
  * `dispatchTs` lives in `task.ts` because it threads through the
  * runtime adapter and produces the `TaskOutcome` that drives the loop.
@@ -18,8 +18,8 @@
  * silently spin on broken emissions.
  */
 
-import type { CommandHandler } from 'termish-ts'
-import { execute } from 'termish-ts'
+import type { CommandHandler } from '@agex-ts/termish'
+import { execute } from '@agex-ts/termish'
 import type { FileEditEmission, FileWriteEmission, Policy, VirtualFileSystem } from './types'
 
 const encoder = new TextEncoder()
@@ -79,7 +79,7 @@ export async function dispatchFileEdit(
  *  A multi-MB blob (e.g. `cat` against a file with an embedded base64
  *  image) can otherwise blow the next turn's input window. ~200K chars
  *  is roughly 50K tokens — leaves room for normal source-file reads
- *  while bounding the worst case. termish-ts appends a marker pointing
+ *  while bounding the worst case. @agex-ts/termish appends a marker pointing
  *  the agent at `head/tail/grep/sed` when it trips. */
 const DEFAULT_TERMINAL_OUTPUT_CAP = 200_000
 
@@ -90,11 +90,11 @@ export async function dispatchTerminal(
   signal: AbortSignal,
 ): Promise<string> {
   // Build the host-injected commands map from the policy's terminals.
-  // termish-ts merges these on top of its own builtins.
+  // @agex-ts/termish merges these on top of its own builtins.
   const hostCommands = new Map<string, CommandHandler>()
   for (const [name, reg] of policy.terminals) {
     // The agent's TerminalCommandHandler is shape-compatible with
-    // termish-ts's CommandHandler; cast through unknown is safe.
+    // @agex-ts/termish's CommandHandler; cast through unknown is safe.
     hostCommands.set(name, reg.handler as unknown as CommandHandler)
   }
   return execute(commands, fs, {

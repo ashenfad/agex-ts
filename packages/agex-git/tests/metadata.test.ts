@@ -1,6 +1,6 @@
-import { Staged, VersionedKV } from 'kvgit-ts'
-import { Memory } from 'kvgit-ts/backends/memory'
-import { polymorphicDecoder, polymorphicEncoder } from 'termish-ts/fs/kvgit'
+import { Staged, VersionedKV } from '@agex-ts/kvgit'
+import { Memory } from '@agex-ts/kvgit/backends/memory'
+import { polymorphicDecoder, polymorphicEncoder } from '@agex-ts/termish/fs/kvgit'
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_BRANCH, METADATA_KEY, Metadata } from '../src/metadata'
 

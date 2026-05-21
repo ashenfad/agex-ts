@@ -30,9 +30,9 @@ import { Dummy } from 'agex-ts/llm-dummy'
 import { renderEvents, prettyEvents } from 'agex-ts'
 
 // Provider packages
-import { connectAnthropic } from '@agex-ts/anthropic'
-import { connectOpenAI }    from '@agex-ts/openai'
-import { connectGemini }    from '@agex-ts/gemini'
+import { Anthropic } from '@agex-ts/anthropic'
+import { OpenAI }    from '@agex-ts/openai'
+import { Gemini }    from '@agex-ts/gemini'
 
 // Production runtime
 import { workerRuntime } from '@agex-ts/runtime-worker'

@@ -7,6 +7,7 @@
  * adapter and its wire protocol, so a contrived context is enough.
  */
 
+import { MemoryFS } from '@agex-ts/termish/fs/memory'
 import { CancelledError } from 'agex-ts/errors'
 import type {
   Cache,
@@ -16,7 +17,6 @@ import type {
   RegisteredFn,
   RegisteredNs,
 } from 'agex-ts/types'
-import { MemoryFS } from 'termish-ts/fs/memory'
 import { afterEach, describe, expect, it } from 'vitest'
 import { workerRuntime } from '../src/runtime'
 

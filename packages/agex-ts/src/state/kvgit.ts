@@ -1,5 +1,5 @@
 /**
- * `KvgitState` — `VersionedStateBackend` wrapping a kvgit-ts `Staged`.
+ * `KvgitState` — `VersionedStateBackend` wrapping a @agex-ts/kvgit `Staged`.
  *
  * Reads / writes go straight through to the staging buffer; `commit()`
  * flushes them as one versioned commit (with three-way merge if HEAD
@@ -10,7 +10,7 @@
  * lives in the host-side persistence APIs, not here.
  */
 
-import type { CommitInfo, Staged, Versioned } from 'kvgit-ts'
+import type { CommitInfo, Staged, Versioned } from '@agex-ts/kvgit'
 import type { VersionedStateBackend } from './backend'
 
 export class KvgitState implements VersionedStateBackend {

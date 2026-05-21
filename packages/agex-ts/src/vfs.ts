@@ -21,7 +21,7 @@
  * `MemoryFS` per session otherwise.
  */
 
-import type { FileSystem } from 'termish-ts/fs/protocol'
+import type { FileSystem } from '@agex-ts/termish/fs/protocol'
 import { ChaptersOverlay, buildChaptersOverlay } from './fs/chapters-overlay'
 import { MountFS } from './fs/mount'
 import { SkillsOverlay } from './fs/skills-overlay'

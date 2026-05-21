@@ -54,8 +54,8 @@ agex-ts is a small monorepo. Pick what you need:
 | `@agex-ts/anthropic` | Anthropic provider (`Anthropic`). |
 | `@agex-ts/openai` | OpenAI provider (`OpenAI`). |
 | `@agex-ts/gemini` | Gemini provider (`Gemini`). |
-| `kvgit-ts` | Versioned KV store powering state. Standalone-usable. |
-| `termish-ts` | Async filesystem protocol + parser/interpreter for `terminal_action`. Standalone-usable. |
+| `@agex-ts/kvgit` | Versioned KV store powering state. Standalone-usable. |
+| `@agex-ts/termish` | Async filesystem protocol + parser/interpreter for `terminal_action`. Standalone-usable. |
 
 ## Status
 
@@ -63,5 +63,5 @@ agex-ts is a small monorepo. Pick what you need:
 
 ## Built on
 
-- **[kvgit-ts](https://github.com/ashenfad/agex-ts/tree/main/packages/kvgit-ts)** — versioned KV store with HAMT-backed branches and three-way merge.
-- **[termish-ts](https://github.com/ashenfad/agex-ts/tree/main/packages/termish-ts)** — async filesystem protocol with shell-style command interpreter for the agent's `terminal_action` surface.
+- **[@agex-ts/kvgit](https://github.com/ashenfad/agex-ts/tree/main/packages/kvgit-ts)** — versioned KV store with HAMT-backed branches and three-way merge.
+- **[@agex-ts/termish](https://github.com/ashenfad/agex-ts/tree/main/packages/termish-ts)** — async filesystem protocol with shell-style command interpreter for the agent's `terminal_action` surface.

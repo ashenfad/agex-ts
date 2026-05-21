@@ -1,7 +1,10 @@
 {
-  "name": "termish-ts",
+  "name": "@agex-ts/termish",
   "version": "0.1.0",
   "description": "Pure-TypeScript shell parser + builtins over an async FileSystem. TypeScript port of agex-py's termish (minus jq).",
+  "publishConfig": {
+    "access": "public"
+  },
   "keywords": [
     "shell",
     "parser",
@@ -60,7 +63,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
-    "kvgit-ts": "workspace:^",
+    "@agex-ts/kvgit": "workspace:^",
     "tsup": "^8.3.5",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"

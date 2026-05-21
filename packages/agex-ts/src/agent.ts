@@ -13,8 +13,8 @@
  * those will hook into.
  */
 
-import type { CommitInfo } from 'kvgit-ts'
-import type { FileSystem } from 'termish-ts/fs/protocol'
+import type { CommitInfo } from '@agex-ts/kvgit'
+import type { FileSystem } from '@agex-ts/termish/fs/protocol'
 import { CacheImpl } from './cache'
 import {
   CHAPTER_TASK_NAME,
@@ -308,7 +308,7 @@ export class Agent {
   #buildBackingFactory(fsConfig: FSConfig): BackingFactory {
     if (fsConfig.type === 'memory') {
       return async () => {
-        const { MemoryFS } = await import('termish-ts/fs/memory')
+        const { MemoryFS } = await import('@agex-ts/termish/fs/memory')
         return new MemoryFS() as FileSystem
       }
     }
@@ -329,7 +329,7 @@ export class Agent {
         // resolver shape ever drifts.
         throw new Error('Agent: kvgit-backed FS expects KvgitState; got an unexpected backend')
       }
-      const { KvgitFS } = await import('termish-ts/fs/kvgit')
+      const { KvgitFS } = await import('@agex-ts/termish/fs/kvgit')
       return new KvgitFS(state.staged) as FileSystem
     }
   }
@@ -676,8 +676,8 @@ export class Agent {
     // don't need writes — just iter() and get() — so a minimal
     // adapter wraps the Versioned's reads directly. Pass `session`
     // so the historical EventLog reads from the right keyspace.
-    const { Staged } = await import('kvgit-ts')
-    const { polymorphicDecoder, polymorphicEncoder } = await import('termish-ts/fs/kvgit')
+    const { Staged } = await import('@agex-ts/kvgit')
+    const { polymorphicDecoder, polymorphicEncoder } = await import('@agex-ts/termish/fs/kvgit')
     const historicalStaged = new Staged(view, {
       encoder: polymorphicEncoder,
       decoder: polymorphicDecoder,

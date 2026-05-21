@@ -1,4 +1,4 @@
-import { MemoryFS } from 'termish-ts/fs/memory'
+import { MemoryFS } from '@agex-ts/termish/fs/memory'
 import { describe, expect, it } from 'vitest'
 import { parseImports, prepareScript } from '../src/runtime/module-loader'
 

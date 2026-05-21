@@ -15,7 +15,7 @@
  * leaving kvgit HEAD on its real path.
  */
 
-import type { Staged, Versioned } from 'kvgit-ts'
+import type { Staged, Versioned } from '@agex-ts/kvgit'
 import { isBinary, unifiedDiff as renderUnifiedDiff } from './diff'
 import {
   AgentGitError,
@@ -39,7 +39,7 @@ import {
 import type { AgentCommit, Status } from './types'
 
 /** Polymorphic-codec FileRecord shape. Defined locally because
- *  `termish-ts/fs/kvgit`'s interface isn't exported. */
+ *  `@agex-ts/termish/fs/kvgit`'s interface isn't exported. */
 interface FileRecord {
   readonly isDir: boolean
   readonly createdAt: string
@@ -823,7 +823,7 @@ function fileContentEqual(
   return true
 }
 
-/** Inline POSIX path resolver (parity with `termish-ts/src/fs/path`,
+/** Inline POSIX path resolver (parity with `@agex-ts/termish/src/fs/path`,
  *  which isn't publicly exported). Relative paths anchor to `cwd`;
  *  absolute paths normalize directly. */
 function resolvePath(path: string, cwd: string): string {

@@ -1,5 +1,5 @@
 /**
- * `FileSystem` protocol for termish-ts.
+ * `FileSystem` protocol for @agex-ts/termish.
  *
  * Async, structurally-typed interface that every adapter (MemoryFS,
  * RealFS, KvgitFS, host-defined) implements. We define our own

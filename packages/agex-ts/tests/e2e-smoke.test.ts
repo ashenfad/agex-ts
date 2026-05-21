@@ -3,7 +3,7 @@
  *
  * Drives a multi-turn task through the full pipeline:
  *   Dummy LLM (scripted) → action loop → eval-runtime → emission
- *   dispatcher → kvgit-backed state + termish-ts MemoryFS.
+ *   dispatcher → kvgit-backed state + @agex-ts/termish MemoryFS.
  *
  * Exercises every contract this PR landed:
  *   - registration (fn + namespace + terminal)

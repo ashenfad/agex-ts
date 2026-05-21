@@ -13,7 +13,7 @@
  * the chapters overlay uses).
  */
 
-import type { FileInfo, FileMetadata, FileSystem } from 'termish-ts'
+import type { FileInfo, FileMetadata, FileSystem } from '@agex-ts/termish'
 import type { RegisteredSkill } from '../types'
 
 const enc = new TextEncoder()

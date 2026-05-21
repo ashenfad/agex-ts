@@ -18,8 +18,8 @@
  * and rejects with `CancelledError`.
  */
 
+import { TerminalError } from '@agex-ts/termish'
 import type { StandardSchemaV1 } from '@standard-schema/spec'
-import { TerminalError } from 'termish-ts'
 import type { Agent } from './agent'
 import {
   getLastFiredActionTimestamp,

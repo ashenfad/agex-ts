@@ -19,7 +19,7 @@
  * doesn't care what's underneath.
  */
 
-import type { FileInfo, FileMetadata, FileSystem } from 'termish-ts'
+import type { FileInfo, FileMetadata, FileSystem } from '@agex-ts/termish'
 
 export interface Mount {
   /** Path prefix the overlay handles. Must start with `/` and not

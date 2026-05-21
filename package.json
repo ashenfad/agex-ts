@@ -23,6 +23,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
+    "@changesets/cli": "^2.31.0",
     "simple-git-hooks": "^2.13.1",
     "typescript": "^5.7.2"
   }

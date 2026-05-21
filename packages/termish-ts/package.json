@@ -59,6 +59,7 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
+    "@types/node": "^22.10.0",
     "kvgit-ts": "workspace:^",
     "tsup": "^8.3.5",
     "typescript": "^5.7.2",

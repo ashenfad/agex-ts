@@ -137,20 +137,21 @@ function makeConsole(executeId: number): Console {
   } as any
 }
 
-/** Per-arg cap for captured-console output. Applied uniformly across
+/** Per-arg cap for captured-console output, measured in UTF-16 code
+ *  units (`String#length`) — not bytes. Applied uniformly across
  *  every type so a `console.log(JSON.stringify(big))` (string path)
  *  is bounded just like `console.log(big)` (object path) — the two
  *  idioms used to diverge wildly, with the string variant bypassing
  *  the cap entirely and blowing past LLM context windows on the
- *  next turn. 50 KB leaves room for honest debugging output
+ *  next turn. 50 K chars leaves room for honest debugging output
  *  (formatted JSON dumps, log-line bundles) while tripping the
  *  truncation marker on data-URI floods, base64-embedded
  *  resources, and the like. */
-const MAX_CAPTURE_BYTES = 50_000
+const MAX_CAPTURE_CHARS = 50_000
 
 function _cap(s: string): string {
-  return s.length > MAX_CAPTURE_BYTES
-    ? `${s.slice(0, MAX_CAPTURE_BYTES)}…(truncated, original ${s.length} bytes)`
+  return s.length > MAX_CAPTURE_CHARS
+    ? `${s.slice(0, MAX_CAPTURE_CHARS)}…(truncated, original ${s.length} chars)`
     : s
 }
 

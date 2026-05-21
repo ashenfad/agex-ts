@@ -32,45 +32,45 @@ interface LLMConfig {
 ### `@agex-ts/anthropic`
 
 ```ts
-import { connectAnthropic } from '@agex-ts/anthropic'
+import { Anthropic } from '@agex-ts/anthropic'
 
-const llm = connectAnthropic({
+const llm = new Anthropic({
   model: 'claude-sonnet-4-6',
-  apiKey: process.env.ANTHROPIC_API_KEY,        // optional; defaults to env
-  timeoutSeconds: 30,
+  apiKey: process.env.ANTHROPIC_API_KEY,
+  timeoutMs: 30_000,
   // ... extras
 })
 ```
 
-Returns an `LLMClient` that streams from Anthropic's Messages API. Tool-use blocks for the four built-in tools (`ts_action`, `terminal_action`, `write_file`, `edit_file`) are wired automatically.
+An `LLMClient` that streams from Anthropic's Messages API. Tool-use blocks for the four built-in tools (`ts_action`, `terminal_action`, `write_file`, `edit_file`) are wired automatically. See [`@agex-ts/anthropic`'s README](https://www.npmjs.com/package/@agex-ts/anthropic) for the full option table.
 
 ### `@agex-ts/openai`
 
 ```ts
-import { connectOpenAI } from '@agex-ts/openai'
+import { OpenAI } from '@agex-ts/openai'
 
-const llm = connectOpenAI({
-  model: 'gpt-4.1-nano',
+const llm = new OpenAI({
+  model: 'gpt-4o-mini',
   apiKey: process.env.OPENAI_API_KEY,
-  timeoutSeconds: 30,
+  timeoutMs: 30_000,
 })
 ```
 
-Returns an `LLMClient` for OpenAI's Chat Completions / Tool Use APIs.
+An `LLMClient` for OpenAI's Chat Completions API. `baseUrl` override makes this drop-in for any OpenAI-compatible server (ollama, vLLM, LM Studio, OpenRouter, Together, etc.). See [`@agex-ts/openai`'s README](https://www.npmjs.com/package/@agex-ts/openai) for the full option table.
 
 ### `@agex-ts/gemini`
 
 ```ts
-import { connectGemini } from '@agex-ts/gemini'
+import { Gemini } from '@agex-ts/gemini'
 
-const llm = connectGemini({
-  model: 'gemini-2.5-pro',
+const llm = new Gemini({
+  model: 'gemini-2.5-flash',
   apiKey: process.env.GEMINI_API_KEY,
-  timeoutSeconds: 30,
+  timeoutMs: 30_000,
 })
 ```
 
-Returns an `LLMClient` for Google's Gemini API.
+An `LLMClient` for Google's Gemini API. See [`@agex-ts/gemini`'s README](https://www.npmjs.com/package/@agex-ts/gemini) for the full option table.
 
 ## `Dummy` (for tests)
 
@@ -88,16 +88,17 @@ Cycles through the configured responses in order, one per `complete()` call. Use
 
 `Dummy` exposes `callCount`, `allTurns`, and `allSystems` for assertions about what the agent loop sent on each turn.
 
-## Configuration
+## Common configuration shape
 
 | Field | Purpose |
 |---|---|
-| `model` | The provider's model identifier. |
-| `apiKey` | API key; usually defaults to a provider-specific env var. |
-| `timeoutSeconds` | Per-call timeout. Defaults vary by provider. |
-| `extras` | Provider-specific knobs (max_tokens, temperature, top_p, etc.). |
+| `model` | The provider's model identifier. Each provider ships a sensible default. |
+| `apiKey` | API key. Pass explicitly — provider clients do not read env vars on your behalf. |
+| `timeoutMs` | Per-call timeout. Defaults to 90s across providers. |
+| `extras` (Anthropic, OpenAI) / `generationConfig` (Gemini) | Provider-specific knobs (`temperature`, `top_p`, etc.) merged into the request body. |
+| `headers`, `fetchImpl` | Per-request header overrides + custom-transport hook (proxies, auth bridges). |
 
-Each provider's connector supports its native knobs; check the provider package's source for the exact `extras` shape.
+Each provider also has its own native knobs (e.g. Anthropic's `nativeThinking` / `thinkingBudget`, OpenAI's `forceToolUse`, Gemini's `nativeThinking`). See the provider package's README on npm or its `OptionsInterface` in source for the exact shape.
 
 ## Streaming model
 
@@ -142,6 +143,6 @@ Useful for self-hosted models, local inference (llama.cpp, MLX), and provider pr
 
 ## Retry and resilience
 
-agex-ts core does not retry failed LLM calls automatically. Provider clients implement transient-error retry (e.g. `@agex-ts/anthropic` retries `TypeError` once before giving up — useful for browser fetch transient failures). The agent loop catches errors as `ErrorEvent` and lets the agent see and react.
+agex-ts core does not retry failed LLM calls automatically. Provider clients implement transient-error retry (e.g. `@agex-ts/anthropic`, `@agex-ts/openai`, and `@agex-ts/gemini` retry transient network errors up to twice with a 1s backoff — useful for browser fetch flakiness). The agent loop catches non-retryable errors as `ErrorEvent` and lets the agent see and react.
 
 For aggressive retry policies, wrap your `LLMClient` in a thin adapter that retries `complete()` on configured failures.

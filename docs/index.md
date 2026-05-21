@@ -9,11 +9,11 @@ Most agent frameworks ask you to define tools — JSON schemas wrapping your cod
 ```ts
 import { createAgent } from 'agex-ts'
 import { workerRuntime } from '@agex-ts/runtime-worker'
-import { connectAnthropic } from '@agex-ts/anthropic'
+import { Anthropic } from '@agex-ts/anthropic'
 
 const agent = await createAgent({
   name: 'analyst',
-  llm: connectAnthropic({ model: 'claude-sonnet-4-6' }),
+  llm: new Anthropic({ model: 'claude-sonnet-4-6', apiKey: process.env.ANTHROPIC_API_KEY }),
   runtime: workerRuntime({ workerUrl: new URL('./worker.js', import.meta.url) }),
   state: { type: 'versioned', storage: 'indexeddb' },
 })
@@ -51,9 +51,9 @@ agex-ts is a small monorepo. Pick what you need:
 |---|---|
 | `agex-ts` | Core: `Agent`, `createAgent`, registration, task, state, render. |
 | `@agex-ts/runtime-worker` | Web Worker runtime adapter (browser today; Node `worker_threads` planned). |
-| `@agex-ts/anthropic` | Anthropic provider (`connectAnthropic`). |
-| `@agex-ts/openai` | OpenAI provider (`connectOpenAI`). |
-| `@agex-ts/gemini` | Gemini provider (`connectGemini`). |
+| `@agex-ts/anthropic` | Anthropic provider (`Anthropic`). |
+| `@agex-ts/openai` | OpenAI provider (`OpenAI`). |
+| `@agex-ts/gemini` | Gemini provider (`Gemini`). |
 | `kvgit-ts` | Versioned KV store powering state. Standalone-usable. |
 | `termish-ts` | Async filesystem protocol + parser/interpreter for `terminal_action`. Standalone-usable. |
 

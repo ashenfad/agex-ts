@@ -7,12 +7,12 @@ The agent's TS runs in an isolated Web Worker by default (or `worker_threads` on
 ```ts
 import { createAgent } from 'agex-ts'
 import { workerRuntime } from '@agex-ts/runtime-worker'
-import { connectAnthropic } from '@agex-ts/anthropic'
+import { Anthropic } from '@agex-ts/anthropic'
 import * as stats from './stats'
 
 const agent = await createAgent({
   name: 'analyst',
-  llm: connectAnthropic({ model: 'claude-sonnet-4-6' }),
+  llm: new Anthropic({ model: 'claude-sonnet-4-6', apiKey: process.env.ANTHROPIC_API_KEY }),
   runtime: workerRuntime({ workerUrl: new URL('./worker.js', import.meta.url) }),
   state: { type: 'versioned', storage: 'indexeddb' },
 })
@@ -45,9 +45,9 @@ This is a small monorepo. Pick what you need:
 |---|---|
 | [`agex-ts`](packages/agex-ts) | Core: `Agent`, `createAgent`, registration, task, state, render. |
 | [`@agex-ts/runtime-worker`](packages/agex-runtime-worker) | Web Worker runtime adapter. |
-| [`@agex-ts/anthropic`](packages/agex-anthropic) | Anthropic provider (`connectAnthropic`). |
-| [`@agex-ts/openai`](packages/agex-openai) | OpenAI provider (`connectOpenAI`). |
-| [`@agex-ts/gemini`](packages/agex-gemini) | Gemini provider (`connectGemini`). |
+| [`@agex-ts/anthropic`](packages/agex-anthropic) | Anthropic provider (`Anthropic`). |
+| [`@agex-ts/openai`](packages/agex-openai) | OpenAI provider (`OpenAI`). |
+| [`@agex-ts/gemini`](packages/agex-gemini) | Gemini provider (`Gemini`). |
 | [`@agex-ts/git`](packages/agex-git) | Agent-view `git` for `terminal_action` — branches / commits / diff / merge over the agent's VFS. Opt-in via `registerGit(agent)`. |
 | [`kvgit-ts`](packages/kvgit-ts) | Versioned KV store with branches and merge. Powers `state` + the kvgit-backed VFS. Standalone-usable. |
 | [`termish-ts`](packages/termish-ts) | Async filesystem protocol + shell command interpreter. Powers the agent's `terminal_action` surface. Standalone-usable. |

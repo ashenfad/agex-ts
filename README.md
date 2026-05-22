@@ -72,7 +72,7 @@ For tests / trusted code (no worker isolation), the in-process `evalRuntime` shi
 
 ### Using with Vite
 
-If you use `@agex-ts/runtime-worker`, add the package to `optimizeDeps.exclude`:
+If you use `@agex-ts/runtime-worker`, you need two `optimizeDeps` entries:
 
 ```ts
 // vite.config.ts
@@ -81,11 +81,14 @@ import { defineConfig } from 'vite'
 export default defineConfig({
   optimizeDeps: {
     exclude: ['@agex-ts/runtime-worker'],
+    include: ['ts-blank-space', 'typescript'],
   },
 })
 ```
 
-Without this, the worker fails to boot with `Error: worker failed during boot: undefined`. Vite pre-bundles dependencies into `node_modules/.vite/deps/`, which rewrites `import.meta.url` away from the package's own `dist/` — breaking the `new URL('./worker.js', import.meta.url)` resolution that loads the worker bundle. Standard quirk that affects any library shipping a worker this way (comlink-based libs, tesseract.js, etc.).
+**Why `exclude: ['@agex-ts/runtime-worker']`.** Without it, the worker fails to boot with `Error: worker failed during boot: undefined`. Vite pre-bundles dependencies into `node_modules/.vite/deps/`, which rewrites `import.meta.url` away from the package's own `dist/` — breaking the `new URL('./worker.js', import.meta.url)` resolution that loads the worker bundle. Standard quirk that affects any library shipping a worker this way (comlink-based libs, tesseract.js, etc.).
+
+**Why `include: ['ts-blank-space', 'typescript']`.** `@agex-ts/runtime-worker` depends on `ts-blank-space`, which does `import tslib from "typescript"`. The `typescript` package ships as CJS; without esbuild's CJS-to-ESM interop, the browser chokes with `does not provide an export named 'default'`. Vite normally handles this transparently during dep pre-bundling, but the `exclude` above stops it from following the runtime-worker's import graph — so these two transitive deps have to be re-included by hand. Pre-bundling typescript adds a one-time esbuild step at dev-server startup; production builds aren't affected (Rollup handles the interop natively).
 
 ### Working from a clone (this repo)
 

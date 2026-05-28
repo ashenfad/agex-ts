@@ -11,9 +11,9 @@
  * can otherwise stack arbitrarily.
  *
  * Implementation note: like `find -exec`, we re-enter the interpreter
- * via a shell-quoted command string. This loses the host command map
- * and the parent's AbortSignal scope, matching how find -exec behaves
- * today.
+ * via a shell-quoted command string, threading `ctx.commands` and
+ * `ctx.signal` through so host-injected commands and cancellation
+ * remain in scope inside the nested invocation.
  */
 
 import type { CommandHandler } from '../context'

@@ -106,14 +106,17 @@ function classify(bytes: Uint8Array): string {
     return 'HTML document'
   }
 
-  // No magic match → text/binary fallback.
+  // No magic match → text/binary fallback. Both checks scan the full
+  // buffer (not just `head`) so we don't misclassify a file as text
+  // when its first 1024 bytes are clean but trailing content isn't.
+  // `looksLikeBinary` already samples the first 4KB; the extra cost
+  // here is one linear pass over data we've already loaded.
   if (looksLikeBinary(bytes)) return 'data'
 
-  // Distinguish ASCII-only from broader UTF-8.
-  if (isAsciiOnly(head)) return 'ASCII text'
+  if (isAsciiOnly(bytes)) return 'ASCII text'
 
   try {
-    new TextDecoder('utf-8', { fatal: true }).decode(head)
+    new TextDecoder('utf-8', { fatal: true }).decode(bytes)
     return 'UTF-8 Unicode text'
   } catch {
     // Not valid UTF-8 but didn't trip the binary heuristic — call it

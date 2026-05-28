@@ -5,13 +5,6 @@ import { execute } from '../src/interpreter'
 
 const enc = new TextEncoder()
 
-/** Build a Uint8Array from a prefix and pad with zeros to `total` bytes. */
-function padTo(prefix: readonly number[], total: number): Uint8Array {
-  const buf = new Uint8Array(total)
-  for (let i = 0; i < prefix.length; i++) buf[i] = prefix[i] as number
-  return buf
-}
-
 describe('file', () => {
   it('detects gzip via 1f 8b magic', async () => {
     const fs = new MemoryFS()

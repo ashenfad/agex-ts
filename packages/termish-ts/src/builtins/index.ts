@@ -9,7 +9,9 @@
 
 import type { CommandHandler } from '../context'
 import { gunzip, gzip, tar, unzip, zip } from './archive'
+import { false_, true_ } from './control'
 import { diff } from './diff'
+import { file } from './file'
 import { basename, cd, cp, dirname, ls, mkdir, mv, pwd, rm, touch } from './filesystem'
 import { cat, echo, head, printf, tail, tee } from './io'
 import { find, grep } from './search'
@@ -57,4 +59,9 @@ export const BUILTINS: ReadonlyMap<string, CommandHandler> = new Map<string, Com
   ['tar', tar],
   ['zip', zip],
   ['unzip', unzip],
+  // Inspection
+  ['file', file],
+  // Control
+  ['true', true_],
+  ['false', false_],
 ])

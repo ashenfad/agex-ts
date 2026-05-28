@@ -38,3 +38,30 @@ export function formatLsTime(modifiedAt: string | undefined): string {
 export function padLeft(s: string, width: number): string {
   return s.length >= width ? s : ' '.repeat(width - s.length) + s
 }
+
+/** Binary-content sniff over the first 4KB of bytes. Returns true for
+ *  blobs that would only waste tokens if dumped:
+ *
+ *  - any NUL byte (0x00) — almost never appears in real text
+ *  - C0 / DEL control chars (excluding `\t \n \r`) above ~1% of the
+ *    sample
+ *
+ *  Plain UTF-8 text, JSON, source code, markdown, and CSVs all pass
+ *  comfortably; PNG/JPEG/protobuf/sqlite/etc. trip the gate. The
+ *  base64-in-source workaround case is *not* binary by this measure
+ *  (it's all printable ASCII) — the output cap on `executeScript` is
+ *  the safety net for that case. */
+export function looksLikeBinary(bytes: Uint8Array): boolean {
+  if (bytes.byteLength === 0) return false
+  const sample = bytes.subarray(0, Math.min(bytes.byteLength, 4096))
+  let suspect = 0
+  for (let i = 0; i < sample.length; i++) {
+    const b = sample[i] as number
+    if (b === 0) return true
+    // Control chars except TAB (0x09), LF (0x0A), CR (0x0D).
+    if ((b < 0x20 && b !== 0x09 && b !== 0x0a && b !== 0x0d) || b === 0x7f) {
+      suspect++
+    }
+  }
+  return suspect / sample.length > 0.01
+}

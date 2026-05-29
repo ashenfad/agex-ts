@@ -47,6 +47,74 @@ async function ensureParentDir(path: string, fs: VirtualFileSystem): Promise<voi
   await fs.mkdir(parent, { parents: true, existOk: true })
 }
 
+// Typographic characters the model routinely retypes as their ASCII
+// look-alikes when reconstructing a `search` string from memory — the
+// commonest cause of a silent search miss on prose-in-code (button
+// labels, comments). Folding both sides to the ASCII form lets the
+// not-found path detect "you meant this, but typed the straight
+// version" and say so, without changing match semantics on success.
+const LOOKALIKES: Readonly<Record<string, string>> = {
+  '‘': "'", // ‘  left single quote
+  '’': "'", // ’  right single quote / apostrophe
+  '‚': "'", // ‚  single low quote
+  '‛': "'", // ‛  single high-reversed quote
+  '“': '"', // “  left double quote
+  '”': '"', // ”  right double quote
+  '„': '"', // „  double low quote
+  '–': '-', // –  en dash
+  '—': '-', // —  em dash
+  '―': '-', // ―  horizontal bar
+  '−': '-', // −  minus sign
+  '…': '...', // …  horizontal ellipsis
+  ' ': ' ', //    non-breaking space
+  ' ': ' ', //    narrow no-break space
+  ' ': ' ', //    thin space
+}
+
+function foldLookalikes(s: string): string {
+  let out = ''
+  for (const ch of s) out += LOOKALIKES[ch] ?? ch
+  return out
+}
+
+/** Diagnose a not-found search. Returns a hint suffix (or '') when a
+ *  folded comparison *would* have matched — the model almost certainly
+ *  retyped typographic characters as ASCII look-alikes, or copied text
+ *  in a different Unicode normal form. We don't normalize on the happy
+ *  path (the tool's contract is exact, whitespace-significant match,
+ *  and the slice-based splice indexes the original string); we only
+ *  turn the silent miss into actionable feedback. */
+function nearMissHint(text: string, search: string): string {
+  if (foldLookalikes(text).includes(foldLookalikes(search))) {
+    return ' — the file contains typographic characters (e.g. curly quotes ‘’ “”, en/em dashes – —, or non-breaking spaces); copy them exactly rather than retyping ASCII quotes/hyphens/spaces'
+  }
+  try {
+    if (text.normalize('NFC').includes(search.normalize('NFC'))) {
+      return ' — the text matches under Unicode NFC normalization but not byte-for-byte (the file uses a different normal form, e.g. combining accents); copy the exact characters from the file'
+    }
+  } catch {
+    // String.prototype.normalize can throw RangeError on malformed
+    // input — treat as "no near miss" rather than masking the real
+    // not-found error.
+  }
+  return ''
+}
+
+/** Count non-overlapping occurrences of `needle` in `haystack`.
+ *  `needle` is assumed non-empty (callers guard against the empty
+ *  search). Used to report match counts in the not-unique error. */
+function countOccurrences(haystack: string, needle: string): number {
+  let count = 0
+  for (
+    let at = haystack.indexOf(needle);
+    at !== -1;
+    at = haystack.indexOf(needle, at + needle.length)
+  ) {
+    count++
+  }
+  return count
+}
+
 export async function dispatchFileEdit(
   emission: FileEditEmission,
   fs: VirtualFileSystem,
@@ -68,7 +136,21 @@ export async function dispatchFileEdit(
   } else {
     const idx = text.indexOf(search)
     if (idx === -1) {
-      throw new Error(`fileEdit: ${emission.path}: search string not found`)
+      throw new Error(
+        `fileEdit: ${emission.path}: search string not found${nearMissHint(text, search)}`,
+      )
+    }
+    // Enforce the uniqueness the tool schema promises: a non-matchAll
+    // edit must match exactly once. Silently taking the first of
+    // several matches is how an edit lands on the wrong occurrence and
+    // looks, to the agent, like it "deleted lines I didn't target".
+    // Make the model disambiguate (widen the search with surrounding
+    // context) or opt into matchAll instead.
+    if (text.indexOf(search, idx + search.length) !== -1) {
+      const count = countOccurrences(text, search)
+      throw new Error(
+        `fileEdit: ${emission.path}: search string is not unique (${count} matches); add surrounding context to target a single occurrence, or set matchAll=true`,
+      )
     }
     next = text.slice(0, idx) + emission.content + text.slice(idx + search.length)
   }

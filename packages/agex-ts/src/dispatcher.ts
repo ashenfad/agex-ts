@@ -100,19 +100,173 @@ function nearMissHint(text: string, search: string): string {
   return ''
 }
 
-/** Count non-overlapping occurrences of `needle` in `haystack`.
- *  `needle` is assumed non-empty (callers guard against the empty
- *  search). Used to report match counts in the not-unique error. */
-function countOccurrences(haystack: string, needle: string): number {
-  let count = 0
-  for (
-    let at = haystack.indexOf(needle);
-    at !== -1;
-    at = haystack.indexOf(needle, at + needle.length)
-  ) {
-    count++
+interface EditMatch {
+  readonly start: number
+  readonly end: number
+  /** The exact slice of the file the match covers. Needed to re-indent
+   *  the replacement under the indent-flexible strategy. */
+  readonly matched: string
+}
+
+interface LocatedEdit {
+  readonly mode: 'exact' | 'trailingWs' | 'indent'
+  /** Ascending by `start`. */
+  readonly matches: EditMatch[]
+}
+
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/** Locate every place `search` applies, trying three strategies in
+ *  order and returning the first that finds anything: exact, then
+ *  trailing-whitespace-flexible, then indent-flexible. Mirrors agex
+ *  (Python) `apply_file_edit`'s matching ladder — the strict exact
+ *  path hard-fails the two commonest near-misses (file carrying
+ *  trailing whitespace the agent omitted; a block at a different
+ *  absolute indent than the search), which the fallbacks recover. */
+function locateMatches(text: string, search: string): LocatedEdit {
+  const exact: EditMatch[] = []
+  for (let i = text.indexOf(search); i !== -1; i = text.indexOf(search, i + search.length)) {
+    exact.push({ start: i, end: i + search.length, matched: search })
   }
-  return count
+  if (exact.length > 0) return { mode: 'exact', matches: exact }
+
+  const trailing = trailingWsMatches(text, search)
+  if (trailing.length > 0) return { mode: 'trailingWs', matches: trailing }
+
+  const indent = indentFlexibleMatches(text, search)
+  if (indent.length > 0) return { mode: 'indent', matches: indent }
+
+  return { mode: 'exact', matches: [] }
+}
+
+/** Match `search` allowing the file to carry trailing whitespace at
+ *  line ends that the agent's search omitted (a frequent paste
+ *  artifact). Internal indentation stays significant. */
+function trailingWsMatches(text: string, search: string): EditMatch[] {
+  const pattern = search
+    .split('\n')
+    .map((line) => `${escapeRegExp(line.replace(/\s+$/, ''))}[ \\t]*`)
+    .join('\n')
+  let re: RegExp
+  try {
+    re = new RegExp(pattern, 'g')
+  } catch {
+    return []
+  }
+  const out: EditMatch[] = []
+  for (const m of text.matchAll(re)) {
+    if (m[0].length === 0) continue
+    const start = m.index ?? 0
+    out.push({ start, end: start + m[0].length, matched: m[0] })
+  }
+  return out
+}
+
+/** Match `search` against a block with the same structure but a
+ *  different absolute indent (e.g. a 2-space search against 4-space
+ *  or tab-indented code). Anchors on the first non-empty search line
+ *  (trimmed), then validates the block line-by-line after trimming. */
+function indentFlexibleMatches(text: string, search: string): EditMatch[] {
+  const searchLines = search.split('\n')
+  const contentLines = text.split('\n')
+
+  let anchor: string | null = null
+  let anchorIdx = 0
+  for (let idx = 0; idx < searchLines.length; idx++) {
+    const trimmed = (searchLines[idx] as string).trim()
+    if (trimmed.length > 0) {
+      anchor = trimmed
+      anchorIdx = idx
+      break
+    }
+  }
+  if (anchor === null) return []
+
+  const searchTrim = searchLines.map((l) => l.trim())
+  // Char offset of each line's start in `text`. Lines were split on
+  // '\n', so each contributes its length + 1 for the separator.
+  const lineStart: number[] = [0]
+  for (let k = 0; k < contentLines.length; k++) {
+    lineStart.push((lineStart[k] as number) + (contentLines[k] as string).length + 1)
+  }
+
+  const out: EditMatch[] = []
+  for (let i = 0; i < contentLines.length; i++) {
+    if ((contentLines[i] as string).trim() !== anchor) continue
+    const startLine = i - anchorIdx
+    if (startLine < 0) continue
+    const endLine = startLine + searchLines.length
+    if (endLine > contentLines.length) continue
+
+    let ok = true
+    for (let j = 0; j < searchTrim.length; j++) {
+      if (searchTrim[j] !== (contentLines[startLine + j] as string).trim()) {
+        ok = false
+        break
+      }
+    }
+    if (!ok) continue
+
+    const start = lineStart[startLine] as number
+    const matched = contentLines.slice(startLine, endLine).join('\n')
+    out.push({ start, end: start + matched.length, matched })
+  }
+  return out
+}
+
+/** Re-indent `replacement` to sit where an indent-flexible match was
+ *  found: shift every line by the delta between the file's indent and
+ *  the search's baseline, rendered with the file's indent character.
+ *  Paired with `indentFlexibleMatches`. */
+function adjustReplacementIndent(replacement: string, search: string, matched: string): string {
+  const searchBase = baseIndentInfo(search.split('\n')).spaces
+  const target = baseIndentInfo(matched.split('\n'))
+  const replacementLines = replacement.split('\n')
+  const replacementBase = baseIndentInfo(replacementLines).spaces
+
+  // Prefer the search baseline as the reference; fall back to the
+  // replacement's own baseline when the agent indented them differently.
+  const delta =
+    replacementBase === searchBase ? target.spaces - searchBase : target.spaces - replacementBase
+
+  return replacementLines
+    .map((line) => {
+      const lstripped = line.replace(/^\s+/, '')
+      if (lstripped.length === 0) return ''
+      const leading = line.slice(0, line.length - lstripped.length)
+      const width = Math.max(0, indentWidth(leading) + delta)
+      const newLeading =
+        target.char === '\t'
+          ? '\t'.repeat(Math.floor(width / 4)) + ' '.repeat(width % 4)
+          : ' '.repeat(width)
+      // `lstripped` retains the line's own trailing whitespace.
+      return newLeading + lstripped
+    })
+    .join('\n')
+}
+
+/** Indent width and dominant char of the first non-blank line. */
+function baseIndentInfo(lines: string[]): { spaces: number; char: string } {
+  for (const line of lines) {
+    const lstripped = line.replace(/^\s+/, '')
+    if (lstripped.length > 0) {
+      const leading = line.slice(0, line.length - lstripped.length)
+      return { spaces: indentWidth(leading), char: leading.includes('\t') ? '\t' : ' ' }
+    }
+  }
+  return { spaces: 0, char: ' ' }
+}
+
+/** A tab counts as 4 columns, matching agex (Python). */
+function indentWidth(leading: string): number {
+  let width = 0
+  for (const ch of leading) {
+    if (ch === '\t') width += 4
+    else if (ch === ' ') width += 1
+  }
+  return width
 }
 
 export async function dispatchFileEdit(
@@ -130,29 +284,34 @@ export async function dispatchFileEdit(
     throw new Error('fileEdit: empty search string')
   }
   const matchAll = emission.matchAll === true
-  let next: string
-  if (matchAll) {
-    next = text.split(search).join(emission.content)
-  } else {
-    const idx = text.indexOf(search)
-    if (idx === -1) {
-      throw new Error(
-        `fileEdit: ${emission.path}: search string not found${nearMissHint(text, search)}`,
-      )
-    }
-    // Enforce the uniqueness the tool schema promises: a non-matchAll
-    // edit must match exactly once. Silently taking the first of
-    // several matches is how an edit lands on the wrong occurrence and
-    // looks, to the agent, like it "deleted lines I didn't target".
-    // Make the model disambiguate (widen the search with surrounding
-    // context) or opt into matchAll instead.
-    if (text.indexOf(search, idx + search.length) !== -1) {
-      const count = countOccurrences(text, search)
-      throw new Error(
-        `fileEdit: ${emission.path}: search string is not unique (${count} matches); add surrounding context to target a single occurrence, or set matchAll=true`,
-      )
-    }
-    next = text.slice(0, idx) + emission.content + text.slice(idx + search.length)
+  const located = locateMatches(text, search)
+  if (located.matches.length === 0) {
+    throw new Error(
+      `fileEdit: ${emission.path}: search string not found${nearMissHint(text, search)}`,
+    )
+  }
+  // Enforce the uniqueness the tool schema promises: a non-matchAll
+  // edit must match exactly once. Silently taking the first of several
+  // matches is how an edit lands on the wrong occurrence and looks, to
+  // the agent, like it "deleted lines I didn't target". Make the model
+  // disambiguate (widen the search) or opt into matchAll instead.
+  if (located.matches.length > 1 && !matchAll) {
+    throw new Error(
+      `fileEdit: ${emission.path}: search string is not unique (${located.matches.length} matches); add surrounding context to target a single occurrence, or set matchAll=true`,
+    )
+  }
+
+  const toApply = matchAll ? located.matches : located.matches.slice(0, 1)
+  // Splice right-to-left so each replacement leaves the earlier
+  // matches' offsets valid.
+  let next = text
+  for (let k = toApply.length - 1; k >= 0; k--) {
+    const m = toApply[k] as EditMatch
+    const replacement =
+      located.mode === 'indent'
+        ? adjustReplacementIndent(emission.content, search, m.matched)
+        : emission.content
+    next = next.slice(0, m.start) + replacement + next.slice(m.end)
   }
   await fs.write(emission.path, encoder.encode(next))
 }

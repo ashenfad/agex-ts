@@ -71,6 +71,120 @@ describe('emission dispatch — fileEdit', () => {
     expect(dec.decode(await (await agent.fs()).read('/p.txt'))).toBe('X X X')
   })
 
+  it('fails when the search string matches more than once (not unique)', async () => {
+    // The schema promises a non-matchAll edit matches exactly once.
+    // If the agent's search isn't unique, silently editing the first
+    // hit is how a replace lands on the wrong occurrence and looks
+    // like it "deleted lines it didn't target". Reject instead, with
+    // the match count, so the agent widens the search or uses matchAll.
+    const { agent } = await makeAgent([
+      r(
+        { type: 'fileWrite', path: '/p.txt', content: 'a a a', mode: 'write' },
+        { type: 'fileEdit', path: '/p.txt', search: 'a', content: 'X' },
+      ),
+    ])
+    const fn = agent.task<undefined, null>({ description: 'Edit ambiguous.' })
+    await expect(fn(undefined)).rejects.toThrow(/not unique \(3 matches\)/)
+  })
+
+  it('non-unique guard leaves the file untouched', async () => {
+    // The failing edit must not partially apply — the file is exactly
+    // as written before the rejected edit. (Round 2 terminates so we
+    // can read the VFS after the failure surfaces to the agent.)
+    const { agent } = await makeAgent([
+      r(
+        { type: 'fileWrite', path: '/p.txt', content: 'a a a', mode: 'write' },
+        { type: 'fileEdit', path: '/p.txt', search: 'a', content: 'X' },
+      ),
+      r({ type: 'ts', code: 'taskSuccess(null)' }),
+    ])
+    const fn = agent.task<undefined, null>({ description: 'Edit ambiguous, recover.' })
+    await fn(undefined)
+    expect(dec.decode(await (await agent.fs()).read('/p.txt'))).toBe('a a a')
+  })
+
+  it('targets one occurrence when the search carries surrounding context', async () => {
+    // The disambiguation the not-unique error points the agent toward:
+    // include enough context that the search matches exactly once.
+    const { agent } = await makeAgent([
+      r(
+        { type: 'fileWrite', path: '/p.txt', content: 'a=1\na=2\n', mode: 'write' },
+        { type: 'fileEdit', path: '/p.txt', search: 'a=2', content: 'a=9' },
+        { type: 'ts', code: 'taskSuccess(null)' },
+      ),
+    ])
+    const fn = agent.task<undefined, null>({ description: 'Edit second line.' })
+    await fn(undefined)
+    expect(dec.decode(await (await agent.fs()).read('/p.txt'))).toBe('a=1\na=9\n')
+  })
+
+  it('two sequential edits on adjacent lines each apply surgically', async () => {
+    // The reported failure was two edits in one action mangling the
+    // span between them. Each fileEdit re-reads the file fresh and
+    // splices only its matched range, so adjacent edits compose
+    // cleanly: editing line 2 then line 3 touches neither line 1 nor
+    // each other.
+    const { agent } = await makeAgent([
+      r(
+        { type: 'fileWrite', path: '/p.txt', content: 'one\ntwo\nthree\n', mode: 'write' },
+        { type: 'fileEdit', path: '/p.txt', search: 'two', content: 'TWO' },
+        { type: 'fileEdit', path: '/p.txt', search: 'three', content: 'THREE' },
+        { type: 'ts', code: 'taskSuccess(null)' },
+      ),
+    ])
+    const fn = agent.task<undefined, null>({ description: 'Two adjacent edits.' })
+    await fn(undefined)
+    expect(dec.decode(await (await agent.fs()).read('/p.txt'))).toBe('one\nTWO\nTHREE\n')
+  })
+
+  it('hints at typographic look-alikes when an ASCII search just misses', async () => {
+    // The reported incident: the file has a curly apostrophe / em-dash,
+    // the model retypes the block with a straight quote / hyphen, and
+    // the exact-match search misses. The error now names the cause so
+    // the model copies the real characters instead of guessing again.
+    const { agent } = await makeAgent([
+      r(
+        // File holds U+2019 (curly) and U+2014 (em dash).
+        { type: 'fileWrite', path: '/p.txt', content: 'it’s here — really', mode: 'write' },
+        // Search uses ASCII apostrophe + hyphen.
+        { type: 'fileEdit', path: '/p.txt', search: "it's here - really", content: 'gone' },
+      ),
+    ])
+    const fn = agent.task<undefined, null>({ description: 'Edit look-alike.' })
+    await expect(fn(undefined)).rejects.toThrow(/not found.*typographic characters/s)
+  })
+
+  it('hints at NFC normalization when forms differ', async () => {
+    // File stores a decomposed (NFD) accented char; the model searches
+    // with the composed (NFC) form. Byte-for-byte miss, but they match
+    // under NFC — the error says so.
+    const nfd = 'café'.normalize('NFD') // e + combining acute
+    const nfc = 'café' // é precomposed
+    const { agent } = await makeAgent([
+      r(
+        { type: 'fileWrite', path: '/p.txt', content: `${nfd} menu`, mode: 'write' },
+        { type: 'fileEdit', path: '/p.txt', search: nfc, content: 'X' },
+      ),
+    ])
+    const fn = agent.task<undefined, null>({ description: 'Edit NFC.' })
+    await expect(fn(undefined)).rejects.toThrow(/not found.*NFC normalization/s)
+  })
+
+  it('does not add a hint for a genuine not-found (no near miss)', async () => {
+    const { agent } = await makeAgent([
+      r(
+        { type: 'fileWrite', path: '/p.txt', content: 'hello world', mode: 'write' },
+        { type: 'fileEdit', path: '/p.txt', search: 'zzz', content: 'X' },
+      ),
+    ])
+    const fn = agent.task<undefined, null>({ description: 'Edit plain miss.' })
+    const err = await fn(undefined).catch((e: unknown) => e)
+    const msg = err instanceof Error ? err.message : String(err)
+    expect(msg).toMatch(/search string not found/)
+    // No look-alike / normalization hint appended for a true miss.
+    expect(msg).not.toMatch(/typographic|NFC/)
+  })
+
   it('fails the task when the file does not exist', async () => {
     const { agent } = await makeAgent([
       r({ type: 'fileEdit', path: '/missing', search: 'a', content: 'b' }),

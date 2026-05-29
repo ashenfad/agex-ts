@@ -185,6 +185,170 @@ describe('emission dispatch — fileEdit', () => {
     expect(msg).not.toMatch(/typographic|NFC/)
   })
 
+  it('matches a multi-line block despite trailing whitespace in the file', async () => {
+    // The file's first two lines carry trailing spaces the agent's
+    // search omits, so the exact contiguous match fails. The
+    // trailing-whitespace-flexible strategy recovers; the matched span
+    // (including the stray spaces) is replaced by the content verbatim.
+    const { agent } = await makeAgent([
+      r(
+        {
+          type: 'fileWrite',
+          path: '/p.txt',
+          content: 'function f() {  \n  return 1  \n}\n',
+          mode: 'write',
+        },
+        {
+          type: 'fileEdit',
+          path: '/p.txt',
+          search: 'function f() {\n  return 1\n}',
+          content: 'function f() {\n  return 2\n}',
+        },
+        { type: 'ts', code: 'taskSuccess(null)' },
+      ),
+    ])
+    const fn = agent.task<undefined, null>({ description: 'Trailing ws block.' })
+    await fn(undefined)
+    expect(dec.decode(await (await agent.fs()).read('/p.txt'))).toBe(
+      'function f() {\n  return 2\n}\n',
+    )
+  })
+
+  it('matches a block at a different absolute indent and re-indents the replacement', async () => {
+    // The agent wrote its search/replacement at module indent (def at
+    // column 0); the file has the block nested in a class (def at
+    // column 4). Indent-flexible matching locates it, and the
+    // replacement is shifted to the file's indentation on the way in.
+    const { agent } = await makeAgent([
+      r(
+        {
+          type: 'fileWrite',
+          path: '/p.txt',
+          content: 'class A:\n    def f():\n        return 1\n',
+          mode: 'write',
+        },
+        {
+          type: 'fileEdit',
+          path: '/p.txt',
+          search: 'def f():\n    return 1',
+          content: 'def f():\n    return 99',
+        },
+        { type: 'ts', code: 'taskSuccess(null)' },
+      ),
+    ])
+    const fn = agent.task<undefined, null>({ description: 'Indent-flexible.' })
+    await fn(undefined)
+    expect(dec.decode(await (await agent.fs()).read('/p.txt'))).toBe(
+      'class A:\n    def f():\n        return 99\n',
+    )
+  })
+
+  it('indent-flexible re-indents using the file’s tab character', async () => {
+    // File is tab-indented; the agent searched with spaces. The
+    // replacement comes back rendered with tabs (4 columns per tab).
+    const { agent } = await makeAgent([
+      r(
+        {
+          type: 'fileWrite',
+          path: '/p.txt',
+          content: 'class A:\n\tdef f():\n\t\treturn 1\n',
+          mode: 'write',
+        },
+        {
+          type: 'fileEdit',
+          path: '/p.txt',
+          search: 'def f():\n    return 1',
+          content: 'def f():\n    return 99',
+        },
+        { type: 'ts', code: 'taskSuccess(null)' },
+      ),
+    ])
+    const fn = agent.task<undefined, null>({ description: 'Indent tabs.' })
+    await fn(undefined)
+    expect(dec.decode(await (await agent.fs()).read('/p.txt'))).toBe(
+      'class A:\n\tdef f():\n\t\treturn 99\n',
+    )
+  })
+
+  it('matchAll replaces every indent-flexible occurrence', async () => {
+    const { agent } = await makeAgent([
+      r(
+        {
+          type: 'fileWrite',
+          path: '/p.txt',
+          content:
+            'class A:\n    def f():\n        return 1\n\nclass B:\n    def f():\n        return 1\n',
+          mode: 'write',
+        },
+        {
+          type: 'fileEdit',
+          path: '/p.txt',
+          search: 'def f():\n    return 1',
+          content: 'def f():\n    return 2',
+          matchAll: true,
+        },
+        { type: 'ts', code: 'taskSuccess(null)' },
+      ),
+    ])
+    const fn = agent.task<undefined, null>({ description: 'Indent matchAll.' })
+    await fn(undefined)
+    expect(dec.decode(await (await agent.fs()).read('/p.txt'))).toBe(
+      'class A:\n    def f():\n        return 2\n\nclass B:\n    def f():\n        return 2\n',
+    )
+  })
+
+  it('uniqueness guard fires on fuzzy (indent-flexible) matches too', async () => {
+    // Two structurally-identical blocks at different indents — a
+    // non-matchAll edit must still refuse rather than pick one.
+    const { agent } = await makeAgent([
+      r(
+        {
+          type: 'fileWrite',
+          path: '/p.txt',
+          content:
+            'class A:\n    def f():\n        return 1\n\nclass B:\n    def f():\n        return 1\n',
+          mode: 'write',
+        },
+        {
+          type: 'fileEdit',
+          path: '/p.txt',
+          search: 'def f():\n    return 1',
+          content: 'def f():\n    return 2',
+        },
+      ),
+    ])
+    const fn = agent.task<undefined, null>({ description: 'Fuzzy non-unique.' })
+    await expect(fn(undefined)).rejects.toThrow(/not unique \(2 matches\)/)
+  })
+
+  it('prefers an exact match over the fuzzy fallbacks', async () => {
+    // When the search matches exactly, indentation-only twins elsewhere
+    // must not turn it into a (spurious) multi-match error.
+    const { agent } = await makeAgent([
+      r(
+        {
+          type: 'fileWrite',
+          path: '/p.txt',
+          content: 'def f():\n    return 1\n\nclass A:\n    def f():\n        return 1\n',
+          mode: 'write',
+        },
+        // Exact module-level block; the nested twin differs by indent.
+        {
+          type: 'fileEdit',
+          path: '/p.txt',
+          search: 'def f():\n    return 1',
+          content: 'def f():\n    return 2',
+        },
+        { type: 'ts', code: 'taskSuccess(null)' },
+      ),
+    ])
+    const fn = agent.task<undefined, null>({ description: 'Exact wins.' })
+    await fn(undefined)
+    expect(dec.decode(await (await agent.fs()).read('/p.txt'))).toBe(
+      'def f():\n    return 2\n\nclass A:\n    def f():\n        return 1\n',
+    )
+  })
+
   it('fails the task when the file does not exist', async () => {
     const { agent } = await makeAgent([
       r({ type: 'fileEdit', path: '/missing', search: 'a', content: 'b' }),

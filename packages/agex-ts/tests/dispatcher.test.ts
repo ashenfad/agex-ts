@@ -349,6 +349,83 @@ describe('emission dispatch — fileEdit', () => {
     )
   })
 
+  it('indent-flexible matches do not overlap on a repeated anchor line', async () => {
+    // A search whose lines repeat ("x()\nx()") against three indented
+    // copies must yield one non-overlapping match, not two overlapping
+    // ones — otherwise matchAll would splice overlapping ranges and
+    // corrupt the file. Replace all; expect the first two lines edited
+    // as one block and the third left intact.
+    const { agent } = await makeAgent([
+      r(
+        { type: 'fileWrite', path: '/p.txt', content: '  x()\n  x()\n  x()\n', mode: 'write' },
+        {
+          type: 'fileEdit',
+          path: '/p.txt',
+          search: 'x()\nx()',
+          content: 'y()\ny()',
+          matchAll: true,
+        },
+        { type: 'ts', code: 'taskSuccess(null)' },
+      ),
+    ])
+    const fn = agent.task<undefined, null>({ description: 'No overlap.' })
+    await fn(undefined)
+    expect(dec.decode(await (await agent.fs()).read('/p.txt'))).toBe('  y()\n  y()\n  x()\n')
+  })
+
+  it('trailing-ws matching works on a CRLF file and keeps endings consistent', async () => {
+    // The agent searches with LF; the file uses CRLF and carries
+    // trailing whitespace. The block is still found, and the spliced-in
+    // replacement is normalized to CRLF — no mixed endings.
+    const { agent } = await makeAgent([
+      r(
+        {
+          type: 'fileWrite',
+          path: '/p.txt',
+          content: 'function f() {  \r\n  return 1  \r\n}\r\n',
+          mode: 'write',
+        },
+        {
+          type: 'fileEdit',
+          path: '/p.txt',
+          search: 'function f() {\n  return 1\n}',
+          content: 'function f() {\n  return 2\n}',
+        },
+        { type: 'ts', code: 'taskSuccess(null)' },
+      ),
+    ])
+    const fn = agent.task<undefined, null>({ description: 'CRLF trailing ws.' })
+    await fn(undefined)
+    const out = dec.decode(await (await agent.fs()).read('/p.txt'))
+    expect(out).toBe('function f() {\r\n  return 2\r\n}\r\n')
+    expect(out).not.toMatch(/[^\r]\n/) // no bare LF (every \n preceded by \r)
+  })
+
+  it('indent-flexible matching works on a CRLF file and keeps endings consistent', async () => {
+    const { agent } = await makeAgent([
+      r(
+        {
+          type: 'fileWrite',
+          path: '/p.txt',
+          content: 'class A:\r\n    def f():\r\n        return 1\r\n',
+          mode: 'write',
+        },
+        {
+          type: 'fileEdit',
+          path: '/p.txt',
+          search: 'def f():\n    return 1',
+          content: 'def f():\n    return 99',
+        },
+        { type: 'ts', code: 'taskSuccess(null)' },
+      ),
+    ])
+    const fn = agent.task<undefined, null>({ description: 'CRLF indent.' })
+    await fn(undefined)
+    const out = dec.decode(await (await agent.fs()).read('/p.txt'))
+    expect(out).toBe('class A:\r\n    def f():\r\n        return 99\r\n')
+    expect(out).not.toMatch(/[^\r]\n/)
+  })
+
   it('fails the task when the file does not exist', async () => {
     const { agent } = await makeAgent([
       r({ type: 'fileEdit', path: '/missing', search: 'a', content: 'b' }),

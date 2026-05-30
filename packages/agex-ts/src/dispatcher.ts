@@ -16,6 +16,17 @@
  * Errors thrown by a dispatcher surface as runtime failures — the
  * action loop converts them into a `FailEvent` so the task doesn't
  * silently spin on broken emissions.
+ *
+ * `dispatchFileEdit` matching is best-effort, not a parser. After an
+ * exact match it falls back to two heuristics: a generated regex that
+ * tolerates trailing whitespace (`trailingWsMatches`), and a
+ * line-based indent-flexible match (`indentFlexibleMatches`). Both are
+ * intentionally syntax-agnostic — they don't understand the language,
+ * so a search that's ambiguous at the token level can still match. The
+ * uniqueness guard catches the multi-match case; anything subtler is
+ * the agent's responsibility to disambiguate with more context. Line
+ * endings: matching tolerates LF or CRLF, and a fuzzy replacement is
+ * normalized to the file's existing endings before it's spliced in.
  */
 
 import type { CommandHandler } from '@agex-ts/termish'
@@ -145,10 +156,12 @@ function locateMatches(text: string, search: string): LocatedEdit {
  *  line ends that the agent's search omitted (a frequent paste
  *  artifact). Internal indentation stays significant. */
 function trailingWsMatches(text: string, search: string): EditMatch[] {
+  // Join with `\r?\n` (not a literal newline) so the pattern matches a
+  // block whether the file uses LF or CRLF line endings.
   const pattern = search
-    .split('\n')
+    .split(/\r?\n/)
     .map((line) => `${escapeRegExp(line.replace(/\s+$/, ''))}[ \\t]*`)
-    .join('\n')
+    .join('\\r?\\n')
   let re: RegExp
   try {
     re = new RegExp(pattern, 'g')
@@ -170,7 +183,9 @@ function trailingWsMatches(text: string, search: string): EditMatch[] {
  *  (trimmed), then validates the block line-by-line after trimming. */
 function indentFlexibleMatches(text: string, search: string): EditMatch[] {
   const searchLines = search.split('\n')
-  const contentLines = text.split('\n')
+  // Split on either ending so a CRLF file's lines don't retain a
+  // trailing '\r' (which would skew trimming and slice boundaries).
+  const contentLines = text.split(/\r?\n/)
 
   let anchor: string | null = null
   let anchorIdx = 0
@@ -185,11 +200,12 @@ function indentFlexibleMatches(text: string, search: string): EditMatch[] {
   if (anchor === null) return []
 
   const searchTrim = searchLines.map((l) => l.trim())
-  // Char offset of each line's start in `text`. Lines were split on
-  // '\n', so each contributes its length + 1 for the separator.
+  // Byte offset where each line's content begins: the char just after
+  // every '\n'. CRLF-safe — a '\r' sits at the end of the prior line,
+  // so offsets and the `text.slice` below stay exact for LF or CRLF.
   const lineStart: number[] = [0]
-  for (let k = 0; k < contentLines.length; k++) {
-    lineStart.push((lineStart[k] as number) + (contentLines[k] as string).length + 1)
+  for (let idx = 0; idx < text.length; idx++) {
+    if (text.charCodeAt(idx) === 10) lineStart.push(idx + 1)
   }
 
   const out: EditMatch[] = []
@@ -210,8 +226,18 @@ function indentFlexibleMatches(text: string, search: string): EditMatch[] {
     if (!ok) continue
 
     const start = lineStart[startLine] as number
-    const matched = contentLines.slice(startLine, endLine).join('\n')
-    out.push({ start, end: start + matched.length, matched })
+    // End at the last matched line's content — excluding its trailing
+    // separator — by slicing the original text rather than re-joining
+    // (which would drop a CRLF's '\r' or force an ending choice).
+    const end = (lineStart[endLine - 1] as number) + (contentLines[endLine - 1] as string).length
+    const matched = text.slice(start, end)
+    out.push({ start, end, matched })
+    // Skip past this block so a repeated anchor line inside it can't
+    // produce an overlapping second match — overlaps would either trip
+    // a spurious not-unique error or corrupt the file when spliced
+    // under matchAll. Keeps this strategy non-overlapping like the
+    // exact and trailing-ws ones.
+    i = endLine - 1
   }
   return out
 }
@@ -301,16 +327,24 @@ export async function dispatchFileEdit(
     )
   }
 
+  // A fuzzy match can cover a CRLF region while the agent authored the
+  // replacement with LF; splicing LF in verbatim would leave mixed
+  // endings. Normalize fuzzy replacements to the file's endings. Exact
+  // matches are left untouched — they matched verbatim, endings included.
+  const fileUsesCrlf = text.includes('\r\n')
   const toApply = matchAll ? located.matches : located.matches.slice(0, 1)
   // Splice right-to-left so each replacement leaves the earlier
   // matches' offsets valid.
   let next = text
   for (let k = toApply.length - 1; k >= 0; k--) {
     const m = toApply[k] as EditMatch
-    const replacement =
+    let replacement =
       located.mode === 'indent'
         ? adjustReplacementIndent(emission.content, search, m.matched)
         : emission.content
+    if (located.mode !== 'exact' && fileUsesCrlf) {
+      replacement = replacement.replace(/\r?\n/g, '\r\n')
+    }
     next = next.slice(0, m.start) + replacement + next.slice(m.end)
   }
   await fs.write(emission.path, encoder.encode(next))

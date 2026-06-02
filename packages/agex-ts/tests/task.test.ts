@@ -2,10 +2,33 @@ import { describe, expect, it } from 'vitest'
 import { createAgent } from '../src/agent'
 import { TaskFailError } from '../src/errors'
 import { Dummy } from '../src/llm/dummy'
+import type { NeutralTurn } from '../src/render'
 import { evalRuntime } from '../src/runtime/eval'
 import type { AgentEvent, LLMResponse, TokenChunk } from '../src/types'
 
 const r = (...emissions: LLMResponse['emissions']): LLMResponse => ({ emissions })
+
+/** Pull (tool_use, tool_result) pairs out of a captured request so a
+ *  test can assert what the LLM saw on its next turn. */
+function toolUsesAndResults(turns: NeutralTurn[]): {
+  toolUses: { id: string; tool: string }[]
+  results: { id: string; text: string }[]
+} {
+  const toolUses: { id: string; tool: string }[] = []
+  const results: { id: string; text: string }[] = []
+  for (const turn of turns) {
+    for (const p of turn.content) {
+      if (p.type === 'toolUse') toolUses.push({ id: p.toolUseId, tool: p.toolName })
+      else if (p.type === 'toolResult') {
+        results.push({
+          id: p.toolUseId,
+          text: p.content.map((c) => (c.type === 'text' ? c.text : `[${c.type}]`)).join('\n'),
+        })
+      }
+    }
+  }
+  return { toolUses, results }
+}
 
 async function makeAgent(responses: ReadonlyArray<LLMResponse | Error>) {
   const llm = new Dummy({ responses })
@@ -193,5 +216,84 @@ describe('task — missing config', () => {
     const a = await createAgent({ name: 'T', llm: new Dummy() })
     const fn = a.task<undefined, number>({ description: 'X.' })
     await expect(fn(undefined)).rejects.toThrow(/missing required runtime/)
+  })
+})
+
+describe('task — batch truncation observability', () => {
+  // A recoverable error mid-batch stops the rest of the action (state
+  // the failed call should have produced isn't there, so trailing calls
+  // would cascade). These cover that each result still pairs to its own
+  // tool_use id, and that the dropped calls are *named* as skipped
+  // rather than rendering silently.
+  it('pairs every result to its own id and marks dropped calls skipped', async () => {
+    const { agent, llm } = await makeAgent([
+      r(
+        { type: 'ts', code: `console.log("OUT_ALPHA")` }, // runs
+        { type: 'ts', code: `throw new Error("BOOM_BRAVO")` }, // errors → truncates
+        { type: 'ts', code: `console.log("OUT_CHARLIE")` }, // never runs
+      ),
+      r({ type: 'ts', code: 'taskSuccess(null)' }),
+    ])
+    await agent.task({ description: 'batch' })(undefined)
+
+    const { toolUses, results } = toolUsesAndResults(llm.allTurns[1] ?? [])
+    expect(toolUses.length).toBe(3)
+    expect(results.length).toBe(3)
+    // Results render in emission order, each paired 1:1 to its own
+    // tool_use id — no orphan, no merge, no cross-wiring.
+    for (let k = 0; k < 3; k++) {
+      expect(results[k]?.id).toBe(toolUses[k]?.id)
+    }
+    expect(results[0]?.text).toContain('OUT_ALPHA')
+    expect(results[0]?.text).not.toContain('BOOM_BRAVO')
+    expect(results[1]?.text).toContain('BOOM_BRAVO')
+    expect(results[1]?.text).not.toContain('OUT_ALPHA')
+    // The dropped call is explicitly skipped, not "(no observation)"
+    // and definitely not its never-produced output.
+    expect(results[2]?.text).toContain('Not executed')
+    expect(results[2]?.text).not.toContain('OUT_CHARLIE')
+    expect(results[2]?.text).not.toContain('no observation')
+  })
+
+  it('a file write dropped behind a failed call does not render a false success', async () => {
+    const { agent, llm } = await makeAgent([
+      r(
+        { type: 'ts', code: `throw new Error("BOOM")` }, // errors → truncates
+        { type: 'fileWrite', path: '/late.txt', content: 'X', mode: 'write' }, // never runs
+      ),
+      r({ type: 'ts', code: 'taskSuccess(null)' }),
+    ])
+    await agent.task({ description: 'drop-write' })(undefined)
+
+    const { toolUses, results } = toolUsesAndResults(llm.allTurns[1] ?? [])
+    const writeId = toolUses.find((t) => t.tool === 'write_file')?.id
+    const text = results.find((res) => res.id === writeId)?.text ?? ''
+    expect(text).toContain('Not executed')
+    expect(text).not.toContain('wrote') // no synthesized "write_file: wrote /late.txt"
+    // And the side effect really didn't happen.
+    const fs = await agent.fs()
+    expect(await fs.exists('/late.txt')).toBe(false)
+  })
+
+  it('emits a ✓ SystemNote on file-op success — seen by the embedder, not the LLM', async () => {
+    const { agent, llm } = await makeAgent([
+      r({ type: 'fileWrite', path: '/a.txt', content: 'hello', mode: 'write' }),
+      r({ type: 'fileEdit', path: '/a.txt', search: 'hello', content: 'HELLO' }),
+      r({ type: 'ts', code: 'taskSuccess(null)' }),
+    ])
+    const seen: AgentEvent[] = []
+    await agent.task({ description: 'acks' })(undefined, { onEvent: (e) => void seen.push(e) })
+
+    const notes = seen
+      .filter((e) => e.type === 'systemNote')
+      .map((e) => (e as { message: string }).message)
+    expect(notes).toContain('✓ write_file: /a.txt')
+    expect(notes).toContain('✓ edit_file: /a.txt')
+
+    // The renderer skips systemNote events, so the ✓ ack never reaches
+    // the model (it already gets a synthesized tool_result for success).
+    const rendered = JSON.stringify(llm.allTurns)
+    expect(rendered).not.toContain('✓ write_file')
+    expect(rendered).not.toContain('✓ edit_file')
   })
 })

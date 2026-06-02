@@ -43,6 +43,7 @@ import type {
   Policy,
   RuntimeAdapter,
   SuccessEvent,
+  SystemNoteEvent,
   TaskCallOptions,
   TaskFn,
   TaskStartEvent,
@@ -395,6 +396,11 @@ async function dispatchEmissions(
         // Recoverable: stop walking emissions for this action — the
         // agent gets to read the error on its next iteration and decide
         // what to do. Matches agex-py's `break` after `recoverable_error`.
+        // The trailing emissions queued behind this one assume state the
+        // failed call was supposed to produce, so running them would
+        // cascade; instead mark them skipped so the agent sees exactly
+        // which calls didn't run.
+        await emitSkippedMarkers(emissions, i + 1, actionTimestamp, agentName, eventLog, onEvent)
         return { kind: 'continue', lastError: describeError(result.error) }
       }
       if (result.outcome.kind !== 'continue') return result.outcome
@@ -406,8 +412,10 @@ async function dispatchEmissions(
         await dispatchFileWrite(em, fs)
       } catch (e) {
         await emitErrorOutput(e, agentName, emissionId, eventLog, onEvent)
+        await emitSkippedMarkers(emissions, i + 1, actionTimestamp, agentName, eventLog, onEvent)
         return { kind: 'continue', lastError: describeError(e) }
       }
+      await emitFileAck(`✓ write_file: ${em.path}`, agentName, eventLog, onEvent)
       continue
     }
 
@@ -416,8 +424,10 @@ async function dispatchEmissions(
         await dispatchFileEdit(em, fs)
       } catch (e) {
         await emitErrorOutput(e, agentName, emissionId, eventLog, onEvent)
+        await emitSkippedMarkers(emissions, i + 1, actionTimestamp, agentName, eventLog, onEvent)
         return { kind: 'continue', lastError: describeError(e) }
       }
+      await emitFileAck(`✓ edit_file: ${em.path}`, agentName, eventLog, onEvent)
       continue
     }
 
@@ -443,6 +453,7 @@ async function dispatchEmissions(
         // late look like atomic-all-or-nothing.
         const partial = e instanceof TerminalError ? e.partialOutput : ''
         await emitErrorOutput(e, agentName, emissionId, eventLog, onEvent, partial)
+        await emitSkippedMarkers(emissions, i + 1, actionTimestamp, agentName, eventLog, onEvent)
         return { kind: 'continue', lastError: describeError(e) }
       }
     }
@@ -480,6 +491,65 @@ async function emitErrorOutput(
 
 function describeError(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
+}
+
+/** Notice rendered into the tool_result for emissions that never ran
+ *  because an earlier emission in the same action raised a recoverable
+ *  error and truncated the batch. Without it those calls render as
+ *  "(no observation)" — silent, indistinguishable from "ran and
+ *  produced nothing" — or, for file ops, as a misleading synthesized
+ *  "wrote /path" success line. Naming the skip lets the agent re-issue
+ *  only the calls that didn't run instead of replaying the whole batch
+ *  (which silently double-applies the ones that did). */
+const SKIPPED_NOTICE =
+  'Not executed — an earlier action in this turn raised an error, so the remaining actions in the batch were skipped. Re-issue this action if you still need it.'
+
+/** Emit a skip-notice OutputEvent for every actionable emission at or
+ *  after `fromIndex`, stamped with that emission's emissionId so the
+ *  renderer pairs it to the right tool_use. Called from each
+ *  recoverable-error truncation point. Text/thinking emissions are not
+ *  tool_use parts, so they need no skip result. */
+async function emitSkippedMarkers(
+  emissions: ReadonlyArray<Emission>,
+  fromIndex: number,
+  actionTimestamp: string,
+  agentName: string,
+  eventLog: { add(e: AgentEvent): Promise<string> },
+  onEvent: ((e: AgentEvent) => void | Promise<void>) | undefined,
+): Promise<void> {
+  for (let k = fromIndex; k < emissions.length; k++) {
+    if (!isActionEmission(emissions[k] as Emission)) continue
+    const outputEvent: OutputEvent = {
+      type: 'output',
+      timestamp: new Date().toISOString(),
+      agentName,
+      emissionId: makeToolUseId(actionTimestamp, k),
+      parts: [{ type: 'text', text: SKIPPED_NOTICE }],
+    }
+    await emit(outputEvent, eventLog, onEvent)
+  }
+}
+
+/** Confirm a successful file op with a SystemNote, mirroring agex
+ *  (Python) `sync_loop.py`. The renderer skips `systemNote` events, so
+ *  this stays out of the LLM's view — the per-emission tool_result
+ *  already synthesizes a success line there — but it reaches the
+ *  embedder via `onEvent`, so a host UI can show "✓ wrote …" in-turn
+ *  instead of nothing (the gap that made a silent success look like a
+ *  failure worth retrying). */
+async function emitFileAck(
+  message: string,
+  agentName: string,
+  eventLog: { add(e: AgentEvent): Promise<string> },
+  onEvent: ((e: AgentEvent) => void | Promise<void>) | undefined,
+): Promise<void> {
+  const note: SystemNoteEvent = {
+    type: 'systemNote',
+    timestamp: new Date().toISOString(),
+    agentName,
+    message,
+  }
+  await emit(note, eventLog, onEvent)
 }
 
 async function collectEvents(log: { iter(): AsyncIterable<AgentEvent> }): Promise<AgentEvent[]> {
@@ -590,11 +660,13 @@ function throwMissing(field: 'llm' | 'runtime'): never {
  *  composed entirely of them leaves the loop in the same state it
  *  started. */
 function hasActionableEmission(emissions: ReadonlyArray<Emission>): boolean {
-  return emissions.some(
-    (em) =>
-      em.type === 'ts' ||
-      em.type === 'terminal' ||
-      em.type === 'fileWrite' ||
-      em.type === 'fileEdit',
+  return emissions.some(isActionEmission)
+}
+
+/** True for emission types that become a `tool_use` part (and thus need
+ *  a paired tool_result). Text / thinking are pure narration. */
+function isActionEmission(em: Emission): boolean {
+  return (
+    em.type === 'ts' || em.type === 'terminal' || em.type === 'fileWrite' || em.type === 'fileEdit'
   )
 }

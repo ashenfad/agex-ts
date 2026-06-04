@@ -92,9 +92,10 @@
     "vitest": "^2.1.8"
   },
   "dependencies": {
-    "@standard-schema/spec": "^1.1.0",
     "@agex-ts/kvgit": "workspace:^",
     "@agex-ts/termish": "workspace:^",
+    "@cfworker/json-schema": "^4.1.1",
+    "@standard-schema/spec": "^1.1.0",
     "ts-blank-space": "^0.6.0"
   }
 }

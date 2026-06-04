@@ -249,11 +249,13 @@ describe('task — output validation (recoverable)', () => {
       description: 'Return a number.',
       output: numberSchema,
     })
-    await expect(fn(undefined)).rejects.toThrow(/exceeded maxIterations \(2\)/)
-    await expect(fn(undefined)).rejects.toThrow(/expected number, got string/)
+    const err = await fn(undefined).catch((e) => e)
+    expect(err).toBeInstanceOf(TaskFailError)
+    expect(err.message).toMatch(/exceeded maxIterations \(2\)/)
+    expect(err.message).toMatch(/expected number, got string/)
     // The loop kept retrying — one LLM call per iteration, not a single
-    // hard-reject on the first mismatch. (Two task() calls above × 2 iters.)
-    expect(llm.callCount).toBe(4)
+    // hard-reject on the first mismatch.
+    expect(llm.callCount).toBe(2)
   })
 
   it('a valid output still returns on the first turn (no retry)', async () => {

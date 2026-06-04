@@ -215,6 +215,33 @@ describe('spawn — agent-authored sub-tasks', () => {
     expect(await pfs.exists('/data/y.txt')).toBe(false)
   })
 
+  it('recursive listing through a view is single-prefixed (no /data/data)', async () => {
+    const { agent } = await makeAgent((req) =>
+      isParent(req)
+        ? ts('taskSuccess(await spawn({ task: "ls", view: "/data" }))')
+        : ts(
+            'const d = await fs.listDetailed("/", { recursive: true }); const l = await fs.list("/", { recursive: true }); taskSuccess(JSON.stringify({ detailed: d.map((f) => f.path), list: l }))',
+          ),
+    )
+    const pfs = await agent.fs()
+    await pfs.mkdir('/data/sub', { parents: true })
+    await pfs.write('/data/a.txt', new TextEncoder().encode('A'))
+    await pfs.write('/data/sub/b.txt', new TextEncoder().encode('B'))
+    const fn = agent.task<undefined, string>({ description: 'Parent.' })
+    const { detailed, list } = JSON.parse(await fn(undefined)) as {
+      detailed: string[]
+      list: string[]
+    }
+    // listDetailed re-anchors correctly: the parent's files appear once
+    // under /data, never double-prefixed.
+    expect(detailed).toContain('/data/a.txt')
+    expect(detailed).toContain('/data/sub/b.txt')
+    expect(detailed.some((p) => p.includes('/data/data'))).toBe(false)
+    // list (relative, no leading slash) composes correctly too.
+    expect(list).toContain('data/a.txt')
+    expect(list.some((p) => p.includes('data/data'))).toBe(false)
+  })
+
   it('paths outside view are not visible to the clone', async () => {
     const { agent } = await makeAgent((req) =>
       isParent(req)

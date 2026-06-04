@@ -97,6 +97,16 @@ class ReadOnlyView implements VirtualFileSystem {
     if (p === '' || p === '/') return this.base
     return `${this.base}${p.startsWith('/') ? p : `/${p}`}`
   }
+  /** Inverse of `#at` for returned paths: strip `base` so a result is
+   *  relative to the view (overlay) root — matching how a native
+   *  overlay reports paths. `MountFS` re-prepends the mount prefix on a
+   *  recursive listing from an ancestor, so without this the path would
+   *  double-prefix (`/data/data/x`). */
+  #fromBase(p: string): string {
+    if (p === this.base) return '/'
+    if (p.startsWith(`${this.base}/`)) return p.slice(this.base.length)
+    return p
+  }
   // cwd is tracked on the MountFS backing, so these aren't reached.
   getcwd(): string {
     return '/'
@@ -118,13 +128,19 @@ class ReadOnlyView implements VirtualFileSystem {
     return this.inner.stat(this.#at(p))
   }
   list(p = '/', opts?: { recursive?: boolean }): Promise<string[]> {
+    // `list` returns paths relative to the queried dir (no leading
+    // slash), so querying at the view root already yields view-relative
+    // results — pass through unchanged.
     return this.inner.list(this.#at(p), opts)
   }
-  listDetailed(
+  async listDetailed(
     p = '/',
     opts?: { recursive?: boolean },
   ): ReturnType<VirtualFileSystem['listDetailed']> {
-    return this.inner.listDetailed(this.#at(p), opts)
+    // `listDetailed` paths are query-prefixed (absolute here), so
+    // re-anchor them at the view root or `MountFS` double-prefixes.
+    const entries = await this.inner.listDetailed(this.#at(p), opts)
+    return entries.map((fi) => ({ ...fi, path: this.#fromBase(fi.path) }))
   }
   async write(): Promise<void> {
     throw new TypeError('spawn view is read-only')

@@ -373,16 +373,27 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
         }
       }
 
-      // A `dispose()` (or a kill from a concurrent execute) may have
-      // landed while we were transforming / awaiting `ready`. We're not
-      // in `activeExecutes` yet, so neither swept us — bail here before
-      // posting to a worker that's gone. This window is synchronous from
-      // here to `postMessage`, so no further race.
+      // An abort, a `dispose()`, or a kill from a concurrent execute may
+      // have landed while we were transforming / awaiting `ready`. We're
+      // not in `activeExecutes` yet, and the `'abort'` listener we'd add
+      // below would NOT fire for an already-aborted signal — so check
+      // explicitly here, before posting to the worker. This window is
+      // synchronous through to `postMessage`, so there's no further race.
+      if (ctx.signal.aborted) {
+        return {
+          outcome: { kind: 'continue' },
+          outputs: [],
+          error: new CancelledError(),
+          elapsedMs: performance.now() - start,
+        }
+      }
       if (disposed || worker === null) {
         return {
           outcome: { kind: 'continue' },
           outputs: [],
-          error: new CancelledError('runtime disposed'),
+          error: new CancelledError(
+            disposed ? 'runtime disposed' : 'worker terminated by a concurrent emission',
+          ),
           elapsedMs: performance.now() - start,
         }
       }

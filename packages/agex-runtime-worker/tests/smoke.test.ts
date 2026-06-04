@@ -436,6 +436,23 @@ describe('workerRuntime', () => {
     expect(slowResult.outcome).toEqual({ kind: 'success', value: 'slow' })
   })
 
+  it('settles with CancelledError when the signal aborts during the setup phase', async () => {
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const ac = new AbortController()
+    // `execute()` runs synchronously up to its first `await` (transform),
+    // so the top-of-execute abort check has already passed. Aborting now
+    // lands *during* setup — before the in-Promise 'abort' listener
+    // exists (and that listener wouldn't fire on an already-aborted
+    // signal). It must still settle promptly, not hang to the timeout.
+    const p = rt.execute('taskSuccess(1)', makeCtx({ signal: ac.signal }))
+    ac.abort()
+    const start = performance.now()
+    const r = await p
+    expect(r.error).toBeInstanceOf(CancelledError)
+    expect(performance.now() - start).toBeLessThan(1_000) // far below timeoutMs
+  })
+
   it('shares fate: a kill (dispose) settles all in-flight concurrent executes', async () => {
     const rt = runtime()
     await rt.init(EMPTY_POLICY)

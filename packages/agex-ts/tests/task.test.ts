@@ -1,11 +1,22 @@
+import { MemoryFS } from '@agex-ts/termish/fs/memory'
 import type { StandardSchemaV1 } from '@standard-schema/spec'
 import { describe, expect, it } from 'vitest'
 import { createAgent } from '../src/agent'
+import { CacheImpl } from '../src/cache'
 import { TaskFailError } from '../src/errors'
+import { EventLogImpl } from '../src/event-log'
 import { Dummy } from '../src/llm/dummy'
 import type { NeutralTurn } from '../src/render'
 import { evalRuntime } from '../src/runtime/eval'
+import { Live } from '../src/state'
+import type { TaskFnInternal } from '../src/task'
 import type { AgentEvent, LLMResponse, TokenChunk } from '../src/types'
+
+async function drain(log: { iter(): AsyncIterable<AgentEvent> }): Promise<AgentEvent[]> {
+  const out: AgentEvent[] = []
+  for await (const e of log.iter()) out.push(e)
+  return out
+}
 
 const r = (...emissions: LLMResponse['emissions']): LLMResponse => ({ emissions })
 
@@ -266,6 +277,71 @@ describe('task — output validation (recoverable)', () => {
     })
     expect(await fn(undefined)).toBe(7)
     expect(llm.callCount).toBe(1)
+  })
+})
+
+describe('task — injected run resources (spawn seam)', () => {
+  // The run-resource bundle seam (decision #1 in roadmap/spawn.md): a
+  // caller can hand the loop pre-built throwaway state so an ephemeral
+  // clone runs without touching the parent's configured session. These
+  // assert the override path is wired and isolates correctly. The public
+  // TaskFn type hides the runCtx arg, so we cast to TaskFnInternal.
+  it('runs on injected throwaway state and leaves the configured session untouched', async () => {
+    const llm = new Dummy({ responses: [r({ type: 'ts', code: 'taskSuccess("ok")' })] })
+    const agent = await createAgent({ name: 'T', llm, runtime: evalRuntime() })
+    const fn = agent.task<undefined, string>({
+      description: 'Return ok.',
+    }) as TaskFnInternal<undefined, string>
+
+    const injState = new Live()
+    const injLog = new EventLogImpl(injState, 'inj')
+    const result = await fn(
+      undefined,
+      {},
+      {
+        resources: { eventLog: injLog, fs: new MemoryFS(), cache: new CacheImpl(injState, 'inj') },
+      },
+    )
+    expect(result).toBe('ok')
+
+    // The injected log captured the run...
+    const injected = await drain(injLog)
+    expect(injected.some((e) => e.type === 'taskStart')).toBe(true)
+    expect(injected.some((e) => e.type === 'success')).toBe(true)
+
+    // ...and the agent's configured session saw nothing.
+    expect(await drain(await agent.events('default'))).toEqual([])
+  })
+
+  it('writes during the run land in the injected VFS, not the agent VFS', async () => {
+    const llm = new Dummy({
+      responses: [
+        r({ type: 'fileWrite', path: '/note.txt', content: 'hi', mode: 'write' }),
+        r({ type: 'ts', code: 'taskSuccess(null)' }),
+      ],
+    })
+    const agent = await createAgent({ name: 'T', llm, runtime: evalRuntime() })
+    const fn = agent.task<undefined, null>({
+      description: 'Write a file.',
+    }) as TaskFnInternal<undefined, null>
+
+    const injState = new Live()
+    const injFs = new MemoryFS()
+    await fn(
+      undefined,
+      {},
+      {
+        resources: {
+          eventLog: new EventLogImpl(injState, 'inj'),
+          fs: injFs,
+          cache: new CacheImpl(injState, 'inj'),
+        },
+      },
+    )
+
+    expect(await injFs.exists('/note.txt')).toBe(true)
+    // The agent's configured VFS is untouched (built fresh on this read).
+    expect(await (await agent.fs('default')).exists('/note.txt')).toBe(false)
   })
 })
 

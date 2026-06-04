@@ -185,6 +185,50 @@ describe('spawn — agent-authored sub-tasks', () => {
     expect(await fn(undefined)).toBe(true)
   })
 
+  it('view exposes parent files read-only at the same path', async () => {
+    const { agent } = await makeAgent((req) =>
+      isParent(req)
+        ? ts('taskSuccess(await spawn({ task: "read", view: "/data" }))')
+        : ts('taskSuccess(await fs.read("/data/x.txt", "utf8"))'),
+    )
+    const pfs = await agent.fs()
+    await pfs.mkdir('/data', { parents: true })
+    await pfs.write('/data/x.txt', new TextEncoder().encode('hello-parent'))
+    const fn = agent.task<undefined, string>({ description: 'Parent.' })
+    expect(await fn(undefined)).toBe('hello-parent')
+  })
+
+  it('clone writes to a view path are rejected (read-only)', async () => {
+    const { agent } = await makeAgent((req) =>
+      isParent(req)
+        ? ts('taskSuccess(await spawn({ task: "w", view: "/data" }))')
+        : ts(
+            'try { await fs.write("/data/y.txt", "x"); taskSuccess("wrote") } catch { taskSuccess("blocked") }',
+          ),
+    )
+    const pfs = await agent.fs()
+    await pfs.mkdir('/data', { parents: true })
+    await pfs.write('/data/x.txt', new TextEncoder().encode('seed'))
+    const fn = agent.task<undefined, string>({ description: 'Parent.' })
+    expect(await fn(undefined)).toBe('blocked')
+    // The parent's /data is untouched — the clone's write never landed.
+    expect(await pfs.exists('/data/y.txt')).toBe(false)
+  })
+
+  it('paths outside view are not visible to the clone', async () => {
+    const { agent } = await makeAgent((req) =>
+      isParent(req)
+        ? ts('taskSuccess(await spawn({ task: "peek", view: "/data" }))')
+        : ts('taskSuccess(await fs.exists("/secret.txt"))'),
+    )
+    const pfs = await agent.fs()
+    await pfs.mkdir('/data', { parents: true })
+    await pfs.write('/data/x.txt', new TextEncoder().encode('seed'))
+    await pfs.write('/secret.txt', new TextEncoder().encode('classified'))
+    const fn = agent.task<undefined, boolean>({ description: 'Parent.' })
+    expect(await fn(undefined)).toBe(false) // outside the /data view → clone can't see it
+  })
+
   it('bounds concurrency to maxSpawns', async () => {
     let active = 0
     let maxActive = 0

@@ -28,7 +28,7 @@ import { SkillsOverlay } from './fs/skills-overlay'
 import { jsonSchemaToStandard } from './json-schema'
 import { Live } from './state/live'
 import { type TaskDefinition, type TaskFnInternal, makeTask } from './task'
-import type { AgentEvent, SpawnFn, SpawnSpec } from './types'
+import type { AgentEvent, SpawnFn, SpawnSpec, VirtualFileSystem } from './types'
 
 const SKILLS_PREFIX = '/skills'
 
@@ -72,26 +72,114 @@ function buildCloneDef(spec: SpawnSpec): TaskDefinition<unknown, unknown> {
   }
 }
 
+/** Normalize a `view` path into a `MountFS` prefix: ensure a leading
+ *  slash and strip a trailing one. Invalid results (`''` / `'/'`) are
+ *  left for `MountFS` to reject with its own clear message. */
+function viewPrefix(path: string): string {
+  const withLead = path.startsWith('/') ? path : `/${path}`
+  return withLead.length > 1 && withLead.endsWith('/') ? withLead.slice(0, -1) : withLead
+}
+
+/** A read-only window onto `inner` rooted at `base`, for `spawn`'s
+ *  `view`. `MountFS` strips the mount prefix before delegating (and
+ *  rejects writes to a mounted overlay), so to expose the parent's
+ *  `<base>` subtree at the clone's `<base>` we re-prepend `base` to the
+ *  stripped path. Because the mount prefix *equals* `base`, paths the
+ *  inner FS returns (e.g. recursive `list`) are already clone-absolute,
+ *  so results pass through untouched. Mutators throw defensively —
+ *  `MountFS` blocks overlay writes before they reach here. */
+class ReadOnlyView implements VirtualFileSystem {
+  constructor(
+    private readonly inner: VirtualFileSystem,
+    private readonly base: string,
+  ) {}
+  #at(p: string): string {
+    if (p === '' || p === '/') return this.base
+    return `${this.base}${p.startsWith('/') ? p : `/${p}`}`
+  }
+  // cwd is tracked on the MountFS backing, so these aren't reached.
+  getcwd(): string {
+    return '/'
+  }
+  async chdir(): Promise<void> {}
+  read(p: string): Promise<Uint8Array> {
+    return this.inner.read(this.#at(p))
+  }
+  exists(p: string): Promise<boolean> {
+    return this.inner.exists(this.#at(p))
+  }
+  isFile(p: string): Promise<boolean> {
+    return this.inner.isFile(this.#at(p))
+  }
+  isDir(p: string): Promise<boolean> {
+    return this.inner.isDir(this.#at(p))
+  }
+  stat(p: string): ReturnType<VirtualFileSystem['stat']> {
+    return this.inner.stat(this.#at(p))
+  }
+  list(p = '/', opts?: { recursive?: boolean }): Promise<string[]> {
+    return this.inner.list(this.#at(p), opts)
+  }
+  listDetailed(
+    p = '/',
+    opts?: { recursive?: boolean },
+  ): ReturnType<VirtualFileSystem['listDetailed']> {
+    return this.inner.listDetailed(this.#at(p), opts)
+  }
+  async write(): Promise<void> {
+    throw new TypeError('spawn view is read-only')
+  }
+  async mkdir(): Promise<void> {
+    throw new TypeError('spawn view is read-only')
+  }
+  async remove(): Promise<void> {
+    throw new TypeError('spawn view is read-only')
+  }
+  async rmdir(): Promise<void> {
+    throw new TypeError('spawn view is read-only')
+  }
+  async rename(): Promise<void> {
+    throw new TypeError('spawn view is read-only')
+  }
+}
+
 /** Build the clone's throwaway substrate: a fresh in-process `Live` for
  *  the (discarded) event log + cache, and a blank `MemoryFS` with the
  *  parent's `/skills` overlay mounted so the clone has the same skills.
- *  Nothing here touches the parent's configured session. */
-async function buildCloneResources(agent: Agent, idx: number) {
+ *  When `view` is set, the named parent paths are mounted read-only at
+ *  the same location (the parent's *backing* FS, so no nested
+ *  `/view/skills`); `MountFS` rejects writes to a mounted overlay, so
+ *  read-only falls out for free. Nothing here mutates the parent. */
+async function buildCloneResources(
+  agent: Agent,
+  idx: number,
+  parentSession: string,
+  view: string | string[] | undefined,
+) {
   const { MemoryFS } = await import('@agex-ts/termish/fs/memory')
   const state = new Live()
   const session = `spawn#${idx}`
-  const fs = new MountFS(new MemoryFS(), [
+  const mounts: Array<{ prefix: string; fs: VirtualFileSystem }> = [
     { prefix: SKILLS_PREFIX, fs: new SkillsOverlay(agent.policy().skills) },
-  ])
+  ]
+  if (view !== undefined) {
+    const backing = await agent.backingFs(parentSession)
+    const paths = typeof view === 'string' ? [view] : view
+    for (const p of paths) {
+      const prefix = viewPrefix(p)
+      mounts.push({ prefix, fs: new ReadOnlyView(backing, prefix) })
+    }
+  }
   return {
     eventLog: new EventLogImpl(state, session),
-    fs,
+    fs: new MountFS(new MemoryFS(), mounts),
     cache: new CacheImpl(state, session),
   }
 }
 
 export function createSpawn(
   agent: Agent,
+  parentSession: string,
   parentSignal: AbortSignal,
   parentOnEvent: ((e: AgentEvent) => void | Promise<void>) | undefined,
   maxSpawns: number,
@@ -105,7 +193,7 @@ export function createSpawn(
     const idx = counter++
     const normalized: SpawnSpec = typeof spec === 'string' ? { task: spec } : spec
     const cloneDef = buildCloneDef(normalized)
-    const resources = await buildCloneResources(agent, idx)
+    const resources = await buildCloneResources(agent, idx, parentSession, normalized.view)
 
     // Forward the clone's events to the parent's stream, re-tagged so a
     // host UI can demux concurrent clones. We do NOT thread them into the

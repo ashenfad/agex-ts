@@ -1,6 +1,6 @@
 {
   "name": "@agex-ts/git",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Agent-view git over an @agex-ts/kvgit Staged. @agex-ts/termish host command for in-VFS commit / branch / diff.",
   "keywords": [
     "agex",

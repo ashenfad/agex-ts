@@ -61,6 +61,19 @@ describe('jsonSchemaToStandard', () => {
     expect(issues.some((i) => i.path === undefined)).toBe(true)
   })
 
+  it('unescapes JSON Pointer special characters in paths (~1 → /, ~0 → ~)', async () => {
+    // cfworker emits escaped instanceLocation pointers (`#/a~1b`, `#/c~0d`);
+    // pointerToPath must decode them back to the real property names.
+    const schema = {
+      type: 'object',
+      properties: { 'a/b': { type: 'string' }, 'c~d': { type: 'string' } },
+    }
+    const res = await validate(schema, { 'a/b': 1, 'c~d': 1 })
+    const issues = (res as { issues: Issue[] }).issues
+    expect(issues.some((i) => i.path?.[0] === 'a/b')).toBe(true)
+    expect(issues.some((i) => i.path?.[0] === 'c~d')).toBe(true)
+  })
+
   // The reason the util exists: feed an agent-supplied JSON Schema object
   // into the task loop's StandardSchema output validation. With PR 1, a
   // mismatch is recoverable, so the agent retries — this is the exact

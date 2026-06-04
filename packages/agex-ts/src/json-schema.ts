@@ -33,8 +33,11 @@ function pointerToPath(loc: string): PropertyKey[] {
     .split('/')
     .slice(1)
     .map((seg) => {
-      // JSON Pointer unescaping: `~1` → `/`, `~0` → `~` (order matters).
-      const key = seg.replace(/~1/g, '/').replace(/~0/g, '~')
+      // JSON Pointer unescaping (RFC 6901): `~1` → `/`, `~0` → `~`. A single
+      // pass keeps this order-independent — sequential `.replace` is only
+      // correct in the `~1`-then-`~0` order, so the one-pass form removes
+      // that footgun (e.g. `~01` → `~1`, never `/`).
+      const key = seg.replace(/~([01])/g, (_, d) => (d === '1' ? '/' : '~'))
       return /^\d+$/.test(key) ? Number(key) : key
     })
 }

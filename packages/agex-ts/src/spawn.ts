@@ -83,11 +83,13 @@ function viewPrefix(path: string): string {
 /** A read-only window onto `inner` rooted at `base`, for `spawn`'s
  *  `view`. `MountFS` strips the mount prefix before delegating (and
  *  rejects writes to a mounted overlay), so to expose the parent's
- *  `<base>` subtree at the clone's `<base>` we re-prepend `base` to the
- *  stripped path. Because the mount prefix *equals* `base`, paths the
- *  inner FS returns (e.g. recursive `list`) are already clone-absolute,
- *  so results pass through untouched. Mutators throw defensively —
- *  `MountFS` blocks overlay writes before they reach here. */
+ *  `<base>` subtree at the clone's `<base>` we re-prepend `base` to
+ *  incoming paths (`#at`) and re-anchor outgoing ones to the view root
+ *  (`#fromBase`) — so this presents as a native overlay rooted at
+ *  `base`. (`list` already returns query-relative paths, so only
+ *  `listDetailed`, whose paths are query-prefixed, needs re-anchoring.)
+ *  Mutators throw defensively — `MountFS` blocks overlay writes before
+ *  they reach here. */
 class ReadOnlyView implements VirtualFileSystem {
   constructor(
     private readonly inner: VirtualFileSystem,

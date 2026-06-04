@@ -227,19 +227,32 @@ worse. The clone's resources vary per call, so the loop should **accept** them,
 not derive them.
 
 **Decision: a caller-injected run-resource bundle.** Give the loop an optional
-host-only parameter carrying the run's resources + capability flags:
+host-only `RunContext` carrying pre-built resources:
 
 ```ts
-makeTaskCore(agent, def, {
-  resources: { eventLog, fs, cache },  // pre-built by the caller
-  spawnEnabled: false,                 // depth-1: no spawn cap, no spawn primer
-  chaptering: false,                   // no durable log to compact
+runTask(agent, def, input, options, {
+  resources: { eventLog, fs, cache },  // pre-built throwaway substrate
 })
 ```
 
 When the bundle is absent, the loop behaves exactly as today (acquire from
-`agent.*(session)`, chaptering on, `spawn` on), so this lands as a **single
-optional parameter** rather than a big-bang rewrite. But note the shape: once
+`agent.*(session)`). When `resources` is present, the run *is* an ephemeral
+clone, and two behaviors follow from that single fact rather than from separate
+flags:
+
+- **No chaptering.** Chaptering compacts a durable log; a clone's log is
+  throwaway, so there is nothing to compact and firing the chapter task would be
+  pointless. This is an invariant of being ephemeral, not a per-call knob —
+  derived as `chapteringEnabled = resources === undefined`. (The chapter task
+  itself runs on the *configured* substrate, so it still chapters-enabled;
+  re-entrancy is prevented by `shouldTriggerChaptering`, as today.)
+- **No agent-VFS skills refresh.** The caller composed the clone's VFS
+  (including any `/skills` overlay), so the loop leaves the agent's per-session
+  VFS untouched.
+
+Depth-1 spawn suppression keys off the same fact (PR 4): a clone run gets no
+`spawn` capability on its `ExecuteContext`. So this lands as a **single optional
+parameter** rather than a big-bang rewrite. But note the shape: once
 the caller composes the FS and injects the trio, the loop is decoupled from
 session-acquisition — i.e. this is the "extract a shared loop-core" (Option C)
 seam, introduced incrementally. It keeps the single-loop property (the
@@ -256,8 +269,11 @@ canonical loop.
 - `fs`: a `MountFS` over a fresh `MemoryFS` scratch backing, with overlays —
   always the `/skills` overlay (a clone has the parent's capabilities, so it
   sees the same skills), and, when `spec.view` is set, a read-only mount of the
-  parent session's **backing** FS at the view prefix;
-- flags: `spawnEnabled: false`, `chaptering: false`.
+  parent session's **backing** FS at the view prefix.
+
+Injecting `resources` is the whole signal: it makes the run ephemeral, which
+suppresses chaptering and the agent-VFS skills refresh on its own. Depth-1
+(no `spawn` capability) is wired separately in PR 4 via the `ExecuteContext`.
 
 **Read-only VFS sharing is not a new FS type.** `fs/mount.ts` already composes
 a writable backing with read-only overlays at path prefixes, and writes to a
@@ -385,13 +401,16 @@ These all fall out of existing machinery — no Python-style special wrapping
 
 ## Open decisions recap
 
-1. **Clone-state mechanism** — DECIDED: a caller-injected run-resource bundle
-   (`{ resources: { eventLog, fs, cache }, spawnEnabled, chaptering }`) as an
-   optional `makeTask` parameter — the Option-C seam landed incrementally, not a
-   boolean flag. The spawn host handler composes throwaway `Live`-backed
-   log/cache + a `MountFS` (scratch + `/skills` + optional read-only parent
-   `view`). Depth-1 and read-only VFS sharing both fall out of this. Standalone
-   runner (Option B) rejected.
+1. **Clone-state mechanism** — DECIDED: a caller-injected `RunContext`
+   (`{ resources: { eventLog, fs, cache } }`) as an optional `makeTask`
+   parameter — the Option-C seam landed incrementally, not a boolean flag.
+   Injecting `resources` is the whole signal: an ephemeral run suppresses
+   chaptering and the agent-VFS skills refresh on its own (both derived from
+   `resources === undefined`, not separate flags). Depth-1 (no `spawn`
+   capability) is wired in PR 4 via `ExecuteContext`. The spawn host handler
+   composes throwaway `Live`-backed log/cache + a `MountFS` (scratch + `/skills`
+   + optional read-only parent `view`). Read-only VFS sharing falls out of this.
+   Standalone runner (Option B) rejected.
 2. **Validation depth** — DECIDED: always enforced, agex idiom — a mismatch is a
    recoverable error that counts against the iteration cap and hard-fails only on
    exhaustion. Two pieces: (1) make main-loop output validation recoverable
@@ -420,8 +439,12 @@ mergeable, reviewable, and tested.
 
 **PR 2 — Run-resource bundle seam** (decision #1 refactor, *no behavior change*)
 - *Touches:* `task.ts` resource acquisition (`:105–107`) + capability flags.
-- *Change:* `makeTask` accepts optional `{ resources: { eventLog, fs, cache },
-  spawnEnabled, chaptering }`. Absent → today's behavior exactly.
+- *Change:* `makeTask`'s closure accepts an optional `RunContext`
+  (`{ resources: { eventLog, fs, cache } }`). Present → run on those throwaway
+  instances; chaptering + skills-refresh suppression derive from
+  `resources === undefined` (no separate flags). Absent → today's behavior
+  exactly. (`spawnEnabled` / depth-1 lands in PR 4 with the `ExecuteContext`
+  capability.)
 - *Tests:* all existing tests pass unchanged; new test injects a throwaway
   `Live`+`MemoryFS` bundle and asserts nothing lands in the configured backend.
 

@@ -34,6 +34,7 @@ import { buildSystemMessage, buildTaskMessage, makeToolUseId, renderEvents } fro
 import type {
   ActionEvent,
   AgentEvent,
+  Cache,
   Emission,
   ExecuteContext,
   FailEvent,
@@ -81,6 +82,32 @@ export interface TaskDefinition<I, O> {
   readonly primer?: string
 }
 
+/** Host-internal substrate override for a single task run. Empty on the
+ *  normal path. `spawn` (see `docs/roadmap/spawn.md`) supplies one to run
+ *  an ephemeral clone on throwaway state without touching the parent's
+ *  configured per-session substrate. Never agent-reachable. */
+export interface RunContext {
+  /** Pre-built event log / VFS / cache. When set, the loop uses these
+   *  instead of `agent.events/fs/cache(session)`, and skips the
+   *  agent-VFS skills-overlay refresh — the caller is expected to have
+   *  composed the VFS (including any `/skills` overlay) itself. */
+  readonly resources?: {
+    readonly eventLog: EventLogImpl
+    readonly fs: VirtualFileSystem
+    readonly cache: Cache
+  }
+}
+
+/** `TaskFn` plus the host-internal `runCtx` third argument. The public
+ *  `TaskFn` type deliberately hides it; `spawn` casts to this to inject a
+ *  `RunContext`. The returned closure really does accept the argument, so
+ *  the cast is sound. */
+export type TaskFnInternal<I, O> = (
+  input: I,
+  options?: TaskCallOptions,
+  runCtx?: RunContext,
+) => Promise<O>
+
 /** Build a task function. The optional `taskName` overrides the
  *  default of deriving the name from the description's first line —
  *  used internally by `agent.chapterTask` to stamp chapter-task events
@@ -92,7 +119,7 @@ export function makeTask<I, O>(
   def: TaskDefinition<I, O>,
   taskName?: string,
 ): TaskFn<I, O> {
-  return async (input: I, options: TaskCallOptions = {}): Promise<O> => {
+  return async (input: I, options: TaskCallOptions = {}, runCtx: RunContext = {}): Promise<O> => {
     const llmClient = agent.llm ?? throwMissing('llm')
     const runtimeAdapter = agent.runtime ?? throwMissing('runtime')
 
@@ -101,10 +128,19 @@ export function makeTask<I, O>(
     // Per-session host APIs are async — the underlying state /
     // VFS / cache may need to open an IndexedDB or SQLite store.
     // Resolve them up front so the loop body can use them
-    // synchronously.
-    const eventLog = await agent.events(session)
-    const fs = await agent.fs(session)
-    const cache = await agent.cache(session)
+    // synchronously. `runCtx.resources`, when supplied, replaces the
+    // agent's configured substrate with caller-built throwaway instances
+    // (an ephemeral spawn clone) so nothing lands in the parent session.
+    const resources = runCtx.resources
+    const eventLog = resources?.eventLog ?? (await agent.events(session))
+    const fs = resources?.fs ?? (await agent.fs(session))
+    const cache = resources?.cache ?? (await agent.cache(session))
+    // A run on injected resources is an ephemeral spawn clone: it owns no
+    // durable session, so it both skips the agent-VFS skills refresh (the
+    // caller composed the VFS) and never chapters (a throwaway log has
+    // nothing to compact, and chaptering would pointlessly run the chapter
+    // task). Both behaviors key off this one invariant, not separate flags.
+    const usesAgentSubstrate = resources === undefined
 
     // -- Validate input ---------------------------------------------------
     let validatedInput: I = input
@@ -120,8 +156,12 @@ export function makeTask<I, O>(
     })
 
     // Make sure registered skills are visible at /skills/<name>/SKILL.md
-    // before the agent starts running.
-    await agent.refreshSkillsOverlay(session)
+    // before the agent starts running. With injected resources the caller
+    // composed the VFS (including any skills overlay), so leave the
+    // agent's per-session VFS untouched.
+    if (usesAgentSubstrate) {
+      await agent.refreshSkillsOverlay(session)
+    }
 
     // -- Log TaskStartEvent ----------------------------------------------
     // The full task message lives on the event so renderEvents can
@@ -287,7 +327,9 @@ export function makeTask<I, O>(
             result,
           }
           await emit(successEvent, eventLog, options.onEvent)
-          await maybeFireBoundaryChaptering(agent, session, eventLog, signal, options.onEvent)
+          if (usesAgentSubstrate) {
+            await maybeFireBoundaryChaptering(agent, session, eventLog, signal, options.onEvent)
+          }
           return result
         }
         if (outcome.kind === 'fail') {
@@ -298,7 +340,9 @@ export function makeTask<I, O>(
             message: outcome.message,
           }
           await emit(failEvent, eventLog, options.onEvent)
-          await maybeFireBoundaryChaptering(agent, session, eventLog, signal, options.onEvent)
+          if (usesAgentSubstrate) {
+            await maybeFireBoundaryChaptering(agent, session, eventLog, signal, options.onEvent)
+          }
           throw new TaskFailError(outcome.message)
         }
         // outcome.kind === 'continue' → next iteration
@@ -319,7 +363,9 @@ export function makeTask<I, O>(
         message: exhaustMessage,
       }
       await emit(failEvent, eventLog, options.onEvent)
-      await maybeFireBoundaryChaptering(agent, session, eventLog, signal, options.onEvent)
+      if (usesAgentSubstrate) {
+        await maybeFireBoundaryChaptering(agent, session, eventLog, signal, options.onEvent)
+      }
       throw new TaskFailError(exhaustMessage)
     } catch (e) {
       if (isCancelledError(e)) {

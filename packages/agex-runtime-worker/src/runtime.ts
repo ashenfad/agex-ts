@@ -636,41 +636,7 @@ async function handleBridgeCall(
   } catch (e) {
     error = serializeError(e)
   }
-  sendBridgeResponse(w, executeId, callId, value, error)
-}
-
-/** Post the `bridgeResponse` that answers a `bridgeCall` / `spawnCall` /
- *  `newInstance` / `instanceCall`. Wrapped in try/catch because the
- *  value might not structured-clone, and because the worker may have
- *  been terminated mid-call (timeout / abort) — both would otherwise
- *  crash the host. On a clone failure we retry once with the failure
- *  encoded so the worker's awaiting promise rejects rather than hangs. */
-function sendBridgeResponse(
-  w: Worker,
-  executeId: number,
-  callId: number,
-  value: unknown,
-  error: SerializedError | null,
-): void {
-  try {
-    if (error !== null) {
-      w.postMessage({ type: 'bridgeResponse', executeId, callId, ok: false, error })
-    } else {
-      w.postMessage({ type: 'bridgeResponse', executeId, callId, ok: true, value })
-    }
-  } catch (cloneErr) {
-    try {
-      w.postMessage({
-        type: 'bridgeResponse',
-        executeId,
-        callId,
-        ok: false,
-        error: serializeError(cloneErr),
-      })
-    } catch {
-      // Worker is gone. Nothing to deliver to.
-    }
-  }
+  postBridgeResponse(w, executeId, callId, value, error)
 }
 
 /** Dispatch a `spawnCall` to the host's `ctx.spawn` (built by the task
@@ -694,7 +660,7 @@ async function handleSpawnCall(
   } catch (e) {
     error = serializeError(e)
   }
-  sendBridgeResponse(w, executeId, callId, value, error)
+  postBridgeResponse(w, executeId, callId, value, error)
 }
 
 async function dispatch(
@@ -997,10 +963,13 @@ function unpackArgs(args: ReadonlyArray<unknown>, instances: Map<number, unknown
   return args.map(unpack)
 }
 
-/** Common reply path for `newInstance` and `instanceCall`. Mirrors
- *  the try-twice clone-failure handling used in `handleBridgeCall`
- *  so a non-cloneable return value or a terminated worker doesn't
- *  crash the host. */
+/** Common reply path for every worker→host call that gets a
+ *  `bridgeResponse` back — `bridgeCall`, `spawnCall`, `newInstance`,
+ *  `instanceCall`. Wrapped twice: the return value might not
+ *  structured-clone, and the worker may have been terminated mid-call
+ *  (timeout / abort) — neither should crash the host. On a clone
+ *  failure we retry once with the failure encoded so the worker's
+ *  awaiting promise rejects rather than hangs. */
 function postBridgeResponse(
   w: Worker,
   executeId: number,

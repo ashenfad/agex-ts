@@ -166,6 +166,7 @@ interface CtxOpts {
   fs?: ExecuteContext['fs']
   cache?: ExecuteContext['cache']
   inputs?: ExecuteContext['inputs']
+  spawn?: ExecuteContext['spawn']
 }
 
 function makeCtx(opts: CtxOpts = {}): ExecuteContext {
@@ -174,6 +175,7 @@ function makeCtx(opts: CtxOpts = {}): ExecuteContext {
     cache: opts.cache ?? makeMemoryCache(),
     signal: opts.signal ?? new AbortController().signal,
     ...(opts.inputs !== undefined && { inputs: opts.inputs }),
+    ...(opts.spawn !== undefined && { spawn: opts.spawn }),
   }
 }
 
@@ -481,6 +483,78 @@ describe('workerRuntime', () => {
     const [ra, rb] = await Promise.all([rt.execute(code, ctxA), rt.execute(code, ctxB)])
     expect(ra.outcome).toEqual({ kind: 'success', value: 'A' })
     expect(rb.outcome).toEqual({ kind: 'success', value: 'B' })
+  })
+})
+
+describe('workerRuntime — spawn bridge', () => {
+  let disposers: Array<() => Promise<void>> = []
+  afterEach(async () => {
+    await Promise.all(disposers.map((d) => d()))
+    disposers = []
+  })
+  function runtime() {
+    const rt = workerRuntime({ workerUrl: TEST_WORKER_URL, timeoutMs: 2_000 })
+    disposers.push(() => rt.dispose())
+    return rt
+  }
+
+  it('bridges spawn(spec) to the host ctx.spawn and returns the result', async () => {
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const seen: unknown[] = []
+    const ctx = makeCtx({
+      spawn: async (spec) => {
+        seen.push(spec)
+        return { echoed: (spec as { task: string }).task }
+      },
+    })
+    const r = await rt.execute('taskSuccess(await spawn({ task: "hello", input: 7 }))', ctx)
+    expect(r.error).toBeNull()
+    expect(r.outcome).toEqual({ kind: 'success', value: { echoed: 'hello' } })
+    expect(seen).toEqual([{ task: 'hello', input: 7 }])
+  })
+
+  it('propagates a sub-task failure as a rejection the agent can catch', async () => {
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const ctx = makeCtx({
+      spawn: async () => {
+        throw new Error('spawned sub-task failed: nope')
+      },
+    })
+    const code =
+      'try { await spawn({ task: "x" }) } catch (e) { taskSuccess("caught: " + e.message) }'
+    const r = await rt.execute(code, ctx)
+    expect(r.outcome).toEqual({ kind: 'success', value: 'caught: spawned sub-task failed: nope' })
+  })
+
+  it('is not injected when the host omits spawn (spawnEnabled false)', async () => {
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    // makeCtx() with no spawn → execute() sends spawnEnabled:false → no stub.
+    const r = await rt.execute('taskSuccess(typeof spawn)', makeCtx())
+    expect(r.outcome).toEqual({ kind: 'success', value: 'undefined' })
+  })
+
+  it('runs the clone as a concurrent execute on the same worker', async () => {
+    // The real worker-spawn mechanic: the parent emission parks at
+    // `await spawn(...)` while ctx.spawn runs a clone *through the same
+    // runtime* — a concurrent execute() on the one worker (only possible
+    // because of the 6a concurrency rework). Proves the parked parent
+    // and the clone coexist, not just that the bridge echoes a value.
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const ctx = makeCtx({
+      spawn: async (spec) => {
+        const clone = await rt.execute(
+          `taskSuccess("clone-of:" + ${JSON.stringify((spec as { task: string }).task)})`,
+          makeCtx(),
+        )
+        return (clone.outcome as { kind: 'success'; value: unknown }).value
+      },
+    })
+    const r = await rt.execute('taskSuccess(await spawn({ task: "T" }))', ctx)
+    expect(r.outcome).toEqual({ kind: 'success', value: 'clone-of:T' })
   })
 })
 

@@ -484,10 +484,39 @@ mergeable, reviewable, and tested.
 - *Tests:* clone reads parent files under the prefix; writes there throw; clone
   scratch writes don't touch the parent.
 
-**PR 6 — Worker-runtime bridge** (`'spawn'` `BridgeTarget`)
-- *Touches:* `agex-runtime-worker` messages/worker/host handler; reuses PR4's
-  host-side spawn function.
-- *Change:* add `'spawn'` to `BridgeTarget`; worker-side proxy posts
-  `bridgeCall`; host handler runs the clone loop and replies.
-- *Tests:* in the worker package — spawn under worker isolation returns/rejects
-  correctly.
+**PR 6 — Worker-runtime spawn.** Turned out to be much bigger than "+1 bridge
+target": servicing a spawn means running clone emissions *while the parent
+emission is parked at `await spawn(...)`*, which the worker's one-execute-at-a-
+time model deadlocked on. Split into two:
+
+**PR 6a — concurrent executes on one worker** (the real work)
+- *Change:* `workerRuntime` multiplexes executes on the single worker, keyed by
+  `executeId` (host `activeExecute` singleton → map; worker `activeBridge` /
+  `currentExecuteId` globals → per-`executeId`; `__load` bound per-execute).
+- *Shared fate:* a kill (timeout / abort / worker error / dispose) settles ALL
+  in-flight executes — blast radius is one worker = one `workerRuntime`
+  instance. Isolate sessions by giving each its own instance.
+- *Fetch:* the `routeFetchToVfs` shim (a global `fetch` patch with no execute
+  context — no `AsyncLocalStorage`/`AsyncContext` in a browser worker) routes
+  to the VFS only when exactly one execute is in flight; under concurrency it
+  passes through to the network. So clones never get the *transparent* redirect
+  (the parent stays parked-active while they run) — by design, not by accident.
+
+**PR 6b — the `spawn` bridge** (the small capstone, on top of 6a)
+- *Change:* dedicated `spawnCall` worker→host message (reusing the
+  `bridgeResponse` reply + callId/pending machinery, exactly like
+  `newInstance` / `instanceCall`); host dispatches it to `ctx.spawn`.
+  `workerRuntime` sets `injectsSpawn`; the `execute` message carries a per-run
+  `spawnEnabled` flag so the worker injects `spawn` only for top-level runs
+  (clones stay depth-1).
+- *Subagent primer:* clones get a sub-task note — they have a real VFS via
+  `fs.*`, but third-party libraries that `fetch` URLs won't reach it (use
+  `fs.read` + bytes-shuttling). `routeFetchToVfs` is **top-level-only**.
+- *Tests:* worker smoke — spawn round-trip, failure-as-rejection, not-injected
+  without `spawnEnabled`, and the clone running as a concurrent execute on the
+  same worker; agex-ts — the clone receives the sub-task primer, not the spawn
+  section.
+
+Why a browser worker can't transparently route a *library's* internal `fetch`
+to a clone's VFS (and Node `worker_threads` could, via `AsyncLocalStorage`):
+it's the `contextvars` problem — see the discussion in the fetch note above.

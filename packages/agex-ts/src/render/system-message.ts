@@ -48,6 +48,12 @@ export interface SystemMessageInputs {
    *  loop only for spawn-enabled top-level runs, so the primer never
    *  teaches a `spawn` the agent can't call. See `docs/roadmap/spawn.md`. */
   readonly spawnEnabled?: boolean
+  /** When true, this run is an ephemeral sub-task clone (a `spawn`
+   *  child). Appends a short note setting its expectations: it has its
+   *  own scratch VFS via `fs.*`, but third-party libraries that fetch
+   *  URLs won't reach that VFS. Mutually exclusive with `spawnEnabled`
+   *  (clones are depth-1 and never get `spawn`). */
+  readonly isClone?: boolean
 }
 
 /** Teaches the `spawn` builtin. Appended only when `spawnEnabled`. Kept
@@ -77,6 +83,14 @@ const tiles = await Promise.all(prompts.map((p) => spawn({ task: 'Produce a tile
 
 A clone that fails throws, so \`await spawn(...)\` rejects — catch it, or let it surface as this turn's error. Clones can't spawn (they're leaf workers), and a handle must be awaited within the action that created it.`
 
+/** Shown to a sub-task clone instead of the spawn section. Sets two
+ *  expectations: the clone has its own throwaway VFS reachable via
+ *  `fs.*`, and third-party libraries that fetch URLs read from the
+ *  network, not that VFS (so load local files explicitly). */
+const SUBAGENT_PRIMER = `## Sub-task
+
+You're running as an ephemeral sub-task clone. You have your own scratch filesystem — read and write it with \`fs.read\` / \`fs.write\`. Note: third-party libraries that fetch URLs read from the network, not your filesystem. To use one with a local file, \`fs.read\` the bytes yourself and pass them in — don't rely on the library fetching a VFS path.`
+
 export function buildSystemMessage(inputs: SystemMessageInputs): string {
   const parts: string[] = []
 
@@ -103,10 +117,13 @@ export function buildSystemMessage(inputs: SystemMessageInputs): string {
     }
   }
 
-  // 2b. Spawn (sub-tasks) — only when the runtime injects the capability
-  // for this top-level run. Sits with the capability descriptions.
+  // 2b. Spawn (sub-tasks) for a spawn-enabled top-level run, or the
+  // sub-task note for a clone. Mutually exclusive (clones are depth-1),
+  // and both sit with the capability descriptions.
   if (inputs.spawnEnabled === true) {
     parts.push(SPAWN_PRIMER)
+  } else if (inputs.isClone === true) {
+    parts.push(SUBAGENT_PRIMER)
   }
 
   // 3. Skills listing (names + descriptions; full content via VFS overlay)

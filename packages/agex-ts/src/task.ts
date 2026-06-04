@@ -215,6 +215,10 @@ export function makeTask<I, O>(
       ...(agent.primer !== undefined && { agentPrimer: agent.primer }),
       ...(runtimeAddendum !== undefined && { runtimeAddendum }),
       ...(spawnEnabled && { spawnEnabled: true }),
+      // A run on injected resources is a spawn clone — show it the
+      // sub-task note (its own VFS via fs.*, library fetches won't reach
+      // it) in place of the spawn section it can't use.
+      ...(!usesAgentSubstrate && { isClone: true }),
     })
 
     // Most recent recoverable error from agent code, surfaced in the

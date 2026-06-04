@@ -249,7 +249,36 @@ export function makeTask<I, O>(
         if (outcome.kind === 'success') {
           let result = outcome.value as O
           if (def.output !== undefined) {
-            result = await validateOrThrow(def.output, result, 'output')
+            try {
+              result = await validateOrThrow(def.output, result, 'output')
+            } catch (e) {
+              // Output validation is enforced but *recoverable*: rather than
+              // hard-failing the whole task, surface the mismatch as a system
+              // reminder the agent reads next turn and let it re-issue
+              // taskSuccess with a corrected value. This costs one iteration,
+              // so a persistent mismatch is bounded by maxIterations and the
+              // loop's exhaust path turns it into the terminal failure.
+              // Mirrors agex-py, where a return-type mismatch is a
+              // recoverable_error counted against the loop, not a hard fail.
+              // Synthetic OutputEvent with no emissionId — same routing as the
+              // no-action nudge above (lands as plain text in the next user
+              // turn), and `[System reminder]` framing reads as meta.
+              const message = describeError(e)
+              const reminderEvent: OutputEvent = {
+                type: 'output',
+                timestamp: new Date().toISOString(),
+                agentName: agent.name,
+                parts: [
+                  {
+                    type: 'text',
+                    text: `[System reminder] The value passed to taskSuccess did not match the task's required output shape — ${message}. Call taskSuccess(...) again with a value that satisfies the schema.`,
+                  },
+                ],
+              }
+              await emit(reminderEvent, eventLog, options.onEvent)
+              lastError = message
+              continue
+            }
           }
           const successEvent: SuccessEvent = {
             type: 'success',

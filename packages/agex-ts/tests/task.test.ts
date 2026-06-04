@@ -1,3 +1,4 @@
+import type { StandardSchemaV1 } from '@standard-schema/spec'
 import { describe, expect, it } from 'vitest'
 import { createAgent } from '../src/agent'
 import { TaskFailError } from '../src/errors'
@@ -202,6 +203,67 @@ describe('task — no-action nudge', () => {
       .map((p) => (p as { text: string }).text)
       .join('\n')
     expect(text).toMatch(/\[System reminder\]/)
+  })
+})
+
+// A StandardSchema that accepts numbers and rejects everything else,
+// reporting an issue the loop surfaces back to the agent.
+const numberSchema: StandardSchemaV1<number, number> = {
+  '~standard': {
+    version: 1,
+    vendor: 'test',
+    validate: (v: unknown) =>
+      typeof v === 'number'
+        ? { value: v }
+        : { issues: [{ message: `expected number, got ${typeof v}` }] },
+  },
+}
+
+describe('task — output validation (recoverable)', () => {
+  // Output validation is enforced but recoverable: a mismatch is surfaced
+  // to the agent, costs one iteration, and only becomes a terminal fail
+  // when the loop exhausts. Mirrors agex-py's return-type idiom.
+  it('a mismatch is surfaced and the agent retries with a corrected value', async () => {
+    const { agent, llm } = await makeAgent([
+      r({ type: 'ts', code: 'taskSuccess("nope")' }), // wrong type → recover
+      r({ type: 'ts', code: 'taskSuccess(42)' }), // corrected → success
+    ])
+    const fn = agent.task<undefined, number>({
+      description: 'Return a number.',
+      output: numberSchema,
+    })
+    const result = await fn(undefined)
+    expect(result).toBe(42)
+    // It took a second turn — the mismatch cost one iteration.
+    expect(llm.callCount).toBe(2)
+    // The agent saw the mismatch as a system reminder on its next turn.
+    const seen = JSON.stringify(llm.allTurns[1] ?? [])
+    expect(seen).toContain("did not match the task's required output shape")
+    expect(seen).toContain('expected number, got string')
+  })
+
+  it('a persistent mismatch exhausts maxIterations and fails with the validation message', async () => {
+    const llm = new Dummy({ responses: [r({ type: 'ts', code: 'taskSuccess("nope")' })] })
+    const agent = await createAgent({ name: 'T', llm, runtime: evalRuntime(), maxIterations: 2 })
+    const fn = agent.task<undefined, number>({
+      description: 'Return a number.',
+      output: numberSchema,
+    })
+    await expect(fn(undefined)).rejects.toThrow(/exceeded maxIterations \(2\)/)
+    await expect(fn(undefined)).rejects.toThrow(/expected number, got string/)
+    // The loop kept retrying — one LLM call per iteration, not a single
+    // hard-reject on the first mismatch. (Two task() calls above × 2 iters.)
+    expect(llm.callCount).toBe(4)
+  })
+
+  it('a valid output still returns on the first turn (no retry)', async () => {
+    const { agent, llm } = await makeAgent([r({ type: 'ts', code: 'taskSuccess(7)' })])
+    const fn = agent.task<undefined, number>({
+      description: 'Return a number.',
+      output: numberSchema,
+    })
+    expect(await fn(undefined)).toBe(7)
+    expect(llm.callCount).toBe(1)
   })
 })
 

@@ -17,10 +17,12 @@ export default defineConfig({
       headless: true,
     },
   },
-  // Pre-bundle DuckDB-WASM (used by tests/fixtures/duckdb-fixture.ts)
-  // so the dep optimizer doesn't kick in mid-test and reload the page,
-  // which Vitest warns about and can cause flaky test ordering.
+  // Pre-bundle deps that would otherwise trip Vite's optimizer mid-run
+  // (it reloads the page, which Vitest warns can cause flaky/duplicated
+  // tests). DuckDB-WASM: the bytes-shuttling fixture. @cfworker/json-schema
+  // + fflate: pulled in transitively by `agex-ts` once the spawn-e2e test
+  // imports the full agent (output-schema validation, kvgit compression).
   optimizeDeps: {
-    include: ['@duckdb/duckdb-wasm'],
+    include: ['@duckdb/duckdb-wasm', '@cfworker/json-schema', 'fflate'],
   },
 })

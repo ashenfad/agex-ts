@@ -535,6 +535,13 @@ export class Agent {
     return this.#vfs.fs(session)
   }
 
+  /** Framework-internal: the session's writable *backing* FS, beneath
+   *  the `/chapters` + `/skills` overlays. `spawn`'s `view` mounts this
+   *  read-only into a clone. Not part of the end-user surface. */
+  async backingFs(session: string = DEFAULT_SESSION): Promise<FileSystem> {
+    return this.#vfs.backingFs(session)
+  }
+
   /** Framework-internal: rebuild the `/skills/` overlay for `session`
    *  from the current registered skills. Called by the action loop
    *  on every task start so newly-registered skills become

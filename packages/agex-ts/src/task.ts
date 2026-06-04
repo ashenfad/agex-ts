@@ -196,7 +196,7 @@ export function makeTask<I, O>(
     const spawnEnabled =
       usesAgentSubstrate && agent.maxSpawns > 0 && runtimeAdapter.injectsSpawn === true
     const spawnCapability = spawnEnabled
-      ? createSpawn(agent, signal, options.onEvent, agent.maxSpawns)
+      ? createSpawn(agent, session, signal, options.onEvent, agent.maxSpawns)
       : undefined
     // Stable across the loop — only changes if the agent's
     // registration table mutates mid-task (it shouldn't).

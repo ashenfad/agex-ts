@@ -93,4 +93,20 @@ describe('workerRuntime — spawn end-to-end (real agent loop)', () => {
     const fn = agent.task<undefined, string>({ description: 'Parent.' })
     expect(await fn(undefined)).toBe('caught: spawned sub-task failed: nope')
   })
+
+  it('exposes a read-only view of the parent VFS to the clone through the bridge', async () => {
+    // The view is a host-side fs composition; this confirms it survives
+    // the worker boundary — the clone's bridged fs.read of a view path
+    // routes to the host ReadOnlyView → parent backing.
+    const agent = await makeAgent((req) =>
+      isParent(req)
+        ? ts('taskSuccess(await spawn({ task: "read", view: "/data" }))')
+        : ts('taskSuccess(await fs.read("/data/x.txt", "utf8"))'),
+    )
+    const pfs = await agent.fs()
+    await pfs.mkdir('/data', { parents: true })
+    await pfs.write('/data/x.txt', new TextEncoder().encode('via-worker'))
+    const fn = agent.task<undefined, string>({ description: 'Parent.' })
+    expect(await fn(undefined)).toBe('via-worker')
+  })
 })

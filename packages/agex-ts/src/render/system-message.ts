@@ -81,6 +81,12 @@ Fan out with ordinary \`Promise.all\` — concurrency is bounded for you:
 const tiles = await Promise.all(prompts.map((p) => spawn({ task: 'Produce a tile', input: { prompt: p } })))
 \`\`\`
 
+To let a clone read part of your filesystem, add \`view\` — the paths appear read-only at the same location in the clone:
+
+\`\`\`ts
+const summary = await spawn({ task: 'Summarize the logs', view: '/logs' })
+\`\`\`
+
 A clone that fails throws, so \`await spawn(...)\` rejects — catch it, or let it surface as this turn's error. Clones can't spawn (they're leaf workers), and a handle must be awaited within the action that created it.`
 
 /** Shown to a sub-task clone instead of the spawn section. Sets two

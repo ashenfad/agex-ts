@@ -367,6 +367,12 @@ export interface SpawnSpec {
   readonly outputDescription?: string
   /** Sub-task-specific framing appended to the clone's task message. */
   readonly primer?: string
+  /** Parent VFS path(s) to expose to the clone, **read-only**, at the
+   *  same location (e.g. `'/data'` or `['/data', '/config']`). The
+   *  clone reads them like the parent does; writes there throw, and
+   *  everything else is its own throwaway scratch. Use it to let a
+   *  sub-task explore files without copying them in. */
+  readonly view?: string | string[]
 }
 
 /** The `spawn` builtin injected into a top-level agent's code: run an

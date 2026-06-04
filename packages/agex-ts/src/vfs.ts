@@ -38,6 +38,7 @@ export type BackingFactory = (session: string) => Promise<FileSystem>
 
 interface SessionEntry {
   readonly mount: MountFS
+  readonly backing: FileSystem
   readonly chaptersOverlay: ChaptersOverlay
   readonly skillsOverlay: SkillsOverlay
 }
@@ -65,8 +66,19 @@ export class VfsManager {
       { prefix: CHAPTERS_PREFIX, fs: chaptersOverlay },
       { prefix: SKILLS_PREFIX, fs: skillsOverlay },
     ])
-    this.#cache.set(session, { mount, chaptersOverlay, skillsOverlay })
+    this.#cache.set(session, { mount, backing, chaptersOverlay, skillsOverlay })
     return mount
+  }
+
+  /** The session's writable *backing* FS — the layer beneath the
+   *  `/chapters` and `/skills` overlays. `spawn`'s `view` mounts this
+   *  (not the whole `MountFS`) read-only into a clone, so the clone
+   *  sees the parent's real files without inheriting a nested
+   *  `/view/skills`. Ensures the session is initialized first. */
+  async backingFs(session: string): Promise<FileSystem> {
+    await this.fs(session)
+    // `fs()` populated the cache entry on the line above.
+    return (this.#cache.get(session) as SessionEntry).backing
   }
 
   /** Rebuild the `/chapters/` overlay for `session` from the current

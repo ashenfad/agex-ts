@@ -77,6 +77,12 @@ const AsyncFunction = Object.getPrototypeOf(async () => undefined).constructor a
  *  legitimate long host-side awaits. */
 const DEFAULT_TIMEOUT_MS = 300_000
 
+/** `setTimeout` stores its delay in a 32-bit signed int; a larger value
+ *  overflows and fires almost immediately — the opposite of intent (every
+ *  emission would abort at once). Clamp to this ceiling (~24.8 days), which
+ *  also lets `Infinity` mean "effectively no timeout". */
+const MAX_TIMEOUT_MS = 2_147_483_647
+
 export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
   // Idempotent — first runtime construction in the process installs the
   // ALS-gated console proxy; later calls are a no-op. Outside any
@@ -85,7 +91,7 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
   installConsoleProxy()
   let policy: Policy | null = null
   let resolver: NamespaceResolver | undefined
-  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  const timeoutMs = Math.min(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS)
   // URL-shipped registration specs, keyed by registered name.
   // Populated at `init()` but NOT imported — the dynamic `import()`
   // fires on first reference via `__load(name)` from the agent's

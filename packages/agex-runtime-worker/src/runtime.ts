@@ -140,6 +140,16 @@ export interface WorkerRuntimeOptions {
   readonly routeFetchToVfs?: boolean | ReadonlyArray<string>
 }
 
+/** Default per-emission wall-clock budget: 5 minutes. The sole bound (no
+ *  tick limit), so it must cover legitimate long host awaits, not just
+ *  compute. */
+const DEFAULT_TIMEOUT_MS = 300_000
+
+/** `setTimeout` stores its delay in a 32-bit signed int; a larger value
+ *  overflows and fires almost immediately. Clamp to this ceiling
+ *  (~24.8 days), which also lets `Infinity` mean "effectively no timeout". */
+const MAX_TIMEOUT_MS = 2_147_483_647
+
 export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
   // Idempotent — first runtime construction in the host process
   // installs the ALS-gated console proxy. Subsequent calls are no-ops.
@@ -150,9 +160,7 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
   // `ctx.console` channel.)
   installConsoleProxy()
   const transform = opts.transform ?? defaultTransform
-  // 5 minutes — the sole bound (no tick limit), sized for legitimate long
-  // host awaits; a runaway worker is still capped here and force-killed.
-  const timeoutMs = opts.timeoutMs ?? 300_000
+  const timeoutMs = Math.min(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS)
   const workerUrl = opts.workerUrl ?? new URL('./worker.js', import.meta.url)
 
   // Worker is spawned lazily — on first `execute` and after every

@@ -169,22 +169,28 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
   // and we don't yet have a per-call importmap to mutate (that
   // changes in the module-policy PR).
   //
-  // Concurrency: this adapter assumes one outstanding `execute()`
-  // at a time. The agent loop calls into us sequentially per
-  // emission, so this matches actual usage; concurrent calls would
-  // share a single worker and a `killWorker()` from one (timeout,
-  // abort, dispose) would yank the rug out from under any other
-  // in-flight execute. We enforce the assumption with a guard
-  // (`activeExecute`) below — if it ever throws in practice that's
-  // a bug in the caller, not in this adapter.
+  // Concurrency: multiple `execute()` calls can be in flight on the
+  // one worker at once (e.g. a parent emission parked at `await
+  // spawn(...)` plus the clone emissions it triggered — the worker
+  // thread is free during the await). Each is tracked in
+  // `activeExecutes` and routed by `executeId`. The trade-off is
+  // shared fate: a `killWorker()` from any one (timeout / abort /
+  // worker error / dispose) terminates the shared worker and settles
+  // them all. That blast radius is one worker = one `workerRuntime`
+  // instance, so isolate sessions by giving each its own instance.
   let worker: Worker | null = null
   let readyPromise: Promise<void> | null = null
   let nextExecuteId = 1
   let disposed = false
-  // Hoisted out of the per-execute Promise so `dispose()` (and any
-  // future cancellation point) can settle a hung execute
-  // immediately rather than waiting for `timeoutMs` to fire.
-  let activeExecute: { settle: (reason: Error) => void } | null = null
+  // Executes currently multiplexed on the worker, keyed by executeId,
+  // each holding its `settle`. Concurrent executes share one worker (a
+  // parent emission parks at `await spawn(...)` while clone emissions
+  // run — the worker thread is free during the await). A kill (timeout
+  // / abort / worker error / dispose) settles ALL of them: terminating
+  // the shared worker is all-or-nothing, so co-resident executes share
+  // fate. That blast radius is one worker — i.e. one `workerRuntime`
+  // instance. Use a separate instance per session you want isolated.
+  const activeExecutes = new Map<number, (reason?: Error) => void>()
   // Captured at `init()` and re-shipped on every spawn (the worker
   // is recreated after timeout / abort kills it). Holds the
   // RegisteredFn / RegisteredNs entries the bridge dispatcher needs
@@ -226,6 +232,15 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
       worker = null
       readyPromise = null
     }
+    // Terminating the worker kills every execute multiplexed on it, so
+    // settle any still-active ones. The execute that triggered the kill
+    // settles itself first (with its own specific error), so this sweep
+    // only reaches innocent co-residents. Snapshot the values — `settle`
+    // deletes from the map as it runs.
+    if (activeExecutes.size > 0) {
+      const reason = new CancelledError('worker terminated by a concurrent emission')
+      for (const settle of [...activeExecutes.values()]) settle(reason)
+    }
   }
 
   return {
@@ -266,23 +281,12 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
       if (disposed) {
         throw new Error('workerRuntime: execute() called after dispose()')
       }
-      if (activeExecute !== null) {
-        throw new Error(
-          'workerRuntime: concurrent execute() not supported — ' +
-            'previous emission is still running. The agent loop calls ' +
-            'execute() sequentially per emission; if you hit this, the ' +
-            'embedder is calling the adapter directly from multiple ' +
-            'concurrent task calls against the same runtime instance.',
-        )
-      }
-      // Claim the slot *synchronously* so back-to-back execute()
-      // calls in the same microtask trip the guard above. The real
-      // settle is wired up later inside the per-execute Promise; up
-      // until that happens, dispose-during-setup is a no-op (the
-      // setup awaits are short — transform + ready). Cleared in the
-      // settle path on every exit, including the early-return
-      // transform/ready failure branches below.
-      activeExecute = { settle: () => {} }
+      // Allocated up front so it's stable across the setup awaits below.
+      // The execute registers in `activeExecutes` only once its `settle`
+      // is wired up (inside the per-execute Promise); before that, the
+      // setup phase has no entry, and a `dispose()` racing it is caught
+      // by the post-`ready` disposed check rather than the map sweep.
+      const executeId = nextExecuteId++
 
       // Transform on the host. Syntax errors surface here without
       // ever spawning / messaging the worker.
@@ -290,7 +294,6 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
       try {
         transformed = await transform(code)
       } catch (e) {
-        activeExecute = null
         return {
           outcome: { kind: 'continue' },
           outputs: [],
@@ -346,7 +349,6 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
         preparedCode = prepared.code
         helpers = prepared.helpers
       } catch (e) {
-        activeExecute = null
         return {
           outcome: { kind: 'continue' },
           outputs: [],
@@ -362,7 +364,6 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
       try {
         await ready
       } catch (e) {
-        activeExecute = null
         killWorker()
         return {
           outcome: { kind: 'continue' },
@@ -372,7 +373,20 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
         }
       }
 
-      const executeId = nextExecuteId++
+      // A `dispose()` (or a kill from a concurrent execute) may have
+      // landed while we were transforming / awaiting `ready`. We're not
+      // in `activeExecutes` yet, so neither swept us — bail here before
+      // posting to a worker that's gone. This window is synchronous from
+      // here to `postMessage`, so no further race.
+      if (disposed || worker === null) {
+        return {
+          outcome: { kind: 'continue' },
+          outputs: [],
+          error: new CancelledError('runtime disposed'),
+          elapsedMs: performance.now() - start,
+        }
+      }
+
       const outputs: OutputPart[] = []
       // Per-execute live instance table — populated by `newInstance`,
       // looked up by `instanceCall`, dropped wholesale at settle so
@@ -413,7 +427,7 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
           w.removeEventListener('error', onErr)
           ctx.signal.removeEventListener('abort', onAbort)
           clearTimeout(timer)
-          activeExecute = null
+          activeExecutes.delete(executeId)
           // Drop instance handles + their class registrations —
           // agent's "fresh slate per emission" model. Real release
           // happens when no other closure retains a reference; the
@@ -422,7 +436,7 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
           instanceClasses.clear()
           resolve()
         }
-        activeExecute = { settle }
+        activeExecutes.set(executeId, settle)
 
         const onMsg = (ev: MessageEvent<Worker2HostMessage>): void => {
           const m = ev.data
@@ -463,21 +477,23 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
           // Worker threw outside an `execute` (e.g. a parse error in
           // its own module — shouldn't happen with our entry, but
           // surface it cleanly if it does). The worker is now in a
-          // bad state; kill and respawn next time.
+          // bad state; kill and respawn next time. Settle *self* first
+          // (with this specific error), then `killWorker` sweeps any
+          // co-resident executes with the generic terminated reason.
           error = new Error(`worker error: ${ev.message}`)
-          killWorker()
           settle()
+          killWorker()
         }
         const onAbort = (): void => {
           error = new CancelledError()
-          killWorker()
           settle()
+          killWorker()
         }
 
         const timer = setTimeout(() => {
           error = new Error(`emission exceeded ${timeoutMs}ms timeout`)
-          killWorker()
           settle()
+          killWorker()
         }, timeoutMs)
 
         w.addEventListener('message', onMsg)
@@ -505,14 +521,16 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
 
     async dispose(): Promise<void> {
       disposed = true
-      // Settle any in-flight execute *before* terminating the
-      // worker — once `worker.terminate()` runs, no more `message`
-      // or `error` events fire, so the only remaining settle path
-      // would be the per-execute `timeoutMs` timer (minutes, by
-      // default) of pointless waiting. Force-settle with a CancelledError so
-      // the awaiting caller returns immediately.
-      if (activeExecute !== null) {
-        activeExecute.settle(new CancelledError('runtime disposed'))
+      // Settle every in-flight execute *before* terminating the worker —
+      // once `worker.terminate()` runs, no more `message` / `error`
+      // events fire, so the only remaining settle path would be each
+      // per-execute `timeoutMs` timer (minutes, by default) of pointless
+      // waiting. Force-settle them all with a CancelledError so awaiting
+      // callers return immediately. (`killWorker` would also sweep, but
+      // we want the clearer "disposed" reason here.)
+      if (activeExecutes.size > 0) {
+        const reason = new CancelledError('runtime disposed')
+        for (const settle of [...activeExecutes.values()]) settle(reason)
       }
       killWorker()
     },

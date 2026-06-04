@@ -415,18 +415,55 @@ describe('workerRuntime', () => {
     expect(elapsed).toBeLessThan(500) // far below timeoutMs
   })
 
-  it('throws on concurrent execute() calls against the same runtime', async () => {
+  it('runs concurrent execute() calls on the same worker, each settling independently', async () => {
     const rt = runtime()
     await rt.init(EMPTY_POLICY)
-    // Kick off a long-running emission and, before it settles, try
-    // to start a second one. The second call should reject loudly
-    // — the agent loop is sequential per emission, so a concurrent
-    // call indicates a misuse.
-    const slow = rt.execute('await new Promise(r => setTimeout(r, 200))', makeCtx())
-    await expect(rt.execute('taskSuccess(1)', makeCtx())).rejects.toThrow(/concurrent/)
-    // The first call must still complete cleanly.
-    const r1 = await slow
-    expect(r1.error).toBeNull()
+    // Start a long-running emission and, before it settles, start a
+    // second that returns quickly. Concurrent executes multiplex on the
+    // one worker (this is what makes worker-runtime spawn possible — a
+    // parent emission parks at `await spawn(...)` while clone emissions
+    // run). Both must complete on their own.
+    const slow = rt.execute(
+      'await new Promise(r => setTimeout(r, 200)); taskSuccess("slow")',
+      makeCtx(),
+    )
+    const fast = await rt.execute('taskSuccess("fast")', makeCtx())
+    expect(fast.error).toBeNull()
+    expect(fast.outcome).toEqual({ kind: 'success', value: 'fast' })
+    // The fast one settled while the slow one was still parked.
+    const slowResult = await slow
+    expect(slowResult.error).toBeNull()
+    expect(slowResult.outcome).toEqual({ kind: 'success', value: 'slow' })
+  })
+
+  it('shares fate: a kill (dispose) settles all in-flight concurrent executes', async () => {
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const a = rt.execute('await new Promise(r => setTimeout(r, 5000)); taskSuccess(1)', makeCtx())
+    const b = rt.execute('await new Promise(r => setTimeout(r, 5000)); taskSuccess(2)', makeCtx())
+    // Let both reach the worker and park.
+    await new Promise((r) => setTimeout(r, 50))
+    await rt.dispose()
+    const [ra, rb] = await Promise.all([a, b])
+    expect(ra.error).toBeInstanceOf(CancelledError)
+    expect(rb.error).toBeInstanceOf(CancelledError)
+  })
+
+  it('routes each concurrent execute to its own fs (bridge keyed by executeId)', async () => {
+    // Two executes with distinct VFS contents; each reads its own file
+    // concurrently. Proves bridgeResponse routing is keyed by executeId,
+    // not a single shared channel.
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const ctxA = makeCtx()
+    const ctxB = makeCtx()
+    await ctxA.fs.write('/who.txt', new TextEncoder().encode('A'))
+    await ctxB.fs.write('/who.txt', new TextEncoder().encode('B'))
+    const code =
+      'const who = await fs.read("/who.txt", "utf8"); await new Promise(r => setTimeout(r, 80)); taskSuccess(who)'
+    const [ra, rb] = await Promise.all([rt.execute(code, ctxA), rt.execute(code, ctxB)])
+    expect(ra.outcome).toEqual({ kind: 'success', value: 'A' })
+    expect(rb.outcome).toEqual({ kind: 'success', value: 'B' })
   })
 })
 

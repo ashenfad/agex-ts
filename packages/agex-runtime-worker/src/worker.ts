@@ -707,16 +707,15 @@ function serializeError(e: unknown): SerializedError {
 // Execute loop
 // ---------------------------------------------------------------------------
 
-/** Currently-running execute's bridge channel, looked up by the
- *  module-level message listener on every `bridgeResponse`. Only
- *  one execute runs at a time (host-side guard), so a single slot is
- *  enough. Cleared when the AsyncFunction settles. */
-let activeBridge: BridgeChannel | null = null
-/** Mirrors `activeBridge`'s lifecycle. Used by `__load`'s
- *  resolver-RPC path so it can stamp the right executeId on
- *  outbound `resolveNamespace` messages without exposing
- *  BridgeChannel's private `executeId`. */
-let currentExecuteId: number | null = null
+/** Bridge channels for in-flight executes, keyed by executeId. The
+ *  module-level message listener routes each `bridgeResponse` to the
+ *  right channel by id. Multiple executes can run concurrently — a
+ *  parent emission parked at `await spawn(...)` coexists with the clone
+ *  emissions it triggered — so a single slot isn't enough. An entry is
+ *  added when an execute starts and removed when it settles. (The
+ *  `__load` resolver RPC stamps its own executeId via a per-execute
+ *  closure, so it no longer needs a global "current id".) */
+const bridges = new Map<number, BridgeChannel>()
 
 /** Most recent `configure` payload from the host. Set once after
  *  boot, possibly overwritten on a respawn (host re-sends after a
@@ -800,9 +799,9 @@ function handleConfigure(msg: ConfigureMessage): void {
     })
   }
   // Install the fetch shim if the host configured route-to-VFS. Done
-  // once per configure message; the shim is inert outside an active
-  // execute (it falls through to the original fetch when there's no
-  // `activeBridge` to read VFS through).
+  // once per configure message; the shim is inert unless exactly one
+  // execute is in flight (it falls through to the original fetch when
+  // there's no single bridge to read VFS through — see the shim).
   if (msg.routeFetchToVfs !== undefined) {
     installFetchShim(msg.routeFetchToVfs)
   }
@@ -839,15 +838,25 @@ function installFetchShim(routing: boolean | ReadonlyArray<string>): void {
     }
     // decision is { path }: try the VFS read.
     const path = decision.path
-    if (activeBridge === null) {
-      // No execute is in flight, so we have no fs to read through.
-      // Fall through to the original fetch; this only happens when
-      // some non-execute code path triggers fetch (e.g. URL-shipped
-      // module loading), which legitimately wants the network.
+    // The shim is a single global `fetch` override, but a library's
+    // internal fetch carries no execute context — so we can only route
+    // to a VFS when there's exactly one execute in flight (the common,
+    // non-concurrent case; routing matches today's behavior). With zero
+    // (e.g. URL-module loading) or several concurrent executes (spawn
+    // fan-out, where clones have *different* VFSs and we can't tell
+    // which one called), fall through to the network rather than risk
+    // reading the wrong clone's files. (A per-execute fetch context —
+    // e.g. AsyncLocalStorage on Node — is the follow-up to route VFS
+    // fetches per clone.)
+    if (bridges.size !== 1) {
+      return _originalFetch(input, init)
+    }
+    const [soleBridge] = bridges.values()
+    if (soleBridge === undefined) {
       return _originalFetch(input, init)
     }
     try {
-      const fs = activeBridge.build('fs', FS_METHODS) as { read(p: string): Promise<Uint8Array> }
+      const fs = soleBridge.build('fs', FS_METHODS) as { read(p: string): Promise<Uint8Array> }
       const bytes = await fs.read(path)
       // Cast to BodyInit — DOM lib types still expect ArrayBufferView
       // here, and recent Node Uint8Array<ArrayBufferLike> generic
@@ -957,7 +966,7 @@ function inferContentType(path: string): string {
  *  the registered name + URL + underlying message, so the agent's
  *  recoverable-error path emits a useful `💥 ImportError: ...` line
  *  rather than a bare `TypeError: Failed to fetch...`. */
-function __load(name: string): Promise<unknown> {
+function __load(executeId: number, name: string): Promise<unknown> {
   const cached = urlPromiseCache.get(name)
   if (cached !== undefined) return cached
   const spec = urlSpecs.get(name)
@@ -996,8 +1005,8 @@ function __load(name: string): Promise<unknown> {
   // URL; otherwise fail with the standardized "module missing" error
   // the agent's training data recognizes.
   const p = (async () => {
-    if (configured?.hasNamespaceResolver === true && currentExecuteId !== null) {
-      const url = await resolveNamespaceViaHost(currentExecuteId, name)
+    if (configured?.hasNamespaceResolver === true) {
+      const url = await resolveNamespaceViaHost(executeId, name)
       if (url !== null) {
         // Cache the resolution as a urlSpec entry so subsequent
         // imports take the registered path (sticky resolution per
@@ -1040,8 +1049,12 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
   }
 
   const bridge = new BridgeChannel(executeId)
-  activeBridge = bridge
-  currentExecuteId = executeId
+  bridges.set(executeId, bridge)
+  // Per-execute loader: binds this execute's id so the resolver RPC
+  // (`resolveNamespace`) is stamped correctly even when several executes
+  // are in flight at once. The agent's rewritten `await __load('name')`
+  // calls this; helpers receive it too.
+  const load = (name: string): Promise<unknown> => __load(executeId, name)
 
   const injected: Record<string, unknown> = {
     taskSuccess,
@@ -1065,7 +1078,7 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
     // expansion of `import { ... } from 'name'`. First call per name
     // per worker lifetime fires the dynamic import; subsequent calls
     // hit the per-name promise cache.
-    __load,
+    __load: load,
   }
 
   if (configured !== null) {
@@ -1121,12 +1134,11 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
       for (const h of msg.helpers) {
         const fn = new AsyncFunction('__exports', '__modules', '__registered', '__load', h.body)
         const exports: Record<string, unknown> = {}
-        await fn(exports, __modules, __registered, __load)
+        await fn(exports, __modules, __registered, load)
         ;(__modules as Record<string, Readonly<Record<string, unknown>>>)[h.path] = exports
       }
     } catch (e) {
-      activeBridge = null
-      currentExecuteId = null
+      bridges.delete(executeId)
       post({
         type: 'result',
         executeId,
@@ -1214,11 +1226,10 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
   // Reject any orphan bridge Promises (user code dispatched a call
   // without awaiting it before unwinding) so their `await`-side
   // closures release rather than retaining the channel forever.
-  // Done before nulling `activeBridge` so any in-flight catch
-  // handlers triggered by the rejection still see the right channel.
+  // Done before dropping the channel from `bridges` so any in-flight
+  // catch handlers triggered by the rejection still see it.
   bridge.cancelPending(makeCancelledError('execute settled with pending bridge calls'))
-  activeBridge = null
-  currentExecuteId = null
+  bridges.delete(executeId)
   post({ type: 'result', executeId, outcome, error })
 }
 
@@ -1261,7 +1272,7 @@ self.addEventListener('message', (ev: MessageEvent<Host2WorkerMessage>) => {
     return
   }
   if (msg?.type === 'bridgeResponse') {
-    activeBridge?.handleResponse(msg)
+    bridges.get(msg.executeId)?.handleResponse(msg)
     return
   }
   if (msg?.type === 'resolveNamespaceResponse') {

@@ -1191,8 +1191,8 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
     try {
       if (bridge.pendingCount > 0) {
         // 2s upper bound is generous for a deferred chain to complete;
-        // the host's per-emission timeout (default 5s in tests) bounds
-        // the total wait separately.
+        // the host's per-emission timeout bounds the total wait
+        // separately.
         await bridge.drain(2000)
       } else {
         // No bridge traffic — give purely-local orphan async chains a

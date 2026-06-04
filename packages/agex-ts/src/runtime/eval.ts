@@ -31,7 +31,15 @@
  * - No sandboxing. The code runs in the host realm with full access
  *   to the surrounding closures. Use this for tests or for trusted
  *   embedders only.
- * - No tick limit. Wall-clock `timeoutMs` is the only enforcement.
+ * - No tick limit (unlike agex-py's instruction-counting sandbox).
+ *   Wall-clock `timeoutMs` is the *only* enforcement, so it doubles as
+ *   both the "legitimate long wait" budget and the runaway guard. The
+ *   default is generous (5 min) so ordinary slow host work — a big
+ *   `fetch`, a slow registered fn, a multi-step host call — isn't
+ *   killed mid-flight; a true runaway is still bounded by it. Note a
+ *   synchronous infinite loop can't be interrupted here at all (the
+ *   abort timer never gets the event loop), which is one reason this
+ *   realm is for tests / trusted embedders only.
  */
 
 import tsBlankSpace from 'ts-blank-space'
@@ -51,7 +59,9 @@ import { prepareScript } from './module-loader'
 import { wrapAgentFs } from './wrap-fs'
 
 export interface EvalRuntimeOptions {
-  /** Per-emission wall-clock budget in milliseconds. Default `5000`. */
+  /** Per-emission wall-clock budget in milliseconds. Default `300000`
+   *  (5 minutes) — generous because it's the only bound (no tick limit),
+   *  so it must cover legitimate long host awaits, not just compute. */
   readonly timeoutMs?: number
   /** When true, console.* calls also pass through to the host's
    *  console (useful when debugging tests). Default `false`. */
@@ -62,6 +72,11 @@ const AsyncFunction = Object.getPrototypeOf(async () => undefined).constructor a
   ...args: string[]
 ) => (...args: unknown[]) => Promise<unknown>
 
+/** Default per-emission wall-clock budget: 5 minutes. Generous on
+ *  purpose — with no tick limit, this is the sole bound and must cover
+ *  legitimate long host-side awaits. */
+const DEFAULT_TIMEOUT_MS = 300_000
+
 export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
   // Idempotent — first runtime construction in the process installs the
   // ALS-gated console proxy; later calls are a no-op. Outside any
@@ -70,7 +85,7 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
   installConsoleProxy()
   let policy: Policy | null = null
   let resolver: NamespaceResolver | undefined
-  const timeoutMs = opts.timeoutMs ?? 5000
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
   // URL-shipped registration specs, keyed by registered name.
   // Populated at `init()` but NOT imported — the dynamic `import()`
   // fires on first reference via `__load(name)` from the agent's

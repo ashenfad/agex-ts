@@ -99,7 +99,11 @@ export interface WorkerRuntimeOptions {
   readonly transform?: TransformFn
   /** Per-emission wall-clock budget, in milliseconds. Hitting it
    *  terminates the worker; the next emission spawns a fresh one.
-   *  Default `5000`. */
+   *  Default `300000` (5 minutes) — generous because, with no tick
+   *  limit, this is the only bound and must cover legitimate long host
+   *  awaits (a big `fetch`, a slow registered fn), not just compute. A
+   *  runaway worker is still capped here and force-killed; a tighter
+   *  instruction/tick budget is a possible future addition. */
   readonly timeoutMs?: number
   /**
    * Route the agent's `fetch(...)` calls for path-shaped URLs (no
@@ -146,7 +150,9 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
   // `ctx.console` channel.)
   installConsoleProxy()
   const transform = opts.transform ?? defaultTransform
-  const timeoutMs = opts.timeoutMs ?? 5000
+  // 5 minutes — the sole bound (no tick limit), sized for legitimate long
+  // host awaits; a runaway worker is still capped here and force-killed.
+  const timeoutMs = opts.timeoutMs ?? 300_000
   const workerUrl = opts.workerUrl ?? new URL('./worker.js', import.meta.url)
 
   // Worker is spawned lazily — on first `execute` and after every
@@ -494,8 +500,8 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
       // Settle any in-flight execute *before* terminating the
       // worker — once `worker.terminate()` runs, no more `message`
       // or `error` events fire, so the only remaining settle path
-      // would be the per-execute `timeoutMs` timer (default 5s of
-      // pointless waiting). Force-settle with a CancelledError so
+      // would be the per-execute `timeoutMs` timer (minutes, by
+      // default) of pointless waiting. Force-settle with a CancelledError so
       // the awaiting caller returns immediately.
       if (activeExecute !== null) {
         activeExecute.settle(new CancelledError('runtime disposed'))

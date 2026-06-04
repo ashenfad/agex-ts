@@ -39,7 +39,7 @@
  * isolation tradeoff matters.
  */
 
-import type { OutputPart, TaskOutcome } from 'agex-ts/types'
+import type { OutputPart, SpawnSpec, TaskOutcome } from 'agex-ts/types'
 import { wrapAgentFs } from 'agex-ts/wrap-fs'
 import {
   type BridgeTarget,
@@ -554,6 +554,25 @@ class BridgeChannel {
         instanceId,
         method,
         args: packed,
+      }))
+    })
+  }
+
+  /** Run an ephemeral sub-task clone on the host (`ctx.spawn`) and
+   *  resolve with its result. Like `newInstance` / `instanceCall`, it
+   *  posts its own outbound shape (`spawnCall`) but reuses the callId /
+   *  pending map and gets a `bridgeResponse` back. The spec is plain
+   *  data (no tracked Proxies), so packing is a no-op — but routing it
+   *  through `postWithArgs` keeps the DataCloneError handling. */
+  spawn(spec: SpawnSpec): Promise<unknown> {
+    return new Promise<unknown>((resolve, reject) => {
+      const callId = this.nextCallId++
+      this.pending.set(callId, { resolve, reject })
+      this.postWithArgs(callId, reject, [spec], (packed) => ({
+        type: 'spawnCall',
+        executeId: this.executeId,
+        callId,
+        spec: packed[0] as SpawnSpec,
       }))
     })
   }
@@ -1079,6 +1098,13 @@ async function handleExecute(msg: Extract<Host2WorkerMessage, { type: 'execute' 
     // per worker lifetime fires the dynamic import; subsequent calls
     // hit the per-name promise cache.
     __load: load,
+  }
+
+  // `spawn` — only for spawn-enabled top-level executes (the host sets
+  // the flag from `ctx.spawn` being present). Clones never get it, so
+  // sub-tasks stay depth-1. The stub bridges to the host's `ctx.spawn`.
+  if (msg.spawnEnabled === true) {
+    injected.spawn = (spec: SpawnSpec): Promise<unknown> => bridge.spawn(spec)
   }
 
   if (configured !== null) {

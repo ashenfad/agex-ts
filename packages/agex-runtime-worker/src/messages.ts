@@ -57,7 +57,7 @@
  *  RPC variants here keep working unchanged.
  */
 
-import type { OutputPart, TaskOutcome } from 'agex-ts/types'
+import type { OutputPart, SpawnSpec, TaskOutcome } from 'agex-ts/types'
 
 /** Serialized form of a host `Error` (the original isn't structured-cloneable
  *  with full fidelity across realms — `name` and `message` survive, the
@@ -197,6 +197,12 @@ export type Host2WorkerMessage =
       readonly inputs?: unknown
       /** Optional, threaded through for diagnostic logs. */
       readonly emissionId?: string
+      /** When true, inject the `spawn` builtin for this execute. Set
+       *  by the host only for spawn-enabled top-level runs (i.e. when
+       *  `ExecuteContext.spawn` is present) — never for clones, so
+       *  sub-tasks stay depth-1. The stub bridges to the host's
+       *  `ctx.spawn` via a `spawnCall`. */
+      readonly spawnEnabled?: boolean
     }
   | {
       readonly type: 'bridgeResponse'
@@ -280,6 +286,19 @@ export type Worker2HostMessage =
       readonly executeId: number
       readonly outcome: TaskOutcome
       readonly error: SerializedError | null
+    }
+  | {
+      /** Agent code called `spawn(spec)`. The host runs an ephemeral
+       *  clone (its `ctx.spawn`) and replies with a normal
+       *  `bridgeResponse` carrying the clone's result (or a serialized
+       *  error if the sub-task failed). Distinct outbound shape from
+       *  `bridgeCall` — the host dispatches it to `ctx.spawn` rather
+       *  than the method-bridge — but it shares the same callId /
+       *  pending bookkeeping, like `newInstance` / `instanceCall`. */
+      readonly type: 'spawnCall'
+      readonly executeId: number
+      readonly callId: number
+      readonly spec: SpawnSpec
     }
   | {
       /** Worker's `__load(name)` got a name not in `urlSpecs` and the

@@ -84,6 +84,20 @@ describe('spawn — agent-authored sub-tasks', () => {
     expect(await fn(undefined)).toBe('undefined')
   })
 
+  it('shows the clone the sub-task primer note, not the spawn section', async () => {
+    const { agent, llm } = await makeAgent((req) =>
+      isParent(req) ? ts('taskSuccess(await spawn("inner"))') : ts('taskSuccess("ok")'),
+    )
+    const fn = agent.task<undefined, string>({ description: 'Parent.' })
+    await fn(undefined)
+    // The parent was taught spawn; the clone got the sub-task note and
+    // NOT the spawn section (depth-1).
+    const cloneSystems = llm.allSystems.filter((s) => s.includes('## Sub-task'))
+    expect(llm.allSystems.some((s) => s.includes('## Spawn (sub-tasks)'))).toBe(true)
+    expect(cloneSystems.length).toBeGreaterThan(0)
+    expect(cloneSystems.every((s) => !s.includes('## Spawn (sub-tasks)'))).toBe(true)
+  })
+
   it('a clone failure rejects the spawn — catchable, not a parent taskFail', async () => {
     const { agent } = await makeAgent((req) =>
       isParent(req)

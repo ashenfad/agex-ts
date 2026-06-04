@@ -244,6 +244,10 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
   }
 
   return {
+    // This runtime injects `spawn` (bridged to the host's `ctx.spawn`),
+    // so the task loop builds the capability and teaches it in the
+    // primer for top-level worker runs. See the `spawnCall` handler.
+    injectsSpawn: true,
     async init(policy: Policy, initOpts: RuntimeInitOptions = {}): Promise<void> {
       // Capture the policy so:
       //   1. `handleBridgeCall` can dispatch `fn` / `namespace`
@@ -478,6 +482,10 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
             void handleResolveNamespace(m, namespaceResolver, w)
             return
           }
+          if (m?.type === 'spawnCall' && m.executeId === executeId) {
+            void handleSpawnCall(m, ctx, w)
+            return
+          }
           if (m?.type === 'result' && m.executeId === executeId) {
             outcome = m.outcome
             if (m.error !== null) error = rebuildError(m.error)
@@ -518,6 +526,10 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
           ...(helpers.length > 0 && { helpers }),
           ...(ctx.inputs !== undefined && { inputs: ctx.inputs }),
           ...(ctx.emissionId !== undefined && { emissionId: ctx.emissionId }),
+          // Inject `spawn` in the worker iff this run carries the
+          // capability (top-level, spawn-enabled). Clones run with
+          // `ctx.spawn` undefined, so they stay depth-1.
+          ...(ctx.spawn !== undefined && { spawnEnabled: true }),
         }
         w.postMessage(out)
       })
@@ -624,11 +636,22 @@ async function handleBridgeCall(
   } catch (e) {
     error = serializeError(e)
   }
+  sendBridgeResponse(w, executeId, callId, value, error)
+}
 
-  // Final reply. Wrapped in try/catch because the value might not
-  // structured-clone, and because the worker may have been
-  // terminated mid-call (timeout / abort) — both cases would
-  // otherwise crash the host.
+/** Post the `bridgeResponse` that answers a `bridgeCall` / `spawnCall` /
+ *  `newInstance` / `instanceCall`. Wrapped in try/catch because the
+ *  value might not structured-clone, and because the worker may have
+ *  been terminated mid-call (timeout / abort) — both would otherwise
+ *  crash the host. On a clone failure we retry once with the failure
+ *  encoded so the worker's awaiting promise rejects rather than hangs. */
+function sendBridgeResponse(
+  w: Worker,
+  executeId: number,
+  callId: number,
+  value: unknown,
+  error: SerializedError | null,
+): void {
   try {
     if (error !== null) {
       w.postMessage({ type: 'bridgeResponse', executeId, callId, ok: false, error })
@@ -636,8 +659,6 @@ async function handleBridgeCall(
       w.postMessage({ type: 'bridgeResponse', executeId, callId, ok: true, value })
     }
   } catch (cloneErr) {
-    // Successful host call but result wasn't cloneable. Try once
-    // more with the failure encoded so the worker's await rejects.
     try {
       w.postMessage({
         type: 'bridgeResponse',
@@ -650,6 +671,30 @@ async function handleBridgeCall(
       // Worker is gone. Nothing to deliver to.
     }
   }
+}
+
+/** Dispatch a `spawnCall` to the host's `ctx.spawn` (built by the task
+ *  loop from `createSpawn`) — run an ephemeral clone and reply with its
+ *  result, or a serialized error if the sub-task failed. `ctx.spawn` is
+ *  present whenever the worker was told `spawnEnabled`, but we guard
+ *  defensively. */
+async function handleSpawnCall(
+  msg: Extract<Worker2HostMessage, { type: 'spawnCall' }>,
+  ctx: ExecuteContext,
+  w: Worker,
+): Promise<void> {
+  const { executeId, callId } = msg
+  let value: unknown
+  let error: SerializedError | null = null
+  try {
+    if (ctx.spawn === undefined) {
+      throw new Error('spawn is not available in this execute')
+    }
+    value = await ctx.spawn(msg.spec)
+  } catch (e) {
+    error = serializeError(e)
+  }
+  sendBridgeResponse(w, executeId, callId, value, error)
 }
 
 async function dispatch(

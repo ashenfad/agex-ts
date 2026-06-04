@@ -21,7 +21,7 @@
 
 import type { Agent } from './agent'
 import { CacheImpl } from './cache'
-import { CancelledError, TaskFailError } from './errors'
+import { CancelledError, TaskFailError, isCancelledError } from './errors'
 import { EventLogImpl } from './event-log'
 import { MountFS } from './fs/mount'
 import { SkillsOverlay } from './fs/skills-overlay'
@@ -100,6 +100,8 @@ export function createSpawn(
   let counter = 0
 
   return async (spec: string | SpawnSpec): Promise<unknown> => {
+    // Bail before allocating clone state if the parent is already gone.
+    if (parentSignal.aborted) throw new CancelledError()
     const idx = counter++
     const normalized: SpawnSpec = typeof spec === 'string' ? { task: spec } : spec
     const cloneDef = buildCloneDef(normalized)
@@ -124,12 +126,17 @@ export function createSpawn(
         { resources },
       )
     } catch (e) {
-      // Cancellation propagates (the parent is being torn down). A
-      // sub-task failure must NOT surface as a TaskFailError — the runtime
-      // would read it as the *parent* calling taskFail. Re-raise as a
-      // plain Error so the parent sees an ordinary recoverable error it
-      // can read next turn (or catch around the spawn call).
-      if (e instanceof CancelledError) throw e
+      // Cancellation propagates (the parent is being torn down). Use
+      // isCancelledError, not instanceof: a cancellation raised inside the
+      // clone's *emission* originates in the worker and comes back as a
+      // plain Error with the right name but no CancelledError prototype.
+      if (isCancelledError(e)) throw e
+      // A sub-task failure must NOT surface as a TaskFailError — the runtime
+      // would read it as the *parent* calling taskFail. Re-raise as a plain
+      // Error so the parent sees an ordinary recoverable error it can read
+      // next turn (or catch around the spawn call). instanceof is reliable
+      // here: this TaskFailError is constructed host-side by the clone's
+      // makeTask loop (the worker only returns a fail outcome as data).
       if (e instanceof TaskFailError) throw new Error(`spawned sub-task failed: ${e.message}`)
       throw e
     } finally {

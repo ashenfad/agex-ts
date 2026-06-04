@@ -44,7 +44,38 @@ export interface SystemMessageInputs {
    *  agent needs (e.g. workerRuntime's `routeFetchToVfs` enabling
    *  fetch-against-VFS) is read alongside the agex conventions. */
   readonly runtimeAddendum?: string
+  /** When true, append the `spawn` (sub-tasks) section. Set by the task
+   *  loop only for spawn-enabled top-level runs, so the primer never
+   *  teaches a `spawn` the agent can't call. See `docs/roadmap/spawn.md`. */
+  readonly spawnEnabled?: boolean
 }
+
+/** Teaches the `spawn` builtin. Appended only when `spawnEnabled`. Kept
+ *  terse and stable (cache-friendly): the contract mirrors a task, and
+ *  fan-out is native `Promise.all` — no bespoke API to learn. */
+const SPAWN_PRIMER = `## Spawn (sub-tasks)
+
+\`spawn\` runs an ephemeral, memoryless clone of yourself to fulfil a typed sub-task — generating data, drafting an artifact, researching one point — and returns its result. The clone has your capabilities but none of your memory, cache, or files, so reserve it for self-contained work worth that cost.
+
+\`\`\`ts
+// one-shot, prose contract — returns the clone's taskSuccess value
+const summary = await spawn('Summarize /docs/spec.md in three bullets')
+
+// structured contract: pass an input and a JSON Schema the result must satisfy
+const tile = await spawn({
+  task: 'Produce a 64x64 SVG tile',
+  input: { prompt: 'a small castle' },
+  output: { type: 'object', properties: { svg: { type: 'string' } }, required: ['svg'] },
+})
+\`\`\`
+
+Fan out with ordinary \`Promise.all\` — concurrency is bounded for you:
+
+\`\`\`ts
+const tiles = await Promise.all(prompts.map((p) => spawn({ task: 'Produce a tile', input: { prompt: p } })))
+\`\`\`
+
+A clone that fails throws, so \`await spawn(...)\` rejects — catch it, or let it surface as this turn's error. Clones can't spawn (they're leaf workers), and a handle must be awaited within the action that created it.`
 
 export function buildSystemMessage(inputs: SystemMessageInputs): string {
   const parts: string[] = []
@@ -70,6 +101,12 @@ export function buildSystemMessage(inputs: SystemMessageInputs): string {
     if (registrations.trim().length > 0) {
       parts.push(`# Registered Resources\n\n${registrations}`)
     }
+  }
+
+  // 2b. Spawn (sub-tasks) — only when the runtime injects the capability
+  // for this top-level run. Sits with the capability descriptions.
+  if (inputs.spawnEnabled === true) {
+    parts.push(SPAWN_PRIMER)
   }
 
   // 3. Skills listing (names + descriptions; full content via VFS overlay)

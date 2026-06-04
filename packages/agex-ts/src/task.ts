@@ -31,6 +31,7 @@ import { dispatchFileEdit, dispatchFileWrite, dispatchTerminal } from './dispatc
 import { CancelledError, SchemaError, TaskFailError, isCancelledError } from './errors'
 import type { EventLogImpl } from './event-log'
 import { buildSystemMessage, buildTaskMessage, makeToolUseId, renderEvents } from './render'
+import { createSpawn } from './spawn'
 import type {
   ActionEvent,
   AgentEvent,
@@ -149,6 +150,10 @@ export function makeTask<I, O>(
     }
 
     // -- Initialize runtime ----------------------------------------------
+    // Always init — a spawn clone may be the first run to touch the
+    // adapter (the public seam can be invoked directly), and re-init is
+    // cheap and atomic (the eval runtime's init body is synchronous, so
+    // concurrent fan-out inits don't interleave).
     await runtimeAdapter.init(agent.policy(), {
       ...(agent.namespaceResolver !== undefined && {
         namespaceResolver: agent.namespaceResolver,
@@ -183,6 +188,16 @@ export function makeTask<I, O>(
     // -- Action loop -----------------------------------------------------
     let iter = 0
     const maxIter = agent.maxIterations
+    // `spawn` is offered only to a spawn-enabled top-level run: this must
+    // be the agent's own substrate (not an ephemeral clone — depth-1), the
+    // runtime must inject it, and `maxSpawns` must allow at least one. When
+    // off, the capability isn't built and the primer doesn't teach it, so
+    // the agent never sees a `spawn` it can't call.
+    const spawnEnabled =
+      usesAgentSubstrate && agent.maxSpawns > 0 && runtimeAdapter.injectsSpawn === true
+    const spawnCapability = spawnEnabled
+      ? createSpawn(agent, signal, options.onEvent, agent.maxSpawns)
+      : undefined
     // Stable across the loop — only changes if the agent's
     // registration table mutates mid-task (it shouldn't).
     // Optional addendum from the runtime adapter — e.g.
@@ -199,6 +214,7 @@ export function makeTask<I, O>(
       }),
       ...(agent.primer !== undefined && { agentPrimer: agent.primer }),
       ...(runtimeAddendum !== undefined && { runtimeAddendum }),
+      ...(spawnEnabled && { spawnEnabled: true }),
     })
 
     // Most recent recoverable error from agent code, surfaced in the
@@ -248,6 +264,7 @@ export function makeTask<I, O>(
           cache,
           signal,
           ...(validatedInput !== undefined && { inputs: validatedInput }),
+          ...(spawnCapability !== undefined && { spawn: spawnCapability }),
         }
         const outcome = await dispatchEmissions(
           emissions,

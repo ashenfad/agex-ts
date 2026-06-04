@@ -69,6 +69,11 @@ export interface AgentOptions {
   readonly fs?: FSConfig
   /** Max iterations per task (turn cap). Default `10`. */
   readonly maxIterations?: number
+  /** Max concurrent in-agent `spawn` clones — bounds the per-task
+   *  spawn semaphore. Default `8`. Set `0` to disable `spawn` entirely
+   *  (the capability isn't injected and the primer won't teach it).
+   *  See `docs/roadmap/spawn.md`. */
+  readonly maxSpawns?: number
   /** Threshold (in input tokens, as reported by the latest
    *  `ActionEvent`) at which chaptering fires. When set, the
    *  framework auto-registers a chapter task with the default
@@ -125,6 +130,7 @@ export interface ReconfigurableOptions {
   readonly chapteringTrigger?: number | undefined
   readonly chapterPrimer?: string
   readonly maxIterations?: number
+  readonly maxSpawns?: number
 }
 
 /** Async factory — handles the awaitable parts of state setup. */
@@ -244,6 +250,7 @@ function isUrlSpec(v: unknown): v is UrlSpec {
 
 const DEFAULT_SESSION = 'default'
 const DEFAULT_MAX_ITERATIONS = 10
+const DEFAULT_MAX_SPAWNS = 8
 
 /** Resolve a registration's identifier: prefer the explicit
  *  `opts.name`, fall back to the value's intrinsic name (e.g.
@@ -342,6 +349,11 @@ export class Agent {
 
   get maxIterations(): number {
     return this.#opts.maxIterations ?? DEFAULT_MAX_ITERATIONS
+  }
+
+  /** Max concurrent in-agent `spawn` clones. `0` disables spawn. */
+  get maxSpawns(): number {
+    return this.#opts.maxSpawns ?? DEFAULT_MAX_SPAWNS
   }
 
   /** Stable identifier for the agent's current registration shape.

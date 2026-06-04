@@ -144,6 +144,10 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
   }
 
   return {
+    // Same-realm runtime injects the `spawn` capability directly (it runs
+    // clones in-process). The worker runtime will set this once the spawn
+    // bridge target lands.
+    injectsSpawn: true,
     async init(p: Policy, initOpts: RuntimeInitOptions = {}): Promise<void> {
       policy = p
       resolver = initOpts.namespaceResolver
@@ -239,6 +243,10 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
         __load,
         __agexBodyDone,
       }
+      // Spawn capability (top-level, spawn-enabled runs only). Host-built
+      // and passed via ExecuteContext; injected as the `spawn` global so
+      // agent code can run ephemeral sub-task clones. Absent for clones.
+      if (ctx.spawn !== undefined) injected.spawn = ctx.spawn
       const start = performance.now()
       let error: Error | null = null
       const ac = new AbortController()

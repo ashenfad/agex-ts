@@ -351,6 +351,29 @@ export type TaskOutcome =
 // Runtime adapter contract
 // ---------------------------------------------------------------------------
 
+/** A sub-task an agent defines and runs at runtime via `spawn`. The
+ *  string form is shorthand for `{ task: <string> }`. See
+ *  `docs/roadmap/spawn.md`. */
+export interface SpawnSpec {
+  /** What the sub-task should do — the clone's task description. */
+  readonly task: string
+  /** Value bound to the clone's `inputs`. */
+  readonly input?: unknown
+  /** JSON Schema object the clone's result is validated against
+   *  (enforced via the same recoverable path as a normal task's
+   *  `output`). Also shapes what the clone is told to produce. */
+  readonly output?: object
+  /** Prose description of the expected output shape. */
+  readonly outputDescription?: string
+  /** Sub-task-specific framing appended to the clone's task message. */
+  readonly primer?: string
+}
+
+/** The `spawn` builtin injected into a top-level agent's code: run an
+ *  ephemeral, memoryless clone of the agent on a typed sub-task and
+ *  return its result. Rejects (recoverably) if the sub-task fails. */
+export type SpawnFn = (spec: string | SpawnSpec) => Promise<unknown>
+
 export interface ExecuteContext {
   readonly fs: VirtualFileSystem
   readonly cache: Cache
@@ -361,6 +384,11 @@ export interface ExecuteContext {
   readonly inputs?: unknown
   /** Optional identifier for the source emission, for diagnostics. */
   readonly emissionId?: string
+  /** The `spawn` capability, when this run is a spawn-enabled
+   *  top-level task. Host-built; the runtime injects it as the
+   *  `spawn` global. Absent for ephemeral clones (depth-1) and for
+   *  runtimes that don't inject it (`injectsSpawn !== true`). */
+  readonly spawn?: SpawnFn
 }
 
 export interface ExecResult {
@@ -398,6 +426,13 @@ export interface RuntimeAdapter {
    *  `fetch('/path')` against the VFS, which the agent should know
    *  about. Return `undefined` when the runtime has nothing to add. */
   primerAddendum?(): string | undefined
+  /** Whether this runtime injects the `spawn` capability
+   *  (`ExecuteContext.spawn`) into agent code. The task loop only
+   *  builds the capability and teaches `spawn` in the primer when this
+   *  is `true`, so an agent never sees a `spawn` it can't call. The
+   *  same-realm `evalRuntime` sets it; the worker runtime will once the
+   *  bridge lands. Defaults to `false` when omitted. */
+  readonly injectsSpawn?: boolean
 }
 
 // ---------------------------------------------------------------------------

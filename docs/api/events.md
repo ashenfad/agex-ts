@@ -34,7 +34,7 @@ interface EventBase {
 }
 ```
 
-Every event extends this. `timestamp` is set at write time; `agentName` is the agent that produced the event.
+Every event extends this. `timestamp` is set at write time; `agentName` is the agent that produced the event — or, for a `spawn` clone, a tagged form like `"<name>:spawn#<n>"` (see [Sub-agent (spawn) events](#sub-agent-spawn-events)).
 
 ## Event types
 
@@ -237,6 +237,29 @@ await myTask(input, {
   onEvent: (e) => ui.handleEvent(e),
 })
 ```
+
+## Sub-agent (spawn) events
+
+When an agent calls `spawn(...)` (see [Agent § Spawn](agent.md#spawn-sub-tasks)), the clone runs the same task loop and emits the **same event types** (`taskStart`, `action`, `output`, `success` / `fail`, …). Two things distinguish them for a host:
+
+- **They're tagged.** A clone's events come through the parent task's `onEvent` with `agentName` set to **`"<parentName>:spawn#<n>"`** — `<parentName>` is the agent's name, and `<n>` is a 0-based counter **per parent task**, distinct per concurrent clone. So you can both tell sub-agent events apart from the parent's *and* demux concurrent clones from each other.
+- **They're stream-only.** Clone events are forwarded **live to `onEvent` but never written to the durable log** — they won't appear in `agent.events(session)` or its replay. (Clones run on throwaway state; the parent's log stays clean.) If you need to observe or record sub-agent work, do it from `onEvent`; the durable log alone won't show it.
+
+```ts
+await myTask(input, {
+  onEvent: (e) => {
+    const m = /^(.*):spawn#(\d+)$/.exec(e.agentName)
+    if (m) {
+      // sub-agent event: m[1] = parent name, m[2] = clone index
+      ui.subAgent(Number(m[2])).handle(e)
+    } else {
+      ui.handleEvent(e) // the parent agent's own event
+    }
+  },
+})
+```
+
+A clone is depth-1, so `agentName` carries at most one `:spawn#<n>` segment — there's no nesting to parse.
 
 ## Pretty-printing
 

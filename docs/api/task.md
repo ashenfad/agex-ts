@@ -169,6 +169,27 @@ while (true) {
 
 Each task call gets its own session resolution, event log, and lifecycle. Sessions are not shared across agents — `orchestrator.session('alice')` and `critic.session('alice')` are two separate substrates because they're two different agents.
 
+That pattern is *host-wired*: you decide the topology up front. For the *agent-authored* counterpart — where the agent decides at runtime to fan its own work out — see Spawn below.
+
+## Spawn (`SpawnSpec`)
+
+When enabled (see [Agent § Spawn](agent.md#spawn-sub-tasks)), agent code can call `spawn(spec)` to run an ephemeral clone of itself and `await` the result. The host doesn't call `spawn` — agents do — but the call shape is part of the contract you're enabling:
+
+```ts
+type SpawnFn = (spec: string | SpawnSpec) => Promise<unknown>
+
+interface SpawnSpec {
+  task: string                  // the sub-task description (the clone's contract)
+  input?: unknown               // bound to the clone's `inputs`
+  output?: object               // JSON Schema the result is validated against (enforced + retried)
+  outputDescription?: string    // prose shape hint
+  primer?: string               // sub-task-specific framing
+  view?: string | string[]      // parent VFS path(s) exposed to the clone READ-ONLY at the same location
+}
+```
+
+A bare string is shorthand for `{ task }`. The clone runs on throwaway state with the agent's registrations but none of its memory/cache/files (except any `view` paths, which are read-only). A clone failure rejects the `await`. Concurrency is bounded by [`maxSpawns`](agent.md#agentoptions); clone events surface via [`onEvent`, tagged](events.md#sub-agent-spawn-events). Full design notes: [`roadmap/spawn.md`](../roadmap/spawn.md).
+
 ## Cancellation semantics
 
 When `signal.aborted` fires:

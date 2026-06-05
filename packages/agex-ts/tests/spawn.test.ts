@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { type AgentOptions, createAgent } from '../src/agent'
+import { CancelledError } from '../src/errors'
 import { Dummy } from '../src/llm/dummy'
 import { evalRuntime } from '../src/runtime/eval'
 import type { AgentEvent, Emission, LLMRequest, LLMResponse, TokenChunk } from '../src/types'
@@ -279,5 +280,51 @@ describe('spawn — agent-authored sub-tasks', () => {
     expect(await fn(undefined)).toEqual([1, 2, 3, 4, 5])
     expect(maxActive).toBeLessThanOrEqual(2) // the bound holds
     expect(maxActive).toBeGreaterThan(1) // and clones really ran in parallel
+  })
+})
+
+describe('spawn — host-facing invoke', () => {
+  // No parent task runs here, so the LLM only ever serves the clone.
+  it('runs a clone cold and round-trips its result', async () => {
+    const { agent } = await makeAgent(() => ts('taskSuccess("clone-result")'))
+    expect(await agent.spawn('do the thing')).toBe('clone-result')
+  })
+
+  it('passes input via SpawnSpec and enforces the output schema', async () => {
+    const { agent } = await makeAgent(() => ts('taskSuccess({ echoed: inputs.n })'))
+    const out = await agent.spawn({
+      task: 'echo',
+      input: { n: 7 },
+      output: {
+        type: 'object',
+        properties: { echoed: { type: 'number' } },
+        required: ['echoed'],
+      },
+    })
+    expect(out).toEqual({ echoed: 7 })
+  })
+
+  it('aborts when the supplied signal is already aborted', async () => {
+    const { agent } = await makeAgent(() => ts('taskSuccess("unreached")'))
+    const controller = new AbortController()
+    controller.abort()
+    await expect(agent.spawn('x', { signal: controller.signal })).rejects.toThrow(CancelledError)
+  })
+
+  it('forwards clone events to onEvent, tagged with the spawn label', async () => {
+    const { agent } = await makeAgent(() => ts('taskSuccess("ok")'))
+    const seen: AgentEvent[] = []
+    await agent.spawn('inner', { onEvent: (e) => void seen.push(e) })
+    expect(seen.length).toBeGreaterThan(0)
+    expect(seen.some((e) => e.agentName === 'T:spawn#0')).toBe(true)
+    // Cold invoke leaves the parent's durable log untouched.
+    const log: AgentEvent[] = []
+    for await (const e of (await agent.events('default')).iter()) log.push(e)
+    expect(log).toHaveLength(0)
+  })
+
+  it('a clone failure rejects the returned promise as a plain Error', async () => {
+    const { agent } = await makeAgent(() => ts('taskFail("nope")'))
+    await expect(agent.spawn('boom')).rejects.toThrow('spawned sub-task failed: nope')
   })
 })

@@ -1,6 +1,6 @@
 {
   "name": "@agex-ts/runtime-worker",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Worker-isolated RuntimeAdapter for agex-ts. Browser-first (Web Worker); ts-blank-space transpile by default with a transform hook for embedders that need fuller TS coverage (e.g. esbuild-wasm).",
   "keywords": [
     "agex",

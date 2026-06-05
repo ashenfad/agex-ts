@@ -1,5 +1,13 @@
 # mathy-example
 
+## 0.0.3
+
+### Patch Changes
+
+- Updated dependencies [1a9df08]
+  - agex-ts@0.3.0
+  - @agex-ts/gemini@2.0.0
+
 ## 0.0.2
 
 ### Patch Changes

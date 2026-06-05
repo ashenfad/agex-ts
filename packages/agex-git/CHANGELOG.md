@@ -1,5 +1,12 @@
 # @agex-ts/git
 
+## 2.0.0
+
+### Patch Changes
+
+- Updated dependencies [1a9df08]
+  - agex-ts@0.3.0
+
 ## 1.0.0
 
 ### Patch Changes

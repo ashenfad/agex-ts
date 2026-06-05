@@ -173,7 +173,7 @@ That pattern is *host-wired*: you decide the topology up front. For the *agent-a
 
 ## Spawn (`SpawnSpec`)
 
-When enabled (see [Agent § Spawn](agent.md#spawn-sub-tasks)), agent code can call `spawn(spec)` to run an ephemeral clone of itself and `await` the result. The host doesn't call `spawn` — agents do — but the call shape is part of the contract you're enabling:
+When enabled (see [Agent § Spawn](agent.md#spawn-sub-tasks)), agent code can call `spawn(spec)` to run an ephemeral clone of itself and `await` the result. Agents call `spawn` from inside their code; the host can also invoke the same clone directly via [`agent.spawn(spec, opts?)`](agent.md#spawn-sub-tasks). Either way, the call shape is part of the contract you're enabling:
 
 ```ts
 type SpawnFn = (spec: string | SpawnSpec) => Promise<unknown>
@@ -188,7 +188,7 @@ interface SpawnSpec {
 }
 ```
 
-A bare string is shorthand for `{ task }`. The clone runs on throwaway state with the agent's registrations but none of its memory/cache/files (except any `view` paths, which are read-only). A clone failure rejects the `await`. Concurrency is bounded by [`maxSpawns`](agent.md#agentoptions); clone events surface via [`onEvent`, tagged](events.md#sub-agent-spawn-events). Full design notes: [`roadmap/spawn.md`](../roadmap/spawn.md).
+A bare string is shorthand for `{ task }`. The clone runs on throwaway state with the agent's registrations but none of its memory/cache/files (except any `view` paths, which are read-only). A clone failure rejects the `await`. Concurrency is bounded by [`maxSpawns`](agent.md#agentoptions); clone events surface via [`onEvent`, tagged](events.md#sub-agent-spawn-events).
 
 ## Cancellation semantics
 

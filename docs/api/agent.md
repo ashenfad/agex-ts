@@ -67,7 +67,7 @@ Returns a typed callable: `(input: I, options?: TaskCallOptions) => Promise<O>`.
 
 ## Spawn (sub-tasks)
 
-When `maxSpawns > 0` and the runtime supports it, agent code is given a `spawn` builtin: it runs an ephemeral, memoryless **clone** of the agent on a typed sub-task and returns the result. The clone shares the agent's registrations (same fns/classes/skills) but runs on throwaway state — a blank VFS, no cache, an event log discarded at the end — so nothing it does touches the parent's session. Agents fan out with `Promise.all`; concurrency is bounded by `maxSpawns`. This is an *agent-authored* capability — the host doesn't wire sub-agents; the agent decides at runtime to decompose its work.
+When `maxSpawns > 0` and the runtime supports it, agent code is given a `spawn` builtin: it runs an ephemeral, memoryless **clone** of the agent on a typed sub-task and returns the result. The clone shares the agent's registrations (same fns/classes/skills) but runs on throwaway state — a blank VFS, no cache, an event log discarded at the end — so nothing it does touches the parent's session. Agents fan out with `Promise.all`; concurrency is bounded by `maxSpawns`. This is primarily an *agent-authored* capability — the agent decides at runtime to decompose its work, rather than the host wiring sub-agents ahead of time. The same clone is also reachable from host code via [`agent.spawn`](#agentspawnspec-opts) below, for when something outside an agent turn must trigger a sub-task.
 
 **Host-facing surface:**
 
@@ -75,7 +75,7 @@ When `maxSpawns > 0` and the runtime supports it, agent code is given a `spawn` 
 - **Runtime support:** `evalRuntime` injects `spawn` today; `workerRuntime` injects it via its `injectsSpawn` capability. A runtime that doesn't support it leaves `spawn` unavailable, and the primer won't advertise it.
 - **Clones are depth-1** — a clone never gets its own `spawn` (no recursive fan-out).
 - **Observing sub-agent work:** clone events stream through the parent task's `onEvent`, tagged so you can demux them — see [Events § Sub-agent events](events.md#sub-agent-spawn-events). They are **not** written to the durable log.
-- **Read-only file sharing:** an agent can pass `view` to a spawn call to expose part of its VFS to the clone read-only. See [Task § Spawn (`SpawnSpec`)](task.md#spawn-spawnspec) for the call shape and the design notes in [`roadmap/spawn.md`](../roadmap/spawn.md).
+- **Read-only file sharing:** an agent can pass `view` to a spawn call to expose part of its VFS to the clone read-only. See [Task § Spawn (`SpawnSpec`)](task.md#spawn-spawnspec) for the call shape.
 
 ### `agent.spawn(spec, opts?)`
 

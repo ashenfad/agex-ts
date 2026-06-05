@@ -24,6 +24,7 @@ import {
 import { RegistrationError } from './errors'
 import { EventLogImpl } from './event-log'
 import { PolicyBuilder, memberAllowed } from './policy'
+import { createSpawn } from './spawn'
 import {
   KvgitState,
   type StateBackend,
@@ -33,6 +34,7 @@ import {
 } from './state'
 import { type TaskDefinition, makeTask } from './task'
 import type {
+  AgentEvent,
   Cache,
   Chapter,
   EventLog,
@@ -43,6 +45,7 @@ import type {
   NamespaceResolver,
   Policy,
   RuntimeAdapter,
+  SpawnSpec,
   StateConfig,
   TaskCallOptions,
   TaskFn,
@@ -519,6 +522,42 @@ export class Agent {
     return runChapteringInternal(events, eventLog, this, session, signal, async (e) => {
       if (opts.onEvent !== undefined) await opts.onEvent(e)
     })
+  }
+
+  /** Host-facing `spawn`: run an ephemeral **clone** of this agent on a
+   *  typed sub-task and return its result, from host code rather than
+   *  from inside an agent emission. The symmetric counterpart of the
+   *  agent-authored `spawn` builtin — same `SpawnSpec`, same semantics:
+   *  the clone shares this agent's policy + `/skills`, runs on throwaway
+   *  state (blank VFS, discarded event log + cache), is depth-1 (gets no
+   *  `spawn` of its own), enforces-and-retries its output schema, and may
+   *  `view` parent files read-only. A sub-task failure rejects the
+   *  returned promise as a plain `Error`; cancellation flows via `signal`.
+   *
+   *  Runs cold — no live parent task is required. Each call builds its
+   *  own `createSpawn`, so each host invoke gets an independent
+   *  concurrency semaphore bounded by `maxSpawns`; concurrency is not
+   *  shared across separate calls.
+   *
+   *  Clone events stream through `onEvent`, tagged `"<name>:spawn#<n>"`
+   *  so a host UI can demux them. They are not written to any durable
+   *  log. */
+  spawn(
+    spec: string | SpawnSpec,
+    opts: {
+      readonly session?: string
+      readonly signal?: AbortSignal
+      readonly onEvent?: (e: AgentEvent) => void | Promise<void>
+    } = {},
+  ): Promise<unknown> {
+    const fn = createSpawn(
+      this,
+      opts.session ?? DEFAULT_SESSION,
+      opts.signal ?? new AbortController().signal,
+      opts.onEvent,
+      this.maxSpawns,
+    )
+    return fn(spec)
   }
 
   // -- Per-session host APIs ---------------------------------------------

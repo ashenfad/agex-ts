@@ -77,6 +77,23 @@ When `maxSpawns > 0` and the runtime supports it, agent code is given a `spawn` 
 - **Observing sub-agent work:** clone events stream through the parent task's `onEvent`, tagged so you can demux them — see [Events § Sub-agent events](events.md#sub-agent-spawn-events). They are **not** written to the durable log.
 - **Read-only file sharing:** an agent can pass `view` to a spawn call to expose part of its VFS to the clone read-only. See [Task § Spawn (`SpawnSpec`)](task.md#spawn-spawnspec) for the call shape and the design notes in [`roadmap/spawn.md`](../roadmap/spawn.md).
 
+### `agent.spawn(spec, opts?)`
+
+```ts
+spawn(
+  spec: string | SpawnSpec,
+  opts?: {
+    session?: string                                  // default "default"
+    signal?: AbortSignal                              // default never-aborts
+    onEvent?: (e: AgentEvent) => void | Promise<void> // clone events, tagged "<name>:spawn#<n>"
+  },
+): Promise<unknown>
+```
+
+The same capability, **host-callable**: invoke a clone directly from host code rather than from inside an agent emission — for when something outside an agent turn (a UI event, a job) must trigger a sub-task. It runs cold; no live parent task is required. The `spec` is the same [`SpawnSpec`](task.md#spawn-spawnspec) the agent-code builtin takes (a bare string is shorthand for `{ task }`), and the semantics are identical: ephemeral clone, shared policy + `/skills`, depth-1, output enforce-and-retry, optional read-only `view`, a sub-task failure rejecting the promise, and cancellation via `signal`.
+
+Each call builds its own spawn machinery, so each host invoke gets an **independent** concurrency semaphore bounded by `maxSpawns` — concurrency is not shared across separate `agent.spawn(...)` calls. Clone events stream through `opts.onEvent` tagged `"<name>:spawn#<n>"` and are not written to any durable log.
+
 ## Per-session host APIs
 
 All async. `session` defaults to `"default"`. Each is cached per-session — first call resolves the underlying substrate; subsequent calls return immediately.

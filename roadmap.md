@@ -73,3 +73,29 @@ risk is low; the abstraction shape is obvious in advance.
 work is browser-side. Architecture isn't something we'll regret
 delaying. Pick this up when a Node embedder surfaces or when broader
 adoption makes server-side isolation a credible ask.
+
+---
+
+### Per-clone iteration budgets + supervised extension hearings
+
+**Why it matters.** A `spawn` clone today inherits one global cap — `agent.maxIterations` (default `10`), read straight off the agent in the task loop (`task.ts`), with no per-task override anywhere. That bounds runaways (good — every clone can't spin forever for free), but it gives the orchestrating parent no per-subtask control, and it gives a clone making *slow but steady* progress no recourse: it hits the wall and fails, even when a few more turns would finish the job. The missing primitive is a **per-clone, mutable iteration budget** — and once you have it, two distinct capabilities fall out of the same plumbing.
+
+**The primitive.** A per-clone iteration budget that is (a) settable at spawn time and (b) adjustable mid-flight. `agent.maxIterations` stays as the default/floor; the per-clone budget overrides it for that one run.
+
+**Use 1 — static, parent-set budgets (small, could land alone).**
+- Add `maxIterations?: number` to `SpawnSpec`; thread it through `buildCloneDef` → the clone's task loop so a clone reads *its* budget, not the shared `agent.maxIterations`.
+- Lets the parent right-size each subtask: `spawn({ task, maxIterations: 5 })` for a quick lookup, a larger cap for real work. This is the cheap, no-LLM "runaway budget" tier, and it's the foundation the dynamic version builds on.
+
+**Use 2 — supervised extension hearings (the premium tier; the reason supervisor mode is worth building).**
+- A clone nearing its cap can emit an explicit, structured `requestExtension(report)` instead of silently hitting the wall. The `report` is the clone's *justification* — "processed 8 of 12 files, steady progress, need ~6 more turns."
+- On that request, the host runs a **supervisor**: a *read-only branch of the parent* (the same `RunContext` resource-injection seam `spawn` already uses, but seeded with the parent's event log read-only instead of a blank substrate — it needs the parent's goal to judge relevance; it must not mutate parent state or it corrupts the suspended real agent). The supervisor is a **single-turn structured decision**, not a full agent loop: `{ grant: boolean, additionalIterations?: number, guidance?: string }`.
+- On grant: bump *that* clone's `maxIter` and continue the same loop — no pause/resume, since the loop control is host-side in `makeTask` and supervision is synchronous at the boundary. `guidance` doubles as a steering channel ("yes, +5, but focus only on the error logs"). On deny: normal cap-exhaust fail.
+
+**Why this is the payoff for the "report" channel.** A separate exploration (see the conversation that produced this entry) concluded that piping a clone's free-form prose into the *parent's* reasoning is a step sideways — the parent has no in-flight moment (it's parked at `await spawn(...)`), so prose and the typed return arrive together and the return value strictly dominates (opt-in via schema, attributed by handle, bounded). The extension hearing is the *one* place a clone's report earns a parent-adjacent audience: not as ambient narration, but as **evidence in a resource request a supervisor adjudicates.** The trigger is discrete and rare (only on an extension request — a well-behaved clone that finishes under budget never fires it), which is exactly what makes the supervisor's full-context cost affordable where polling never was.
+
+**Plumbing shared by both uses (build first).**
+- Per-clone mutable iteration budget in the clone's task loop (replaces the bare `agent.maxIterations` read for clones).
+- Per-clone `AbortController` chained to the parent (`AbortSignal.any([parentSignal, perClone.signal])`) so the host can act on *one* clone — needed if a denied/abandoned subtask should be cancelled rather than left to exhaust. Today `createSpawn` threads `parentSignal` straight to every clone.
+- A non-throwing cancellation/exhaustion *sentinel* outcome (`{ cancelled: true, reason }` / `{ exhausted: true }`) so a supervised stop resolves the clone's promise rather than rejecting the parent's `Promise.all` — the parent wakes to "3 returned, 2 stopped, here's why," not an error it never initiated.
+
+**Defer rationale.** Use 2 needs the supervisor (a read-only parent branch + an LLM call per hearing) and the sentinel-outcome semantics — real surface area. Use 1 (`SpawnSpec.maxIterations`) is small and self-contained and is the natural thing to land first if/when the per-subtask-budget need is concrete; the supervisor is the eventual escalation once "is this subtask worth more turns?" becomes a judgment worth paying for.

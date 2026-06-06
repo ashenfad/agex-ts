@@ -219,11 +219,16 @@ export function makeTask<I, O>(
     // Drain the per-clone buckets into the terminal-event shape (sorted
     // by `spawnIndex`). Returns `undefined` when capture is off or no
     // clone ran, so the `spawnEvents` field is simply absent.
+    // Snapshot each bucket's array (`[...events]`) so the emitted
+    // terminal event stays immutable: a clone that emits *after* the
+    // drain — a sibling still unwinding when `Promise.all` rejects on
+    // cancellation, or a fire-and-forget `void spawn(...)` — would
+    // otherwise `push` into the live array the event already holds.
     const drainSpawnEvents = (): SpawnEventsEntry[] | undefined =>
       spawnBuckets !== undefined && spawnBuckets.size > 0
         ? [...spawnBuckets]
             .sort(([a], [b]) => a - b)
-            .map(([spawnIndex, events]) => ({ spawnIndex, events }))
+            .map(([spawnIndex, events]) => ({ spawnIndex, events: [...events] }))
         : undefined
     // Stable across the loop — only changes if the agent's
     // registration table mutates mid-task (it shouldn't).

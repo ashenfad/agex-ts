@@ -168,6 +168,11 @@ export interface EventBase {
   readonly timestamp: string
   /** Name of the agent that produced this event. */
   readonly agentName: string
+  /** When this event comes from a `spawn` clone, the clone's index
+   *  (`0`-based, per spawning task). Lets a host demux concurrent
+   *  clones off a structured field instead of parsing the `spawn#<n>`
+   *  suffix out of `agentName`. Absent on a top-level run's events. */
+  readonly spawnIndex?: number
   /** kvgit commit hash this event was committed under, if any. */
   readonly commitHash?: string
   /** State key of the parent event in the same task lineage. Lets

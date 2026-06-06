@@ -285,7 +285,7 @@ export class MountFS implements FileSystem {
 
 const EPOCH_ISO = new Date(0).toISOString()
 
-function normalizeAbs(path: string): string {
+export function normalizeAbs(path: string): string {
   const segments = path.split('/').filter((s) => s !== '' && s !== '.')
   const out: string[] = []
   for (const seg of segments) {

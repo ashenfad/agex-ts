@@ -23,7 +23,7 @@ import type { Agent } from './agent'
 import { CacheImpl } from './cache'
 import { CancelledError, TaskFailError, isCancelledError } from './errors'
 import { EventLogImpl } from './event-log'
-import { MountFS } from './fs/mount'
+import { MountFS, normalizeAbs } from './fs/mount'
 import { SkillsOverlay } from './fs/skills-overlay'
 import { jsonSchemaToStandard } from './json-schema'
 import { Live } from './state/live'
@@ -59,8 +59,14 @@ class Semaphore {
 
 /** Map a `SpawnSpec` onto a `TaskDefinition` for the clone. A JSON Schema
  *  `output` becomes both the validated `output` (compiled to a Standard
- *  Schema) and the `outputJsonSchema` the clone is shown. */
-function buildCloneDef(spec: SpawnSpec): TaskDefinition<unknown, unknown> {
+ *  Schema) and the `outputJsonSchema` the clone is shown. A `view` mount
+ *  `announcement` (Gap 1) rides in the clone's `primer` so it surfaces in
+ *  the opening task message, after any spec-supplied primer. */
+function buildCloneDef(
+  spec: SpawnSpec,
+  announcement: string | null,
+): TaskDefinition<unknown, unknown> {
+  const primer = [spec.primer, announcement].filter((p) => p != null).join('\n\n')
   return {
     description: spec.task,
     ...(spec.output !== undefined && {
@@ -68,16 +74,51 @@ function buildCloneDef(spec: SpawnSpec): TaskDefinition<unknown, unknown> {
       outputJsonSchema: spec.output,
     }),
     ...(spec.outputDescription !== undefined && { outputDescription: spec.outputDescription }),
-    ...(spec.primer !== undefined && { primer: spec.primer }),
+    ...(primer.length > 0 && { primer }),
   }
 }
 
-/** Normalize a `view` path into a `MountFS` prefix: ensure a leading
- *  slash and strip a trailing one. Invalid results (`''` / `'/'`) are
- *  left for `MountFS` to reject with its own clear message. */
-function viewPrefix(path: string): string {
-  const withLead = path.startsWith('/') ? path : `/${path}`
-  return withLead.length > 1 && withLead.endsWith('/') ? withLead.slice(0, -1) : withLead
+/** Resolve a `view` path to an absolute `MountFS` prefix. An absolute
+ *  path anchors at the filesystem root; a *relative* one resolves
+ *  against the parent session's cwd — the same way the parent's own
+ *  `fs.*` calls resolve it — so `view: "notes.md"` mounts wherever the
+ *  parent would read `notes.md`, not at a root-anchored (and often
+ *  empty) `/notes.md`. `normalizeAbs` collapses `.`/`..` and strips the
+ *  trailing slash. A result of `'/'` is left for `MountFS` to reject. */
+function resolveViewPrefix(path: string, cwd: string): string {
+  return path.startsWith('/') ? normalizeAbs(path) : normalizeAbs(`${cwd}/${path}`)
+}
+
+/** Maximum directory entries named inline in a `view` mount
+ *  announcement before it summarizes the remainder as `+N more`. */
+const VIEW_ANNOUNCE_MAX_ENTRIES = 16
+
+/** Build the read-only mount self-announcement folded into a clone's
+ *  task framing (Gap 1): a clone starts on a blank workspace and is
+ *  never told `view` files were mounted, so a real model often won't
+ *  think to `list("/")` and find them. Per-file views announce the file
+ *  directly; a directory view announces its root plus a shallow,
+ *  count-capped listing (cheap for large trees). `null` when nothing is
+ *  mounted. */
+async function buildViewAnnouncement(
+  backing: VirtualFileSystem,
+  prefixes: string[],
+): Promise<string | null> {
+  if (prefixes.length === 0) return null
+  const lines: string[] = []
+  for (const prefix of prefixes) {
+    if (await backing.isDir(prefix)) {
+      const entries = await backing.list(prefix)
+      const shown = entries.slice(0, VIEW_ANNOUNCE_MAX_ENTRIES)
+      const more = entries.length > shown.length ? `, +${entries.length - shown.length} more` : ''
+      const noun = entries.length === 1 ? 'entry' : 'entries'
+      const listing = shown.length > 0 ? `: ${shown.join(', ')}${more}` : ''
+      lines.push(`- ${prefix}/ — read-only directory, ${entries.length} ${noun}${listing}`)
+    } else {
+      lines.push(`- ${prefix} — read-only file`)
+    }
+  }
+  return `Read-only files have been mounted into your workspace (you may read them, but not write to them):\n${lines.join('\n')}`
 }
 
 /** A read-only window onto `inner` rooted at `base`, for `spawn`'s
@@ -164,10 +205,14 @@ class ReadOnlyView implements VirtualFileSystem {
 /** Build the clone's throwaway substrate: a fresh in-process `Live` for
  *  the (discarded) event log + cache, and a blank `MemoryFS` with the
  *  parent's `/skills` overlay mounted so the clone has the same skills.
- *  When `view` is set, the named parent paths are mounted read-only at
- *  the same location (the parent's *backing* FS, so no nested
- *  `/view/skills`); `MountFS` rejects writes to a mounted overlay, so
- *  read-only falls out for free. Nothing here mutates the parent. */
+ *  When `view` is set, the named parent paths are resolved (relative to
+ *  the parent's cwd) and mounted read-only at the same location (the
+ *  parent's *backing* FS, so no nested `/view/skills`); `MountFS` rejects
+ *  writes to a mounted overlay, so read-only falls out for free. A path
+ *  that resolves to nothing throws, rather than silently mounting an
+ *  empty overlay the clone would report as "doesn't exist". Returns a
+ *  `viewAnnouncement` (Gap 1) so the clone can be told what was mounted.
+ *  Nothing here mutates the parent. */
 async function buildCloneResources(
   agent: Agent,
   idx: number,
@@ -180,18 +225,25 @@ async function buildCloneResources(
   const mounts: Array<{ prefix: string; fs: VirtualFileSystem }> = [
     { prefix: SKILLS_PREFIX, fs: new SkillsOverlay(agent.policy().skills) },
   ]
+  let viewAnnouncement: string | null = null
   if (view !== undefined) {
     const backing = await agent.backingFs(parentSession)
+    const cwd = backing.getcwd()
     const paths = typeof view === 'string' ? [view] : view
-    for (const p of paths) {
-      const prefix = viewPrefix(p)
+    const prefixes = paths.map((p) => resolveViewPrefix(p, cwd))
+    for (const prefix of prefixes) {
+      if (!(await backing.exists(prefix))) {
+        throw new Error(`spawn view path not found in the parent filesystem: ${prefix}`)
+      }
       mounts.push({ prefix, fs: new ReadOnlyView(backing, prefix) })
     }
+    viewAnnouncement = await buildViewAnnouncement(backing, prefixes)
   }
   return {
     eventLog: new EventLogImpl(state, session),
     fs: new MountFS(new MemoryFS(), mounts),
     cache: new CacheImpl(state, session),
+    viewAnnouncement,
   }
 }
 
@@ -210,8 +262,15 @@ export function createSpawn(
     if (parentSignal.aborted) throw new CancelledError()
     const idx = counter++
     const normalized: SpawnSpec = typeof spec === 'string' ? { task: spec } : spec
-    const cloneDef = buildCloneDef(normalized)
-    const resources = await buildCloneResources(agent, idx, parentSession, normalized.view)
+    // Build resources first: mounting `view` is what surfaces the
+    // self-announcement folded into the clone's task framing below.
+    const { viewAnnouncement, ...resources } = await buildCloneResources(
+      agent,
+      idx,
+      parentSession,
+      normalized.view,
+    )
+    const cloneDef = buildCloneDef(normalized, viewAnnouncement)
 
     // Forward the clone's events to the parent's stream, re-tagged so a
     // host UI can demux concurrent clones. We do NOT thread them into the
@@ -221,7 +280,7 @@ export function createSpawn(
     const onEvent =
       parentOnEvent === undefined
         ? undefined
-        : (e: AgentEvent) => parentOnEvent({ ...e, agentName: label })
+        : (e: AgentEvent) => parentOnEvent({ ...e, agentName: label, spawnIndex: idx })
 
     await semaphore.acquire()
     try {

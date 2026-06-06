@@ -230,7 +230,11 @@ async function buildCloneResources(
     const backing = await agent.backingFs(parentSession)
     const cwd = backing.getcwd()
     const paths = typeof view === 'string' ? [view] : view
-    const prefixes = paths.map((p) => resolveViewPrefix(p, cwd))
+    // Dedupe: two paths can resolve to the same prefix (e.g. `notes.md`
+    // and `./notes.md`). `MountFS` already collapses same-prefix mounts,
+    // but deduping here also keeps the announcement from listing a path
+    // twice and skips redundant stat/list calls. `Set` preserves order.
+    const prefixes = [...new Set(paths.map((p) => resolveViewPrefix(p, cwd)))]
     for (const prefix of prefixes) {
       if (!(await backing.exists(prefix))) {
         throw new Error(`spawn view path not found in the parent filesystem: ${prefix}`)
@@ -270,6 +274,10 @@ export function createSpawn(
       parentSession,
       normalized.view,
     )
+    // The parent may have aborted *during* the setup above. Re-check
+    // before queueing on the (non-abort-aware) semaphore: a doomed
+    // waiter would otherwise block until a permit frees, only to throw.
+    if (parentSignal.aborted) throw new CancelledError()
     const cloneDef = buildCloneDef(normalized, viewAnnouncement)
 
     // Forward the clone's events to the parent's stream, re-tagged so a

@@ -398,6 +398,22 @@ describe('spawn — view follow-ups', () => {
     expect(cloneTurnText(llm)).toContain('/notes.md — read-only file')
   })
 
+  it('dedupes view paths that resolve to the same prefix (Gap 1)', async () => {
+    const { agent, llm } = await makeAgent((req) =>
+      isParent(req)
+        ? ts('taskSuccess(await spawn({ task: "read", view: ["/notes.md", "/notes.md"] }))')
+        : ts('taskSuccess("ok")'),
+    )
+    const pfs = await agent.fs()
+    await pfs.write('/notes.md', new TextEncoder().encode('hi'))
+    const fn = agent.task<undefined, string>({ description: 'Parent.' })
+    await fn(undefined)
+    const text = cloneTurnText(llm)
+    // Announced once, not once per duplicate.
+    const occurrences = text.split('/notes.md — read-only file').length - 1
+    expect(occurrences).toBe(1)
+  })
+
   it('tags clone events with a structured spawnIndex, not just agentName', async () => {
     const { agent } = await makeAgent((req) =>
       isParent(req) ? ts('taskSuccess(await spawn("inner"))') : ts('taskSuccess("ok")'),

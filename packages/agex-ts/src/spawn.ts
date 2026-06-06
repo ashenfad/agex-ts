@@ -257,6 +257,12 @@ export function createSpawn(
   parentSignal: AbortSignal,
   parentOnEvent: ((e: AgentEvent) => void | Promise<void>) | undefined,
   maxSpawns: number,
+  /** Optional sink for each clone's (already tagged) events, used by the
+   *  task loop to capture per-clone timelines onto the parent's terminal
+   *  event (`captureSpawnEvents`). Independent of `parentOnEvent`: the
+   *  event wrapper fires for either sink, so capture works even with no
+   *  host `onEvent` attached. The host-facing `Agent.spawn` passes none. */
+  collect?: (event: AgentEvent) => void,
 ): SpawnFn {
   const semaphore = new Semaphore(Math.max(1, maxSpawns))
   let counter = 0
@@ -280,15 +286,23 @@ export function createSpawn(
     if (parentSignal.aborted) throw new CancelledError()
     const cloneDef = buildCloneDef(normalized, viewAnnouncement)
 
-    // Forward the clone's events to the parent's stream, re-tagged so a
-    // host UI can demux concurrent clones. We do NOT thread them into the
-    // parent's durable log (stream, don't store) — the clone's own log is
-    // the throwaway `Live` above.
+    // Re-tag the clone's events so a host UI can demux concurrent clones,
+    // then route the tagged event to both sinks: the parent's live stream
+    // (`parentOnEvent`) and the optional `collect` capture (which the task
+    // loop drains onto the parent's terminal event). The clone's own
+    // throwaway `Live` still holds its log for its loop; `collect` is what
+    // makes any of it durable past the run. The wrapper exists when either
+    // sink is present, so capture doesn't require a host `onEvent`.
     const label = `${agent.name}:spawn#${idx}`
+    const tag = (e: AgentEvent): AgentEvent => ({ ...e, agentName: label, spawnIndex: idx })
     const onEvent =
-      parentOnEvent === undefined
+      parentOnEvent === undefined && collect === undefined
         ? undefined
-        : (e: AgentEvent) => parentOnEvent({ ...e, agentName: label, spawnIndex: idx })
+        : (e: AgentEvent) => {
+            const tagged = tag(e)
+            collect?.(tagged)
+            return parentOnEvent?.(tagged)
+          }
 
     await semaphore.acquire()
     try {

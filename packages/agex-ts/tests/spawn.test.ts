@@ -2,8 +2,18 @@ import { describe, expect, it } from 'vitest'
 import { type AgentOptions, createAgent } from '../src/agent'
 import { CancelledError } from '../src/errors'
 import { Dummy } from '../src/llm/dummy'
+import { renderEvents } from '../src/render'
 import { evalRuntime } from '../src/runtime/eval'
-import type { AgentEvent, Emission, LLMRequest, LLMResponse, TokenChunk } from '../src/types'
+import type {
+  AgentEvent,
+  CancelledEvent,
+  Emission,
+  FailEvent,
+  LLMRequest,
+  LLMResponse,
+  SuccessEvent,
+  TokenChunk,
+} from '../src/types'
 
 const ts = (code: string): LLMResponse => ({ emissions: [{ type: 'ts', code }] })
 
@@ -42,6 +52,14 @@ async function makeAgent(
   const llm = new RouterLLM(pick)
   const agent = await createAgent({ name: 'T', llm, runtime: evalRuntime(), ...opts })
   return { agent, llm }
+}
+
+async function collectLog(
+  agent: Awaited<ReturnType<typeof makeAgent>>['agent'],
+): Promise<AgentEvent[]> {
+  const out: AgentEvent[] = []
+  for await (const e of (await agent.events('default')).iter()) out.push(e)
+  return out
 }
 
 describe('spawn — agent-authored sub-tasks', () => {
@@ -428,5 +446,125 @@ describe('spawn — view follow-ups', () => {
     expect(seen.filter((e) => e.agentName === 'T').every((e) => e.spawnIndex === undefined)).toBe(
       true,
     )
+  })
+})
+
+describe('spawn — event capture (captureSpawnEvents)', () => {
+  it('off by default: terminal events carry no spawnEvents', async () => {
+    const { agent } = await makeAgent((req) =>
+      isParent(req) ? ts('taskSuccess(await spawn("inner"))') : ts('taskSuccess("ok")'),
+    )
+    const fn = agent.task<undefined, string>({ description: 'Parent.' })
+    await fn(undefined)
+    const success = (await collectLog(agent)).find((e) => e.type === 'success') as SuccessEvent
+    expect(success).toBeDefined()
+    expect(success.spawnEvents).toBeUndefined()
+  })
+
+  it('on: captures the full clone timeline onto the success event, keyed by spawnIndex', async () => {
+    const { agent } = await makeAgent(
+      (req) => (isParent(req) ? ts('taskSuccess(await spawn("inner"))') : ts('taskSuccess("ok")')),
+      { captureSpawnEvents: true },
+    )
+    const fn = agent.task<undefined, string>({ description: 'Parent.' })
+    await fn(undefined)
+    const success = (await collectLog(agent)).find((e) => e.type === 'success') as SuccessEvent
+    expect(success.spawnEvents).toHaveLength(1)
+    const entry = success.spawnEvents?.[0]
+    expect(entry?.spawnIndex).toBe(0)
+    // The whole sub-task timeline, start to finish.
+    expect(entry?.events.some((e) => e.type === 'taskStart')).toBe(true)
+    expect(entry?.events.some((e) => e.type === 'success')).toBe(true)
+    // Every captured event is tagged for its clone.
+    expect(entry?.events.every((e) => e.spawnIndex === 0 && e.agentName === 'T:spawn#0')).toBe(true)
+  })
+
+  it('fan-out: one entry per clone, keyed and sorted by spawnIndex', async () => {
+    const { agent } = await makeAgent(
+      (req) =>
+        isParent(req)
+          ? ts(
+              'taskSuccess(await Promise.all([0,1,2].map((n) => spawn({ task: "echo", input: n }))))',
+            )
+          : ts('taskSuccess(inputs)'),
+      { captureSpawnEvents: true },
+    )
+    const fn = agent.task<undefined, number[]>({ description: 'Parent.' })
+    await fn(undefined)
+    const success = (await collectLog(agent)).find((e) => e.type === 'success') as SuccessEvent
+    expect(success.spawnEvents?.map((s) => s.spawnIndex)).toEqual([0, 1, 2])
+    expect(success.spawnEvents?.every((s) => s.events.length > 0)).toBe(true)
+  })
+
+  it('captures even with no onEvent handler attached', async () => {
+    const { agent } = await makeAgent(
+      (req) => (isParent(req) ? ts('taskSuccess(await spawn("inner"))') : ts('taskSuccess("ok")')),
+      { captureSpawnEvents: true },
+    )
+    const fn = agent.task<undefined, string>({ description: 'Parent.' })
+    await fn(undefined) // deliberately no { onEvent }
+    const success = (await collectLog(agent)).find((e) => e.type === 'success') as SuccessEvent
+    expect(success.spawnEvents).toHaveLength(1)
+  })
+
+  it('captures onto a fail event when the parent taskFails', async () => {
+    const { agent } = await makeAgent(
+      (req) =>
+        isParent(req)
+          ? ts('await spawn("inner"); taskFail("parent gives up")')
+          : ts('taskSuccess("ok")'),
+      { captureSpawnEvents: true },
+    )
+    const fn = agent.task<undefined, string>({ description: 'Parent.' })
+    await expect(fn(undefined)).rejects.toThrow('parent gives up')
+    const fail = (await collectLog(agent)).find((e) => e.type === 'fail') as FailEvent
+    expect(fail.spawnEvents).toHaveLength(1)
+    expect(fail.spawnEvents?.[0]?.spawnIndex).toBe(0)
+  })
+
+  it('captures clones that ran before a parent cancellation onto the cancelled event', async () => {
+    const controller = new AbortController()
+    // Abort from inside the clone, then hang — so the clone is genuinely
+    // cancelled (not racing to success) and the parent unwinds cancelled.
+    const abortAndHang = async (): Promise<void> => {
+      controller.abort()
+      await new Promise<void>(() => {})
+    }
+    const { agent } = await makeAgent(
+      (req) =>
+        isParent(req)
+          ? ts('await spawn("g"); taskSuccess("unreached")')
+          : ts('await abortAndHang(); taskSuccess("unreached")'),
+      { captureSpawnEvents: true },
+    )
+    agent.fn(abortAndHang, { name: 'abortAndHang' })
+    const fn = agent.task<undefined, string>({ description: 'Parent.' })
+    await expect(fn(undefined, { signal: controller.signal })).rejects.toThrow(CancelledError)
+    const cancelled = (await collectLog(agent)).find(
+      (e) => e.type === 'cancelled',
+    ) as CancelledEvent
+    expect(cancelled).toBeDefined()
+    expect(cancelled.spawnEvents?.[0]?.spawnIndex).toBe(0)
+    // At least the clone's opening event made it into the record.
+    expect(cancelled.spawnEvents?.[0]?.events.some((e) => e.type === 'taskStart')).toBe(true)
+  })
+
+  it('the captured payload is invisible to the parent LLM (render is byte-identical)', async () => {
+    const { agent } = await makeAgent(
+      (req) => (isParent(req) ? ts('taskSuccess(await spawn("inner"))') : ts('taskSuccess("ok")')),
+      { captureSpawnEvents: true },
+    )
+    const fn = agent.task<undefined, string>({ description: 'Parent.' })
+    await fn(undefined)
+    const log = await collectLog(agent)
+    // Sanity: the payload really is present on the durable success event.
+    expect((log.find((e) => e.type === 'success') as SuccessEvent).spawnEvents).toBeDefined()
+    // Rendering the log with vs. without the payload yields identical turns.
+    const stripped = log.map((e) => {
+      if (e.type !== 'success') return e
+      const { spawnEvents: _omit, ...rest } = e
+      return rest
+    })
+    expect(renderEvents(log)).toEqual(renderEvents(stripped))
   })
 })

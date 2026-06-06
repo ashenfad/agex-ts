@@ -77,6 +77,14 @@ export interface AgentOptions {
    *  (the capability isn't injected and the primer won't teach it).
    *  See `docs/roadmap/spawn.md`. */
   readonly maxSpawns?: number
+  /** Capture each `spawn` clone's event timeline onto the parent task's
+   *  terminal event (`SuccessEvent` / `FailEvent` / `CancelledEvent`) as
+   *  a durable record for audit / drill-down. Keyed by `spawnIndex`,
+   *  covering every clone the task launched. Invisible to the parent LLM
+   *  (`renderEvents` never reads the field). Default `false`; uncapped
+   *  when on, so a wide fan-out yields a large terminal event. See
+   *  `docs/roadmap/spawn.md`. */
+  readonly captureSpawnEvents?: boolean
   /** Threshold (in input tokens, as reported by the latest
    *  `ActionEvent`) at which chaptering fires. When set, the
    *  framework auto-registers a chapter task with the default
@@ -134,6 +142,7 @@ export interface ReconfigurableOptions {
   readonly chapterPrimer?: string
   readonly maxIterations?: number
   readonly maxSpawns?: number
+  readonly captureSpawnEvents?: boolean
 }
 
 /** Async factory — handles the awaitable parts of state setup. */
@@ -357,6 +366,12 @@ export class Agent {
   /** Max concurrent in-agent `spawn` clones. `0` disables spawn. */
   get maxSpawns(): number {
     return this.#opts.maxSpawns ?? DEFAULT_MAX_SPAWNS
+  }
+
+  /** Whether to capture per-clone `spawn` event timelines onto the
+   *  parent task's terminal event. Default `false`. */
+  get captureSpawnEvents(): boolean {
+    return this.#opts.captureSpawnEvents ?? false
   }
 
   /** Stable identifier for the agent's current registration shape.
@@ -684,6 +699,9 @@ export class Agent {
    *   chaptering check. Setting to `undefined` disables auto-fire.
    * - `chapterPrimer`: applied if/when the chapter task next runs.
    * - `maxIterations`: applied at the start of the next task.
+   * - `maxSpawns` / `captureSpawnEvents`: applied at the start of the
+   *   next task (both are read once when the task's spawn capability is
+   *   built).
    *
    * NOT included: `name`, `state`, `runtime`, `fs`. Mutating those
    * mid-session would orphan per-session resources or break

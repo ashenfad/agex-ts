@@ -44,6 +44,7 @@ import type {
   OutputPart,
   Policy,
   RuntimeAdapter,
+  SpawnEventsEntry,
   SuccessEvent,
   SystemNoteEvent,
   TaskCallOptions,
@@ -195,9 +196,35 @@ export function makeTask<I, O>(
     // the agent never sees a `spawn` it can't call.
     const spawnEnabled =
       usesAgentSubstrate && agent.maxSpawns > 0 && runtimeAdapter.injectsSpawn === true
-    const spawnCapability = spawnEnabled
-      ? createSpawn(agent, session, signal, options.onEvent, agent.maxSpawns)
+    // When capture is on (and spawns are possible), accumulate each
+    // clone's tagged events into a per-`spawnIndex` bucket for the life
+    // of the task, then drain them onto the terminal event below. Off →
+    // no collector is built and `createSpawn` retains nothing (events
+    // still stream live via `onEvent`, exactly as before).
+    const captureSpawn = spawnEnabled && agent.captureSpawnEvents
+    const spawnBuckets = captureSpawn ? new Map<number, AgentEvent[]>() : undefined
+    const collectSpawnEvent = spawnBuckets
+      ? (e: AgentEvent) => {
+          // `spawnIndex` is stamped by `createSpawn`'s tagger; `-1` is a
+          // defensive fallback that should never occur for a clone event.
+          const i = e.spawnIndex ?? -1
+          const bucket = spawnBuckets.get(i)
+          if (bucket) bucket.push(e)
+          else spawnBuckets.set(i, [e])
+        }
       : undefined
+    const spawnCapability = spawnEnabled
+      ? createSpawn(agent, session, signal, options.onEvent, agent.maxSpawns, collectSpawnEvent)
+      : undefined
+    // Drain the per-clone buckets into the terminal-event shape (sorted
+    // by `spawnIndex`). Returns `undefined` when capture is off or no
+    // clone ran, so the `spawnEvents` field is simply absent.
+    const drainSpawnEvents = (): SpawnEventsEntry[] | undefined =>
+      spawnBuckets !== undefined && spawnBuckets.size > 0
+        ? [...spawnBuckets]
+            .sort(([a], [b]) => a - b)
+            .map(([spawnIndex, events]) => ({ spawnIndex, events }))
+        : undefined
     // Stable across the loop — only changes if the agent's
     // registration table mutates mid-task (it shouldn't).
     // Optional addendum from the runtime adapter — e.g.
@@ -341,11 +368,13 @@ export function makeTask<I, O>(
               continue
             }
           }
+          const capturedSpawnEvents = drainSpawnEvents()
           const successEvent: SuccessEvent = {
             type: 'success',
             timestamp: new Date().toISOString(),
             agentName: agent.name,
             result,
+            ...(capturedSpawnEvents !== undefined && { spawnEvents: capturedSpawnEvents }),
           }
           await emit(successEvent, eventLog, options.onEvent)
           if (usesAgentSubstrate) {
@@ -354,11 +383,13 @@ export function makeTask<I, O>(
           return result
         }
         if (outcome.kind === 'fail') {
+          const capturedSpawnEvents = drainSpawnEvents()
           const failEvent: FailEvent = {
             type: 'fail',
             timestamp: new Date().toISOString(),
             agentName: agent.name,
             message: outcome.message,
+            ...(capturedSpawnEvents !== undefined && { spawnEvents: capturedSpawnEvents }),
           }
           await emit(failEvent, eventLog, options.onEvent)
           if (usesAgentSubstrate) {
@@ -377,11 +408,13 @@ export function makeTask<I, O>(
         lastError !== undefined
           ? `Task exceeded maxIterations (${maxIter})\nLast error: ${lastError}`
           : `Task exceeded maxIterations (${maxIter})`
+      const capturedSpawnEvents = drainSpawnEvents()
       const failEvent: FailEvent = {
         type: 'fail',
         timestamp: new Date().toISOString(),
         agentName: agent.name,
         message: exhaustMessage,
+        ...(capturedSpawnEvents !== undefined && { spawnEvents: capturedSpawnEvents }),
       }
       await emit(failEvent, eventLog, options.onEvent)
       if (usesAgentSubstrate) {
@@ -390,6 +423,7 @@ export function makeTask<I, O>(
       throw new TaskFailError(exhaustMessage)
     } catch (e) {
       if (isCancelledError(e)) {
+        const capturedSpawnEvents = drainSpawnEvents()
         await emit(
           {
             type: 'cancelled',
@@ -397,6 +431,7 @@ export function makeTask<I, O>(
             agentName: agent.name,
             taskName: taskName ?? deriveTaskName(def),
             iterationsCompleted: iter,
+            ...(capturedSpawnEvents !== undefined && { spawnEvents: capturedSpawnEvents }),
           },
           eventLog,
           options.onEvent,

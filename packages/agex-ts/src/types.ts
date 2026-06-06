@@ -246,20 +246,43 @@ export interface OutputEvent extends EventBase {
   readonly emissionId?: string
 }
 
+/** One spawn clone's full event timeline, captured onto the parent
+ *  task's terminal event when `captureSpawnEvents` is on. Keyed by the
+ *  clone's `spawnIndex` — unique and contiguous across the whole parent
+ *  task, since `createSpawn`'s counter spans every emission, so the
+ *  collection covers every clone the task launched. The events are the
+ *  same ones streamed live via `onEvent`, batched here for the durable
+ *  record. Invisible to the parent LLM: `renderEvents` reads only
+ *  `result` / `message` / `taskName` off a terminal event, never this
+ *  field, so the payload rides along unseen. See `docs/roadmap/spawn.md`. */
+export interface SpawnEventsEntry {
+  readonly spawnIndex: number
+  readonly events: ReadonlyArray<AgentEvent>
+}
+
 export interface SuccessEvent extends EventBase {
   readonly type: 'success'
   readonly result: unknown
+  /** Per-clone spawn event timelines, present only when the agent's
+   *  `captureSpawnEvents` is on and the task launched at least one
+   *  `spawn`. Durable audit record; invisible to the parent LLM. */
+  readonly spawnEvents?: ReadonlyArray<SpawnEventsEntry>
 }
 
 export interface FailEvent extends EventBase {
   readonly type: 'fail'
   readonly message: string
+  /** See `SuccessEvent.spawnEvents`. */
+  readonly spawnEvents?: ReadonlyArray<SpawnEventsEntry>
 }
 
 export interface CancelledEvent extends EventBase {
   readonly type: 'cancelled'
   readonly taskName: string
   readonly iterationsCompleted: number
+  /** See `SuccessEvent.spawnEvents`. Captures whatever clones had
+   *  emitted before the parent task was cancelled. */
+  readonly spawnEvents?: ReadonlyArray<SpawnEventsEntry>
 }
 
 export interface ErrorEvent extends EventBase {

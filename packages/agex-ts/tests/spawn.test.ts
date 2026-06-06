@@ -328,3 +328,89 @@ describe('spawn — host-facing invoke', () => {
     await expect(agent.spawn('boom')).rejects.toThrow('spawned sub-task failed: nope')
   })
 })
+
+describe('spawn — view follow-ups', () => {
+  // Clone turns (system + user task message) for the calls that are NOT
+  // the parent — keyed off the spawn primer the parent alone carries.
+  const cloneTurnText = (llm: { allSystems: string[]; allTurns: unknown[] }): string =>
+    JSON.stringify(
+      llm.allTurns.filter((_, i) => !(llm.allSystems[i] ?? '').includes('## Spawn (sub-tasks)')),
+    )
+
+  it('resolves a relative view against the parent session cwd (Gap 2)', async () => {
+    const { agent } = await makeAgent((req) =>
+      isParent(req)
+        ? ts('taskSuccess(await spawn({ task: "read", view: "notes.md" }))')
+        : ts('taskSuccess(await fs.read("/work/notes.md", "utf8"))'),
+    )
+    const pfs = await agent.fs()
+    await pfs.mkdir('/work', { parents: true })
+    await pfs.chdir('/work')
+    // Written relative → lands at /work/notes.md (the parent's cwd). A
+    // root-anchored view would have mounted an empty /notes.md.
+    await pfs.write('notes.md', new TextEncoder().encode('cwd-relative'))
+    const fn = agent.task<undefined, string>({ description: 'Parent.' })
+    expect(await fn(undefined)).toBe('cwd-relative')
+  })
+
+  it('throws a clear error when a view path resolves to nothing (Gap 2)', async () => {
+    const { agent } = await makeAgent((req) =>
+      isParent(req)
+        ? ts(
+            'try { await spawn({ task: "x", view: "/nope.txt" }) } catch (e) { taskSuccess("caught: " + e.message) }',
+          )
+        : ts('taskSuccess("unreached")'),
+    )
+    const fn = agent.task<undefined, string>({ description: 'Parent.' })
+    expect(await fn(undefined)).toContain('spawn view path not found')
+  })
+
+  it('announces a directory view in the clone task message (Gap 1)', async () => {
+    const { agent, llm } = await makeAgent((req) =>
+      isParent(req)
+        ? ts('taskSuccess(await spawn({ task: "read", view: "/data" }))')
+        : ts('taskSuccess("ok")'),
+    )
+    const pfs = await agent.fs()
+    await pfs.mkdir('/data', { parents: true })
+    await pfs.write('/data/a.txt', new TextEncoder().encode('A'))
+    await pfs.write('/data/b.txt', new TextEncoder().encode('B'))
+    const fn = agent.task<undefined, string>({ description: 'Parent.' })
+    await fn(undefined)
+    const text = cloneTurnText(llm)
+    // The clone is told what's mounted without having to `list("/")`.
+    expect(text).toContain('Read-only files have been mounted')
+    expect(text).toContain('/data/ — read-only directory')
+    expect(text).toContain('a.txt')
+    expect(text).toContain('b.txt')
+  })
+
+  it('announces a single-file view in the clone task message (Gap 1)', async () => {
+    const { agent, llm } = await makeAgent((req) =>
+      isParent(req)
+        ? ts('taskSuccess(await spawn({ task: "read", view: "/notes.md" }))')
+        : ts('taskSuccess("ok")'),
+    )
+    const pfs = await agent.fs()
+    await pfs.write('/notes.md', new TextEncoder().encode('hello'))
+    const fn = agent.task<undefined, string>({ description: 'Parent.' })
+    await fn(undefined)
+    expect(cloneTurnText(llm)).toContain('/notes.md — read-only file')
+  })
+
+  it('tags clone events with a structured spawnIndex, not just agentName', async () => {
+    const { agent } = await makeAgent((req) =>
+      isParent(req) ? ts('taskSuccess(await spawn("inner"))') : ts('taskSuccess("ok")'),
+    )
+    const seen: AgentEvent[] = []
+    const fn = agent.task<undefined, string>({ description: 'Parent.' })
+    await fn(undefined, { onEvent: (e) => void seen.push(e) })
+    const cloneEvents = seen.filter((e) => e.agentName === 'T:spawn#0')
+    expect(cloneEvents.length).toBeGreaterThan(0)
+    expect(cloneEvents.every((e) => e.spawnIndex === 0)).toBe(true)
+    // The parent's own events carry no spawnIndex.
+    expect(seen.filter((e) => e.agentName === 'T').every((e) => e.spawnIndex === undefined)).toBe(
+      true,
+    )
+  })
+})

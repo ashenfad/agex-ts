@@ -190,6 +190,10 @@ interface SpawnSpec {
 
 A bare string is shorthand for `{ task }`. The clone runs on throwaway state with the agent's registrations but none of its memory/cache/files (except any `view` paths, which are read-only). A clone failure rejects the `await`. Concurrency is bounded by [`maxSpawns`](agent.md#agentoptions); clone events surface via [`onEvent`, tagged](events.md#sub-agent-spawn-events).
 
+**`view` path resolution.** An absolute `view` path anchors at the filesystem root; a *relative* one resolves against the parent session's current working directory — exactly as the parent's own `fs.*` calls resolve it. So `view: "notes.md"` mounts wherever the parent would read `notes.md`, even if its cwd isn't `/`. A `view` path that resolves to nothing throws (rather than silently mounting an empty overlay the clone would report as "doesn't exist").
+
+**Mounts are self-announcing.** Because a clone starts on an otherwise-blank workspace, the mounted `view` paths are named in its opening task message — per-file for a file view, root plus a shallow (count-capped) listing for a directory view — so the clone doesn't have to discover them by listing. The files are read-only either way.
+
 ## Cancellation semantics
 
 When `signal.aborted` fires:

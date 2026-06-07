@@ -60,6 +60,13 @@ export async function connectState(config: StateConfig = { type: 'live' }): Prom
   // express). Hand it back untouched. `createAgent` flows `opts.state`
   // straight through here, so this is the one place that needs to know.
   if (config.type === 'resolver') {
+    // Mirror the sqlite `path` guard below: the type system already
+    // requires `resolver`, but a plain-JS caller (or a runtime-built
+    // config) could omit it — fail loudly here instead of a cryptic
+    // `undefined.resolve` downstream.
+    if (!config.resolver) {
+      throw new Error('connectState: "resolver" state requires a `resolver` option')
+    }
     return config.resolver
   }
   if (config.type === 'live') {

@@ -87,6 +87,13 @@ describe('connectState — errors', () => {
       /requires a `path`/,
     )
   })
+
+  it('rejects resolver type without a resolver', async () => {
+    // The type system requires `resolver`; this exercises the runtime
+    // guard for a plain-JS caller that omits it.
+    // @ts-expect-error — intentionally missing `resolver`
+    await expect(connectState({ type: 'resolver' })).rejects.toThrow(/requires a `resolver`/)
+  })
 })
 
 describe('connectState — session id validation', () => {

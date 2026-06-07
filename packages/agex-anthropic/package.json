@@ -1,6 +1,6 @@
 {
   "name": "@agex-ts/anthropic",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Anthropic Messages API provider for agex-ts. Lowers NeutralTurn[] to Anthropic content blocks; streams via SSE; no SDK dependency.",
   "keywords": ["agex", "agex-ts", "agent", "llm", "anthropic", "claude", "provider"],
   "author": "Adam Ashenfelter",

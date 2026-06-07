@@ -1,6 +1,6 @@
 {
   "name": "agex-ts",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Embeddable LLM-work primitive: typed-function task contract, code as the action space, kvgit-backed state. TypeScript port of agex-py.",
   "keywords": [
     "agent",

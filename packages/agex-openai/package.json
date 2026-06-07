@@ -1,6 +1,6 @@
 {
   "name": "@agex-ts/openai",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "OpenAI Chat Completions provider for agex-ts. Lowers NeutralTurn[] to OpenAI messages; streams via SSE; baseUrl-friendly for OpenAI-compatible local servers (ollama, vLLM, LM Studio, OpenRouter, Together, etc.).",
   "keywords": [
     "agex",

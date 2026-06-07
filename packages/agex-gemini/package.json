@@ -1,6 +1,6 @@
 {
   "name": "@agex-ts/gemini",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Google Gemini provider for agex-ts. Lowers NeutralTurn[] to Gemini Content[]; streams via SSE; no SDK dep.",
   "keywords": ["agex", "agex-ts", "agent", "llm", "gemini", "google", "provider"],
   "author": "Adam Ashenfelter",

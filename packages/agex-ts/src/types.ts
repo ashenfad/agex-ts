@@ -12,6 +12,7 @@
 
 import type { FileSystem } from '@agex-ts/termish'
 import type { StandardSchemaV1 } from '@standard-schema/spec'
+import type { StateResolver } from './state/connect'
 
 // ---------------------------------------------------------------------------
 // Re-exports
@@ -724,6 +725,19 @@ export type StateConfig =
       readonly storage: 'memory' | 'indexeddb' | 'sqlite'
       /** Required for `storage: 'sqlite'`; ignored otherwise. */
       readonly path?: string
+    }
+  | {
+      /** Bring-your-own state: the embedder supplies a `StateResolver`
+       *  directly, and `connectState` returns it as-is. The built-in
+       *  `versioned` storage gives each session its own substrate (a
+       *  separate db / file), which can't express "one shared substrate,
+       *  a branch per session" — many working trees over one repo, for
+       *  concurrent sessions that still fork cheaply. A custom resolver
+       *  (e.g. one returning a `KvgitState` over a shared `VersionedKV`
+       *  pinned per branch) does. See agex-studio's concurrent-sessions
+       *  work. */
+      readonly type: 'resolver'
+      readonly resolver: StateResolver
     }
 
 /** How the agent's virtual filesystem is backed. `memory` uses

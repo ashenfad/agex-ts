@@ -54,6 +54,14 @@ function assertSafeSession(session: string): void {
 }
 
 export async function connectState(config: StateConfig = { type: 'live' }): Promise<StateResolver> {
+  // Bring-your-own resolver: the embedder built the StateResolver
+  // itself (e.g. a shared `VersionedKV` with a branch per session, which
+  // the built-in storage modes — one substrate per session — can't
+  // express). Hand it back untouched. `createAgent` flows `opts.state`
+  // straight through here, so this is the one place that needs to know.
+  if (config.type === 'resolver') {
+    return config.resolver
+  }
   if (config.type === 'live') {
     const cache = new Map<string, StateBackend>()
     return {

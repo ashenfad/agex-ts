@@ -1,5 +1,7 @@
+import { Staged, VersionedKV } from '@agex-ts/kvgit'
+import { Memory } from '@agex-ts/kvgit/backends/memory'
 import { describe, expect, it } from 'vitest'
-import { KvgitState, Live, connectState, isVersioned } from '../src/state'
+import { KvgitState, Live, type StateResolver, connectState, isVersioned } from '../src/state'
 
 describe('connectState — live', () => {
   it('returns a non-versioned resolver for { type: "live" }', async () => {
@@ -120,5 +122,58 @@ describe('connectState — session id validation', () => {
     const r = await connectState({ type: 'live' })
     await expect(r.resolve('../escape')).rejects.toThrow(/invalid session id/)
     await expect(r.resolve('default')).resolves.toBeDefined()
+  })
+})
+
+describe('connectState — resolver passthrough', () => {
+  it('returns a caller-supplied resolver unchanged', async () => {
+    const custom: StateResolver = {
+      versioned: false,
+      resolve: async () => new Live(),
+    }
+    const r = await connectState({ type: 'resolver', resolver: custom })
+    expect(r).toBe(custom)
+  })
+
+  it('supports a shared-store, branch-per-session resolver', async () => {
+    // The arrangement the built-in `versioned` storage can't express: ONE
+    // substrate, each session id a branch within it — many working trees
+    // over one repo, the basis for concurrent sessions that still fork
+    // cheaply. The embedder builds this resolver and hands it in.
+    const store = new Memory()
+    const main = await VersionedKV.open(store) // empty root on 'main'
+    const cache = new Map<string, KvgitState>()
+    const resolver: StateResolver = {
+      versioned: true,
+      async resolve(session) {
+        const hit = cache.get(session)
+        if (hit) return hit
+        // 'main' uses the root; any other session forks off main's HEAD.
+        const vk = session === 'main' ? main : ((await main.createBranch(session)) as VersionedKV)
+        const state = new KvgitState(new Staged(vk))
+        cache.set(session, state)
+        return state
+      },
+    }
+
+    const r = await connectState({ type: 'resolver', resolver })
+    expect(r).toBe(resolver)
+    expect(r.versioned).toBe(true)
+
+    const a = (await r.resolve('main')) as KvgitState
+    a.set('owner', 'a')
+    await a.commit()
+
+    // A fresh session forks off main's HEAD → sees a's committed write…
+    const b = (await r.resolve('chat-feature1')) as KvgitState
+    expect(await b.get('owner')).toBe('a')
+
+    // …then diverges on its own branch without disturbing main.
+    b.set('owner', 'b')
+    await b.commit()
+    expect(await b.get('owner')).toBe('b')
+    expect(await a.get('owner')).toBe('a')
+    expect(a.currentCommit).not.toBe(b.currentCommit)
+    expect(isVersioned(a)).toBe(true)
   })
 })

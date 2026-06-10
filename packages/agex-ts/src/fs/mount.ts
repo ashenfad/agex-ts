@@ -7,6 +7,9 @@
  *   - Reads outside any mount go to the backing FS.
  *   - All writes go to the backing FS — overlay writes throw a
  *     `TypeError` clearly attributing the rejection to the mount.
+ *     `write` auto-creates the parent directory (mkdir -p), matching
+ *     the `file_write` emission path so every agent-facing write has
+ *     the same semantics.
  *   - `cwd` and `chdir` are tracked on the backing FS only; mount
  *     paths are absolute and don't participate in cwd resolution.
  *   - `list()` of a directory that *contains* a mount point includes
@@ -131,6 +134,17 @@ export class MountFS implements FileSystem {
     const route = this.#route(path)
     if (route.fs !== this.#backing) {
       throw new TypeError(`MountFS: cannot write under read-only mount ${route.mountPrefix}`)
+    }
+    // Auto-create the parent directory (mkdir -p semantics). MountFS
+    // is the agent-facing layer, and `file_write` emissions already
+    // auto-create parents (dispatcher.ts ensureParentDir) — without
+    // this, the other agent write paths (`fs.write` in a ts_action,
+    // terminal redirects) inconsistently demanded an explicit mkdir
+    // first. The strict no-parent behavior stays in the termish
+    // backing FS for callers who want it.
+    const slash = path.lastIndexOf('/')
+    if (slash > 0) {
+      await this.#backing.mkdir(path.slice(0, slash), { parents: true, existOk: true })
     }
     return this.#backing.write(path, content, mode)
   }

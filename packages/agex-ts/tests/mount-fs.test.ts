@@ -40,6 +40,29 @@ describe('MountFS — routing', () => {
     expect(dec.decode(await backing.read('/note.txt'))).toBe('agent wrote this')
   })
 
+  it('write auto-creates missing parent directories (mkdir -p)', async () => {
+    // The backing FS itself rejects writes into nonexistent dirs —
+    // MountFS papers over that so every agent-facing write path has
+    // the same semantics as `file_write` emissions.
+    const backing = new MemoryFS()
+    const fs = new MountFS(backing, [{ prefix: '/chapters', fs: makeOverlay() }])
+    await fs.write('/app/components/Chart.jsx', enc.encode('export {}'))
+    expect(await backing.isDir('/app/components')).toBe(true)
+    expect(dec.decode(await backing.read('/app/components/Chart.jsx'))).toBe('export {}')
+    // Relative path resolves against the backing cwd the same way.
+    await fs.write('helpers/util/math.js', enc.encode('export const x = 1'))
+    expect(await backing.isFile('/helpers/util/math.js')).toBe(true)
+  })
+
+  it('write surfaces a clear error when the parent path is a file', async () => {
+    const backing = new MemoryFS()
+    const fs = new MountFS(backing, [{ prefix: '/chapters', fs: makeOverlay() }])
+    await fs.write('/blocker', enc.encode('x'))
+    await expect(fs.write('/blocker/child.txt', enc.encode('y'))).rejects.toThrow(
+      /file exists at path/,
+    )
+  })
+
   it('list() includes mount points as virtual subdirs of the parent', async () => {
     const fs = new MountFS(new MemoryFS(), [
       { prefix: '/chapters', fs: makeOverlay() },

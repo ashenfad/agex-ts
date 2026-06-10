@@ -34,6 +34,24 @@ describe('detectImage', () => {
   it('rejects unsupported format', () => {
     expect(detectImage({ format: 'gif', data: 'abc' })).toBeNull()
   })
+  it('accepts {format, data: Uint8Array} with valid magic, trusting the bytes over the label', () => {
+    // Agents wrap raw bytes this way unprompted (e.g. renderPdf pages:
+    // `console.log({format: 'png', data: page})`) — must render, not
+    // JSON-serialize into `{"0":137,"1":80,...}`.
+    expect(detectImage({ format: 'png', data: PNG })).toEqual({
+      format: 'png',
+      data: bytesToBase64(PNG),
+    })
+    // Mislabeled but valid image: the magic wins.
+    expect(detectImage({ format: 'png', data: JPEG })).toEqual({
+      format: 'jpeg',
+      data: bytesToBase64(JPEG),
+    })
+  })
+  it('rejects {format, data: Uint8Array} whose bytes have no image magic', () => {
+    expect(detectImage({ format: 'png', data: new Uint8Array(20) })).toBeNull()
+    expect(detectImage({ format: 'png', data: new Uint8Array([0x89, 0x50]) })).toBeNull()
+  })
   it('rejects missing fields and empty data', () => {
     expect(detectImage({ format: 'png' })).toBeNull()
     expect(detectImage({ data: 'abc' })).toBeNull()

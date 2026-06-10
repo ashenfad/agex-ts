@@ -14,7 +14,9 @@
  * part.
  *
  * Image detection rules (`detectImage`):
- * - `{format: 'png'|'jpeg'|'webp', data: <non-empty string>}`
+ * - `{format: 'png'|'jpeg'|'webp', data: <non-empty string>}`, or the
+ *   same shape with `data: <Uint8Array>` whose magic bytes match a
+ *   supported format (agents naturally wrap raw bytes this way)
  * - `data:image/(png|jpeg|webp);base64,...` strings
  * - `Uint8Array` whose first ~12 bytes match a PNG / JPEG / WebP magic
  *
@@ -127,12 +129,21 @@ export function detectImage(value: unknown): { format: ImageFormat; data: string
     !(value instanceof Uint8Array)
   ) {
     const v = value as { format?: unknown; data?: unknown }
-    if (
-      (v.format === 'png' || v.format === 'jpeg' || v.format === 'webp') &&
-      typeof v.data === 'string' &&
-      v.data.length > 0
-    ) {
-      return { format: v.format, data: v.data }
+    if (v.format === 'png' || v.format === 'jpeg' || v.format === 'webp') {
+      if (typeof v.data === 'string' && v.data.length > 0) {
+        return { format: v.format, data: v.data }
+      }
+      // Raw-bytes variant: `{format, data: <Uint8Array>}`. Agents
+      // wrapping image bytes (e.g. rendered PDF pages) reach for this
+      // shape unprompted; without this branch the wrapper falls
+      // through to safeStringify and the bytes JSON-serialize into
+      // `{"0":137,"1":80,...}` garbage. Trust the magic bytes over
+      // the declared label — a mislabeled but valid image renders as
+      // what it actually is.
+      if (v.data instanceof Uint8Array) {
+        const fmt = detectMagicFormat(v.data)
+        if (fmt !== null) return { format: fmt, data: bytesToBase64(v.data) }
+      }
     }
   }
   // Rule B — data URL string. The MIME label is host-supplied and

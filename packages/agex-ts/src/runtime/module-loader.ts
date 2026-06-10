@@ -68,9 +68,19 @@
  * agent-written helpers are short, idiomatic, and don't contain
  * pathological cases — but a few fragile spots exist:
  *
- *   - An `import` or `export` statement appearing inside a string
- *     literal or comment can fool the matcher. (`const s = "import
- *     { x } from '/p'"` would attempt to load `/p` from the VFS.)
+ *   - `import`/`export` statements inside **template literals and
+ *     comments** are handled: `parseImports` scans a masked copy of
+ *     the source (see `maskTemplatesAndComments`), so an agent
+ *     embedding app source in a backtick string and `fs.writeText`ing
+ *     it doesn't get that string's imports rewritten into
+ *     `__load(...)` calls the app's realm can't resolve. The masker
+ *     doesn't track regex literals, and a line-continuation
+ *     (`"foo\` + newline) putting `import` at a line start inside a
+ *     quoted string can still in principle fool it — the failure
+ *     mode is a missed/false rewrite that errors visibly at eval.
+ *   - The helper `export` rewrite passes (`rewriteHelperExports` /
+ *     `rewriteHelperReexports`) still scan raw source — an `export`
+ *     statement inside a helper's string literal can fool them.
  *   - Multi-line `export default` expressions truncate at the
  *     first newline. Single-line forms — including IIFEs and
  *     inline objects — work fine.
@@ -80,10 +90,9 @@
  *     map. Helpers that re-export from npm-style packages aren't
  *     supported.
  *
- * If/when these bite real agent code, the answer is to swap the
- * regex passes for an AST walk (e.g. via `oxc-parser` or
- * `@babel/parser`'s lightweight estree mode). For now they
- * haven't surfaced.
+ * If/when the remaining spots bite real agent code, the answer is
+ * to swap the regex passes for an AST walk (e.g. via `oxc-parser`
+ * or `@babel/parser`'s lightweight estree mode).
  */
 
 import tsBlankSpace from 'ts-blank-space'
@@ -554,13 +563,150 @@ function rewriteHelperExports(code: string): { code: string; exportNames: string
 // Import-statement parsing + rewriting
 // ---------------------------------------------------------------------------
 
+/**
+ * Blank out template-literal contents and comments so the import/
+ * re-export regexes can't match statements that live inside them —
+ * an agent embedding app source in a backtick string (`await
+ * fs.writeText('app/index.js', \`import ...\`)`) must not get that
+ * string's imports rewritten into `__load(...)` calls the app's
+ * realm can't resolve.
+ *
+ * Masked chars become spaces; newlines are preserved so offsets AND
+ * line structure stay aligned with the original source (the caller
+ * slices replacements into the original by offset). Single/double-
+ * quoted strings are tracked (so a quote can't open a fake template
+ * or comment) but NOT masked — import specifiers live in them.
+ * Template interpolations (`${...}`) re-enter live-code scanning,
+ * including nested templates. Regex literals are not tracked — a
+ * quote/backtick inside one can desync the scanner (rare in agent
+ * code; the failure mode is a missed rewrite, which surfaces as a
+ * clear eval-time syntax error rather than silent corruption).
+ */
+export function maskTemplatesAndComments(src: string): string {
+  const out = src.split('')
+  /** Template-nesting stack: 'tpl' = inside a template's literal
+   *  text (masked); {depth} = inside a `${...}` interpolation
+   *  (live code), tracking unmatched `{` so object literals don't
+   *  close it early. */
+  type Frame = 'tpl' | { depth: number }
+  const stack: Frame[] = []
+  let str: '"' | "'" | null = null
+  let comment: 'line' | 'block' | null = null
+  let i = 0
+  while (i < src.length) {
+    const c = src[i]
+    const n = src[i + 1]
+    if (comment === 'line') {
+      if (c === '\n') comment = null
+      else out[i] = ' '
+      i++
+      continue
+    }
+    if (comment === 'block') {
+      if (c === '*' && n === '/') {
+        out[i] = ' '
+        out[i + 1] = ' '
+        comment = null
+        i += 2
+        continue
+      }
+      if (c !== '\n') out[i] = ' '
+      i++
+      continue
+    }
+    if (str !== null) {
+      // Tracked but not masked — see doc comment.
+      if (c === '\\') {
+        i += 2
+        continue
+      }
+      if (c === str || c === '\n') str = null
+      i++
+      continue
+    }
+    const top = stack[stack.length - 1]
+    if (top === 'tpl') {
+      if (c === '\\') {
+        out[i] = ' '
+        if (i + 1 < src.length && src[i + 1] !== '\n') out[i + 1] = ' '
+        i += 2
+        continue
+      }
+      if (c === '`') {
+        stack.pop()
+        out[i] = ' '
+        i++
+        continue
+      }
+      if (c === '$' && n === '{') {
+        stack.push({ depth: 0 })
+        out[i] = ' '
+        out[i + 1] = ' '
+        i += 2
+        continue
+      }
+      if (c !== '\n') out[i] = ' '
+      i++
+      continue
+    }
+    // Live code (top-level or inside an interpolation).
+    if (c === '/' && n === '/') {
+      comment = 'line'
+      out[i] = ' '
+      out[i + 1] = ' '
+      i += 2
+      continue
+    }
+    if (c === '/' && n === '*') {
+      comment = 'block'
+      out[i] = ' '
+      out[i + 1] = ' '
+      i += 2
+      continue
+    }
+    if (c === "'" || c === '"') {
+      str = c
+      i++
+      continue
+    }
+    if (c === '`') {
+      stack.push('tpl')
+      out[i] = ' '
+      i++
+      continue
+    }
+    if (top !== undefined) {
+      // `top` can only be an interpolation frame here — the 'tpl'
+      // case was handled (and `continue`d) above.
+      if (c === '{') top.depth++
+      else if (c === '}') {
+        if (top.depth === 0) {
+          stack.pop() // back into the template's literal text
+          out[i] = ' '
+          i++
+          continue
+        }
+        top.depth--
+      }
+    }
+    i++
+  }
+  return out.join('')
+}
+
 /** Find top-level static module-graph edges in the source — both
- *  `import` statements and `export ... from` re-exports. */
+ *  `import` statements and `export ... from` re-exports. Scans a
+ *  masked copy of the source (template literals and comments
+ *  blanked) so string-embedded code can't produce false matches;
+ *  offsets and matched text are valid against the original because
+ *  masking is char-for-char and real import statements contain no
+ *  template/comment chars. */
 export function parseImports(source: string): ImportStatement[] {
   const out: ImportStatement[] = []
+  const masked = maskTemplatesAndComments(source)
   const importRe =
     /^[ \t]*import\b((?:[\s\S](?!^[ \t]*(?:import|export)\b))*?)['"]([^'"]+)['"][ \t]*;?[ \t]*$/gm
-  for (const m of source.matchAll(importRe)) {
+  for (const m of masked.matchAll(importRe)) {
     const start = m.index ?? 0
     const end = start + m[0].length
     const middle = (m[1] ?? '').trim()
@@ -575,7 +721,7 @@ export function parseImports(source: string): ImportStatement[] {
   }
   const reexportRe =
     /^[ \t]*export\b((?:[\s\S](?!^[ \t]*(?:import|export)\b))*?)\bfrom\b[\s]*['"]([^'"]+)['"][ \t]*;?[ \t]*$/gm
-  for (const m of source.matchAll(reexportRe)) {
+  for (const m of masked.matchAll(reexportRe)) {
     const start = m.index ?? 0
     const end = start + m[0].length
     const path = m[2] ?? ''

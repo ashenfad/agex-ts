@@ -234,6 +234,21 @@ describe('workerRuntime', () => {
     expect(result.outputs[0]).toMatchObject({ type: 'image', format: 'png' })
   })
 
+  it('console.log of {format, data: Uint8Array} produces an image part (in-Worker)', async () => {
+    // The wrapper shape agents reach for unprompted (e.g. renderPdf
+    // pages). Must route through the image pipeline, not JSON-serialize
+    // the bytes into `{"0":137,"1":80,...}`.
+    const rt = runtime()
+    await rt.init(EMPTY_POLICY)
+    const result = await rt.execute(
+      "const bytes = new Uint8Array([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,0,0,0,13])\nconsole.log('Page 1', { format: 'png', data: bytes })\ntaskSuccess(null)",
+      makeCtx(),
+    )
+    expect(result.outputs).toHaveLength(2)
+    expect(result.outputs[0]).toEqual({ type: 'text', text: 'Page 1' })
+    expect(result.outputs[1]).toMatchObject({ type: 'image', format: 'png' })
+  })
+
   it('caps oversized object args via safeStringify', async () => {
     // Direct `console.log(bigObj)` — went through JSON.stringify
     // path. Has had a cap forever; pin it explicitly so a future

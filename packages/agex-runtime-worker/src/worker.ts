@@ -181,7 +181,8 @@ function safeStringify(v: unknown): string {
 
 /** Inline copy of `agex-ts/console-capture`'s `detectImage` rules, kept
  *  in-realm so the worker bundle doesn't need to pull in
- *  `node:async_hooks`. Three accept rules: `{format,data}` objects,
+ *  `node:async_hooks`. Three accept rules: `{format,data}` objects
+ *  (`data` as base64 string OR raw `Uint8Array` with matching magic),
  *  `data:image/...;base64,...` strings, and `Uint8Array`s whose first
  *  ~12 bytes match a PNG / JPEG / WebP magic. Returns `null` for non-
  *  image values. */
@@ -193,12 +194,21 @@ function detectImage(value: unknown): { format: 'png' | 'jpeg' | 'webp'; data: s
     !(value instanceof Uint8Array)
   ) {
     const v = value as { format?: unknown; data?: unknown }
-    if (
-      (v.format === 'png' || v.format === 'jpeg' || v.format === 'webp') &&
-      typeof v.data === 'string' &&
-      v.data.length > 0
-    ) {
-      return { format: v.format, data: v.data }
+    if (v.format === 'png' || v.format === 'jpeg' || v.format === 'webp') {
+      if (typeof v.data === 'string' && v.data.length > 0) {
+        return { format: v.format, data: v.data }
+      }
+      // Raw-bytes variant: `{format, data: <Uint8Array>}`. Agents
+      // wrapping image bytes (e.g. rendered PDF pages) reach for this
+      // shape unprompted; without this branch the wrapper falls
+      // through to safeStringify and the bytes JSON-serialize into
+      // `{"0":137,"1":80,...}` garbage. Trust the magic bytes over
+      // the declared label — a mislabeled but valid image renders as
+      // what it actually is.
+      if (v.data instanceof Uint8Array) {
+        const fmt = detectMagicFormat(v.data)
+        if (fmt !== null) return { format: fmt, data: bytesToBase64(v.data) }
+      }
     }
   }
   if (typeof value === 'string') {
@@ -207,25 +217,29 @@ function detectImage(value: unknown): { format: 'png' | 'jpeg' | 'webp'; data: s
       return { format: m[1] as 'png' | 'jpeg' | 'webp', data: m[2] }
     }
   }
-  if (value instanceof Uint8Array && value.byteLength >= 12) {
-    if (value[0] === 0x89 && value[1] === 0x50 && value[2] === 0x4e && value[3] === 0x47) {
-      return { format: 'png', data: bytesToBase64(value) }
-    }
-    if (value[0] === 0xff && value[1] === 0xd8 && value[2] === 0xff) {
-      return { format: 'jpeg', data: bytesToBase64(value) }
-    }
-    if (
-      value[0] === 0x52 &&
-      value[1] === 0x49 &&
-      value[2] === 0x46 &&
-      value[3] === 0x46 &&
-      value[8] === 0x57 &&
-      value[9] === 0x45 &&
-      value[10] === 0x42 &&
-      value[11] === 0x50
-    ) {
-      return { format: 'webp', data: bytesToBase64(value) }
-    }
+  if (value instanceof Uint8Array) {
+    const fmt = detectMagicFormat(value)
+    if (fmt !== null) return { format: fmt, data: bytesToBase64(value) }
+  }
+  return null
+}
+
+/** Inspect the first 12 bytes for PNG / JPEG / WebP signatures. */
+function detectMagicFormat(b: Uint8Array): 'png' | 'jpeg' | 'webp' | null {
+  if (b.byteLength < 12) return null
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'png'
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'jpeg'
+  if (
+    b[0] === 0x52 &&
+    b[1] === 0x49 &&
+    b[2] === 0x46 &&
+    b[3] === 0x46 &&
+    b[8] === 0x57 &&
+    b[9] === 0x45 &&
+    b[10] === 0x42 &&
+    b[11] === 0x50
+  ) {
+    return 'webp'
   }
   return null
 }

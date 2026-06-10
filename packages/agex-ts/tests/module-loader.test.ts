@@ -1,6 +1,6 @@
 import { MemoryFS } from '@agex-ts/termish/fs/memory'
 import { describe, expect, it } from 'vitest'
-import { parseImports, prepareScript } from '../src/runtime/module-loader'
+import { maskTemplatesAndComments, parseImports, prepareScript } from '../src/runtime/module-loader'
 
 const enc = new TextEncoder()
 
@@ -96,6 +96,88 @@ import {
 
   it('returns empty for code with no imports', () => {
     expect(parseImports('const x = 1\nconsole.log(x)')).toEqual([])
+  })
+
+  it('ignores imports inside template literals (app source via fs.writeText)', () => {
+    // The bitten case: an agent embeds app source in a backtick
+    // string. Rewriting those imports corrupts the written file —
+    // the app's realm has no __load and throws at runtime.
+    const src = [
+      'const code = `',
+      "import { h, render } from 'preact';",
+      "import { useState } from 'preact/hooks';",
+      '`;',
+      "await fs.writeText('app/index.js', code);",
+    ].join('\n')
+    expect(parseImports(src)).toEqual([])
+  })
+
+  it('still finds real imports alongside template-embedded ones', () => {
+    const src = [
+      "import { sum } from '/helpers/math'",
+      'const code = `',
+      "import { h } from 'preact';",
+      '`;',
+    ].join('\n')
+    const out = parseImports(src)
+    expect(out.map((i) => i.path)).toEqual(['/helpers/math'])
+  })
+
+  it('ignores imports inside comments', () => {
+    const src = [
+      "// import { a } from '/helpers/x'",
+      '/*',
+      "import { b } from '/helpers/y'",
+      '*/',
+      "import { c } from '/helpers/z'",
+    ].join('\n')
+    const out = parseImports(src)
+    expect(out.map((i) => i.path)).toEqual(['/helpers/z'])
+  })
+
+  it('finds imports in live code inside template interpolations', () => {
+    // ${...} re-enters live code — not that imports can appear
+    // there (they are statements), but strings/templates inside
+    // the interpolation must not desync the scanner.
+    const src = ['const s = `a ${fn(`nested ${x}`)} b`;', "import { d } from '/helpers/d'"].join(
+      '\n',
+    )
+    const out = parseImports(src)
+    expect(out.map((i) => i.path)).toEqual(['/helpers/d'])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// maskTemplatesAndComments
+// ---------------------------------------------------------------------------
+
+describe('maskTemplatesAndComments', () => {
+  it('preserves length and newlines', () => {
+    const src = 'const a = `line1\nline2`;\n// note\nconst b = 1'
+    const masked = maskTemplatesAndComments(src)
+    expect(masked.length).toBe(src.length)
+    expect(masked.split('\n').length).toBe(src.split('\n').length)
+  })
+
+  it('masks template contents but keeps quoted strings live', () => {
+    const masked = maskTemplatesAndComments('const a = `hidden`; const b = "visible"')
+    expect(masked).not.toContain('hidden')
+    expect(masked).toContain('"visible"')
+  })
+
+  it('handles escaped backticks and nested templates', () => {
+    const masked = maskTemplatesAndComments('const a = `esc \\` still hidden`; const b = 2')
+    expect(masked).not.toContain('hidden')
+    expect(masked).toContain('const b = 2')
+    const nested = maskTemplatesAndComments('const a = `x ${y(`inner`)} z`; const tail = 3')
+    expect(nested).not.toContain('inner')
+    expect(nested).toContain('const tail = 3')
+  })
+
+  it('does not treat comment/template markers inside quoted strings as real', () => {
+    const masked = maskTemplatesAndComments('const url = "https://a/b"; const t = `m`; rest()')
+    expect(masked).toContain('"https://a/b"')
+    expect(masked).toContain('rest()')
   })
 })
 

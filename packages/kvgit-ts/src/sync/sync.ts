@@ -163,9 +163,12 @@ export async function pushBranch(
   const syncHead = await getSyncHead(store, branch)
 
   // One retry: a lost CAS means the remote moved under us; re-observe
-  // and re-classify once before declaring divergence.
+  // and re-classify once before declaring divergence. Hoisted so the
+  // exhausted-retries return reuses the last observation instead of a
+  // third listRefs round trip (slightly stale is fine for a report).
+  let remoteHead: string | null = null
   for (let attempt = 0; attempt < 2; attempt++) {
-    const remoteHead = await readRemoteHead(remote, branch)
+    remoteHead = await readRemoteHead(remote, branch)
     const result = (status: SyncStatus, transferred = 0): SyncResult => ({
       status,
       branch,
@@ -223,7 +226,7 @@ export async function pushBranch(
     status: 'diverged',
     branch,
     localHead,
-    remoteHead: await readRemoteHead(remote, branch),
+    remoteHead,
     transferred: 0,
   }
 }

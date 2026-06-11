@@ -617,7 +617,10 @@ export function maskTemplatesAndComments(src: string): string {
     if (str !== null) {
       // Tracked but not masked — see doc comment.
       if (c === '\\') {
-        i += 2
+        // Skip the full CRLF after a line-continuation backslash so the
+        // trailing '\n' doesn't trip the recovery heuristic below.
+        if (src[i + 1] === '\r' && src[i + 2] === '\n') i += 3
+        else i += 2
         continue
       }
       if (c === str || c === '\n') str = null

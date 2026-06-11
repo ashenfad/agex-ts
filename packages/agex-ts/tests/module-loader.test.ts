@@ -179,6 +179,17 @@ describe('maskTemplatesAndComments', () => {
     expect(masked).toContain('"https://a/b"')
     expect(masked).toContain('rest()')
   })
+
+  it('keeps string state across a CRLF line-continuation backslash', () => {
+    // "a\<CRLF>`tmpl`" is a single string with the continuation; the
+    // backtick inside it must stay inert. If the trailing '\n' wrongly
+    // resets string state, the backtick opens a real template and `tmpl`
+    // gets masked away.
+    const src = 'const s = "a\\\r\n`tmpl`"; const tail = 9'
+    const masked = maskTemplatesAndComments(src)
+    expect(masked).toContain('tmpl')
+    expect(masked).toContain('const tail = 9')
+  })
 })
 
 // ---------------------------------------------------------------------------

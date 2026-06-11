@@ -22,6 +22,14 @@ export {
 export { diffKeysets, walkHistory, type ParentLoader } from './versioned/helpers'
 export { walkDelta, type WalkDeltaOptions } from './sync/walk'
 export {
+  applyWire,
+  clearSyncHead,
+  getSyncHead,
+  setSyncHead,
+  type ApplyWireOptions,
+  type ApplyWireResult,
+} from './sync/apply'
+export {
   Staged,
   jsonDecoder,
   jsonEncoder,

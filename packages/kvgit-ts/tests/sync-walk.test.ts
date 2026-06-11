@@ -41,7 +41,7 @@ async function verifyHashFidelity(
     // at original commit creation).
     const preview = new Map(base)
     for (const key of wc.removals) preview.delete(key)
-    for (const [key, owner] of wc.carries) preview.set(key, blobPointer(owner, key))
+    for (const [key, carry] of wc.carries) preview.set(key, blobPointer(carry.owner, key))
     for (const key of wc.updates.keys()) preview.set(key, pendingPointer(key))
 
     const recomputed = await contentHash(wc.parents, preview, wc.updates, wc.info)
@@ -174,7 +174,11 @@ describe('walkDelta — merges and carries', () => {
     // exactly, so it is neither update nor carry.
     expect(merge.parents).toEqual([theirsCommit, oursCommit])
     expect(merge.updates.size).toBe(0)
-    expect([...merge.carries.entries()]).toEqual([['kb', oursCommit]])
+    expect(merge.carries.size).toBe(1)
+    const carry = merge.carries.get('kb')
+    expect(carry?.owner).toBe(oursCommit)
+    expect(carry?.size).toBe(bytes('from-b').length)
+    expect(carry?.createdAt).toBeGreaterThan(0)
     expect(merge.carries.has('ka')).toBe(false)
 
     await verifyHashFidelity(wire)

@@ -28,7 +28,10 @@ this layer:
   removals, carries, info. Produced by `walkDelta(store, { want, have })`
   ([`src/sync/walk.ts`](./src/sync/walk.ts)) — commits reachable from
   `want` but not `have`, parents-first. `have = ∅` is a full export
-  (bundles are the degenerate case).
+  (bundles are the degenerate case). Replayed by
+  `applyWire(store, commits)` ([`src/sync/apply.ts`](./src/sync/apply.ts)),
+  which recomputes every commit hash from the replayed state and
+  refuses mismatches before writing.
 - **HAMT nodes never cross the wire.** Commit hashes cover parents,
   the keyset pointer map, update bytes, and info — *not* HAMT node
   bytes (see `contentHash` in
@@ -38,12 +41,15 @@ this layer:
 - **Carries are the subtle part.** Merge commits adopt keys from the
   non-first parent *by pointer* (`<owning-commit>:<key>`), without
   rewriting bytes — and the pointer map participates in the commit
-  hash. `WireCommit.carries` transports that provenance; a replayer
-  that derived pointers from the first parent instead would change
-  the hash. Replay must reproduce hashes exactly: recomputing
-  `contentHash` over replayed state and comparing is the sync layer's
-  integrity check (see the fidelity tests in
-  [`tests/sync-walk.test.ts`](./tests/sync-walk.test.ts)).
+  hash. `WireCommit.carries` transports that provenance (plus the
+  carried entry's `size`/`createdAt`, so replay never consults a
+  parent keyset); a replayer that derived pointers from the first
+  parent instead would change the hash. Replay must reproduce hashes
+  exactly: recomputing `contentHash` over replayed state and comparing
+  is the sync layer's integrity check (see the fidelity tests in
+  [`tests/sync-walk.test.ts`](./tests/sync-walk.test.ts) and the
+  refusal tests in
+  [`tests/sync-apply.test.ts`](./tests/sync-apply.test.ts)).
 - **Merge never crosses the wire either.** Remotes move objects and
   CAS refs; reconciliation always happens locally via the existing
   three-way machinery (`commit()` / merge fns). Remotes can therefore
@@ -53,8 +59,10 @@ this layer:
   `parents[0]` is "theirs" (the head that won the CAS race) and
   `parents[1]` is "ours" (`VersionedBase.threeWayMerge`). Wire deltas
   diff against `parents[0]`.
-- `__sync_head__<branch>` is reserved for remote-tracking state
-  (which remote commit a branch was last synced to).
+- `__sync_head__<branch>` holds remote-tracking state (which remote
+  commit a branch was last synced to) via `getSyncHead` /
+  `setSyncHead` / `clearSyncHead` in
+  [`src/sync/apply.ts`](./src/sync/apply.ts).
 
 The storage layout and commit-identity primitives live in
 [`src/versioned/layout.ts`](./src/versioned/layout.ts) — the single

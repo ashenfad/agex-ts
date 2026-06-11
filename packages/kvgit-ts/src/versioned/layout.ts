@@ -21,7 +21,7 @@
  *   `<commit_hash>:<user_key>`       — blob value bytes
  */
 
-import type { CommitInfo } from '../types'
+import type { CommitInfo, KVStore } from '../types'
 
 export const STORAGE_VERSION = 1
 export const STORAGE_VERSION_KEY = '__kvgit_version__'
@@ -56,6 +56,46 @@ export function blobPointer(commitHash: string, key: string): string {
 /** The commit that wrote a blob, extracted from its pointer. */
 export function blobPointerOwner(pointer: string): string {
   return pointer.slice(0, COMMIT_HASH_LEN)
+}
+
+// ---------------------------------------------------------------------------
+// Storage version
+// ---------------------------------------------------------------------------
+
+/**
+ * Validate (or stamp) the storage version sentinel.
+ *
+ * Every writer entry point — `VersionedKV.open`, `applyWire` — must
+ * call this before touching the store: an existing sentinel of another
+ * version is rejected, a fresh store gets the sentinel written, and a
+ * store with branch heads but no sentinel is treated as a pre-v1
+ * format and rejected.
+ */
+export async function checkStorageVersion(store: KVStore): Promise<void> {
+  const raw = await store.get(STORAGE_VERSION_KEY)
+  if (raw !== null) {
+    const version = safeLoads(raw)
+    if (version !== STORAGE_VERSION) {
+      throw new Error(
+        `Store has kvgit storage version ${JSON.stringify(version)}, ` +
+          `this code supports ${STORAGE_VERSION}. Use a fresh store.`,
+      )
+    }
+    return
+  }
+
+  // No version sentinel. Either fresh, or pre-v1.
+  let hasExisting = false
+  for await (const _k of store.keys(BRANCH_HEAD_PREFIX)) {
+    hasExisting = true
+    break
+  }
+  if (hasExisting) {
+    throw new Error(
+      `Store appears to use an older kvgit storage format. This version requires storage v${STORAGE_VERSION}. Use a fresh store.`,
+    )
+  }
+  await store.set(STORAGE_VERSION_KEY, dumps(STORAGE_VERSION))
 }
 
 // ---------------------------------------------------------------------------

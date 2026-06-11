@@ -175,7 +175,7 @@ export async function applyWire(
     const writes: Array<[string, Uint8Array]> = [...blobWrites]
     for (const [k, v] of newKs.pending) writes.push([k, v])
     writes.push([COMMIT_ROOT(wc.hash), dumps(newKs.root)])
-    writes.push([PARENT_COMMIT(wc.hash), dumps([...wc.parents])])
+    writes.push([PARENT_COMMIT(wc.hash), dumps(wc.parents)])
     writes.push([COMMIT_TIME(wc.hash), dumps(wc.time)])
     if (wc.info !== null) writes.push([INFO_KEY(wc.hash), dumps(wc.info)])
     await store.setMany(writes)

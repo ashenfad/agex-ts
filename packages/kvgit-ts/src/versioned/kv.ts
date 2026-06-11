@@ -377,7 +377,7 @@ export class VersionedKV extends VersionedBase {
     const writes: Array<[string, Uint8Array]> = [...blobWrites]
     for (const [k, v] of newKs.pending) writes.push([k, v])
     writes.push([COMMIT_ROOT(mergeHash), dumps(newKs.root)])
-    writes.push([PARENT_COMMIT(mergeHash), dumps([...parents])])
+    writes.push([PARENT_COMMIT(mergeHash), dumps(parents)])
     writes.push([COMMIT_TIME(mergeHash), dumps(Date.now())])
     if (info !== null) writes.push([INFO_KEY(mergeHash), dumps(info)])
 

@@ -275,6 +275,56 @@ export interface Versioned {
 }
 
 // ---------------------------------------------------------------------------
+// Sync / wire
+// ---------------------------------------------------------------------------
+
+/**
+ * One kvgit commit in wire form — the unit of transfer between two
+ * kvgit histories (sync remotes, bundles).
+ *
+ * A `WireCommit` carries exactly what a replayer needs to reproduce
+ * the commit byte-identically: parents, the changed values, and the
+ * provenance of carried pointers. It deliberately does NOT carry HAMT
+ * nodes (rebuilt locally; commit hashes don't cover node bytes) or
+ * blob pointers for updates (reconstructed as `<hash>:<key>` during
+ * replay).
+ *
+ * Replay must reproduce `hash` exactly — recomputing `contentHash`
+ * over the replayed state and comparing against `hash` is the
+ * integrity check of the sync layer.
+ */
+export interface WireCommit {
+  /** kvgit commit hash (40-hex). */
+  readonly hash: string
+  /** Parent hashes, order-significant (order participates in `hash`).
+   *  For three-way merges, `parents[0]` is "theirs" (the head that won
+   *  the CAS race) and `parents[1]` is "ours" — see `VersionedBase`. */
+  readonly parents: readonly string[]
+  /** Wall time epoch ms (`__commit_time__`). Not part of `hash`. */
+  readonly time: number
+  /** Caller-supplied commit info (`__info__`), or null. */
+  readonly info: CommitInfo | null
+  /** Values written at this commit: key → value bytes. Their blob
+   *  pointers are `<hash>:<key>` by construction. */
+  readonly updates: ReadonlyMap<string, Uint8Array>
+  /** Keys present in `parents[0]`'s keyset but absent here. */
+  readonly removals: ReadonlySet<string>
+  /** Per-key metadata fidelity for `updates`: kvgit stamps `createdAt`
+   *  slightly before commit time, so replay can't derive it. Not part
+   *  of `hash` (display metadata), but carried for exactness. */
+  readonly meta: ReadonlyMap<string, { readonly createdAt: number }>
+  /**
+   * Keys whose pointer differs from `parents[0]`'s but was NOT written
+   * at this commit — adopted from another ancestor (merge carries from
+   * the non-first parent's side). Maps key → owning commit hash; the
+   * pointer is `<owner>:<key>`. Replay must reproduce these pointers
+   * exactly — `contentHash` covers the pointer map, so deriving them
+   * from `parents[0]` instead would change the hash.
+   */
+  readonly carries: ReadonlyMap<string, string>
+}
+
+// ---------------------------------------------------------------------------
 // Encoding
 // ---------------------------------------------------------------------------
 

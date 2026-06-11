@@ -22,41 +22,24 @@
 import { Keyset } from '../keyset'
 import type { CommitInfo, KVStore, KeysetEntry, MetaEntry, Versioned } from '../types'
 import { VersionedBase } from './base'
+import {
+  BRANCH_HEAD,
+  BRANCH_HEAD_PREFIX,
+  BRANCH_HEAD_PREV,
+  COMMIT_ROOT,
+  COMMIT_TIME,
+  INFO_KEY,
+  PARENT_COMMIT,
+  STORAGE_VERSION,
+  STORAGE_VERSION_KEY,
+  blobPointer,
+  contentHash,
+  dumps,
+  loads,
+  pendingPointer,
+  safeLoads,
+} from './layout'
 import type { MergeResolution } from './merge'
-
-const STORAGE_VERSION = 1
-const STORAGE_VERSION_KEY = '__kvgit_version__'
-
-const BRANCH_HEAD = (branch: string): string => `__branch_head__${branch}`
-const BRANCH_HEAD_PREV = (branch: string): string => `__branch_head_prev__${branch}`
-const COMMIT_ROOT = (commit: string): string => `__commit_root__${commit}`
-const PARENT_COMMIT = (commit: string): string => `__parent_commit__${commit}`
-const COMMIT_TIME = (commit: string): string => `__commit_time__${commit}`
-const INFO_KEY = (commit: string): string => `__info__${commit}`
-const BRANCH_HEAD_PREFIX = '__branch_head__'
-
-// ---------------------------------------------------------------------------
-// JSON byte helpers
-// ---------------------------------------------------------------------------
-
-const _encoder = new TextEncoder()
-const _decoder = new TextDecoder()
-
-function dumps(value: unknown): Uint8Array {
-  return _encoder.encode(JSON.stringify(value))
-}
-
-function loads(raw: Uint8Array): unknown {
-  return JSON.parse(_decoder.decode(raw))
-}
-
-function safeLoads(raw: Uint8Array): unknown {
-  try {
-    return loads(raw)
-  } catch {
-    return null
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Recovery layer
@@ -154,74 +137,6 @@ async function checkStorageVersion(store: KVStore): Promise<void> {
     )
   }
   await store.set(STORAGE_VERSION_KEY, dumps(STORAGE_VERSION))
-}
-
-// ---------------------------------------------------------------------------
-// Content hashing
-// ---------------------------------------------------------------------------
-
-async function sha256Hex(data: Uint8Array): Promise<string> {
-  const buf = await globalThis.crypto.subtle.digest('SHA-256', data as Uint8Array<ArrayBuffer>)
-  const bytes = new Uint8Array(buf)
-  let hex = ''
-  for (let i = 0; i < bytes.length; i++) {
-    const b = bytes[i] as number
-    hex += (b < 16 ? '0' : '') + b.toString(16)
-  }
-  return hex
-}
-
-/**
- * Compute a content-addressable commit hash.
- *
- * Hashes the parent pointers, sorted keyset preview, sorted update
- * blob bytes, and optional info to produce a deterministic 40-hex-char
- * commit hash. Truncating to 40 keeps commits visually compact while
- * leaving plenty of collision resistance.
- */
-async function contentHash(
-  parents: readonly string[],
-  keyset: ReadonlyMap<string, string>,
-  updates: ReadonlyMap<string, Uint8Array>,
-  info: CommitInfo | null,
-): Promise<string> {
-  // Concatenate the inputs into a single byte stream, then hash.
-  const parts: Uint8Array[] = []
-  parts.push(_encoder.encode(JSON.stringify(parents)))
-  const sortedKeyset = [...keyset.entries()].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-  parts.push(_encoder.encode(JSON.stringify(sortedKeyset)))
-  const sortedUpdateKeys = [...updates.keys()].sort()
-  for (const key of sortedUpdateKeys) {
-    parts.push(_encoder.encode(key))
-    parts.push(updates.get(key) as Uint8Array)
-  }
-  if (info !== null) {
-    parts.push(_encoder.encode(canonicalJson(info)))
-  }
-
-  let total = 0
-  for (const p of parts) total += p.length
-  const flat = new Uint8Array(total)
-  let off = 0
-  for (const p of parts) {
-    flat.set(p, off)
-    off += p.length
-  }
-  const hex = await sha256Hex(flat)
-  return hex.slice(0, 40)
-}
-
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value !== 'object') {
-    return JSON.stringify(value)
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map(canonicalJson).join(',')}]`
-  }
-  const obj = value as Record<string, unknown>
-  const keys = Object.keys(obj).sort()
-  const parts = keys.map((k) => `${JSON.stringify(k)}:${canonicalJson(obj[k])}`)
-  return `{${parts.join(',')}}`
 }
 
 // ---------------------------------------------------------------------------
@@ -367,14 +282,14 @@ export class VersionedKV extends VersionedBase {
     // <pending:key> sentinels for new updates (real versioned keys
     // depend on the hash itself, which we don't know yet).
     const previewKeys = new Map(newCommitKeys)
-    for (const k of updates.keys()) previewKeys.set(k, `<pending:${k}>`)
+    for (const k of updates.keys()) previewKeys.set(k, pendingPointer(k))
     const newHash = await contentHash([this.currentCommitHash], previewKeys, updates, info)
 
     // Resolve real blob keys for the updates.
     const blobWrites: Array<[string, Uint8Array]> = []
     const now = Date.now()
     for (const [key, value] of updates) {
-      const versionedKey = `${newHash}:${key}`
+      const versionedKey = blobPointer(newHash, key)
       blobWrites.push([versionedKey, value])
       newCommitKeys.set(key, versionedKey)
       const existing = newMeta.get(key)
@@ -425,13 +340,13 @@ export class VersionedKV extends VersionedBase {
     // depend on the merge hash, which we compute from the placeholder
     // form — same trick as createCommit).
     const previewKeys = new Map(mergedKeyset)
-    for (const k of mergedValues.keys()) previewKeys.set(k, `<pending:${k}>`)
+    for (const k of mergedValues.keys()) previewKeys.set(k, pendingPointer(k))
     const mergeHash = await contentHash(parents, previewKeys, mergedValues, info)
 
     // Resolve real blob keys for merged values.
     const blobWrites: Array<[string, Uint8Array]> = []
     for (const [key, value] of mergedValues) {
-      const versionedKey = `${mergeHash}:${key}`
+      const versionedKey = blobPointer(mergeHash, key)
       blobWrites.push([versionedKey, value])
       mergedKeyset.set(key, versionedKey)
     }

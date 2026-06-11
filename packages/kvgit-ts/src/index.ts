@@ -20,6 +20,7 @@ export {
   type ResolveMergeOptions,
 } from './versioned/merge'
 export { diffKeysets, walkHistory, type ParentLoader } from './versioned/helpers'
+export { walkDelta, type WalkDeltaOptions } from './sync/walk'
 export {
   Staged,
   jsonDecoder,

@@ -20,7 +20,7 @@
  */
 
 import { Keyset } from '../keyset'
-import type { CommitInfo, KVStore, WireCommit } from '../types'
+import type { CommitInfo, KVStore, KeysetEntry, WireCommit } from '../types'
 import {
   COMMIT_ROOT,
   COMMIT_TIME,
@@ -221,24 +221,23 @@ async function buildWireCommit(
   const updates = new Map<string, Uint8Array>()
   const removals = new Set<string>()
   const meta = new Map<string, { readonly createdAt: number }>()
-  const carries = new Map<string, string>()
+  const carries = new Map<string, { owner: string; size: number; createdAt: number }>()
 
   // added/modified relative to the first parent: written here (owner
   // is this commit) → updates; otherwise adopted from another ancestor
   // (the non-first parent's side of a merge) → carries.
-  const changed: Array<readonly [string, string, number]> = []
-  for (const [key, entry] of diff.added) changed.push([key, entry.blob, entry.meta.createdAt])
-  for (const [key, [, entry]] of diff.modified)
-    changed.push([key, entry.blob, entry.meta.createdAt])
+  const changed: Array<readonly [string, KeysetEntry]> = []
+  for (const [key, entry] of diff.added) changed.push([key, entry])
+  for (const [key, [, entry]] of diff.modified) changed.push([key, entry])
 
   // Partition by pointer ownership first, then batch-fetch the owned
   // blobs in one getMany — one round trip instead of one per key on
   // high-latency stores.
   const owned: Array<readonly [string, string, number]> = []
-  for (const [key, pointer, createdAt] of changed) {
-    const owner = blobPointerOwner(pointer)
-    if (owner === hash) owned.push([key, pointer, createdAt])
-    else carries.set(key, owner)
+  for (const [key, entry] of changed) {
+    const owner = blobPointerOwner(entry.blob)
+    if (owner === hash) owned.push([key, entry.blob, entry.meta.createdAt])
+    else carries.set(key, { owner, size: entry.meta.size, createdAt: entry.meta.createdAt })
   }
   if (owned.length > 0) {
     const fetched = await store.getMany(owned.map(([, pointer]) => pointer))

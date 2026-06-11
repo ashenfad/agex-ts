@@ -316,12 +316,18 @@ export interface WireCommit {
   /**
    * Keys whose pointer differs from `parents[0]`'s but was NOT written
    * at this commit — adopted from another ancestor (merge carries from
-   * the non-first parent's side). Maps key → owning commit hash; the
-   * pointer is `<owner>:<key>`. Replay must reproduce these pointers
-   * exactly — `contentHash` covers the pointer map, so deriving them
-   * from `parents[0]` instead would change the hash.
+   * the non-first parent's side). The pointer is `<owner>:<key>`.
+   * Replay must reproduce these pointers exactly — `contentHash`
+   * covers the pointer map, so deriving them from `parents[0]` instead
+   * would change the hash. `size`/`createdAt` ride along so the
+   * replayer can rebuild the carried keyset entry without consulting
+   * any parent keyset (the carry's blob was written by an earlier
+   * commit, so its meta isn't derivable from this commit's wire form).
    */
-  readonly carries: ReadonlyMap<string, string>
+  readonly carries: ReadonlyMap<
+    string,
+    { readonly owner: string; readonly size: number; readonly createdAt: number }
+  >
 }
 
 // ---------------------------------------------------------------------------

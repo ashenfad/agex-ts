@@ -30,9 +30,8 @@ import {
   COMMIT_TIME,
   INFO_KEY,
   PARENT_COMMIT,
-  STORAGE_VERSION,
-  STORAGE_VERSION_KEY,
   blobPointer,
+  checkStorageVersion,
   contentHash,
   dumps,
   loads,
@@ -106,37 +105,6 @@ async function resolveHead(
   }
 
   return null
-}
-
-// ---------------------------------------------------------------------------
-// Storage version
-// ---------------------------------------------------------------------------
-
-async function checkStorageVersion(store: KVStore): Promise<void> {
-  const raw = await store.get(STORAGE_VERSION_KEY)
-  if (raw !== null) {
-    const version = safeLoads(raw)
-    if (version !== STORAGE_VERSION) {
-      throw new Error(
-        `Store has kvgit storage version ${JSON.stringify(version)}, ` +
-          `this code supports ${STORAGE_VERSION}. Use a fresh store.`,
-      )
-    }
-    return
-  }
-
-  // No version sentinel. Either fresh, or pre-v1.
-  let hasExisting = false
-  for await (const _k of store.keys(BRANCH_HEAD_PREFIX)) {
-    hasExisting = true
-    break
-  }
-  if (hasExisting) {
-    throw new Error(
-      `Store appears to use an older kvgit storage format. This version requires storage v${STORAGE_VERSION}. Use a fresh store.`,
-    )
-  }
-  await store.set(STORAGE_VERSION_KEY, dumps(STORAGE_VERSION))
 }
 
 // ---------------------------------------------------------------------------

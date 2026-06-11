@@ -99,12 +99,15 @@ export async function pullBranch(
   }
 
   // Local strictly ahead (remote head already in our ancestry):
-  // nothing to pull — advancing the remote is pushBranch's job.
+  // nothing to pull — advancing the remote is pushBranch's job. The
+  // remote head is observably shared, so the tracking state may
+  // advance to it.
   if (
     localHead !== null &&
     (await store.get(COMMIT_ROOT(remoteHead))) !== null &&
     (await isAncestor(store, remoteHead, localHead))
   ) {
+    if (syncHead !== remoteHead) await setSyncHead(store, branch, remoteHead)
     return result('up-to-date')
   }
 
@@ -113,6 +116,14 @@ export async function pullBranch(
   if (localHead !== null) have.push(localHead)
   if (syncHead !== null && syncHead !== localHead) have.push(syncHead)
   const applied = await applyWire(store, remote.fetch(remoteHead, have))
+
+  // applyWire verifies every commit IN the stream, but an empty or
+  // truncated stream verifies vacuously — guard the head's presence
+  // before any ref moves, or a hollow fetch would mint a branch
+  // pointing at nothing (mirrors MemoryRemote.push's guard).
+  if ((await store.get(COMMIT_ROOT(remoteHead))) === null) {
+    throw new Error(`pullBranch: fetched head ${remoteHead} not present after apply`)
+  }
 
   if (localHead === null) {
     const ok = await store.cas(BRANCH_HEAD(branch), dumps(remoteHead), null)

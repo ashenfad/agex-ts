@@ -29,6 +29,15 @@ export {
   type ApplyWireOptions,
   type ApplyWireResult,
 } from './sync/apply'
+export { MemoryRemote, type Remote, type RemoteRef } from './sync/remote'
+export {
+  pullBranch,
+  pushBranch,
+  syncBranch,
+  type SyncOutcome,
+  type SyncResult,
+  type SyncStatus,
+} from './sync/sync'
 export {
   Staged,
   jsonDecoder,

@@ -54,7 +54,17 @@ this layer:
   CAS refs; reconciliation always happens locally via the existing
   three-way machinery (`commit()` / merge fns). Remotes can therefore
   be *passive* — any object store with compare-and-swap on refs
-  qualifies; no kvgit code needs to run on the far side.
+  qualifies; no kvgit code needs to run on the far side. The protocol
+  is `Remote` (`listRefs` / `fetch` / `push`) in
+  [`src/sync/remote.ts`](./src/sync/remote.ts), with `MemoryRemote`
+  as the reference implementation.
+- **Sync is fast-forward only.** `pullBranch` / `pushBranch` /
+  `syncBranch` ([`src/sync/sync.ts`](./src/sync/sync.ts)) move refs
+  only along their own ancestry and report `'diverged'` otherwise —
+  objects may transfer on divergence (useful for a later merge), but
+  no ref moves and nothing merges automatically. A vanished
+  previously-synced remote ref reports `'remote-gone'` (lifecycle
+  conflict) for the caller to resolve.
 - **Parent order is significant.** For three-way merges,
   `parents[0]` is "theirs" (the head that won the CAS race) and
   `parents[1]` is "ours" (`VersionedBase.threeWayMerge`). Wire deltas

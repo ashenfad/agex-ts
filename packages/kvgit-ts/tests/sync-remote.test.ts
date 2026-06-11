@@ -258,4 +258,23 @@ describe('races and lifecycle', () => {
     const remote = new MemoryRemote(new Memory())
     await expect(pushBranch(new Memory(), remote, BRANCH)).rejects.toThrow(/does not exist/)
   })
+
+  it('refuses to move refs when a buggy remote fetch returns a hollow stream', async () => {
+    const remote = new MemoryRemote(new Memory())
+    const a = await device()
+    await a.vk.commit({ updates: new Map([['k', bytes('v')]]) })
+    await pushBranch(a.store, remote, BRANCH)
+
+    // A remote that advertises the ref but streams nothing back.
+    const hollow = {
+      listRefs: () => remote.listRefs(),
+      fetch: async function* () {},
+      push: remote.push.bind(remote),
+    }
+
+    const bStore = new Memory()
+    await expect(pullBranch(bStore, hollow, BRANCH)).rejects.toThrow(/not present after apply/)
+    // No branch ref was minted for the missing head.
+    expect(await bStore.get(`__branch_head__${BRANCH}`)).toBeNull()
+  })
 })

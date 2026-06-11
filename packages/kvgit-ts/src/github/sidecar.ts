@@ -77,7 +77,7 @@ export function encodeSidecar(
       format: SIDECAR_FORMAT,
       kernel: opts.kernel,
       hash: wire.hash,
-      parents: [...wire.parents],
+      parents: wire.parents,
       time: wire.time,
       info: wire.info,
       updates,

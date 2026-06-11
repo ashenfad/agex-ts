@@ -58,6 +58,20 @@ export function blobPointerOwner(pointer: string): string {
   return pointer.slice(0, COMMIT_HASH_LEN)
 }
 
+/**
+ * Read a branch's HEAD commit hash, or null if absent/malformed.
+ *
+ * Plain read — no prev-HEAD recovery (that's `VersionedKV.open`'s
+ * job). For the sync layer, a corrupt head reads as "no head" and the
+ * orchestration surfaces it rather than repairing it.
+ */
+export async function readBranchHead(store: KVStore, branch: string): Promise<string | null> {
+  const raw = await store.get(BRANCH_HEAD(branch))
+  if (raw === null) return null
+  const parsed = safeLoads(raw)
+  return typeof parsed === 'string' ? parsed : null
+}
+
 // ---------------------------------------------------------------------------
 // Storage version
 // ---------------------------------------------------------------------------

@@ -136,16 +136,17 @@ export async function* walkDelta(
   }
 }
 
-/** BFS over all parents, adding every reachable commit to `into`. */
+/** Walk all parents (iterative DFS — traversal order is irrelevant
+ *  for set collection), adding every reachable commit to `into`. */
 async function collectAncestors(
   store: KVStore,
   start: string,
   into: Set<string>,
   opts: { tolerateMissing: boolean },
 ): Promise<void> {
-  const queue: string[] = [start]
-  while (queue.length > 0) {
-    const current = queue.shift() as string
+  const stack: string[] = [start]
+  while (stack.length > 0) {
+    const current = stack.pop() as string
     if (into.has(current)) continue
     const parents = await loadParents(store, current)
     if (parents === null) {
@@ -154,21 +155,22 @@ async function collectAncestors(
     }
     into.add(current)
     for (const p of parents) {
-      if (!into.has(p)) queue.push(p)
+      if (!into.has(p)) stack.push(p)
     }
   }
 }
 
-/** BFS from `want`, stopping at `haveSet`, recording commit records. */
+/** Walk from `want` (iterative DFS), stopping at `haveSet`, recording
+ *  commit records. Output order doesn't matter — Kahn re-orders. */
 async function collectDelta(
   store: KVStore,
   want: string,
   haveSet: ReadonlySet<string>,
   into: Map<string, CommitRecord>,
 ): Promise<void> {
-  const queue: string[] = [want]
-  while (queue.length > 0) {
-    const current = queue.shift() as string
+  const stack: string[] = [want]
+  while (stack.length > 0) {
+    const current = stack.pop() as string
     if (into.has(current) || haveSet.has(current)) continue
     const parents = await loadParents(store, current)
     if (parents === null) {
@@ -181,7 +183,7 @@ async function collectDelta(
       time: typeof time === 'number' ? time : 0,
     })
     for (const p of parents) {
-      if (!into.has(p) && !haveSet.has(p)) queue.push(p)
+      if (!into.has(p) && !haveSet.has(p)) stack.push(p)
     }
   }
 }
@@ -202,13 +204,14 @@ async function buildWireCommit(
   hash: string,
   rec: CommitRecord,
 ): Promise<WireCommit> {
-  const commitKs = await loadKeysetAt(store, hash)
+  const firstParent = rec.parents[0]
+  const [commitKs, parentKs] = await Promise.all([
+    loadKeysetAt(store, hash),
+    firstParent !== undefined ? loadKeysetAt(store, firstParent) : Keyset.empty(store),
+  ])
   if (commitKs === null) {
     throw new Error(`walkDelta: commit root missing for ${hash}`)
   }
-  const firstParent = rec.parents[0]
-  const parentKs =
-    firstParent !== undefined ? await loadKeysetAt(store, firstParent) : await Keyset.empty(store)
   if (parentKs === null) {
     throw new Error(`walkDelta: commit root missing for ${firstParent}`)
   }
@@ -228,17 +231,24 @@ async function buildWireCommit(
   for (const [key, [, entry]] of diff.modified)
     changed.push([key, entry.blob, entry.meta.createdAt])
 
+  // Partition by pointer ownership first, then batch-fetch the owned
+  // blobs in one getMany — one round trip instead of one per key on
+  // high-latency stores.
+  const owned: Array<readonly [string, string, number]> = []
   for (const [key, pointer, createdAt] of changed) {
     const owner = blobPointerOwner(pointer)
-    if (owner === hash) {
-      const bytes = await store.get(pointer)
-      if (bytes === null) {
+    if (owner === hash) owned.push([key, pointer, createdAt])
+    else carries.set(key, owner)
+  }
+  if (owned.length > 0) {
+    const fetched = await store.getMany(owned.map(([, pointer]) => pointer))
+    for (const [key, pointer, createdAt] of owned) {
+      const bytes = fetched.get(pointer)
+      if (bytes === undefined) {
         throw new Error(`walkDelta: blob missing for ${pointer}`)
       }
       updates.set(key, bytes)
       meta.set(key, { createdAt })
-    } else {
-      carries.set(key, owner)
     }
   }
   for (const key of diff.removed.keys()) removals.add(key)

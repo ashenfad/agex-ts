@@ -7,6 +7,7 @@ export default defineConfig({
     'src/backends/idb.ts',
     'src/backends/sqlite.ts',
     'src/backends/sqlite.browser.ts',
+    'src/github/index.ts',
   ],
   format: ['esm'],
   dts: true,

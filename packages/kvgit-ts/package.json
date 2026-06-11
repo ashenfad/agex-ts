@@ -46,6 +46,10 @@
       "types": "./dist/backends/sqlite.d.ts",
       "browser": "./dist/backends/sqlite.browser.js",
       "import": "./dist/backends/sqlite.js"
+    },
+    "./github": {
+      "types": "./dist/github/index.d.ts",
+      "import": "./dist/github/index.js"
     }
   },
   "files": ["dist", "README.md", "LICENSE"],

@@ -79,3 +79,38 @@ The storage layout and commit-identity primitives live in
 source of truth shared by `VersionedKV` and the sync layer. If you
 change the layout or hash inputs, both move together and the storage
 version sentinel must bump.
+
+### GitHub transport (`@agex-ts/kvgit/github`)
+
+The first real transport syncs through a plain GitHub repo — no
+backend, no git protocol (GitHub's smart-HTTP endpoints don't send
+CORS headers), just the CORS-friendly Git Data REST API with a
+user-supplied PAT. Designed for a fine-grained token scoped to one
+dedicated sync repo with Contents read/write — least privilege for a
+token that lives in browser storage. A repo, not a gist: gists lack
+the Git Data API and CAS-able refs.
+
+What's in the subpath ([`src/github/`](./src/github)):
+
+- **`GithubClient`** — throttled, retrying REST client scoped to one
+  repo. Mutations are serialized with minimum spacing
+  (`writeIntervalMs`, default 750ms ≈ GitHub's ~80 content-writes/min
+  secondary limit); reads run free against the 5,000/hr primary
+  limit. `server`/`rate-limit`/network failures retry with backoff
+  honoring `Retry-After`; `auth`/`permission`/`validation` never
+  retry (see the `GithubError` taxonomy in
+  [`src/github/errors.ts`](./src/github/errors.ts)). Git Data
+  primitives: binary-safe blobs, trees with `base_tree` + nested
+  paths, commits with explicit dates (deterministic SHAs → resumable
+  pushes), refs with CAS semantics (`createRef`/`updateRef` return
+  `false` on lost races only).
+- **`gitBlobSha1`** — local git blob hashing (WebCrypto SHA-1);
+  knowing a blob's SHA before upload is the push-side dedup
+  primitive. Verified live: the local SHA predicts the remote one.
+- **Live verification suite**
+  ([`tests/github-live.test.ts`](./tests/github-live.test.ts)) —
+  env-gated (`KVGIT_GH_TOKEN` + `KVGIT_GH_REPO`, scratch repo);
+  pins the API behaviors the design rests on: nested-path tree
+  synthesis, exact dates, multi-parent commits, topological-order
+  rejection, empty-tree commits, `force:false` CAS, commits-list
+  pagination, and `archived/*` rename tombstone mechanics.

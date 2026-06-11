@@ -14,6 +14,10 @@ export default defineConfig({
     include: ['tests/**/*.test.ts'],
     globals: false,
     passWithNoTests: true,
+    // The GitHub live suite (tests/github-live.test.ts) runs real,
+    // throttled API calls; give it room when its env gate is set.
+    // Everything else keeps the snappy default.
+    testTimeout: process.env.KVGIT_GH_TOKEN ? 30_000 : 5_000,
     setupFiles: ['./tests/setup-fake-indexeddb.ts'],
     server: {
       deps: {

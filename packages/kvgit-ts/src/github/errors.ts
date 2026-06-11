@@ -59,10 +59,17 @@ export function classify(status: number, message: string, headers: Headers): Git
 /** Parse GitHub's `{"message": ...}` error body; fall back to raw text. */
 export function errorMessage(body: string, status: number): string {
   try {
-    const parsed = JSON.parse(body) as { message?: unknown }
-    if (typeof parsed.message === 'string' && parsed.message.length > 0) return parsed.message
+    const parsed = JSON.parse(body) as { message?: unknown } | null
+    if (
+      parsed !== null &&
+      typeof parsed === 'object' &&
+      typeof parsed.message === 'string' &&
+      parsed.message.length > 0
+    ) {
+      return parsed.message
+    }
   } catch {
-    // non-JSON body — fall through
+    // non-JSON or null-traversal — fall through to the raw fallback
   }
   return body.slice(0, 200) || `HTTP ${status}`
 }

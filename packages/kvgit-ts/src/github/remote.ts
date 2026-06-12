@@ -100,13 +100,17 @@ export class GithubRemote implements Remote {
    *  naturally or by prefix. */
   async listRefs(): Promise<RemoteRef[]> {
     const refs = await this.client.listBranchRefs()
-    const out: RemoteRef[] = []
-    for (const ref of refs) {
-      if (ref.branch.startsWith('archived/')) continue
-      const head = await this.#kvgitHashOf(ref.sha)
-      if (head !== null) out.push({ branch: ref.branch, head })
-    }
-    return out
+    // Trailer resolution is independent, unthrottled GETs — resolve
+    // concurrently rather than serially per branch.
+    const resolved = await Promise.all(
+      refs
+        .filter((ref) => !ref.branch.startsWith('archived/'))
+        .map(async (ref) => {
+          const head = await this.#kvgitHashOf(ref.sha)
+          return head !== null ? { branch: ref.branch, head } : null
+        }),
+    )
+    return resolved.filter((r): r is RemoteRef => r !== null)
   }
 
   /** kvgit hash for a git commit, from its message trailer (cached). */
@@ -271,11 +275,14 @@ export class GithubRemote implements Remote {
     return true
   }
 
-  /** Blob SHA for a carried key: in-stream uploads first, then the
-   *  local store (`<owner>:<key>` bytes exist locally on any device
-   *  that can construct this merge), hashing locally and uploading
-   *  only if GitHub doesn't already have the blob (it usually does —
-   *  the owner commit shipped it). */
+  /** Blob SHA for a carried key: in-stream uploads first, then a
+   *  local hash of the store's bytes (`<owner>:<key>` exists locally
+   *  on any device that can construct the merge). No upload needed —
+   *  an owner below the frontier was pushed previously, so its blob
+   *  is already on the remote, referenced from the owner commit's
+   *  tree (GC-safe). If that invariant were ever violated,
+   *  `createTree` rejects the dangling SHA with a 422 — loud, not
+   *  corrupting. */
   async #carryBlobSha(
     owner: string,
     key: string,
@@ -289,15 +296,7 @@ export class GithubRemote implements Remote {
         `GithubRemote.push: carried blob ${owner.slice(0, 7)}:${key} not found locally`,
       )
     }
-    // createBlob is content-addressed server-side; re-creating an
-    // existing blob is a no-op returning the same SHA. One write
-    // request buys correctness without an existence-check API.
-    const sha = await this.client.createBlob(bytes)
-    const predicted = await gitBlobSha1(bytes)
-    if (sha !== predicted) {
-      throw new Error(`GithubRemote.push: blob SHA mismatch for carried ${key}`)
-    }
-    return sha
+    return gitBlobSha1(bytes)
   }
 
   /** git SHA for a kvgit parent: in-stream renders, then the trailer
@@ -310,7 +309,7 @@ export class GithubRemote implements Remote {
       if (kv === kvgitHash) return gitSha
     }
     // Walk back from the frontier's git head through history pages.
-    const frontier = [...renders.values()][0]
+    const frontier = renders.values().next().value
     if (frontier !== undefined) {
       for (let page = 1; page <= 50; page++) {
         const commits = await this.client.listCommits({ sha: frontier.gitSha, perPage: 100, page })

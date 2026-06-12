@@ -55,11 +55,19 @@ Releases publish from CI. The local sequence is:
 
 4. **Tag and push the tag.** The release workflow fires on tag push and runs the full lint / typecheck / test gate before publishing.
    ```bash
-   # Use the highest bumped version as the tag name. The tag is a pointer for humans;
-   # CI publishes whichever packages have versions not yet on npm, regardless of tag.
-   git tag v0.1.1
+   # Tags are MONOTONIC REPO-LEVEL RELEASE COUNTERS, not any one package's
+   # version: bump the last tag's patch (or minor, for a notable release)
+   # even when the flagship `agex-ts` package didn't change — e.g. a
+   # kvgit-only release after v0.4.0 tags as v0.4.1 although agex-ts
+   # stays 0.4.0. Per-package CHANGELOGs are the version truth; the tag
+   # just triggers CI, which publishes whichever packages have versions
+   # not yet on npm, regardless of the tag's name.
+   git tag v0.4.1
    git push --tags
    ```
+   Double-check step 3 actually pushed: a tag-only push leaves `main`
+   without the release commit (version bumps + CHANGELOGs stranded in
+   the tag's history).
 
 5. **Watch the workflow run** at https://github.com/ashenfad/agex-ts/actions/workflows/release.yml. Success → packages live on npm with Sigstore provenance attached (the "verified" badge on each package page).
 
@@ -70,7 +78,18 @@ Releases publish from CI. The local sequence is:
 
 ### What gets re-published when an internal dep bumps
 
-Config (`updateInternalDependencies: "patch"`): when an internal dep minor-bumps, dependents get a patch-bump and re-publish with the updated dep. Example: a `minor` change to `agex-ts` causes `@agex-ts/anthropic`, `@agex-ts/openai`, etc. to ship a patch release pointing at the new `agex-ts`.
+Usually: nothing — and that's fine. Internal deps use bare `workspace:^`
+ranges, which pnpm rewrites at publish time to `^<current version>`.
+Changesets drives dependent bumps off "does the new version escape the
+written range," and a bare workspace range never goes out of range — so
+the `updateInternalDependencies: "patch"` ripple does **not** fire here.
+Consumers still get the new dep automatically through semver resolution
+(e.g. the published `agex-ts@0.4.0` carries `@agex-ts/kvgit: ^0.1.0`,
+which resolves to `0.1.1` the moment it ships).
+
+When a dependent genuinely needs to re-publish (it re-exports changed
+behavior, or you want its lockfile-pinned consumers to move), list it
+explicitly in the changeset alongside the dep.
 
 ### What the release workflow does
 

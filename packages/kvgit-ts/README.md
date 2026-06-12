@@ -117,6 +117,14 @@ What's in the subpath ([`src/github/`](./src/github)):
   two stores ping-ponging a session through a real repo, incremental
   deltas both directions, interrupted-push resume, lost-state
   recovery.
+- **Roster ops** — the session-lifecycle layer over the ref
+  namespace: `archiveBranch` / `restoreBranch` (ref renames between
+  `refs/heads/*` and `archived/*`), `deleteForever` / `emptyTrash`
+  (tombstone pruning; GitHub GC reclaims objects), `listArchivedRefs`
+  (the trash view), and `readKeyAtTip` (one key's bytes at a tip
+  without materializing — the cloud-stub primitive; probes the
+  natural path then the relocation slot). Concurrent archives
+  collapse benignly; restore suffixes on a retaken name.
 - **`gitBlobSha1`** — local git blob hashing (WebCrypto SHA-1);
   knowing a blob's SHA before upload is the push-side dedup
   primitive. Verified live: the local SHA predicts the remote one.

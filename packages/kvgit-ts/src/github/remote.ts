@@ -42,7 +42,7 @@ import type { KVStore, WireCommit } from '../types'
 import { PARENT_COMMIT, blobPointer, dumps, safeLoads } from '../versioned/layout'
 import type { GithubClient, TreeEntry } from './client'
 import { gitBlobSha1 } from './git-hash'
-import { PathPlanner, SIDECAR_PATH } from './paths'
+import { PathPlanner, SIDECAR_PATH, naturalPath, relocatedPath } from './paths'
 import { decodeSidecar, encodeSidecar, wireFromSidecar } from './sidecar'
 
 export interface GithubRemoteOptions {
@@ -53,6 +53,7 @@ export interface GithubRemoteOptions {
 }
 
 const TRAILER = /^Kvgit-Hash: ([0-9a-f]{40})$/m
+const ARCHIVED = 'archived/'
 const STATE_FORMAT = 1
 
 const stateKey = (repo: string, branch: string): string => `__ghsync__${repo}__${branch}`
@@ -156,7 +157,7 @@ export class GithubRemote implements Remote {
     // concurrently rather than serially per branch.
     const resolved = await Promise.all(
       refs
-        .filter((ref) => !ref.branch.startsWith('archived/'))
+        .filter((ref) => !ref.branch.startsWith(ARCHIVED))
         .map(async (ref) => {
           const head = await this.#kvgitHashOf(ref.sha)
           return head !== null ? { branch: ref.branch, head } : null
@@ -358,11 +359,116 @@ export class GithubRemote implements Remote {
     })
   }
 
+  // -------------------------------------------------------------------------
+  // Roster ops — session lifecycle over the ref namespace.
+  //
+  // The repo syncs session VISIBILITY, not just content: `refs/heads/*`
+  // is the live roster, `archived/*` the recoverable trash, absence is
+  // hard-deleted. Archive/restore are ref renames; objects stay
+  // reachable until the tombstone is pruned and GitHub GC runs. Local
+  // cleanup (sync heads, transport state, branch removal) belongs to
+  // the orchestration layer, not the transport.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Archive a live branch: rename its ref into `archived/`. Returns
+   * false when the live ref doesn't exist (already archived elsewhere,
+   * or never pushed). Concurrent archives collapse benignly; if a
+   * tombstone already exists it's force-pointed at the newest content
+   * so no recent commits become unreachable.
+   */
+  async archiveBranch(branch: string): Promise<boolean> {
+    const sha = await this.client.getRef(branch)
+    if (sha === null) return false
+    const created = await this.client.createRef(`${ARCHIVED}${branch}`, sha)
+    if (!created) {
+      // Tombstone exists (concurrent archive, or a prior same-named
+      // session). Point it at the newest content before dropping the
+      // live ref — force, since the old tombstone need not be an
+      // ancestor.
+      await this.client.updateRef(`${ARCHIVED}${branch}`, sha, { force: true })
+    }
+    await this.client.deleteRef(branch)
+    return true
+  }
+
+  /**
+   * Restore an archived branch. Returns the live branch name — the
+   * original, or `<branch>-restored` if the original name was retaken
+   * (≈ never for chat-<hex8> names). Throws if nothing is archived
+   * under `branch` (e.g. restore raced an empty-trash).
+   */
+  async restoreBranch(branch: string): Promise<string> {
+    const archivedRef = `${ARCHIVED}${branch}`
+    const sha = await this.client.getRef(archivedRef)
+    if (sha === null) {
+      throw new Error(`restoreBranch: nothing archived under '${branch}'`)
+    }
+    let target = branch
+    if (!(await this.client.createRef(target, sha))) {
+      target = `${branch}-restored`
+      if (!(await this.client.createRef(target, sha))) {
+        throw new Error(`restoreBranch: both '${branch}' and '${target}' are taken`)
+      }
+    }
+    await this.client.deleteRef(archivedRef)
+    return target
+  }
+
+  /** Hard-delete one archived session ("Delete forever"). False if it
+   *  was already gone. Objects become unreachable; GitHub GC reclaims
+   *  on its own schedule. */
+  async deleteForever(branch: string): Promise<boolean> {
+    return this.client.deleteRef(`${ARCHIVED}${branch}`)
+  }
+
+  /** Hard-delete every archived session ("Empty trash"). Returns the
+   *  number of tombstones removed. */
+  async emptyTrash(): Promise<number> {
+    const refs = await this.client.listBranchRefs()
+    let removed = 0
+    for (const ref of refs) {
+      if (!ref.branch.startsWith(ARCHIVED)) continue
+      if (await this.client.deleteRef(ref.branch)) removed++
+    }
+    return removed
+  }
+
+  /** Archived sessions (names without the `archived/` prefix), with
+   *  their kvgit heads — the trash view. */
+  async listArchivedRefs(): Promise<RemoteRef[]> {
+    const refs = await this.client.listBranchRefs()
+    const resolved = await Promise.all(
+      refs
+        .filter((ref) => ref.branch.startsWith(ARCHIVED))
+        .map(async (ref) => {
+          const head = await this.#kvgitHashOf(ref.sha)
+          return head !== null ? { branch: ref.branch.slice(ARCHIVED.length), head } : null
+        }),
+    )
+    return resolved.filter((r): r is RemoteRef => r !== null)
+  }
+
+  /**
+   * Read one key's value bytes at a branch tip without materializing
+   * the session — the cloud-stub primitive (e.g. a branch-meta key for
+   * title/name display). A key's tree path is always its natural path
+   * or its relocation slot, so two probes cover every assignment.
+   * Bytes are kvgit-encoded; the caller's codec decodes.
+   */
+  async readKeyAtTip(branch: string, key: string): Promise<Uint8Array | null> {
+    const sha = await this.client.getRef(branch)
+    if (sha === null) return null
+    const natural = await this.client.getContent(naturalPath(key), sha)
+    if (natural !== null) return natural
+    return this.client.getContent(relocatedPath(key), sha)
+  }
+
   /** Find the branch whose tip resolves to kvgit hash `want`. */
   async #locateTip(want: string): Promise<{ branch: string; gitSha: string } | null> {
     const refs = await this.client.listBranchRefs()
     for (const ref of refs) {
-      if (ref.branch.startsWith('archived/')) continue
+      if (ref.branch.startsWith(ARCHIVED)) continue
       if ((await this.#kvgitHashOf(ref.sha)) === want) {
         return { branch: ref.branch, gitSha: ref.sha }
       }

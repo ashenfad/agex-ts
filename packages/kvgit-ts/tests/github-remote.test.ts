@@ -16,6 +16,7 @@ function makeHarness(script: Scripted[]): {
   const fetchImpl = (async (url: RequestInfo | URL, init?: RequestInit) => {
     calls.push({ method: init?.method ?? 'GET', url: String(url) })
     const next = script.shift() ?? { status: 500, body: { message: 'script exhausted' } }
+    if (next.status === 204) return new Response(null, { status: 204 })
     return new Response(JSON.stringify(next.body ?? {}), { status: next.status })
   }) as typeof fetch
   const client = new GithubClient({
@@ -119,5 +120,97 @@ describe('GithubRemote.listRefs', () => {
       // archived/* never fetched
     ])
     expect(await remote.listRefs()).toEqual([{ branch: 'chat-ab12', head: KV_A }])
+  })
+})
+
+describe('GithubRemote roster ops (scripted)', () => {
+  const commit = (sha: string, message: string) => ({
+    sha,
+    tree: { sha: 't' },
+    parents: [],
+    message,
+    author: { date: 'x' },
+    committer: { date: 'x' },
+  })
+
+  it('archive renames the ref and reports false when nothing is live', async () => {
+    const { remote, calls } = makeHarness([
+      { status: 200, body: { object: { sha: 'live1' } } }, // getRef chat-x
+      { status: 201, body: {} }, // createRef archived/chat-x
+      { status: 204 }, // deleteRef chat-x
+      { status: 404, body: { message: 'Not Found' } }, // getRef again
+    ])
+    expect(await remote.archiveBranch('chat-x')).toBe(true)
+    expect(calls.map((c) => c.method)).toEqual(['GET', 'POST', 'DELETE'])
+    expect(await remote.archiveBranch('chat-x')).toBe(false) // already gone
+    expect(calls.length).toBe(4) // just the second getRef
+  })
+
+  it('double-archive collapses benignly: tombstone force-updated, live ref dropped', async () => {
+    const { remote, calls } = makeHarness([
+      { status: 200, body: { object: { sha: 'newer' } } }, // getRef
+      { status: 422, body: { message: 'Reference already exists' } }, // createRef loses
+      { status: 200, body: {} }, // updateRef force
+      { status: 204 }, // deleteRef live
+    ])
+    expect(await remote.archiveBranch('chat-x')).toBe(true)
+    const patch = calls.find((c) => c.method === 'PATCH')
+    expect(patch?.url).toContain('/git/refs/heads/archived/chat-x')
+  })
+
+  it('restore renames back, suffixing when the original name is retaken', async () => {
+    const { remote } = makeHarness([
+      { status: 200, body: { object: { sha: 'arch1' } } }, // getRef archived
+      { status: 422, body: { message: 'Reference already exists' } }, // createRef chat-x loses
+      { status: 201, body: {} }, // createRef chat-x-restored
+      { status: 204 }, // deleteRef archived
+    ])
+    expect(await remote.restoreBranch('chat-x')).toBe('chat-x-restored')
+  })
+
+  it('restore-after-empty-trash throws cleanly', async () => {
+    const { remote } = makeHarness([{ status: 404, body: { message: 'Not Found' } }])
+    await expect(remote.restoreBranch('chat-x')).rejects.toThrow(/nothing archived/)
+  })
+
+  it('emptyTrash deletes only archived refs and counts them', async () => {
+    const refs = [
+      { ref: 'refs/heads/main', object: { sha: 'm' } },
+      { ref: 'refs/heads/chat-live', object: { sha: 'c' } },
+      { ref: 'refs/heads/archived/chat-a', object: { sha: 'a' } },
+      { ref: 'refs/heads/archived/chat-b', object: { sha: 'b' } },
+    ]
+    const { remote, calls } = makeHarness([
+      { status: 200, body: refs },
+      { status: 204 }, // delete archived/chat-a
+      { status: 204 }, // delete archived/chat-b
+    ])
+    expect(await remote.emptyTrash()).toBe(2)
+    const deletes = calls.filter((c) => c.method === 'DELETE').map((c) => c.url)
+    expect(deletes.every((u) => u.includes('/heads/archived/'))).toBe(true)
+  })
+
+  it('listArchivedRefs resolves trailers and strips the prefix', async () => {
+    const refs = [
+      { ref: 'refs/heads/chat-live', object: { sha: 'c' } },
+      { ref: 'refs/heads/archived/chat-old', object: { sha: 'a1' } },
+    ]
+    const { remote } = makeHarness([
+      { status: 200, body: refs },
+      { status: 200, body: commit('a1', trailered(KV_B)) },
+    ])
+    expect(await remote.listArchivedRefs()).toEqual([{ branch: 'chat-old', head: KV_B }])
+  })
+
+  it('readKeyAtTip probes the natural path, then the relocation slot', async () => {
+    const { remote, calls } = makeHarness([
+      { status: 200, body: { object: { sha: 'tip1' } } }, // getRef
+      { status: 404, body: { message: 'Not Found' } }, // natural path miss
+      { status: 200, body: { content: 'aGk=', encoding: 'base64', sha: 's', size: 2 } }, // _kv hit
+    ])
+    const out = await remote.readKeyAtTip('chat-x', 'meta')
+    expect(new TextDecoder().decode(out as Uint8Array)).toBe('hi')
+    expect(calls[1]?.url).toContain('/contents/meta?ref=tip1')
+    expect(calls[2]?.url).toContain('/contents/_kv/meta?ref=tip1')
   })
 })

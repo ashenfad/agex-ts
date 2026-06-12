@@ -314,9 +314,11 @@ export class GithubClient {
     if (data === null || typeof data !== 'object') {
       throw new GithubError('validation', 200, `getContent: unexpected response shape for ${path}`)
     }
-    if (Array.isArray(data)) {
-      throw new GithubError('validation', 200, `getContent: ${path} is a directory`)
-    }
+    // A directory listing means "no FILE at this path" — null, like a
+    // 404. (Load-bearing for two-probe key reads: a key relocated
+    // because its natural path became a directory must fall through
+    // to its `_kv/` slot rather than throw.)
+    if (Array.isArray(data)) return null
     if (data.encoding === 'base64' && typeof data.content === 'string') {
       if (data.content.length > 0 || data.size === 0) return base64ToBytes(data.content)
     }

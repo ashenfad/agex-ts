@@ -216,4 +216,9 @@ describe('getContent', () => {
     expect(await client.getContent('nope', 'ref')).toBeNull()
     expect(await client.getContent('empty', 'ref')).toEqual(new Uint8Array(0))
   })
+
+  it('returns null for directory listings (no FILE at the path)', async () => {
+    const { client } = makeClient([{ status: 200, body: [{ name: 'child.txt', type: 'file' }] }])
+    expect(await client.getContent('some/dir', 'ref')).toBeNull()
+  })
 })

@@ -56,6 +56,25 @@ const TRAILER = /^Kvgit-Hash: ([0-9a-f]{40})$/m
 const ARCHIVED = 'archived/'
 const STATE_FORMAT = 1
 
+/** Fan-out width for unthrottled GET bursts (ref resolution, sidecar
+ *  prefetch). Parallel enough to matter, bounded enough to stay clear
+ *  of GitHub's secondary limits on concurrent requests. */
+const GET_CHUNK = 25
+
+/** Bounded-concurrency map: `Promise.all` in chunks of `limit`. The
+ *  one place the unbounded-vs-bounded policy lives. */
+async function chunked<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const out: R[] = []
+  for (let i = 0; i < items.length; i += limit) {
+    out.push(...(await Promise.all(items.slice(i, i + limit).map(fn))))
+  }
+  return out
+}
+
 const stateKey = (repo: string, branch: string): string => `__ghsync__${repo}__${branch}`
 
 interface TransportState {
@@ -154,14 +173,14 @@ export class GithubRemote implements Remote {
   async listRefs(): Promise<RemoteRef[]> {
     const refs = await this.client.listBranchRefs()
     // Trailer resolution is independent, unthrottled GETs — resolve
-    // concurrently rather than serially per branch.
-    const resolved = await Promise.all(
-      refs
-        .filter((ref) => !ref.branch.startsWith(ARCHIVED))
-        .map(async (ref) => {
-          const head = await this.#kvgitHashOf(ref.sha)
-          return head !== null ? { branch: ref.branch, head } : null
-        }),
+    // concurrently in bounded chunks.
+    const resolved = await chunked(
+      refs.filter((ref) => !ref.branch.startsWith(ARCHIVED)),
+      GET_CHUNK,
+      async (ref) => {
+        const head = await this.#kvgitHashOf(ref.sha)
+        return head !== null ? { branch: ref.branch, head } : null
+      },
     )
     return resolved.filter((r): r is RemoteRef => r !== null)
   }
@@ -307,19 +326,14 @@ export class GithubRemote implements Remote {
     // long-history rebuild fast, bounded enough to stay clear of
     // GitHub's secondary limits on concurrent request bursts. The
     // fold below stays sequential (each map builds on its parent's).
-    const CHUNK = 25
     const sidecars = new Map<string, ReturnType<typeof decodeSidecar>>()
-    for (let i = 0; i < ordered.length; i += CHUNK) {
-      await Promise.all(
-        ordered.slice(i, i + CHUNK).map(async (gitSha) => {
-          const sidecarBytes = await this.client.getContent(SIDECAR_PATH, gitSha)
-          if (sidecarBytes === null) {
-            throw new Error(`rebuildTransportState: ${gitSha.slice(0, 8)} has no ${SIDECAR_PATH}`)
-          }
-          sidecars.set(gitSha, decodeSidecar(sidecarBytes))
-        }),
-      )
-    }
+    await chunked(ordered, GET_CHUNK, async (gitSha) => {
+      const sidecarBytes = await this.client.getContent(SIDECAR_PATH, gitSha)
+      if (sidecarBytes === null) {
+        throw new Error(`rebuildTransportState: ${gitSha.slice(0, 8)} has no ${SIDECAR_PATH}`)
+      }
+      sidecars.set(gitSha, decodeSidecar(sidecarBytes))
+    })
 
     const pathMaps = new Map<string, Map<string, string>>()
     let tipTreeSha: string | null = null
@@ -438,13 +452,13 @@ export class GithubRemote implements Remote {
    *  their kvgit heads — the trash view. */
   async listArchivedRefs(): Promise<RemoteRef[]> {
     const refs = await this.client.listBranchRefs()
-    const resolved = await Promise.all(
-      refs
-        .filter((ref) => ref.branch.startsWith(ARCHIVED))
-        .map(async (ref) => {
-          const head = await this.#kvgitHashOf(ref.sha)
-          return head !== null ? { branch: ref.branch.slice(ARCHIVED.length), head } : null
-        }),
+    const resolved = await chunked(
+      refs.filter((ref) => ref.branch.startsWith(ARCHIVED)),
+      GET_CHUNK,
+      async (ref) => {
+        const head = await this.#kvgitHashOf(ref.sha)
+        return head !== null ? { branch: ref.branch.slice(ARCHIVED.length), head } : null
+      },
     )
     return resolved.filter((r): r is RemoteRef => r !== null)
   }

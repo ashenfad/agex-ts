@@ -213,4 +213,17 @@ describe('GithubRemote roster ops (scripted)', () => {
     expect(calls[1]?.url).toContain('/contents/meta?ref=tip1')
     expect(calls[2]?.url).toContain('/contents/_kv/meta?ref=tip1')
   })
+
+  it('readKeyAtTip falls back when the natural path is a DIRECTORY', async () => {
+    // A key relocated because other keys nest under its natural path:
+    // the contents API answers with a directory listing, which must
+    // read as "no file here", not an error.
+    const { remote } = makeHarness([
+      { status: 200, body: { object: { sha: 'tip1' } } }, // getRef
+      { status: 200, body: [{ name: 'inner', type: 'file' }] }, // directory listing
+      { status: 200, body: { content: 'aGk=', encoding: 'base64', sha: 's', size: 2 } }, // _kv hit
+    ])
+    const out = await remote.readKeyAtTip('chat-x', 'conf')
+    expect(new TextDecoder().decode(out as Uint8Array)).toBe('hi')
+  })
 })

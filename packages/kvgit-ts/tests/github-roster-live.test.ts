@@ -40,14 +40,25 @@ describe.runIf(LIVE)('roster lifecycle (live)', () => {
       updates: new Map([
         ['__branch_meta__', bytes(JSON.stringify({ title: 'Roster test session' }))],
         ['payload', bytes('content')],
+        ['conf/inner', bytes('nested-first')],
       ]),
     })
+    // Second commit: key 'conf' arrives AFTER 'conf/inner' made
+    // 'conf' a directory — the planner relocates it to _kv/.
+    await vk.commit({ updates: new Map([['conf', bytes('relocated')]]) })
     expect((await pushBranch(store, remote, BRANCH)).status).toBe('created')
 
     // The cloud-stub primitive: one key's bytes, no materialization.
     const meta = await remote.readKeyAtTip(BRANCH, '__branch_meta__')
     expect(JSON.parse(dec.decode(meta as Uint8Array))).toEqual({ title: 'Roster test session' })
     expect(await remote.readKeyAtTip(BRANCH, 'no-such-key')).toBeNull()
+
+    // Directory-conflict fallback against the real API: 'conf' lives
+    // in _kv/ because its natural path is a directory in the tree.
+    const conf = await remote.readKeyAtTip(BRANCH, 'conf')
+    expect(dec.decode(conf as Uint8Array)).toBe('relocated')
+    const inner = await remote.readKeyAtTip(BRANCH, 'conf/inner')
+    expect(dec.decode(inner as Uint8Array)).toBe('nested-first')
   }, 60_000)
 
   it('archive moves the session from roster to trash; double-archive is benign', async () => {

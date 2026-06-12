@@ -308,6 +308,12 @@ export class GithubClient {
       if (err instanceof GithubError && err.kind === 'not-found') return null
       throw err
     }
+    // Boundary guard: request<T> casts blindly, and a pathological
+    // response would otherwise escape as a raw TypeError instead of a
+    // classified error.
+    if (data === null || typeof data !== 'object') {
+      throw new GithubError('validation', 200, `getContent: unexpected response shape for ${path}`)
+    }
     if (Array.isArray(data)) {
       throw new GithubError('validation', 200, `getContent: ${path} is a directory`)
     }

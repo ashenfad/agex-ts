@@ -233,16 +233,22 @@ export class GithubRemote implements Remote {
         )
       }
 
+      // Per-commit blob fetches run concurrently — naturally bounded
+      // by the commit's update count (typically a handful), unlike a
+      // whole-walk Promise.all, which would burst-trigger GitHub's
+      // secondary limits on big histories.
       const values = new Map<string, Uint8Array>()
-      for (const [key, entry] of sidecar.updates) {
-        const bytes = await this.client.getContent(entry.path, gitSha)
-        if (bytes === null) {
-          throw new Error(
-            `GithubRemote.fetch: blob missing at ${entry.path} for ${sidecar.hash.slice(0, 7)}`,
-          )
-        }
-        values.set(key, bytes)
-      }
+      await Promise.all(
+        [...sidecar.updates].map(async ([key, entry]) => {
+          const bytes = await this.client.getContent(entry.path, gitSha)
+          if (bytes === null) {
+            throw new Error(
+              `GithubRemote.fetch: blob missing at ${entry.path} for ${sidecar.hash.slice(0, 7)}`,
+            )
+          }
+          values.set(key, bytes)
+        }),
+      )
       const wire = wireFromSidecar(sidecar, values)
 
       // Fold the key→path map forward.
@@ -296,15 +302,29 @@ export class GithubRemote implements Remote {
     const walked = await this.#walkRemote(tipSha, new Set())
     const ordered = topoOrder(walked, new Set())
 
+    // Prefetch sidecars in bounded chunks: parallel enough to make a
+    // long-history rebuild fast, bounded enough to stay clear of
+    // GitHub's secondary limits on concurrent request bursts. The
+    // fold below stays sequential (each map builds on its parent's).
+    const CHUNK = 25
+    const sidecars = new Map<string, ReturnType<typeof decodeSidecar>>()
+    for (let i = 0; i < ordered.length; i += CHUNK) {
+      await Promise.all(
+        ordered.slice(i, i + CHUNK).map(async (gitSha) => {
+          const sidecarBytes = await this.client.getContent(SIDECAR_PATH, gitSha)
+          if (sidecarBytes === null) {
+            throw new Error(`rebuildTransportState: ${gitSha.slice(0, 8)} has no ${SIDECAR_PATH}`)
+          }
+          sidecars.set(gitSha, decodeSidecar(sidecarBytes))
+        }),
+      )
+    }
+
     const pathMaps = new Map<string, Map<string, string>>()
     let tipTreeSha: string | null = null
     for (const gitSha of ordered) {
       const meta = walked.get(gitSha) as RemoteCommit
-      const sidecarBytes = await this.client.getContent(SIDECAR_PATH, gitSha)
-      if (sidecarBytes === null) {
-        throw new Error(`rebuildTransportState: ${gitSha.slice(0, 8)} has no ${SIDECAR_PATH}`)
-      }
-      const sidecar = decodeSidecar(sidecarBytes)
+      const sidecar = sidecars.get(gitSha) as ReturnType<typeof decodeSidecar>
       const firstParent = sidecar.parents[0]
       const base = firstParent !== undefined ? pathMaps.get(firstParent) : new Map<string, string>()
       if (base === undefined) {

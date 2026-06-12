@@ -86,6 +86,16 @@ describe('sidecar round-trip', () => {
     expect(dec.decode(a)).toBe(dec.decode(b))
   })
 
+  it('records carry paths when the planner assigned one', () => {
+    const wire = sampleWire()
+    const paths = new Map([...PATHS, ['kb', '_kv/kb']])
+    const decoded = decodeSidecar(encodeSidecar(wire, { kernel: 'ts', paths }))
+    expect(decoded.carries.get('kb')?.path).toBe('_kv/kb')
+    // Absent from the paths map → omitted, not null.
+    const bare = decodeSidecar(encodeSidecar(wire, { kernel: 'ts', paths: PATHS }))
+    expect('path' in (bare.carries.get('kb') as object)).toBe(false)
+  })
+
   it('handles the empty commit (no updates/removals/carries, null info)', () => {
     const wire: WireCommit = {
       hash: 'e'.repeat(40),

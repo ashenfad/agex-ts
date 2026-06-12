@@ -255,24 +255,67 @@ export class GithubClient {
   }
 
   /** One page of the commits list walking back from `sha` —
-   *  parents and messages included (messages carry the Kvgit-Hash
-   *  trailer), 1-indexed pages. The walk-back primitive for fetch and
+   *  parents, messages (Kvgit-Hash trailers), tree SHAs, and dates
+   *  included; 1-indexed pages. The walk-back primitive for fetch and
    *  for kvgit↔git SHA resolution. */
   async listCommits(opts: {
     sha: string
     perPage?: number
     page?: number
-  }): Promise<Array<{ sha: string; parents: string[]; message: string }>> {
+  }): Promise<
+    Array<{ sha: string; parents: string[]; message: string; treeSha: string; date: string }>
+  > {
     const perPage = opts.perPage ?? 100
     const page = opts.page ?? 1
     const data = await this.request<
-      Array<{ sha: string; parents: Array<{ sha: string }>; commit: { message: string } }>
+      Array<{
+        sha: string
+        parents: Array<{ sha: string }>
+        commit: { message: string; tree: { sha: string }; committer: { date: string } }
+      }>
     >('GET', `commits?sha=${encodeURIComponent(opts.sha)}&per_page=${perPage}&page=${page}`)
     return data.map((c) => ({
       sha: c.sha,
       parents: c.parents.map((p) => p.sha),
       message: c.commit.message,
+      treeSha: c.commit.tree.sha,
+      date: c.commit.committer.date,
     }))
+  }
+
+  /**
+   * A file's bytes at a ref, in one request via the contents API
+   * (inline base64 up to ~1MB; larger files arrive truncated with
+   * `encoding: "none"` and fall back to the blob endpoint, which
+   * serves up to 100MB). Returns null when the path doesn't exist at
+   * that ref.
+   */
+  async getContent(path: string, ref: string): Promise<Uint8Array | null> {
+    const encoded = path.split('/').map(encodeURIComponent).join('/')
+    interface ContentResponse {
+      content?: string
+      encoding?: string
+      sha: string
+      size: number
+    }
+    let data: ContentResponse
+    try {
+      data = await this.request<ContentResponse>(
+        'GET',
+        `contents/${encoded}?ref=${encodeURIComponent(ref)}`,
+      )
+    } catch (err) {
+      if (err instanceof GithubError && err.kind === 'not-found') return null
+      throw err
+    }
+    if (Array.isArray(data)) {
+      throw new GithubError('validation', 200, `getContent: ${path} is a directory`)
+    }
+    if (data.encoding === 'base64' && typeof data.content === 'string') {
+      if (data.content.length > 0 || data.size === 0) return base64ToBytes(data.content)
+    }
+    // Truncated (>1MB) or unexpected encoding — fetch via blob SHA.
+    return this.getBlob(data.sha)
   }
 
   // -------------------------------------------------------------------------

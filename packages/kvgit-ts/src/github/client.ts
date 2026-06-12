@@ -255,20 +255,24 @@ export class GithubClient {
   }
 
   /** One page of the commits list walking back from `sha` —
-   *  parents included, 1-indexed pages. The walk-back primitive for
-   *  fetch ("list until a known SHA appears"). */
+   *  parents and messages included (messages carry the Kvgit-Hash
+   *  trailer), 1-indexed pages. The walk-back primitive for fetch and
+   *  for kvgit↔git SHA resolution. */
   async listCommits(opts: {
     sha: string
     perPage?: number
     page?: number
-  }): Promise<Array<{ sha: string; parents: string[] }>> {
+  }): Promise<Array<{ sha: string; parents: string[]; message: string }>> {
     const perPage = opts.perPage ?? 100
     const page = opts.page ?? 1
-    const data = await this.request<Array<{ sha: string; parents: Array<{ sha: string }> }>>(
-      'GET',
-      `commits?sha=${encodeURIComponent(opts.sha)}&per_page=${perPage}&page=${page}`,
-    )
-    return data.map((c) => ({ sha: c.sha, parents: c.parents.map((p) => p.sha) }))
+    const data = await this.request<
+      Array<{ sha: string; parents: Array<{ sha: string }>; commit: { message: string } }>
+    >('GET', `commits?sha=${encodeURIComponent(opts.sha)}&per_page=${perPage}&page=${page}`)
+    return data.map((c) => ({
+      sha: c.sha,
+      parents: c.parents.map((p) => p.sha),
+      message: c.commit.message,
+    }))
   }
 
   // -------------------------------------------------------------------------

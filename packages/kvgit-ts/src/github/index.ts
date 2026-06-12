@@ -17,6 +17,11 @@ export {
   relocatedPath,
 } from './paths'
 export {
+  GithubRemote,
+  kvgitHashFromMessage,
+  type GithubRemoteOptions,
+} from './remote'
+export {
   SIDECAR_FORMAT,
   decodeSidecar,
   encodeSidecar,

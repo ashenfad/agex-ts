@@ -187,3 +187,33 @@ describe('blob round-trip plumbing', () => {
     expect(back).toEqual(bytes)
   })
 })
+
+describe('getContent', () => {
+  it('decodes inline base64 and URL-encodes path segments (keeping slashes)', async () => {
+    const { client, calls } = makeClient([
+      { status: 200, body: { content: 'aGVsbG8=', encoding: 'base64', sha: 's', size: 5 } },
+    ])
+    const out = await client.getContent('.kvgit/commit 1.json', 'abc123')
+    expect(new TextDecoder().decode(out as Uint8Array)).toBe('hello')
+    expect(calls[0]?.url).toContain('/contents/.kvgit/commit%201.json?ref=abc123')
+  })
+
+  it('falls back to the blob endpoint when content is truncated (>1MB)', async () => {
+    const { client, calls } = makeClient([
+      { status: 200, body: { content: '', encoding: 'none', sha: 'bigsha', size: 2_000_000 } },
+      { status: 200, body: { content: 'aGk=', encoding: 'base64' } },
+    ])
+    const out = await client.getContent('files/big.bin', 'abc123')
+    expect(new TextDecoder().decode(out as Uint8Array)).toBe('hi')
+    expect(calls[1]?.url).toContain('/git/blobs/bigsha')
+  })
+
+  it('returns null for missing paths, distinguishes empty files', async () => {
+    const { client } = makeClient([
+      { status: 404, body: { message: 'Not Found' } },
+      { status: 200, body: { content: '', encoding: 'base64', sha: 's', size: 0 } },
+    ])
+    expect(await client.getContent('nope', 'ref')).toBeNull()
+    expect(await client.getContent('empty', 'ref')).toEqual(new Uint8Array(0))
+  })
+})

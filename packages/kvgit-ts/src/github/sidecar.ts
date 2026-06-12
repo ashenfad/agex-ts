@@ -39,7 +39,11 @@ export interface DecodedSidecar {
    *  meta fidelity. */
   updates: ReadonlyMap<string, { path: string; createdAt: number }>
   removals: ReadonlySet<string>
-  carries: ReadonlyMap<string, { owner: string; size: number; createdAt: number }>
+  /** `path` records where the carried key sits in THIS commit's tree
+   *  (assigned by the pusher's planner at the merge — not derivable
+   *  from the owner's sidecar, whose lineage may have placed the key
+   *  elsewhere). Replay ignores it; transport-state rebuild needs it. */
+  carries: ReadonlyMap<string, { owner: string; size: number; createdAt: number; path?: string }>
 }
 
 const _encoder = new TextEncoder()
@@ -64,10 +68,17 @@ export function encodeSidecar(
     updates[key] = { path, createdAt }
   }
 
-  const carries: Record<string, { owner: string; size: number; createdAt: number }> = {}
+  const carries: Record<string, { owner: string; size: number; createdAt: number; path?: string }> =
+    {}
   for (const key of [...wire.carries.keys()].sort()) {
     const carry = wire.carries.get(key) as { owner: string; size: number; createdAt: number }
-    carries[key] = { owner: carry.owner, size: carry.size, createdAt: carry.createdAt }
+    const path = opts.paths.get(key)
+    carries[key] = {
+      owner: carry.owner,
+      size: carry.size,
+      createdAt: carry.createdAt,
+      ...(path !== undefined && { path }),
+    }
   }
 
   // Field order is fixed by construction; JSON.stringify preserves
@@ -130,17 +141,26 @@ export function decodeSidecar(bytes: Uint8Array): DecodedSidecar {
     updates.set(key, { path: entry.path, createdAt: entry.createdAt })
   }
 
-  const carries = new Map<string, { owner: string; size: number; createdAt: number }>()
+  const carries = new Map<
+    string,
+    { owner: string; size: number; createdAt: number; path?: string }
+  >()
   for (const [key, value] of Object.entries(expectRecord(obj, 'carries'))) {
     const entry = value as Record<string, unknown>
     if (
       typeof entry?.owner !== 'string' ||
       typeof entry?.size !== 'number' ||
-      typeof entry?.createdAt !== 'number'
+      typeof entry?.createdAt !== 'number' ||
+      (entry.path !== undefined && typeof entry.path !== 'string')
     ) {
       throw new Error(`decodeSidecar: malformed carry entry for ${JSON.stringify(key)}`)
     }
-    carries.set(key, { owner: entry.owner, size: entry.size, createdAt: entry.createdAt })
+    carries.set(key, {
+      owner: entry.owner,
+      size: entry.size,
+      createdAt: entry.createdAt,
+      ...(typeof entry.path === 'string' && { path: entry.path }),
+    })
   }
 
   return { kernel, hash, parents, time, info, updates, removals, carries }

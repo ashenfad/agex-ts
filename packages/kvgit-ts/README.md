@@ -104,6 +104,19 @@ What's in the subpath ([`src/github/`](./src/github)):
   paths, commits with explicit dates (deterministic SHAs → resumable
   pushes), refs with CAS semantics (`createRef`/`updateRef` return
   `false` on lost races only).
+- **`GithubRemote`** — the `Remote` implementation. Push renders each
+  kvgit commit as a real git commit (blobs → `base_tree` trees →
+  commits with deterministic dates → one trailing ref CAS); fetch
+  walks the commits list back to the receiver's frontier, reads
+  sidecars + blobs via the contents API, and reassembles
+  `WireCommit`s. Incremental pushes need per-branch **transport
+  state** (frontier tree + key→path assignments), persisted locally
+  under `__ghsync__<repo>__<branch>`; fetch rebuilds it
+  opportunistically as it walks, and `rebuildTransportState(branch)`
+  recovers it from remote sidecars alone. Verified live end to end:
+  two stores ping-ponging a session through a real repo, incremental
+  deltas both directions, interrupted-push resume, lost-state
+  recovery.
 - **`gitBlobSha1`** — local git blob hashing (WebCrypto SHA-1);
   knowing a blob's SHA before upload is the push-side dedup
   primitive. Verified live: the local SHA predicts the remote one.

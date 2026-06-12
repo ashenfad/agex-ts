@@ -25,10 +25,11 @@
  * key→path assignments (`PathPlanner`) and the frontier commit's
  * git SHA + tree. That state is persisted in the LOCAL store under
  * `__ghsync__<repo>__<branch>` after each successful push, keyed to
- * the kvgit head it describes. A push whose `expectedOld` doesn't
- * match the persisted state fails with a "stale transport state"
- * error — rebuilding state from the remote is the fetch side's job
- * (next PR), since pulling is what makes a foreign frontier local.
+ * the kvgit head it describes — and `fetch` re-arms it as it walks
+ * (pulling is what makes a foreign frontier local). A push whose
+ * `expectedOld` doesn't match the persisted state fails with a
+ * "stale transport state" error; `rebuildTransportState(branch)`
+ * recovers from remote sidecars alone.
  *
  * The local store also backstops merge carries: a carried key whose
  * owning commit predates the frontier needs its value's blob SHA for
@@ -38,11 +39,11 @@
 
 import type { Remote, RemoteRef } from '../sync/remote'
 import type { KVStore, WireCommit } from '../types'
-import { blobPointer, dumps, safeLoads } from '../versioned/layout'
+import { PARENT_COMMIT, blobPointer, dumps, safeLoads } from '../versioned/layout'
 import type { GithubClient, TreeEntry } from './client'
 import { gitBlobSha1 } from './git-hash'
 import { PathPlanner, SIDECAR_PATH } from './paths'
-import { encodeSidecar } from './sidecar'
+import { decodeSidecar, encodeSidecar, wireFromSidecar } from './sidecar'
 
 export interface GithubRemoteOptions {
   /** Commit author/committer identity on the sync repo. */
@@ -73,6 +74,57 @@ interface CommitRender {
   gitSha: string
   treeSha: string
   planner: PathPlanner
+}
+
+/** A remote commit as learned from the commits-list walk. */
+interface RemoteCommit {
+  kvHash: string
+  gitParents: string[]
+  treeSha: string
+}
+
+/** Kahn topological order (parents first) over the needed subset of a
+ *  remote walk; parents outside the subset count as satisfied. */
+function topoOrder(
+  walked: ReadonlyMap<string, RemoteCommit>,
+  haveKv: ReadonlySet<string>,
+): string[] {
+  const needed = new Map([...walked].filter(([, meta]) => !haveKv.has(meta.kvHash)))
+  const inDegree = new Map<string, number>()
+  const children = new Map<string, string[]>()
+  for (const [sha, meta] of needed) {
+    let deg = 0
+    for (const p of meta.gitParents) {
+      if (!needed.has(p)) continue
+      deg++
+      const kids = children.get(p) ?? []
+      kids.push(sha)
+      children.set(p, kids)
+    }
+    inDegree.set(sha, deg)
+  }
+  const ready = [...inDegree]
+    .filter(([, deg]) => deg === 0)
+    .map(([sha]) => sha)
+    .sort()
+  const out: string[] = []
+  while (ready.length > 0) {
+    const sha = ready.shift() as string
+    out.push(sha)
+    for (const child of children.get(sha) ?? []) {
+      const deg = (inDegree.get(child) as number) - 1
+      inDegree.set(child, deg)
+      if (deg === 0) {
+        const at = ready.findIndex((r) => child < r)
+        if (at === -1) ready.push(child)
+        else ready.splice(at, 0, child)
+      }
+    }
+  }
+  if (out.length !== needed.size) {
+    throw new Error(`GithubRemote: cycle in remote commit graph (${out.length}/${needed.size})`)
+  }
+  return out
 }
 
 export class GithubRemote implements Remote {
@@ -125,11 +177,241 @@ export class GithubRemote implements Remote {
   }
 
   // -------------------------------------------------------------------------
-  // Remote: fetch (next PR)
+  // Remote: fetch
   // -------------------------------------------------------------------------
 
-  fetch(_want: string, _have: Iterable<string>): AsyncIterable<WireCommit> {
-    throw new Error('GithubRemote.fetch is not implemented yet (PR 8)')
+  /**
+   * Stream the delta from the remote: commits reachable from `want`
+   * but not from `have`, parents-first.
+   *
+   * Mechanics: locate `want`'s branch tip, expand `have` to its full
+   * LOCAL ancestry (pruning is a local read, never a request), page
+   * the commits list back from the tip until every needed commit's
+   * parents are accounted for, then per commit (topo order) read the
+   * sidecar + update blobs via the contents API and reassemble a
+   * `WireCommit`. The receiver (`applyWire`) recomputes every hash —
+   * fetch verifies only trailer↔sidecar agreement.
+   *
+   * Side effect: when the walk can fold a complete key→path map for
+   * the tip (full-history fetch, or incremental atop matching
+   * transport state), the transport state is persisted — this is what
+   * arms the NEXT push after a pull, closing the multi-device loop.
+   */
+  async *fetch(want: string, have: Iterable<string>): AsyncIterable<WireCommit> {
+    const tip = await this.#locateTip(want)
+    if (tip === null) {
+      throw new Error(`GithubRemote.fetch: no branch tip with kvgit hash ${want.slice(0, 7)}`)
+    }
+    const haveSet = await this.#expandLocalAncestors(have)
+    if (haveSet.has(want)) return
+
+    const walked = await this.#walkRemote(tip.gitSha, haveSet)
+    const ordered = topoOrder(walked, haveSet)
+
+    // Path-map folding for transport state (per-commit forks, like
+    // the pusher's planners). Complete only when every fold has a
+    // base: trivially true for full-history walks; incremental walks
+    // need prior state at a have-frontier commit.
+    const pathMaps = new Map<string, Map<string, string>>()
+    const state = await this.#loadState(tip.branch)
+    if (state !== null && haveSet.has(state.kvgitHead)) {
+      pathMaps.set(state.kvgitHead, new Map(state.assignments))
+    }
+    let foldComplete = true
+
+    let tipTreeSha: string | null = null
+    for (const gitSha of ordered) {
+      const meta = walked.get(gitSha) as RemoteCommit
+      const sidecarBytes = await this.client.getContent(SIDECAR_PATH, gitSha)
+      if (sidecarBytes === null) {
+        throw new Error(`GithubRemote.fetch: ${gitSha.slice(0, 8)} has no ${SIDECAR_PATH}`)
+      }
+      const sidecar = decodeSidecar(sidecarBytes)
+      if (sidecar.hash !== meta.kvHash) {
+        throw new Error(
+          `GithubRemote.fetch: trailer/sidecar mismatch at ${gitSha.slice(0, 8)} (${meta.kvHash.slice(0, 7)} vs ${sidecar.hash.slice(0, 7)})`,
+        )
+      }
+
+      const values = new Map<string, Uint8Array>()
+      for (const [key, entry] of sidecar.updates) {
+        const bytes = await this.client.getContent(entry.path, gitSha)
+        if (bytes === null) {
+          throw new Error(
+            `GithubRemote.fetch: blob missing at ${entry.path} for ${sidecar.hash.slice(0, 7)}`,
+          )
+        }
+        values.set(key, bytes)
+      }
+      const wire = wireFromSidecar(sidecar, values)
+
+      // Fold the key→path map forward.
+      const firstParent = wire.parents[0]
+      const base = firstParent !== undefined ? pathMaps.get(firstParent) : new Map<string, string>()
+      if (base === undefined) {
+        foldComplete = false
+      } else {
+        const fold = new Map(base)
+        for (const key of wire.removals) fold.delete(key)
+        for (const [key, entry] of sidecar.updates) fold.set(key, entry.path)
+        for (const [key, carry] of sidecar.carries) {
+          if (carry.path === undefined) foldComplete = false
+          else fold.set(key, carry.path)
+        }
+        pathMaps.set(wire.hash, fold)
+      }
+
+      if (wire.hash === want) tipTreeSha = meta.treeSha
+      yield wire
+    }
+
+    const tipMap = pathMaps.get(want)
+    if (foldComplete && tipMap !== undefined && tipTreeSha !== null) {
+      await this.#saveState(tip.branch, {
+        format: STATE_FORMAT,
+        kvgitHead: want,
+        gitHead: tip.gitSha,
+        treeSha: tipTreeSha,
+        assignments: [...tipMap],
+      })
+    }
+  }
+
+  /**
+   * Rebuild a branch's transport state from the remote alone: walk the
+   * FULL history reading only sidecars (no value blobs), fold the
+   * key→path map, persist. The recovery path for "stale transport
+   * state" pushes — e.g. local state lost, or the branch was last
+   * pushed before state existed.
+   */
+  async rebuildTransportState(branch: string): Promise<void> {
+    const tipSha = await this.client.getRef(branch)
+    if (tipSha === null) {
+      throw new Error(`rebuildTransportState: branch '${branch}' has no remote ref`)
+    }
+    const want = await this.#kvgitHashOf(tipSha)
+    if (want === null) {
+      throw new Error(`rebuildTransportState: '${branch}' tip carries no Kvgit-Hash trailer`)
+    }
+    const walked = await this.#walkRemote(tipSha, new Set())
+    const ordered = topoOrder(walked, new Set())
+
+    const pathMaps = new Map<string, Map<string, string>>()
+    let tipTreeSha: string | null = null
+    for (const gitSha of ordered) {
+      const meta = walked.get(gitSha) as RemoteCommit
+      const sidecarBytes = await this.client.getContent(SIDECAR_PATH, gitSha)
+      if (sidecarBytes === null) {
+        throw new Error(`rebuildTransportState: ${gitSha.slice(0, 8)} has no ${SIDECAR_PATH}`)
+      }
+      const sidecar = decodeSidecar(sidecarBytes)
+      const firstParent = sidecar.parents[0]
+      const base = firstParent !== undefined ? pathMaps.get(firstParent) : new Map<string, string>()
+      if (base === undefined) {
+        throw new Error(`rebuildTransportState: fold base missing at ${sidecar.hash.slice(0, 7)}`)
+      }
+      const fold = new Map(base)
+      for (const key of sidecar.removals) fold.delete(key)
+      for (const [key, entry] of sidecar.updates) fold.set(key, entry.path)
+      for (const [key, carry] of sidecar.carries) {
+        if (carry.path === undefined) {
+          throw new Error(
+            `rebuildTransportState: carry ${JSON.stringify(key)} at ${sidecar.hash.slice(0, 7)} lacks a path (pre-carry-path sidecar)`,
+          )
+        }
+        fold.set(key, carry.path)
+      }
+      pathMaps.set(sidecar.hash, fold)
+      if (sidecar.hash === want) tipTreeSha = meta.treeSha
+    }
+
+    const tipMap = pathMaps.get(want)
+    if (tipMap === undefined || tipTreeSha === null) {
+      throw new Error(`rebuildTransportState: walk never reached tip ${want.slice(0, 7)}`)
+    }
+    await this.#saveState(branch, {
+      format: STATE_FORMAT,
+      kvgitHead: want,
+      gitHead: tipSha,
+      treeSha: tipTreeSha,
+      assignments: [...tipMap],
+    })
+  }
+
+  /** Find the branch whose tip resolves to kvgit hash `want`. */
+  async #locateTip(want: string): Promise<{ branch: string; gitSha: string } | null> {
+    const refs = await this.client.listBranchRefs()
+    for (const ref of refs) {
+      if (ref.branch.startsWith('archived/')) continue
+      if ((await this.#kvgitHashOf(ref.sha)) === want) {
+        return { branch: ref.branch, gitSha: ref.sha }
+      }
+    }
+    return null
+  }
+
+  /** All kvgit hashes reachable locally from `have` (tolerant of
+   *  unknown hashes — they just contribute nothing). */
+  async #expandLocalAncestors(have: Iterable<string>): Promise<Set<string>> {
+    const out = new Set<string>()
+    const stack = [...have]
+    while (stack.length > 0) {
+      const current = stack.pop() as string
+      if (out.has(current)) continue
+      const raw = await this.#store.get(PARENT_COMMIT(current))
+      if (raw === null) continue
+      out.add(current)
+      const parsed = safeLoads(raw)
+      const parents = Array.isArray(parsed)
+        ? parsed.filter((p): p is string => typeof p === 'string')
+        : []
+      for (const p of parents) if (!out.has(p)) stack.push(p)
+    }
+    return out
+  }
+
+  /**
+   * Page the commits list back from `tipSha`, recording every commit
+   * until all parents of NEEDED commits are seen. Commits whose kvgit
+   * hash is in `haveKv` are pruned (their parents aren't pursued), so
+   * the walk's cost tracks the delta plus paging slop.
+   */
+  async #walkRemote(
+    tipSha: string,
+    haveKv: ReadonlySet<string>,
+  ): Promise<Map<string, RemoteCommit>> {
+    const seen = new Map<string, RemoteCommit>()
+    const pending = new Set<string>([tipSha])
+    for (let page = 1; page <= 500 && pending.size > 0; page++) {
+      const batch = await this.client.listCommits({ sha: tipSha, perPage: 100, page })
+      for (const c of batch) {
+        if (seen.has(c.sha)) continue
+        const kvHash = kvgitHashFromMessage(c.message)
+        if (kvHash === null) {
+          throw new Error(
+            `GithubRemote: commit ${c.sha.slice(0, 8)} on a session branch lacks a Kvgit-Hash trailer`,
+          )
+        }
+        seen.set(c.sha, { kvHash, gitParents: c.parents, treeSha: c.treeSha })
+        this.#kvgitBySha.set(c.sha, kvHash)
+        pending.delete(c.sha)
+        if (!haveKv.has(kvHash)) {
+          for (const p of c.parents) if (!seen.has(p)) pending.add(p)
+        }
+      }
+      if (batch.length < 100) {
+        if (pending.size > 0) {
+          throw new Error(
+            `GithubRemote: history exhausted with ${pending.size} unresolved parent(s) — corrupt branch?`,
+          )
+        }
+        break
+      }
+    }
+    if (pending.size > 0) {
+      throw new Error('GithubRemote: history walk exceeded 50,000 commits')
+    }
+    return seen
   }
 
   // -------------------------------------------------------------------------

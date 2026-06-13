@@ -253,6 +253,36 @@ import '/helpers/d'
     expect(out.code).toContain('await __load("node:fs")')
   })
 
+  it('routes a helper bare npm import through __load, like the action body', async () => {
+    // Regression: a bare specifier inside a helper used to be left
+    // untouched, surviving into the helper's AsyncFunction body and
+    // dying with the opaque "Cannot use import statement outside a
+    // module". It should now be rewritten to `await __load('name')` —
+    // the same catch-all the action body uses — so the host resolver
+    // (→ esm.sh in the studio) handles it.
+    const fs = await fsWith({
+      '/helpers/noise.ts':
+        "import { createNoise2D } from 'simplex-noise'\n" +
+        'export const make = () => createNoise2D',
+    })
+    const seen: string[] = []
+    const load = async (name: string) => {
+      seen.push(name)
+      return { createNoise2D: () => 'noise-fn' }
+    }
+    const out = await prepareScript(
+      "import { make } from '/helpers/noise'\ntaskSuccess(make())",
+      fs,
+      new Map(),
+      { load },
+    )
+    // Reached the resolver (no syntax error), and the helper evaluated
+    // with the resolved binding in scope.
+    expect(seen).toContain('simplex-noise')
+    const mod = out.modules['/helpers/noise'] as { make: () => () => string }
+    expect(mod.make()()).toBe('noise-fn')
+  })
+
   it('resolves helper-of-helper imports recursively', async () => {
     const fs = await fsWith({
       '/helpers/leaf.ts': 'export const x = 42',

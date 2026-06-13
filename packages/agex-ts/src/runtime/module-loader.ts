@@ -375,13 +375,17 @@ function aliasBody(primaryPath: string, aliasPath: string): string {
  *  Three import-specifier kinds are recognized:
  *    - VFS paths (`/helpers/foo`, `./bar`) → rewritten to
  *      `__modules['/path']` lookups.
- *    - Names in `registeredNames` → rewritten to `__registered['name']`
- *      lookups (registered fns / classes / namespaces are reachable
- *      from helpers via this map, mirroring the agent's main scope).
- *    - Anything else (npm packages, external URLs) → left untouched.
- *      That's a syntax error at AsyncFunction-eval time; the
- *      message points the agent at what they actually have access
- *      to. */
+ *    - Host-bound registered names → `__registered['name']` lookups
+ *      (registered fns / classes / namespaces are reachable from
+ *      helpers via this map, mirroring the agent's main scope).
+ *    - Anything else (URL-shipped names, npm packages, external URLs)
+ *      → `await __load('name')`, exactly like the action body. The
+ *      runtime's `__load` routes through the host's `namespaceResolver`
+ *      (→ esm.sh in the studio) or throws a clear `Cannot find module`.
+ *      Without this, a bare `import 'pkg'` survived untouched into the
+ *      AsyncFunction body and died with the opaque "Cannot use import
+ *      statement outside a module" — and npm imports worked in action
+ *      bodies but not helpers, a surprising asymmetry. */
 function compileHelperBody(
   stripped: string,
   sourcePath: string,
@@ -410,12 +414,17 @@ function compileHelperBody(
       body = body.slice(0, imp.start) + replacement + body.slice(imp.end)
       continue
     }
-    if (registeredNames.has(imp.path)) {
-      const replacement = urlNames.has(imp.path)
-        ? rewriteAsUrlLoad(imp.binding, imp.path)
-        : rewriteAsRegisteredAccess(imp.binding, imp.path, true)
-      body = body.slice(0, imp.start) + replacement + body.slice(imp.end)
-    }
+    // Non-VFS specifier — same two-way split as the action body:
+    // host-bound registered name → `__registered` lookup; everything
+    // else (URL-shipped names AND unregistered npm packages) →
+    // `await __load('name')`, which the runtime routes through the
+    // host's `namespaceResolver`. The catch-all is what makes
+    // `import 'simplex-noise'` resolve in a helper, not just an action.
+    const isHostBound = registeredNames.has(imp.path) && !urlNames.has(imp.path)
+    const replacement = isHostBound
+      ? rewriteAsRegisteredAccess(imp.binding, imp.path, true)
+      : rewriteAsUrlLoad(imp.binding, imp.path)
+    body = body.slice(0, imp.start) + replacement + body.slice(imp.end)
   }
   const exportAssignments = exportNames
     .map((n) => `__exports[${JSON.stringify(n)}] = ${n};`)

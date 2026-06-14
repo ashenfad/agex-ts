@@ -207,10 +207,17 @@ export class GithubRemote implements Remote {
    * Mechanics: locate `want`'s branch tip, expand `have` to its full
    * LOCAL ancestry (pruning is a local read, never a request), page
    * the commits list back from the tip until every needed commit's
-   * parents are accounted for, then per commit (topo order) read the
-   * sidecar + update blobs via the contents API and reassemble a
-   * `WireCommit`. The receiver (`applyWire`) recomputes every hash —
-   * fetch verifies only trailer↔sidecar agreement.
+   * parents are accounted for, then walk the commits (topo order) in
+   * `GET_CHUNK`-sized WINDOWS — reading each window's sidecars + blobs
+   * concurrently (bounded to `GET_CHUNK` in-flight requests) before
+   * yielding the window's `WireCommit`s in order. Batching unpairs the
+   * network round-trips from the consumer's apply pace: an initial
+   * checkout of N commits costs ~N/GET_CHUNK request waves instead of
+   * N serial round-trips (one per commit, each gated behind the
+   * previous commit's apply). Window-at-a-time keeps peak memory to a
+   * single window of blobs rather than the whole history. The receiver
+   * (`applyWire`) recomputes every hash — fetch verifies only
+   * trailer↔sidecar agreement.
    *
    * Side effect: when the walk can fold a complete key→path map for
    * the tip (full-history fetch, or incremental atop matching
@@ -240,55 +247,78 @@ export class GithubRemote implements Remote {
     let foldComplete = true
 
     let tipTreeSha: string | null = null
-    for (const gitSha of ordered) {
-      const meta = walked.get(gitSha) as RemoteCommit
-      const sidecarBytes = await this.client.getContent(SIDECAR_PATH, gitSha)
-      if (sidecarBytes === null) {
-        throw new Error(`GithubRemote.fetch: ${gitSha.slice(0, 8)} has no ${SIDECAR_PATH}`)
-      }
-      const sidecar = decodeSidecar(sidecarBytes)
-      if (sidecar.hash !== meta.kvHash) {
-        throw new Error(
-          `GithubRemote.fetch: trailer/sidecar mismatch at ${gitSha.slice(0, 8)} (${meta.kvHash.slice(0, 7)} vs ${sidecar.hash.slice(0, 7)})`,
-        )
-      }
+    for (let i = 0; i < ordered.length; i += GET_CHUNK) {
+      const window = ordered.slice(i, i + GET_CHUNK)
 
-      // Per-commit blob fetches run concurrently — naturally bounded
-      // by the commit's update count (typically a handful), unlike a
-      // whole-walk Promise.all, which would burst-trigger GitHub's
-      // secondary limits on big histories.
-      const values = new Map<string, Uint8Array>()
-      await Promise.all(
-        [...sidecar.updates].map(async ([key, entry]) => {
-          const bytes = await this.client.getContent(entry.path, gitSha)
-          if (bytes === null) {
-            throw new Error(
-              `GithubRemote.fetch: blob missing at ${entry.path} for ${sidecar.hash.slice(0, 7)}`,
-            )
-          }
-          values.set(key, bytes)
-        }),
-      )
-      const wire = wireFromSidecar(sidecar, values)
-
-      // Fold the key→path map forward.
-      const firstParent = wire.parents[0]
-      const base = firstParent !== undefined ? pathMaps.get(firstParent) : new Map<string, string>()
-      if (base === undefined) {
-        foldComplete = false
-      } else {
-        const fold = new Map(base)
-        for (const key of wire.removals) fold.delete(key)
-        for (const [key, entry] of sidecar.updates) fold.set(key, entry.path)
-        for (const [key, carry] of sidecar.carries) {
-          if (carry.path === undefined) foldComplete = false
-          else fold.set(key, carry.path)
+      // Window phase 1 — sidecars: one GET each, GET_CHUNK concurrent.
+      const sidecars = new Map<string, ReturnType<typeof decodeSidecar>>()
+      await chunked(window, GET_CHUNK, async (gitSha) => {
+        const meta = walked.get(gitSha) as RemoteCommit
+        const sidecarBytes = await this.client.getContent(SIDECAR_PATH, gitSha)
+        if (sidecarBytes === null) {
+          throw new Error(`GithubRemote.fetch: ${gitSha.slice(0, 8)} has no ${SIDECAR_PATH}`)
         }
-        pathMaps.set(wire.hash, fold)
-      }
+        const sidecar = decodeSidecar(sidecarBytes)
+        if (sidecar.hash !== meta.kvHash) {
+          throw new Error(
+            `GithubRemote.fetch: trailer/sidecar mismatch at ${gitSha.slice(0, 8)} (${meta.kvHash.slice(0, 7)} vs ${sidecar.hash.slice(0, 7)})`,
+          )
+        }
+        sidecars.set(gitSha, sidecar)
+      })
 
-      if (wire.hash === want) tipTreeSha = meta.treeSha
-      yield wire
+      // Window phase 2 — blobs: flattened across the window and bounded
+      // at GET_CHUNK concurrent, so a wide window's fan-out (commits ×
+      // updates) can't burst past GitHub's secondary limits. Per-commit
+      // maps are pre-created so the concurrent writes never race.
+      const blobs = new Map<string, Map<string, Uint8Array>>()
+      for (const gitSha of window) blobs.set(gitSha, new Map())
+      const blobRefs = [...sidecars].flatMap(([gitSha, sidecar]) =>
+        [...sidecar.updates].map(([key, entry]) => ({
+          gitSha,
+          key,
+          path: entry.path,
+          hash: sidecar.hash,
+        })),
+      )
+      await chunked(blobRefs, GET_CHUNK, async (ref) => {
+        const bytes = await this.client.getContent(ref.path, ref.gitSha)
+        if (bytes === null) {
+          throw new Error(
+            `GithubRemote.fetch: blob missing at ${ref.path} for ${ref.hash.slice(0, 7)}`,
+          )
+        }
+        ;(blobs.get(ref.gitSha) as Map<string, Uint8Array>).set(ref.key, bytes)
+      })
+
+      // Window phase 3 — fold + yield in topo order. No network here,
+      // so applyWire drains the window at CPU speed; the window's blob
+      // buffer is released when the next window's overwrites it.
+      for (const gitSha of window) {
+        const meta = walked.get(gitSha) as RemoteCommit
+        const sidecar = sidecars.get(gitSha) as ReturnType<typeof decodeSidecar>
+        const wire = wireFromSidecar(sidecar, blobs.get(gitSha) as Map<string, Uint8Array>)
+
+        // Fold the key→path map forward.
+        const firstParent = wire.parents[0]
+        const base =
+          firstParent !== undefined ? pathMaps.get(firstParent) : new Map<string, string>()
+        if (base === undefined) {
+          foldComplete = false
+        } else {
+          const fold = new Map(base)
+          for (const key of wire.removals) fold.delete(key)
+          for (const [key, entry] of sidecar.updates) fold.set(key, entry.path)
+          for (const [key, carry] of sidecar.carries) {
+            if (carry.path === undefined) foldComplete = false
+            else fold.set(key, carry.path)
+          }
+          pathMaps.set(wire.hash, fold)
+        }
+
+        if (wire.hash === want) tipTreeSha = meta.treeSha
+        yield wire
+      }
     }
 
     const tipMap = pathMaps.get(want)

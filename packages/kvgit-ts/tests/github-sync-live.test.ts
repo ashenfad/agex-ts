@@ -121,6 +121,46 @@ describe.runIf(LIVE)('multi-device sync loop (live)', () => {
   }, 120_000)
 })
 
+describe.runIf(LIVE)('initial checkout across the fetch window', () => {
+  const aStore = new Memory()
+  const bStore = new Memory()
+  const aRemote = makeRemote(aStore)
+  const bRemote = makeRemote(bStore)
+  const WIN_BRANCH = `kvgit-window-${Date.now().toString(36)}`
+
+  afterAll(async () => {
+    await aRemote.client.deleteRef(WIN_BRANCH)
+  })
+
+  it('A pushes >25 commits, B pulls from scratch: full history converges', async () => {
+    // GithubRemote.fetch walks the remote in GET_CHUNK (25) windows.
+    // Push past one boundary so a from-scratch pull exercises the
+    // multi-window path: sidecars/blobs batched per window, and the
+    // transport-state fold carried across the window seam.
+    const N = 30
+    const vk = await VersionedKV.open(aStore, { branch: WIN_BRANCH })
+    for (let i = 0; i < N; i++) {
+      await vk.commit({ updates: new Map([[`k${i}`, bytes(`v${i}`)]]) })
+    }
+    expect((await pushBranch(aStore, aRemote, WIN_BRANCH)).status).toBe('created')
+
+    const pulled = await pullBranch(bStore, bRemote, WIN_BRANCH)
+    expect(pulled.status).toBe('created')
+    expect(pulled.localHead).toBe(vk.currentCommit)
+
+    const bVk = await VersionedKV.open(bStore, { branch: WIN_BRANCH })
+    expect(bVk.currentCommit).toBe(vk.currentCommit)
+    // Full history replayed (initial + N), not just the tip state.
+    const history: string[] = []
+    for await (const c of bVk.history()) history.push(c)
+    expect(history.length).toBe(N + 1)
+    // Values from before, at, and after the 25-commit window seam.
+    expect(text((await bVk.get('k0')) as Uint8Array)).toBe('v0')
+    expect(text((await bVk.get('k24')) as Uint8Array)).toBe('v24')
+    expect(text((await bVk.get('k29')) as Uint8Array)).toBe('v29')
+  }, 240_000)
+})
+
 describe.runIf(!LIVE)('multi-device sync loop', () => {
   it.skip('skipped: set KVGIT_GH_TOKEN and KVGIT_GH_REPO to run', () => {})
 })

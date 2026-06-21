@@ -34,12 +34,18 @@ const FORBIDDEN = [
 ]
 
 // Files that are *allowed* to contain forbidden patterns because they
-// are platform-conditional sub-path entries (browser bundlers resolve
-// to a stub via the `"browser"` exports condition). Paths are relative
-// to the package root.
+// are platform-conditional entries a browser bundle never reaches —
+// either resolved to a stub via the `"browser"` exports condition, or a
+// target-selected entry the browser graph simply never imports. Paths
+// are relative to the package root.
 const ALLOWLIST = {
   'kvgit-ts': ['dist/backends/sqlite.js'],
   'termish-ts': ['dist/fs/real.js'],
+  // The Node `worker_threads` worker entry. Selected only by
+  // `workerRuntime({ target: 'node' })`; the browser graph reaches
+  // `dist/worker.js` (via the `./worker` export / runtime URL), never
+  // this file, so its `node:worker_threads` import can't leak browser-side.
+  'agex-runtime-worker': ['dist/worker.node.js'],
 }
 
 // Packages to scan. Anything not listed is skipped (e.g. the monorepo

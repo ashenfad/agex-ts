@@ -2,7 +2,7 @@
 
 `agex-ts` is a TypeScript-native agent framework. You define a typed task with `agent.task({...})` and the agent fills it in by writing TypeScript that calls into the modules you've registered. Real values flow in and out without JSON serialization at the boundary, and there's no separate runtime to deploy — agex-ts is a library you import.
 
-The agent's TS runs in an isolated Web Worker by default (or `worker_threads` on Node — [planned](roadmap.md)). Per-session state and an optional virtual filesystem are versioned — one commit captures the whole world; sessions roll back independently. Browser-native: no Pyodide, no wasm Python. Just a Web Worker bundle.
+The agent's TS runs in an isolated Web Worker by default (or `worker_threads` on Node). Per-session state and an optional virtual filesystem are versioned — one commit captures the whole world; sessions roll back independently. Browser-native: no Pyodide, no wasm Python. Just a Web Worker bundle.
 
 ```ts
 import { createAgent } from 'agex-ts'

@@ -50,7 +50,7 @@ agex-ts is a small monorepo. Pick what you need:
 | Package | Purpose |
 |---|---|
 | `agex-ts` | Core: `Agent`, `createAgent`, registration, task, state, render. |
-| `@agex-ts/runtime-worker` | Web Worker runtime adapter (browser today; Node `worker_threads` planned). |
+| `@agex-ts/runtime-worker` | Worker runtime adapter — browser Web Worker or Node `worker_threads`. |
 | `@agex-ts/anthropic` | Anthropic provider (`Anthropic`). |
 | `@agex-ts/openai` | OpenAI provider (`OpenAI`). |
 | `@agex-ts/gemini` | Gemini provider (`Gemini`). |

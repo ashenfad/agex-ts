@@ -34,48 +34,6 @@ for known-wanted work that hasn't shipped yet.
 
 ---
 
-### Node `worker_threads` target for `@agex-ts/runtime-worker`
-
-**Why it matters.** `workerRuntime` is browser-only today; Node-side
-embedders (backend services, CLIs, Next.js server actions, BullMQ
-workers, Bun, Deno) can only use `evalRuntime`, which has no
-isolation. That rules out untrusted or agent-authored code on the
-server — the main reason `workerRuntime` exists. Cloudflare Workers
-are out of scope here (no `worker_threads`); standard Node + Bun +
-Deno are the targets.
-
-**Scope.** Small. Most of the package is target-agnostic; only ~15
-lines actually touch the Web Worker API.
-
-- Host-side adapter wrapping `new Worker` / `terminate` /
-  `postMessage` / `on('message' | 'error')`. Two impls behind one
-  interface (~80 LOC).
-- Worker-side shim swapping `self.postMessage` /
-  `self.addEventListener` for `parentPort.postMessage` /
-  `parentPort.on('message')` (~30 LOC).
-- `target: 'auto' | 'browser' | 'node'` option on
-  `WorkerRuntimeOptions`, auto-detected via
-  `typeof process?.versions?.node`.
-- Second worker entry in tsup config (`worker.node.mjs` alongside
-  `worker.js`).
-- New `vitest.node.config.ts` running the existing 68-test suite
-  against the Node worker. A handful of fixture tests that build
-  URL-shipped modules via `URL.createObjectURL` need a Node-friendly
-  variant (`data:` URLs or temp files).
-- README + runtime docstring updates noting target selection.
-
-**Estimate.** 1–2 focused sessions, ~300–500 LOC delta. Risk
-concentrated in the multi-target tsup config and Vitest's
-`worker_threads` spawning under test — both can surprise. Functionality
-risk is low; the abstraction shape is obvious in advance.
-
-**Defer rationale.** No concrete user is asking, and the author's own
-work is browser-side. Architecture isn't something we'll regret
-delaying. Pick this up when a Node embedder surfaces or when broader
-adoption makes server-side isolation a credible ask.
-
----
-
 ### Per-clone iteration budgets + supervised extension hearings
 
 **Why it matters.** A `spawn` clone today inherits one global cap — `agent.maxIterations` (default `10`), read straight off the agent in the task loop (`task.ts`), with no per-task override anywhere. That bounds runaways (good — every clone can't spin forever for free), but it gives the orchestrating parent no per-subtask control, and it gives a clone making *slow but steady* progress no recourse: it hits the wall and fails, even when a few more turns would finish the job. The missing primitive is a **per-clone, mutable iteration budget** — and once you have it, two distinct capabilities fall out of the same plumbing.

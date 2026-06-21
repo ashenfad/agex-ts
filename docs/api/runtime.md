@@ -87,20 +87,22 @@ The built-in primer flags these so the agent doesn't reach for them.
 import { workerRuntime } from '@agex-ts/runtime-worker'
 
 interface WorkerRuntimeOptions {
+  readonly target?: 'auto' | 'browser' | 'node'                // default 'auto'
   readonly workerUrl?: string | URL
   readonly transform?: (src: string) => string | Promise<string>
-  readonly timeoutMs?: number                                  // default 5000
+  readonly timeoutMs?: number                                  // default 300000
   readonly routeFetchToVfs?: boolean | ReadonlyArray<string>   // default false
 }
 
 function workerRuntime(opts?: WorkerRuntimeOptions): RuntimeAdapter
 ```
 
-Web Worker isolation. The host spawns a worker, sends `configure` at boot, then dispatches each `execute` over postMessage. The worker has its own globals, no DOM access, no shared scope with the host.
+Worker isolation on either a browser **Web Worker** or a Node **`worker_threads`** worker. The host spawns a worker, sends `configure` at boot, then dispatches each `execute` over postMessage. The worker has its own globals, no DOM access, no shared scope with the host.
 
 | Option | Purpose |
 |---|---|
-| `workerUrl` | URL the host hands to `new Worker(...)`. Defaults to a sibling file the package ships. |
+| `target` | Which worker backend to spawn: `'browser'` (Web Worker → `worker.js`), `'node'` (`worker_threads` → `worker.node.js`), or `'auto'` (default — detect from the environment). Also selects the default `workerUrl`. Remote URL-shipped registrations are browser-only; on the Node target they raise a clear `ImportError` (Node can't dynamic-import remote URLs). |
+| `workerUrl` | URL the host hands to the worker constructor. Defaults to a sibling file the package ships (`worker.js` / `worker.node.js`). |
 | `transform` | Source pre-processor. Default: `ts-blank-space`. Embedders can swap in `esbuild-wasm` for richer TS support. |
 | `timeoutMs` | Per-emission wall-clock budget. Hitting it terminates the worker; the next emission spawns a fresh one. |
 | `routeFetchToVfs` | Route the agent's `fetch(...)` calls for path-shaped URLs to the agent's VFS. See [routeFetchToVfs](#routefetchtovfs) below. |
@@ -239,7 +241,7 @@ class MyRuntime implements RuntimeAdapter {
 The contract is small. Implementations of interest:
 
 - A more restrictive Worker (Service Worker fetch interceptor, etc.).
-- A subprocess-based Node runtime (Node `worker_threads` is on the [roadmap](https://github.com/ashenfad/agex-ts/blob/main/roadmap.md)).
+- A subprocess-based Node runtime (Node `worker_threads` already ships in `workerRuntime` via `target: 'node'`; a separate-process variant would push isolation further).
 - A WASM-only runtime for stricter sandboxing.
 - A remote-execution runtime that runs the agent's code on dedicated infrastructure.
 

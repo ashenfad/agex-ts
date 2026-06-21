@@ -1,10 +1,13 @@
 /**
  * `workerRuntime` — `RuntimeAdapter` that runs each `ts` emission
- * inside a Web Worker.
+ * inside an isolated worker: a browser Web Worker or a Node
+ * `worker_threads` worker, selected by the `target` option (default
+ * auto-detect). The platform transport lives behind the `WorkerHandle`
+ * seam (`host-worker.ts`); everything below is platform-agnostic.
  *
  * High-level flow per `execute`:
  *
- *   1. Lazily spawn a Worker (on first call, or after a previous
+ *   1. Lazily spawn a worker (on first call, or after a previous
  *      worker was terminated by timeout / abort). Wait for the
  *      worker to post `ready`.
  *   2. Run the configured `transform` on the host side (default
@@ -53,6 +56,12 @@ import type {
   TaskOutcome,
 } from 'agex-ts/types'
 import {
+  type ResolvedTarget,
+  type WorkerHandle,
+  createWorkerHandle,
+  detectTarget,
+} from './host-worker'
+import {
   type BridgeTarget,
   type ConfigureMessage,
   type Host2WorkerMessage,
@@ -85,12 +94,33 @@ const FS_METHODS: ReadonlySet<string> = new Set([
 const CACHE_METHODS: ReadonlySet<string> = new Set(['set', 'get', 'has', 'delete', 'keys'])
 
 export interface WorkerRuntimeOptions {
-  /** URL the host should hand to `new Worker(...)`. Defaults to the
-   *  bundled `worker.js` shipped alongside this module — resolves
-   *  via `new URL('./worker.js', import.meta.url)`, which Vite,
-   *  webpack, esbuild, and modern browsers all understand. Override
-   *  if you're shipping the worker file from a different origin or
-   *  embedding agex inside an app with a custom asset pipeline. */
+  /**
+   * Which worker backend to spawn:
+   *
+   * - `'browser'` — a Web Worker (`worker.js`). The default-resolved
+   *   target in browsers and other Web-Worker-capable runtimes.
+   * - `'node'` — a `node:worker_threads` worker (`worker.node.js`).
+   *   Use on Node, Bun, or Deno to get real isolation for agent code
+   *   server-side (the in-process `evalRuntime` has none).
+   * - `'auto'` (default) — detect from the environment: `'node'` when
+   *   `process.versions.node` is present and there's no global
+   *   `Worker`, else `'browser'`.
+   *
+   * The target also selects the default `workerUrl` (`worker.js` vs
+   * `worker.node.js`). Remote URL-shipped registrations
+   * (`agent.cls({ url: 'https://…' })`) and esm.sh bare-import routing
+   * import natively on the browser target; on the Node target they
+   * raise a clear error (Node can't dynamic-import remote URLs) — ship
+   * such modules as `data:` / `file:` / local specifiers there.
+   */
+  readonly target?: 'auto' | 'browser' | 'node'
+  /** URL the host should hand to the worker constructor. Defaults to
+   *  the bundled worker shipped alongside this module — `worker.js`
+   *  (browser) or `worker.node.js` (node), resolved via
+   *  `new URL('./worker.js', import.meta.url)`, which Vite, webpack,
+   *  esbuild, and modern browsers all understand. Override if you're
+   *  shipping the worker file from a different origin or embedding agex
+   *  inside an app with a custom asset pipeline. */
   readonly workerUrl?: string | URL
   /** TS → JS transform run on the host before code is shipped to
    *  the worker. Defaults to `ts-blank-space` (lightweight type
@@ -161,7 +191,11 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
   installConsoleProxy()
   const transform = opts.transform ?? defaultTransform
   const timeoutMs = Math.min(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS)
-  const workerUrl = opts.workerUrl ?? new URL('./worker.js', import.meta.url)
+  const target: ResolvedTarget =
+    opts.target !== undefined && opts.target !== 'auto' ? opts.target : detectTarget()
+  const workerUrl =
+    opts.workerUrl ??
+    new URL(target === 'node' ? './worker.node.js' : './worker.js', import.meta.url)
 
   // Worker is spawned lazily — on first `execute` and after every
   // hard-terminate. Holding a single live worker across consecutive
@@ -178,7 +212,7 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
   // worker error / dispose) terminates the shared worker and settles
   // them all. That blast radius is one worker = one `workerRuntime`
   // instance, so isolate sessions by giving each its own instance.
-  let worker: Worker | null = null
+  let worker: WorkerHandle | null = null
   let readyPromise: Promise<void> | null = null
   let nextExecuteId = 1
   let disposed = false
@@ -200,30 +234,48 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
   let namespaceResolver: NamespaceResolver | undefined
 
   function spawn(): void {
-    const w = new Worker(workerUrl, { type: 'module' })
-    worker = w
+    let resolveReady!: () => void
+    let rejectReady!: (e: Error) => void
+    // Set `readyPromise` synchronously: a second concurrent execute that
+    // also finds `readyPromise === null` must NOT spawn a duplicate
+    // worker — it awaits this same boot. `worker` itself is assigned once
+    // the handle is constructed (async on the Node target, which
+    // dynamic-imports `node:worker_threads`).
     readyPromise = new Promise<void>((resolve, reject) => {
-      const onMsg = (ev: MessageEvent<Worker2HostMessage>): void => {
-        if (ev.data?.type === 'ready') {
-          w.removeEventListener('message', onMsg)
-          w.removeEventListener('error', onErr)
-          // Configure must arrive before the first `execute` so the
-          // worker's stub builder can populate fn / namespace
-          // bindings. postMessage delivery is FIFO, so posting it
-          // here (before `execute` is sent) is enough — no
-          // round-trip needed.
-          if (configurePayload !== null) w.postMessage(configurePayload)
-          resolve()
-        }
-      }
-      const onErr = (ev: ErrorEvent): void => {
-        w.removeEventListener('message', onMsg)
-        w.removeEventListener('error', onErr)
-        reject(new Error(`worker failed during boot: ${ev.message}`))
-      }
-      w.addEventListener('message', onMsg)
-      w.addEventListener('error', onErr)
+      resolveReady = resolve
+      rejectReady = reject
     })
+    void (async () => {
+      let handle: WorkerHandle
+      try {
+        handle = await createWorkerHandle(workerUrl, target)
+      } catch (e) {
+        rejectReady(e instanceof Error ? e : new Error(String(e)))
+        return
+      }
+      worker = handle
+      let offMsg: () => void = () => {}
+      let offErr: () => void = () => {}
+      const stop = (): void => {
+        offMsg()
+        offErr()
+      }
+      offMsg = handle.addMessageListener((msg) => {
+        if (msg?.type === 'ready') {
+          stop()
+          // Configure must arrive before the first `execute` so the
+          // worker's stub builder can populate fn / namespace bindings.
+          // postMessage delivery is FIFO, so posting it here (before
+          // `execute` is sent) is enough — no round-trip needed.
+          if (configurePayload !== null) handle.postMessage(configurePayload)
+          resolveReady()
+        }
+      })
+      offErr = handle.addErrorListener((err) => {
+        stop()
+        rejectReady(new Error(`worker failed during boot: ${err.message}`))
+      })
+    })()
   }
 
   function killWorker(): void {
@@ -361,9 +413,11 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
         }
       }
 
-      if (worker === null) spawn()
-      // `spawn()` populates both `worker` and `readyPromise`; tell TS.
-      const w = worker as Worker
+      // `spawn()` sets `readyPromise` synchronously but populates `worker`
+      // asynchronously (the Node handle dynamic-imports `worker_threads`).
+      // Guard on `readyPromise` so a concurrent execute reuses the same
+      // boot, and read `worker` only after `ready` resolves.
+      if (readyPromise === null) spawn()
       const ready = readyPromise as Promise<void>
       try {
         await ready
@@ -401,6 +455,8 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
           elapsedMs: performance.now() - start,
         }
       }
+      // Boot succeeded and we passed the guards above — `worker` is set.
+      const w = worker
 
       const outputs: OutputPart[] = []
       // Per-execute live instance table — populated by `newInstance`,
@@ -427,6 +483,11 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
 
       await new Promise<void>((resolve) => {
         let settled = false
+        // Unsubscribers for the per-execute worker listeners. Assigned
+        // once the listeners are wired (below); harmless no-ops until
+        // then so an early `settle` is safe.
+        let offMsg: () => void = () => {}
+        let offErr: () => void = () => {}
         // `settle` accepts an optional reason so external callers
         // (today: `dispose()`) can force-settle a hung execute by
         // setting `error` and resolving — no need to wait for the
@@ -438,8 +499,8 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
           if (settled) return
           settled = true
           if (reason !== undefined) error = reason
-          w.removeEventListener('message', onMsg)
-          w.removeEventListener('error', onErr)
+          offMsg()
+          offErr()
           ctx.signal.removeEventListener('abort', onAbort)
           clearTimeout(timer)
           activeExecutes.delete(executeId)
@@ -453,8 +514,7 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
         }
         activeExecutes.set(executeId, settle)
 
-        const onMsg = (ev: MessageEvent<Worker2HostMessage>): void => {
-          const m = ev.data
+        const onMsg = (m: Worker2HostMessage): void => {
           if (m?.type === 'output' && m.executeId === executeId) {
             outputs.push(m.part)
             return
@@ -492,14 +552,14 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
             settle()
           }
         }
-        const onErr = (ev: ErrorEvent): void => {
+        const onErr = (err: { message: string }): void => {
           // Worker threw outside an `execute` (e.g. a parse error in
           // its own module — shouldn't happen with our entry, but
           // surface it cleanly if it does). The worker is now in a
           // bad state; kill and respawn next time. Settle *self* first
           // (with this specific error), then `killWorker` sweeps any
           // co-resident executes with the generic terminated reason.
-          error = new Error(`worker error: ${ev.message}`)
+          error = new Error(`worker error: ${err.message}`)
           settle()
           killWorker()
         }
@@ -515,8 +575,8 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
           killWorker()
         }, timeoutMs)
 
-        w.addEventListener('message', onMsg)
-        w.addEventListener('error', onErr)
+        offMsg = w.addMessageListener(onMsg)
+        offErr = w.addErrorListener(onErr)
         ctx.signal.addEventListener('abort', onAbort)
 
         const out: Host2WorkerMessage = {
@@ -625,7 +685,7 @@ async function handleBridgeCall(
   ctx: ExecuteContext,
   policy: Policy | null,
   instances: Map<number, unknown>,
-  w: Worker,
+  w: WorkerHandle,
   outputs: OutputPart[],
 ): Promise<void> {
   const { executeId, callId } = msg
@@ -647,7 +707,7 @@ async function handleBridgeCall(
 async function handleSpawnCall(
   msg: Extract<Worker2HostMessage, { type: 'spawnCall' }>,
   ctx: ExecuteContext,
-  w: Worker,
+  w: WorkerHandle,
 ): Promise<void> {
   const { executeId, callId } = msg
   let value: unknown
@@ -803,7 +863,7 @@ async function handleNewInstance(
   instances: Map<number, unknown>,
   instanceClasses: Map<number, RegisteredCls>,
   nextId: () => number,
-  w: Worker,
+  w: WorkerHandle,
 ): Promise<void> {
   const { executeId, callId, clsName } = msg
   let value: { instanceId: number } | null = null
@@ -851,7 +911,7 @@ async function handleNewInstance(
 async function handleResolveNamespace(
   msg: Extract<Worker2HostMessage, { type: 'resolveNamespace' }>,
   resolver: NamespaceResolver | undefined,
-  w: Worker,
+  w: WorkerHandle,
 ): Promise<void> {
   const { executeId, callId, specifier } = msg
   let url: string | null = null
@@ -874,7 +934,7 @@ async function handleInstanceCall(
   msg: Extract<Worker2HostMessage, { type: 'instanceCall' }>,
   instances: Map<number, unknown>,
   instanceClasses: Map<number, RegisteredCls>,
-  w: Worker,
+  w: WorkerHandle,
 ): Promise<void> {
   const { executeId, callId, instanceId, method } = msg
   let value: unknown
@@ -971,7 +1031,7 @@ function unpackArgs(args: ReadonlyArray<unknown>, instances: Map<number, unknown
  *  failure we retry once with the failure encoded so the worker's
  *  awaiting promise rejects rather than hangs. */
 function postBridgeResponse(
-  w: Worker,
+  w: WorkerHandle,
   executeId: number,
   callId: number,
   value: unknown,

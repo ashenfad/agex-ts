@@ -9,6 +9,10 @@ import { defineConfig } from 'vitest/config'
 export default defineConfig({
   test: {
     include: ['tests/**/*.test.ts'],
+    // `tests/node/**` is the Node `worker_threads` lane (run by the default
+    // `vitest.config.ts`); it imports `node:*` builtins that don't resolve
+    // in browser mode, so keep it out of this lane.
+    exclude: ['tests/node/**', 'node_modules/**'],
     globals: false,
     browser: {
       enabled: true,

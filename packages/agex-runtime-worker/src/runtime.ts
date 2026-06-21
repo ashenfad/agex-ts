@@ -250,6 +250,14 @@ export function workerRuntime(opts: WorkerRuntimeOptions = {}): RuntimeAdapter {
       try {
         handle = await createWorkerHandle(workerUrl, target)
       } catch (e) {
+        // Handle construction itself failed (e.g. `await import(
+        // 'node:worker_threads')` rejected, or a browser `new Worker`
+        // threw synchronously on a cross-origin `workerUrl`). `worker`
+        // was never assigned, so the `killWorker()` the awaiting execute
+        // runs on this rejection won't reset `readyPromise` (its reset is
+        // gated on `worker !== null`). Clear it here so the runtime isn't
+        // wedged on the cached rejection — the next execute spawns fresh.
+        readyPromise = null
         rejectReady(e instanceof Error ? e : new Error(String(e)))
         return
       }

@@ -61,9 +61,8 @@ const TS_SCHEMA: ToolSchema = {
   description:
     'Run TypeScript code. The task is driven by special calls inside the code: ' +
     'taskSuccess(result) finishes successfully, taskFail(message) finishes with an ' +
-    'error, taskClarify(prompt) asks the caller a question. If none is called, the ' +
-    'code returns normally and the turn continues — printed output appears on the ' +
-    'next turn.',
+    'error. If none is called, the code returns normally and the turn continues — ' +
+    'printed output appears on the next turn.',
   parameters: {
     type: 'object',
     required: ['title', 'thinking', 'code'],

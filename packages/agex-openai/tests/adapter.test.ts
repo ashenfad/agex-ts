@@ -134,6 +134,22 @@ describe('lowerNeutralTurns — assistant tool_use', () => {
     expect(msg.content).toBeNull()
     expect(msg.tool_calls).toHaveLength(1)
   })
+
+  it('replays visible thinking through reasoning in native mode', () => {
+    const turns: NeutralTurn[] = [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', text: 'first ', signature: new Uint8Array() },
+          { type: 'thinking', text: 'second', signature: new Uint8Array() },
+          { type: 'toolUse', toolUseId: 'tu_1', toolName: 'ts_action', input: { code: 'x' } },
+        ],
+      },
+    ]
+    const msg = lowerNeutralTurns(turns, { nativeThinking: true })[0] as OpenAIAssistantMessage
+    expect(msg.reasoning).toBe('first second')
+    expect(msg.content).toBeNull()
+  })
 })
 
 describe('lowerNeutralTurns — tool_result', () => {

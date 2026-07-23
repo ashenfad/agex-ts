@@ -23,8 +23,9 @@
  *   - No structured `content_block_start/stop` boundaries — text
  *     accumulates across deltas; we flush as a single TextPart at
  *     stream end (matching agex-py's OpenAI adapter).
- *   - No native thinking blocks. OpenRouter's `reasoning_details`
- *     surface is deferred (v2).
+ *   - Native reasoning text is normalized from the common
+ *     `reasoning`, `reasoning_content`, and OpenRouter
+ *     `reasoning_details` extensions.
  *   - Tool args arrive as a JSON string fragment under
  *     `function.arguments` (no `input_json_delta` wrapper).
  */
@@ -43,10 +44,12 @@ interface StreamState {
   openByIndex: Map<number, { callId: string; toolName: ToolName }>
   /** Accumulated text content (flushed on stream end as one TextPart). */
   textBuf: string[]
+  /** Accumulated native reasoning text (flushed as one ThinkingPart). */
+  thinkingBuf: string[]
 }
 
 function newState(): StreamState {
-  return { openByIndex: new Map(), textBuf: [] }
+  return { openByIndex: new Map(), textBuf: [], thinkingBuf: [] }
 }
 
 // ---------------------------------------------------------------------------
@@ -56,6 +59,7 @@ function newState(): StreamState {
 export async function* translateOpenAIStream(
   events: AsyncIterable<unknown>,
   usage?: UsageHolder,
+  includeReasoning = true,
 ): AsyncIterable<ToolCallEvent> {
   const state = newState()
   for await (const raw of events) {
@@ -64,22 +68,33 @@ export async function* translateOpenAIStream(
     if (isErrorChunk(ev)) {
       throw new Error(`OpenAI stream error: ${describeError(ev)}`)
     }
-    yield* handleChunk(state, ev)
+    yield* handleChunk(state, ev, includeReasoning)
   }
   yield* close(state)
 }
 
-function* handleChunk(state: StreamState, ev: Record<string, unknown>): Iterable<ToolCallEvent> {
+function* handleChunk(
+  state: StreamState,
+  ev: Record<string, unknown>,
+  includeReasoning: boolean,
+): Iterable<ToolCallEvent> {
   const choices = ev.choices as ReadonlyArray<Record<string, unknown>> | undefined
   if (choices === undefined || choices.length === 0) return
   const choice = choices[0] as Record<string, unknown>
   const delta = (choice.delta ?? {}) as Record<string, unknown>
+
+  const reasoning = includeReasoning ? reasoningText(delta) : ''
+  if (reasoning.length > 0) {
+    state.thinkingBuf.push(reasoning)
+    yield { type: 'thinkingDelta', content: reasoning }
+  }
 
   // Plain text content streams as deltas in `delta.content`. Yield a
   // TextDelta per chunk for live streaming AND buffer for the final
   // TextPart at stream end. (Mirrors agex-anthropic's text handling.)
   const content = delta.content
   if (typeof content === 'string' && content.length > 0) {
+    yield* flushThinking(state)
     state.textBuf.push(content)
     yield { type: 'textDelta', content }
   }
@@ -88,6 +103,7 @@ function* handleChunk(state: StreamState, ev: Record<string, unknown>): Iterable
   // chunks for the same index belong to the same call.
   const toolCalls = delta.tool_calls as ReadonlyArray<Record<string, unknown>> | undefined
   if (toolCalls !== undefined) {
+    yield* flushThinking(state)
     for (const tc of toolCalls) {
       const idx = tc.index as number | undefined
       if (idx === undefined) continue
@@ -123,6 +139,35 @@ function* close(state: StreamState): Iterable<ToolCallEvent> {
     yield { type: 'textPart', text: state.textBuf.join('') }
     state.textBuf = []
   }
+  yield* flushThinking(state)
+}
+
+function* flushThinking(state: StreamState): Iterable<ToolCallEvent> {
+  if (state.thinkingBuf.length === 0) return
+  yield { type: 'thinkingPart', text: state.thinkingBuf.join('') }
+  state.thinkingBuf = []
+}
+
+function reasoningText(delta: Record<string, unknown>): string {
+  const details = delta.reasoning_details
+  if (Array.isArray(details)) {
+    const chunks: string[] = []
+    for (const raw of details) {
+      if (raw === null || typeof raw !== 'object') continue
+      const detail = raw as Record<string, unknown>
+      const text =
+        detail.type === 'reasoning.summary'
+          ? detail.summary
+          : detail.type === 'reasoning.text'
+            ? detail.text
+            : undefined
+      if (typeof text === 'string') chunks.push(text)
+    }
+    if (chunks.length > 0) return chunks.join('')
+  }
+  if (typeof delta.reasoning === 'string') return delta.reasoning
+  if (typeof delta.reasoning_content === 'string') return delta.reasoning_content
+  return ''
 }
 
 // ---------------------------------------------------------------------------

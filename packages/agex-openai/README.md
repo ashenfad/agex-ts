@@ -11,8 +11,9 @@ OpenAI Chat Completions provider for [`agex-ts`](https://www.npmjs.com/package/a
 **Scope:** Chat Completions API, streaming, tool calls, cancellation, retry,
 and opt-in native reasoning for OpenAI-compatible extensions. The client
 normalizes streamed `reasoning`, `reasoning_content`, and visible
-`reasoning_details` text into agex thinking events. **Out of scope:** the
-Responses API and lossless replay of encrypted reasoning details.
+`reasoning_details` text into agex thinking events. Namespaced uncodex
+reasoning details are also retained as hidden opaque thinking signatures and
+replayed verbatim on later requests. **Out of scope:** the Responses API.
 
 ## Quick start
 

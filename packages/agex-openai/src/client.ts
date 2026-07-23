@@ -19,8 +19,8 @@
  *
  * Out of scope:
  *   - Responses API. This client deliberately targets Chat Completions.
- *   - Lossless encrypted `reasoning_details` round-trip. Plain reasoning
- *     text and summaries are preserved through agex thinking parts.
+ * Opaque reasoning_details from compatible Chat Completions servers are
+ * preserved through agex thinking signatures.
  */
 
 import {

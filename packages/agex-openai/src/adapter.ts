@@ -41,6 +41,7 @@ import type {
   ToolSchema,
   ToolUsePart,
 } from 'agex-ts/render'
+import { type UncodexReasoningDetail, decodeReasoningSignature } from './reasoning'
 
 // ---------------------------------------------------------------------------
 // OpenAI wire-format types (lightweight; we don't pull the SDK)
@@ -95,6 +96,9 @@ export interface OpenAIAssistantMessage {
   /** OpenAI-compatible extension used by reasoning providers such as
    *  OpenRouter. Replaying the text preserves tool-call continuity. */
   readonly reasoning?: string
+  /** Opaque provider reasoning records. uncodex records are preserved in
+   *  agex thinking signatures and replayed verbatim. */
+  readonly reasoning_details?: ReadonlyArray<UncodexReasoningDetail>
   readonly tool_calls?: ReadonlyArray<OpenAIToolCall>
 }
 
@@ -157,6 +161,7 @@ function lowerAssistantTurn(
 ): OpenAIAssistantMessage {
   const textBits: string[] = []
   const reasoningBits: string[] = []
+  const reasoningDetails: UncodexReasoningDetail[] = []
   const toolCalls: OpenAIToolCall[] = []
   for (const part of parts) {
     if (part.type === 'text') {
@@ -164,6 +169,10 @@ function lowerAssistantTurn(
     } else if (part.type === 'thinking') {
       if (nativeThinking && part.redacted !== true && part.text.length > 0) {
         reasoningBits.push(part.text)
+      }
+      if (nativeThinking && part.signature !== undefined) {
+        const detail = decodeReasoningSignature(part.signature)
+        if (detail !== undefined) reasoningDetails.push(detail)
       }
     } else if (part.type === 'toolUse') {
       toolCalls.push(lowerToolUse(part))
@@ -174,6 +183,7 @@ function lowerAssistantTurn(
     role: 'assistant',
     content: textBits.length > 0 ? textBits.join('') : null,
     ...(reasoningBits.length > 0 && { reasoning: reasoningBits.join('') }),
+    ...(reasoningDetails.length > 0 && { reasoning_details: reasoningDetails }),
     ...(toolCalls.length > 0 && { tool_calls: toolCalls }),
   }
   return msg

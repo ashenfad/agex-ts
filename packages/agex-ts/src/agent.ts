@@ -34,6 +34,7 @@ import {
 } from './state'
 import { type TaskDefinition, makeTask } from './task'
 import type {
+  ActionSurface,
   AgentEvent,
   Cache,
   Chapter,
@@ -59,6 +60,11 @@ export interface AgentOptions {
   readonly name: string
   /** System-prompt addendum (the "agent's voice"). Optional. */
   readonly primer?: string
+  /** Action vocabulary taught by the built-in primer. Defaults to
+   *  `agex`. `provider-native` retains `ts_action` while directing
+   *  shell and file work through the provider's native tools. The
+   *  selected LLM client must be configured with the same surface. */
+  readonly actionSurface?: ActionSurface
   /** LLM driver. Required for any task that calls the model. v1 ships
    *  the `Dummy` client for tests; production agents bring their own. */
   readonly llm?: LLMClient
@@ -134,6 +140,7 @@ export interface AgentOptions {
 export interface ReconfigurableOptions {
   readonly llm?: LLMClient
   readonly primer?: string
+  readonly actionSurface?: ActionSurface
   readonly agexPrimerOverride?: string
   readonly capabilitiesPrimer?: string
   // `| undefined` is load-bearing under exactOptionalPropertyTypes:
@@ -384,6 +391,11 @@ export class Agent {
    *  system prompt during task runs. */
   get primer(): string | undefined {
     return this.#opts.primer
+  }
+
+  /** Action vocabulary rendered into the built-in primer. */
+  get actionSurface(): ActionSurface {
+    return this.#opts.actionSurface ?? 'agex'
   }
 
   /** The configured LLM driver, if any. Tasks throw at call time
@@ -691,7 +703,8 @@ export class Agent {
    * next LLM call / next task boundary:
    * - `llm`: next turn uses the new client. In-flight HTTP requests
    *   continue with the old client; nothing mid-stream is touched.
-   * - `primer` / `agexPrimerOverride` / `capabilitiesPrimer`: next
+   * - `primer` / `actionSurface` / `agexPrimerOverride` /
+   *   `capabilitiesPrimer`: next
    *   task's system message reflects the change. Note that the LLM
    *   provider's prompt cache will invalidate when the system text
    *   changes.

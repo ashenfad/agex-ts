@@ -168,6 +168,20 @@ describe('buildSystemMessage', () => {
     expect(msg).not.toContain('Agex Agent Environment')
   })
 
+  it('provider-native surface omits agex shell and file action names', () => {
+    const p = new PolicyBuilder()
+    const msg = buildSystemMessage({
+      policy: p.snapshot(),
+      actionSurface: 'provider-native',
+    })
+    expect(msg).toContain('Provider-native workspace actions')
+    expect(msg).toContain('native shell and file-editing tools')
+    expect(msg).toContain('`ts_action`')
+    expect(msg).not.toContain('`terminal_action`')
+    expect(msg).not.toContain('`write_file`')
+    expect(msg).not.toContain('`edit_file`')
+  })
+
   it('capabilitiesPrimer replaces auto-rendered registrations', () => {
     const p = new PolicyBuilder()
     p.registerFn('uniquelyRegisteredName', { fn: () => null, description: 'A registered fn.' })
@@ -365,6 +379,67 @@ describe('renderEvents', () => {
       expect(result.toolUseId).toBe(emissionId)
       const text = result.content[0]
       if (text?.type === 'text') expect(text.text).toContain('stdout')
+    }
+  })
+
+  it('round-trips a provider tool-call id through toolUse and toolResult', () => {
+    const providerCallId = 'exec-97a4a41b-f4a8-4f30-94af-98b3a090f9e8'
+    const actionEvent = action(1, 'one')
+    const events: AgentEvent[] = [
+      {
+        ...actionEvent,
+        emissions: [
+          {
+            type: 'ts',
+            code: 'one',
+            providerCallId,
+          },
+        ],
+      },
+      {
+        type: 'output',
+        timestamp: '2026-05-05T00:00:02.000Z',
+        agentName: 'a',
+        emissionId: providerCallId,
+        parts: [{ type: 'text', text: 'stdout' }],
+      } as OutputEvent,
+    ]
+
+    const turns = renderEvents(events)
+    const use = turns[0]?.content[0]
+    const result = turns[1]?.content[0]
+    expect(use?.type).toBe('toolUse')
+    expect(result?.type).toBe('toolResult')
+    if (use?.type === 'toolUse') expect(use.toolUseId).toBe(providerCallId)
+    if (result?.type === 'toolResult') expect(result.toolUseId).toBe(providerCallId)
+  })
+
+  it('replays original provider arguments before normalized execution fields', () => {
+    const actionEvent = action(1, 'unused')
+    const events: AgentEvent[] = [
+      {
+        ...actionEvent,
+        emissions: [
+          {
+            type: 'fileWrite',
+            path: '/note.txt',
+            content: 'hello',
+            mode: 'write',
+            providerCallId: 'write-1',
+            // The provider omitted optional `mode`; execution normalizes it to
+            // "write", but assistant history must reproduce the original call.
+            providerArguments: { path: '/note.txt', content: 'hello' },
+          },
+        ],
+      },
+    ]
+
+    const turns = renderEvents(events)
+    const use = turns[0]?.content[0]
+    expect(use?.type).toBe('toolUse')
+    if (use?.type === 'toolUse') {
+      expect(use.input).toEqual({ path: '/note.txt', content: 'hello' })
+      expect(use.input).not.toHaveProperty('mode')
     }
   })
 
@@ -1080,6 +1155,12 @@ describe('NeutralTurn type', () => {
 // ---------------------------------------------------------------------------
 
 describe('toolSchemas', () => {
+  it('provider-native surface advertises only ts_action', () => {
+    expect(toolSchemas({ actionSurface: 'provider-native' }).map((schema) => schema.name)).toEqual([
+      TOOL_TS,
+    ])
+  })
+
   function findSchema(name: string, schemas: ReturnType<typeof toolSchemas>) {
     const s = schemas.find((x) => x.name === name)
     if (s === undefined) throw new Error(`schema ${name} not found`)

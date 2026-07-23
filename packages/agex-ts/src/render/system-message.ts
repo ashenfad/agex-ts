@@ -20,14 +20,16 @@
  */
 
 import { renderSkillsListing } from '../fs/skills-overlay'
-import type { Policy } from '../types'
-import { BUILTIN_PRIMER } from './builtin-primer'
+import type { ActionSurface, Policy } from '../types'
+import { renderBuiltinPrimer } from './builtin-primer'
 import { renderRegistrations } from './registrations'
 
 export interface SystemMessageInputs {
   /** The full registration table. Only the description-bearing
    *  entries get rendered into the prompt. */
   readonly policy: Policy
+  /** Model-facing action vocabulary. Defaults to `agex`. */
+  readonly actionSurface?: ActionSurface
   /** When set, replaces the BUILTIN_PRIMER entirely. Use only if
    *  you really mean to override agex's environment description. */
   readonly agexPrimerOverride?: string
@@ -101,7 +103,7 @@ export function buildSystemMessage(inputs: SystemMessageInputs): string {
   const parts: string[] = []
 
   // 1. Agex conventions (or override)
-  parts.push(inputs.agexPrimerOverride ?? BUILTIN_PRIMER)
+  parts.push(inputs.agexPrimerOverride ?? renderBuiltinPrimer(inputs.actionSurface))
 
   // 1b. Runtime-contributed addendum (e.g. workerRuntime's
   // routeFetchToVfs notice). Appears alongside the agex conventions

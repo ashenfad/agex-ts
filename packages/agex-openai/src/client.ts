@@ -33,7 +33,7 @@ import {
   sseLinesToEventDicts,
 } from 'agex-ts/providers'
 import { toolSchemas } from 'agex-ts/render'
-import type { LLMClient, LLMConfig, LLMRequest, TokenChunk } from 'agex-ts/types'
+import type { ActionSurface, LLMClient, LLMConfig, LLMRequest, TokenChunk } from 'agex-ts/types'
 import {
   type OpenAIMessage,
   type OpenAITool,
@@ -76,6 +76,10 @@ export interface OpenAIOptions {
    *  text-only turns — useful with models that don't reliably
    *  follow `required` (notably some local models). */
   readonly forceToolUse?: boolean
+  /** Model-facing action vocabulary. `provider-native` advertises
+   *  only `ts_action` and leaves shell/file work to provider-native
+   *  tools. It also disables forced dynamic-tool selection. */
+  readonly actionSurface?: ActionSurface
   /** Use the provider's native reasoning channel. When enabled, the
    *  action schemas omit their narration-style `thinking` field,
    *  `reasoning_effort` is sent, and streamed reasoning text becomes
@@ -114,6 +118,7 @@ export class OpenAI implements LLMClient {
   private readonly timeoutMs: number
   private readonly maxTokens: number
   private readonly forceToolUse: boolean
+  private readonly actionSurface: ActionSurface
   private readonly nativeThinking: boolean
   private readonly reasoningEffort: ReasoningEffort
   private readonly extras: Readonly<Record<string, unknown>>
@@ -126,7 +131,14 @@ export class OpenAI implements LLMClient {
     this.baseUrl = (opts.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, '')
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
     this.maxTokens = opts.maxTokens ?? DEFAULT_MAX_TOKENS
-    this.forceToolUse = opts.forceToolUse ?? true
+    this.actionSurface = opts.actionSurface ?? 'agex'
+    if (this.actionSurface === 'provider-native' && opts.forceToolUse === true) {
+      throw new Error(
+        "OpenAI: forceToolUse=true is incompatible with actionSurface='provider-native'",
+      )
+    }
+    this.forceToolUse =
+      this.actionSurface === 'provider-native' ? false : (opts.forceToolUse ?? true)
     this.nativeThinking = opts.nativeThinking ?? false
     this.reasoningEffort = opts.reasoningEffort ?? 'medium'
     this.extras = opts.extras ?? {}
@@ -172,6 +184,7 @@ export class OpenAI implements LLMClient {
         baseUrl: this.baseUrl,
         maxTokens: this.maxTokens,
         forceToolUse: this.forceToolUse,
+        actionSurface: this.actionSurface,
         nativeThinking: this.nativeThinking,
         reasoningEffort: this.reasoningEffort,
         ...this.extras,
@@ -187,7 +200,10 @@ export class OpenAI implements LLMClient {
     })
     const messages: OpenAIMessage[] = [{ role: 'system', content: request.system }, ...lowered]
     const tools: OpenAITool[] = schemasToOpenAITools(
-      toolSchemas({ nativeThinking: this.nativeThinking }),
+      toolSchemas({
+        nativeThinking: this.nativeThinking,
+        actionSurface: this.actionSurface,
+      }),
     )
     const body: Record<string, unknown> = {
       model: this.model,

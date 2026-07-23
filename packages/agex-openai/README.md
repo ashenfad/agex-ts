@@ -58,11 +58,18 @@ const llm = new OpenAI({
 | `timeoutMs` | `90_000` | Per-request timeout. |
 | `maxTokens` | `16_384` | Cap on output tokens. |
 | `forceToolUse` | `true` | Sends `tool_choice: 'required'`. Set false for models that don't reliably follow `required` (some local models). |
+| `actionSurface` | `agex` | Set to `provider-native` for a compatibility endpoint that supplies its own shell/file tools. Only `ts_action` is advertised and forced dynamic-tool selection is disabled. Set the same value on `AgentOptions`. |
 | `nativeThinking` | `false` | Uses the provider reasoning channel, removes narration-style `thinking` from action schemas, and surfaces streamed reasoning as agex thinking events. |
 | `reasoningEffort` | `medium` | Sends OpenAI-style `reasoning_effort` when native thinking is enabled. |
 | `extras` | `{}` | Extra fields merged into the request body (`temperature`, `top_p`, `seed`, `response_format`, etc.). |
 | `headers` | `{}` | Per-request header overrides; `null` deletes a default header. |
 | `fetchImpl` | global `fetch` | Override `fetch` for tests / custom transports. |
+
+`provider-native` is intended for bridges that translate provider-native
+workspace actions back into agex events. A typical compatible endpoint also
+needs an opt-in request field in `extras`; consult that bridge's documentation.
+Ordinary OpenAI and OpenAI-compatible endpoints should keep the default `agex`
+surface.
 
 See [the LLM API doc](https://github.com/ashenfad/agex-ts/blob/main/docs/api/llm.md) for the broader provider contract.
 

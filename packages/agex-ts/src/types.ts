@@ -37,6 +37,15 @@ export {
 export type VirtualFileSystem = FileSystem
 
 /**
+ * The action vocabulary advertised to the model.
+ *
+ * `agex` exposes all four agex actions directly. `provider-native`
+ * keeps `ts_action` as the dynamic computation/lifecycle action while
+ * delegating shell and file operations to the provider's native tools.
+ */
+export type ActionSurface = 'agex' | 'provider-native'
+
+/**
  * Optional host-supplied resolver for unregistered import specifiers.
  *
  * When the agent's emitted code contains `import x from 'foo'` and
@@ -64,6 +73,12 @@ export interface TsEmission {
   readonly code: string
   readonly thinking?: string
   readonly title?: string
+  /** Provider-assigned tool-call id. When present, this must be
+   *  round-tripped verbatim in the corresponding tool result. */
+  readonly providerCallId?: string
+  /** Original provider arguments before execution-oriented normalization.
+   *  Replayed verbatim as the assistant tool input on later turns. */
+  readonly providerArguments?: Readonly<Record<string, unknown>>
   /** Provider-native opaque round-trip blob (Claude thinking blocks,
    *  Gemini `thought_signatures`). MUST be passed back verbatim on
    *  the next request — providers reject mismatched signatures. */
@@ -76,6 +91,8 @@ export interface TerminalEmission {
   readonly commands: string
   readonly thinking?: string
   readonly title?: string
+  readonly providerCallId?: string
+  readonly providerArguments?: Readonly<Record<string, unknown>>
   readonly signature?: Uint8Array
 }
 
@@ -85,6 +102,8 @@ export interface FileWriteEmission {
   readonly path: string
   readonly content: string
   readonly mode: 'write' | 'append'
+  readonly providerCallId?: string
+  readonly providerArguments?: Readonly<Record<string, unknown>>
   readonly signature?: Uint8Array
 }
 
@@ -95,6 +114,8 @@ export interface FileEditEmission {
   readonly search: string
   readonly content: string
   readonly matchAll?: boolean
+  readonly providerCallId?: string
+  readonly providerArguments?: Readonly<Record<string, unknown>>
   readonly signature?: Uint8Array
 }
 

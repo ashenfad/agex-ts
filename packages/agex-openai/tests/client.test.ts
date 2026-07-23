@@ -128,6 +128,31 @@ describe('OpenAI — request body shape', () => {
     expect(body.tool_choice).toBeUndefined()
   })
 
+  it('provider-native surface advertises only ts_action without forcing it', async () => {
+    const { fn, calls } = recordingFetch(happyPathEvents)
+    const client = new OpenAI({
+      apiKey: 'sk-test',
+      actionSurface: 'provider-native',
+      fetchImpl: fn,
+    })
+    await collect(client.complete(trivialRequest))
+    const body = JSON.parse(String(calls[0]?.init.body)) as Record<string, unknown>
+    const tools = body.tools as ReadonlyArray<{ function: { name: string } }>
+    expect(tools.map((tool) => tool.function.name)).toEqual(['ts_action'])
+    expect(body.tool_choice).toBeUndefined()
+  })
+
+  it('rejects forced dynamic-tool selection on the provider-native surface', () => {
+    expect(
+      () =>
+        new OpenAI({
+          apiKey: 'sk-test',
+          actionSurface: 'provider-native',
+          forceToolUse: true,
+        }),
+    ).toThrow(/forceToolUse=true is incompatible/u)
+  })
+
   it('native thinking sends effort and strips schema narration', async () => {
     const { fn, calls } = recordingFetch(happyPathEvents)
     const client = new OpenAI({
@@ -243,7 +268,15 @@ describe('OpenAI — response streaming', () => {
     const client = new OpenAI({ apiKey: 'sk-test', fetchImpl: fn })
     const tokens = await collect(client.complete(trivialRequest))
     const emissions = emissionsOf(tokens)
-    expect(emissions).toEqual([{ type: 'ts', code: 'taskSuccess(1)', title: 'x' }])
+    expect(emissions).toEqual([
+      {
+        type: 'ts',
+        code: 'taskSuccess(1)',
+        title: 'x',
+        providerCallId: 'tu_1',
+        providerArguments: { title: 'x', code: 'taskSuccess(1)' },
+      },
+    ])
     const trailer = tokens.at(-1)
     expect(trailer?.inputTokens).toBe(50)
     expect(trailer?.outputTokens).toBe(10)

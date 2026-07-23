@@ -165,7 +165,15 @@ describe('Anthropic — response streaming', () => {
     const client = new Anthropic({ apiKey: 'k', fetchImpl: fn })
     const tokens = await collect(client.complete(trivialRequest))
     const emissions = emissionsOf(tokens)
-    expect(emissions).toEqual([{ type: 'ts', code: 'taskSuccess(1)', title: 'x' }])
+    expect(emissions).toEqual([
+      {
+        type: 'ts',
+        code: 'taskSuccess(1)',
+        title: 'x',
+        providerCallId: 'tu_1',
+        providerArguments: { title: 'x', code: 'taskSuccess(1)' },
+      },
+    ])
     // The trailing chunk carries the totals (50 input, 10 output).
     const trailer = tokens.at(-1)
     expect(trailer?.inputTokens).toBe(50)

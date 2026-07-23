@@ -100,6 +100,7 @@ class CallState {
   // than crash.
   readonly toolName: string
   readonly emissionIndex: number
+  readonly callId: string
   /** Per-call opaque signature the provider wants round-tripped on
    *  subsequent turns (Gemini's `thoughtSignature`). Threaded onto
    *  the built Emission so the renderer can place it correctly on
@@ -109,7 +110,8 @@ class CallState {
   private readonly rawBuf: string[] = []
   private readonly keyMap: Readonly<Record<string, TokenChunkType>>
 
-  constructor(toolName: string, emissionIndex: number, signature?: Uint8Array) {
+  constructor(callId: string, toolName: string, emissionIndex: number, signature?: Uint8Array) {
+    this.callId = callId
     this.toolName = toolName
     this.emissionIndex = emissionIndex
     if (signature !== undefined) this.signature = signature
@@ -187,13 +189,13 @@ class CallState {
   private buildEmission(args: Record<string, unknown>): Emission | null {
     switch (this.toolName) {
       case TOOL_TS:
-        return buildTsEmission(args, this.signature)
+        return buildTsEmission(args, this.callId, this.signature)
       case TOOL_TERMINAL:
-        return buildTerminalEmission(args, this.signature)
+        return buildTerminalEmission(args, this.callId, this.signature)
       case TOOL_WRITE_FILE:
-        return buildWriteFileEmission(args, this.signature)
+        return buildWriteFileEmission(args, this.callId, this.signature)
       case TOOL_EDIT_FILE:
-        return buildEditFileEmission(args, this.signature)
+        return buildEditFileEmission(args, this.callId, this.signature)
       default:
         // Unknown tool name (LLM hallucination). Return null so
         // `finalize()` routes through the synthetic-TextEmission
@@ -203,7 +205,11 @@ class CallState {
   }
 }
 
-function buildTsEmission(args: Record<string, unknown>, signature?: Uint8Array): TsEmission | null {
+function buildTsEmission(
+  args: Record<string, unknown>,
+  providerCallId: string,
+  signature?: Uint8Array,
+): TsEmission | null {
   const code = strOr(args.code, '')
   // Permit empty code — the model occasionally calls ts_action with
   // just thinking + title to "comment out" a turn. Surfaces as a
@@ -211,6 +217,8 @@ function buildTsEmission(args: Record<string, unknown>, signature?: Uint8Array):
   return {
     type: 'ts',
     code,
+    providerCallId,
+    providerArguments: args,
     ...(args.thinking !== undefined && { thinking: strOr(args.thinking, '') }),
     ...(args.title !== undefined && { title: strOr(args.title, '') }),
     ...(signature !== undefined && { signature }),
@@ -219,12 +227,15 @@ function buildTsEmission(args: Record<string, unknown>, signature?: Uint8Array):
 
 function buildTerminalEmission(
   args: Record<string, unknown>,
+  providerCallId: string,
   signature?: Uint8Array,
 ): TerminalEmission | null {
   const commands = strOr(args.commands, '')
   return {
     type: 'terminal',
     commands,
+    providerCallId,
+    providerArguments: args,
     ...(args.thinking !== undefined && { thinking: strOr(args.thinking, '') }),
     ...(args.title !== undefined && { title: strOr(args.title, '') }),
     ...(signature !== undefined && { signature }),
@@ -233,6 +244,7 @@ function buildTerminalEmission(
 
 function buildWriteFileEmission(
   args: Record<string, unknown>,
+  providerCallId: string,
   signature?: Uint8Array,
 ): FileWriteEmission | null {
   const path = strOr(args.path, '')
@@ -244,12 +256,15 @@ function buildWriteFileEmission(
     path,
     content: strOr(args.content, ''),
     mode,
+    providerCallId,
+    providerArguments: args,
     ...(signature !== undefined && { signature }),
   }
 }
 
 function buildEditFileEmission(
   args: Record<string, unknown>,
+  providerCallId: string,
   signature?: Uint8Array,
 ): FileEditEmission | null {
   const path = strOr(args.path, '')
@@ -262,6 +277,8 @@ function buildEditFileEmission(
     path,
     search: args.search,
     content: strOr(args.content, ''),
+    providerCallId,
+    providerArguments: args,
     ...(args.matchAll === true && { matchAll: true }),
     ...(signature !== undefined && { signature }),
   }
@@ -341,7 +358,7 @@ export async function* parseToolEvents(
     }
     if (event.type === 'toolCallStart') {
       const idx = nextIndex++
-      calls.set(event.callId, new CallState(event.toolName, idx, event.signature))
+      calls.set(event.callId, new CallState(event.callId, event.toolName, idx, event.signature))
       // toolStart token names the tool so the UI can show "calling
       // ts_action..." before any args have arrived.
       yield {

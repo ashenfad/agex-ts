@@ -16,7 +16,6 @@
  *
  * Out of scope (deferred):
  *   - Responses API
- *   - Lossless encrypted `reasoning_details` round-trip
  */
 
 export { OpenAI, type OpenAIOptions, type ReasoningEffort } from './client'

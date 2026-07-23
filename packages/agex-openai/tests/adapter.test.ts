@@ -6,6 +6,11 @@ import {
   lowerNeutralTurns,
   schemasToOpenAITools,
 } from '../src/adapter'
+import {
+  UNCODEX_REASONING_DETAIL_TYPE,
+  UNCODEX_REASONING_DETAIL_VERSION,
+  encodeReasoningDetail,
+} from '../src/reasoning'
 
 describe('schemasToOpenAITools', () => {
   it('wraps each schema in the function envelope', () => {
@@ -149,6 +154,50 @@ describe('lowerNeutralTurns — assistant tool_use', () => {
     const msg = lowerNeutralTurns(turns, { nativeThinking: true })[0] as OpenAIAssistantMessage
     expect(msg.reasoning).toBe('first second')
     expect(msg.content).toBeNull()
+  })
+
+  it('replays uncodex opaque reasoning through reasoning_details in native mode', () => {
+    const detail = {
+      type: UNCODEX_REASONING_DETAIL_TYPE,
+      version: UNCODEX_REASONING_DETAIL_VERSION,
+      item: {
+        type: 'reasoning',
+        id: 'rs_1',
+        summary: [{ type: 'summary_text', text: 'Checked.' }],
+        content: [],
+        encrypted_content: 'opaque-state',
+      },
+    } as const
+    const signature = encodeReasoningDetail(detail)
+    if (signature === undefined) throw new Error('failed to encode reasoning detail')
+    const turns: NeutralTurn[] = [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', text: 'Checked.', signature },
+          { type: 'toolUse', toolUseId: 'tu_1', toolName: 'ts_action', input: { code: 'x' } },
+        ],
+      },
+    ]
+
+    const msg = lowerNeutralTurns(turns, { nativeThinking: true })[0] as OpenAIAssistantMessage
+    expect(msg.reasoning).toBe('Checked.')
+    expect(msg.reasoning_details).toEqual([detail])
+  })
+
+  it('does not replay another provider signature as an OpenAI reasoning detail', () => {
+    const turns: NeutralTurn[] = [
+      {
+        role: 'assistant',
+        content: [
+          { type: 'thinking', text: 'Checked.', signature: new TextEncoder().encode('anthropic') },
+        ],
+      },
+    ]
+
+    const msg = lowerNeutralTurns(turns, { nativeThinking: true })[0] as OpenAIAssistantMessage
+    expect(msg.reasoning).toBe('Checked.')
+    expect(msg.reasoning_details).toBeUndefined()
   })
 })
 

@@ -32,6 +32,7 @@
 
 import type { ToolCallEvent, UsageHolder } from 'agex-ts/providers'
 import type { ToolName } from 'agex-ts/render'
+import { encodeReasoningDetail } from './reasoning'
 
 export type { ToolCallEvent, UsageHolder }
 
@@ -46,10 +47,17 @@ interface StreamState {
   textBuf: string[]
   /** Accumulated native reasoning text (flushed as one ThinkingPart). */
   thinkingBuf: string[]
+  /** Opaque replay state for the current reasoning item. */
+  thinkingSignature: Uint8Array | undefined
 }
 
 function newState(): StreamState {
-  return { openByIndex: new Map(), textBuf: [], thinkingBuf: [] }
+  return {
+    openByIndex: new Map(),
+    textBuf: [],
+    thinkingBuf: [],
+    thinkingSignature: undefined,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -87,6 +95,13 @@ function* handleChunk(
   if (reasoning.length > 0) {
     state.thinkingBuf.push(reasoning)
     yield { type: 'thinkingDelta', content: reasoning }
+  }
+
+  if (includeReasoning) {
+    for (const signature of reasoningSignatures(delta)) {
+      if (state.thinkingSignature !== undefined) yield* flushThinking(state)
+      state.thinkingSignature = signature
+    }
   }
 
   // Plain text content streams as deltas in `delta.content`. Yield a
@@ -143,9 +158,25 @@ function* close(state: StreamState): Iterable<ToolCallEvent> {
 }
 
 function* flushThinking(state: StreamState): Iterable<ToolCallEvent> {
-  if (state.thinkingBuf.length === 0) return
-  yield { type: 'thinkingPart', text: state.thinkingBuf.join('') }
+  if (state.thinkingBuf.length === 0 && state.thinkingSignature === undefined) return
+  yield {
+    type: 'thinkingPart',
+    text: state.thinkingBuf.join(''),
+    ...(state.thinkingSignature !== undefined && { signature: state.thinkingSignature }),
+  }
   state.thinkingBuf = []
+  state.thinkingSignature = undefined
+}
+
+function reasoningSignatures(delta: Record<string, unknown>): Uint8Array[] {
+  const details = delta.reasoning_details
+  if (!Array.isArray(details)) return []
+  const signatures: Uint8Array[] = []
+  for (const detail of details) {
+    const signature = encodeReasoningDetail(detail)
+    if (signature !== undefined) signatures.push(signature)
+  }
+  return signatures
 }
 
 function reasoningText(delta: Record<string, unknown>): string {

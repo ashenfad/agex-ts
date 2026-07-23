@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { decodeReasoningSignature } from '../src/reasoning'
 import { type ToolCallEvent, type UsageHolder, translateOpenAIStream } from '../src/stream'
 
 async function* fromArray<T>(items: ReadonlyArray<T>): AsyncIterable<T> {
@@ -70,6 +71,35 @@ describe('translateOpenAIStream — native reasoning', () => {
       { type: 'thinkingDelta', content: 'summary text' },
       { type: 'thinkingPart', text: 'legacy summary text' },
     ])
+  })
+
+  it('stores uncodex reasoning_details as an opaque thinking signature', async () => {
+    const detail = {
+      type: 'reasoning.uncodex',
+      version: 1,
+      item: {
+        type: 'reasoning',
+        id: 'rs_1',
+        summary: [{ type: 'summary_text', text: 'Checked the files.' }],
+        content: [],
+        encrypted_content: 'opaque-state',
+      },
+    }
+    const events = [
+      { choices: [{ delta: { reasoning: 'Checked the files.' } }] },
+      { choices: [{ delta: { reasoning_details: [detail] } }] },
+      { choices: [{ delta: {}, finish_reason: 'stop' }] },
+    ]
+    const out = await collect(translateOpenAIStream(fromArray(events)))
+
+    expect(out.slice(0, 1)).toEqual([{ type: 'thinkingDelta', content: 'Checked the files.' }])
+    const part = out[1]
+    expect(part?.type).toBe('thinkingPart')
+    if (part?.type !== 'thinkingPart' || part.signature === undefined) {
+      throw new Error('missing opaque reasoning signature')
+    }
+    expect(part.text).toBe('Checked the files.')
+    expect(decodeReasoningSignature(part.signature)).toEqual(detail)
   })
 
   it('closes the thinking part before a following tool call', async () => {

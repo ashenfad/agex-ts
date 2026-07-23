@@ -79,9 +79,9 @@ export interface TsEmission {
   /** Original provider arguments before execution-oriented normalization.
    *  Replayed verbatim as the assistant tool input on later turns. */
   readonly providerArguments?: Readonly<Record<string, unknown>>
-  /** Provider-native opaque round-trip blob (Claude thinking blocks,
-   *  Gemini `thought_signatures`). MUST be passed back verbatim on
-   *  the next request — providers reject mismatched signatures. */
+  /** Provider-native opaque round-trip state (Claude thinking blocks,
+   *  Gemini `thought_signatures`, encrypted OpenAI reasoning items).
+   *  MUST be passed back verbatim on the next request. */
   readonly signature?: Uint8Array
 }
 

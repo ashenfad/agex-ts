@@ -23,8 +23,8 @@ export interface ToolCallStart {
    *  subsequent turns (Gemini's `thoughtSignature`). The parser
    *  threads this onto the built Emission so the renderer can place
    *  it correctly on the next request. `undefined` for providers
-   *  that don't sign (Anthropic puts signatures on separate
-   *  thinking blocks; OpenAI Chat Completions doesn't sign). */
+   *  that don't attach state to tool calls (Anthropic and uncodex
+   *  put opaque state on separate thinking blocks). */
   readonly signature?: Uint8Array
 }
 
@@ -57,6 +57,8 @@ export interface ThinkingDelta {
 export interface ThinkingPartEvent {
   readonly type: 'thinkingPart'
   readonly text?: string
+  /** Provider-owned opaque replay state. Despite the legacy field name,
+   *  this may contain a complete encrypted reasoning record. */
   readonly signature?: Uint8Array
   readonly redacted?: boolean
 }

@@ -86,9 +86,8 @@ export interface ThinkingPart {
   readonly type: 'thinking'
   readonly text: string
   readonly redacted?: boolean
-  /** Provider-native opaque round-trip blob. MUST be passed back
-   *  verbatim on the next request — providers reject mismatched
-   *  signatures. */
+  /** Provider-native opaque round-trip state. MUST be passed back
+   *  verbatim on the next request. */
   readonly signature?: Uint8Array
 }
 

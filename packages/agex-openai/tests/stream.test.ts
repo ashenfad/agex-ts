@@ -34,6 +34,73 @@ describe('translateOpenAIStream — text content', () => {
   })
 })
 
+describe('translateOpenAIStream — native reasoning', () => {
+  it('streams and accumulates delta.reasoning summaries', async () => {
+    const events = [
+      { choices: [{ delta: { reasoning: 'Checked ' } }] },
+      { choices: [{ delta: { reasoning: 'the files.' } }] },
+      { choices: [{ delta: {}, finish_reason: 'stop' }] },
+    ]
+    expect(await collect(translateOpenAIStream(fromArray(events)))).toEqual([
+      { type: 'thinkingDelta', content: 'Checked ' },
+      { type: 'thinkingDelta', content: 'the files.' },
+      { type: 'thinkingPart', text: 'Checked the files.' },
+    ])
+  })
+
+  it('normalizes reasoning_content and visible reasoning_details', async () => {
+    const events = [
+      { choices: [{ delta: { reasoning_content: 'legacy ' } }] },
+      {
+        choices: [
+          {
+            delta: {
+              reasoning_details: [
+                { type: 'reasoning.summary', summary: 'summary ' },
+                { type: 'reasoning.text', text: 'text' },
+                { type: 'reasoning.encrypted', data: 'opaque' },
+              ],
+            },
+          },
+        ],
+      },
+    ]
+    expect(await collect(translateOpenAIStream(fromArray(events)))).toEqual([
+      { type: 'thinkingDelta', content: 'legacy ' },
+      { type: 'thinkingDelta', content: 'summary text' },
+      { type: 'thinkingPart', text: 'legacy summary text' },
+    ])
+  })
+
+  it('closes the thinking part before a following tool call', async () => {
+    const events = [
+      { choices: [{ delta: { reasoning: 'Use the tool.' } }] },
+      {
+        choices: [
+          {
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'tu_1',
+                  function: { name: 'ts_action', arguments: '{}' },
+                },
+              ],
+            },
+          },
+        ],
+      },
+    ]
+    expect(await collect(translateOpenAIStream(fromArray(events)))).toEqual([
+      { type: 'thinkingDelta', content: 'Use the tool.' },
+      { type: 'thinkingPart', text: 'Use the tool.' },
+      { type: 'toolCallStart', callId: 'tu_1', toolName: 'ts_action' },
+      { type: 'toolCallArgDelta', callId: 'tu_1', argumentChunk: '{}' },
+      { type: 'toolCallEnd', callId: 'tu_1' },
+    ])
+  })
+})
+
 describe('translateOpenAIStream — tool calls', () => {
   it('emits toolCallStart on first delta, args on subsequent deltas, end at close', async () => {
     const events = [

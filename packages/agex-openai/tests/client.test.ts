@@ -128,6 +128,42 @@ describe('OpenAI — request body shape', () => {
     expect(body.tool_choice).toBeUndefined()
   })
 
+  it('native thinking sends effort and strips schema narration', async () => {
+    const { fn, calls } = recordingFetch(happyPathEvents)
+    const client = new OpenAI({
+      apiKey: 'sk-test',
+      nativeThinking: true,
+      reasoningEffort: 'high',
+      fetchImpl: fn,
+    })
+    await collect(client.complete(trivialRequest))
+    const body = JSON.parse(String(calls[0]?.init.body)) as Record<string, unknown>
+    expect(body.reasoning_effort).toBe('high')
+    const tools = body.tools as ReadonlyArray<{
+      function: { name: string; parameters: { properties: Record<string, unknown> } }
+    }>
+    const tsTool = tools.find((t) => t.function.name === 'ts_action')
+    expect(Object.keys(tsTool?.function.parameters.properties ?? {})).not.toContain('thinking')
+  })
+
+  it('non-native mode omits effort and keeps schema narration', async () => {
+    const { fn, calls } = recordingFetch(happyPathEvents)
+    const client = new OpenAI({
+      apiKey: 'sk-test',
+      nativeThinking: false,
+      reasoningEffort: 'high',
+      fetchImpl: fn,
+    })
+    await collect(client.complete(trivialRequest))
+    const body = JSON.parse(String(calls[0]?.init.body)) as Record<string, unknown>
+    expect(body.reasoning_effort).toBeUndefined()
+    const tools = body.tools as ReadonlyArray<{
+      function: { name: string; parameters: { properties: Record<string, unknown> } }
+    }>
+    const tsTool = tools.find((t) => t.function.name === 'ts_action')
+    expect(Object.keys(tsTool?.function.parameters.properties ?? {})).toContain('thinking')
+  })
+
   it('caller extras override computed defaults', async () => {
     const { fn, calls } = recordingFetch(happyPathEvents)
     const client = new OpenAI({
@@ -211,6 +247,28 @@ describe('OpenAI — response streaming', () => {
     const trailer = tokens.at(-1)
     expect(trailer?.inputTokens).toBe(50)
     expect(trailer?.outputTokens).toBe(10)
+  })
+
+  it('only surfaces reasoning when native thinking is enabled', async () => {
+    const events = [{ choices: [{ delta: { reasoning: 'safe summary' } }] }, ...happyPathEvents]
+    const disabled = recordingFetch(events)
+    const disabledTokens = await collect(
+      new OpenAI({ apiKey: 'sk-test', nativeThinking: false, fetchImpl: disabled.fn }).complete(
+        trivialRequest,
+      ),
+    )
+    expect(emissionsOf(disabledTokens).some((emission) => emission.type === 'thinking')).toBe(false)
+
+    const enabled = recordingFetch(events)
+    const enabledTokens = await collect(
+      new OpenAI({ apiKey: 'sk-test', nativeThinking: true, fetchImpl: enabled.fn }).complete(
+        trivialRequest,
+      ),
+    )
+    expect(emissionsOf(enabledTokens)).toContainEqual({
+      type: 'thinking',
+      text: 'safe summary',
+    })
   })
 
   it('surfaces a non-2xx response as an Error', async () => {

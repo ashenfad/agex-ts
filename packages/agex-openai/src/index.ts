@@ -9,15 +9,14 @@
  * server: ollama (`http://localhost:11434/v1`), vLLM, LM Studio,
  * OpenRouter, Together, Anyscale, etc.
  *
- * Scope (v1):
- *   - Chat Completions API (gpt-4o, gpt-4o-mini, gpt-4-turbo,
- *     local models)
- *   - Streaming, tool calls, AbortSignal cancellation, transient
- *     network retry
+ * Scope:
+ *   - Chat Completions API and compatible reasoning extensions
+ *   - Streaming text, reasoning, tool calls, AbortSignal
+ *     cancellation, and transient network retry
  *
  * Out of scope (deferred):
- *   - Responses API (gpt-5 / o-series reasoning models)
- *   - OpenRouter `reasoning_details` round-trip
+ *   - Responses API
+ *   - Lossless encrypted `reasoning_details` round-trip
  */
 
-export { OpenAI, type OpenAIOptions } from './client'
+export { OpenAI, type OpenAIOptions, type ReasoningEffort } from './client'

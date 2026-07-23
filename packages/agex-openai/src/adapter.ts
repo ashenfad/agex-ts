@@ -92,6 +92,9 @@ export interface OpenAIUserMessage {
 export interface OpenAIAssistantMessage {
   readonly role: 'assistant'
   readonly content: string | null
+  /** OpenAI-compatible extension used by reasoning providers such as
+   *  OpenRouter. Replaying the text preserves tool-call continuity. */
+  readonly reasoning?: string
   readonly tool_calls?: ReadonlyArray<OpenAIToolCall>
 }
 
@@ -133,11 +136,14 @@ export function schemasToOpenAITools(schemas: ReadonlyArray<ToolSchema>): OpenAI
  *  messages — a user turn with two tool_results becomes two
  *  `role: 'tool'` messages, possibly followed by a user message
  *  with the trailing text/image content. */
-export function lowerNeutralTurns(turns: ReadonlyArray<NeutralTurn>): OpenAIMessage[] {
+export function lowerNeutralTurns(
+  turns: ReadonlyArray<NeutralTurn>,
+  opts: { readonly nativeThinking?: boolean } = {},
+): OpenAIMessage[] {
   const out: OpenAIMessage[] = []
   for (const turn of turns) {
     if (turn.role === 'assistant') {
-      out.push(lowerAssistantTurn(turn.content))
+      out.push(lowerAssistantTurn(turn.content, opts.nativeThinking === true))
     } else {
       out.push(...lowerUserTurn(turn.content))
     }
@@ -145,17 +151,20 @@ export function lowerNeutralTurns(turns: ReadonlyArray<NeutralTurn>): OpenAIMess
   return out
 }
 
-function lowerAssistantTurn(parts: ReadonlyArray<NeutralPart>): OpenAIAssistantMessage {
+function lowerAssistantTurn(
+  parts: ReadonlyArray<NeutralPart>,
+  nativeThinking: boolean,
+): OpenAIAssistantMessage {
   const textBits: string[] = []
+  const reasoningBits: string[] = []
   const toolCalls: OpenAIToolCall[] = []
   for (const part of parts) {
     if (part.type === 'text') {
       textBits.push(part.text)
     } else if (part.type === 'thinking') {
-      // OpenAI Chat Completions has no native thinking field.
-      // OpenRouter supports a separate `reasoning_details` array
-      // but that's a v2 concern. Drop on egress; the captured
-      // emission still lives in the agex event log.
+      if (nativeThinking && part.redacted !== true && part.text.length > 0) {
+        reasoningBits.push(part.text)
+      }
     } else if (part.type === 'toolUse') {
       toolCalls.push(lowerToolUse(part))
     }
@@ -164,6 +173,7 @@ function lowerAssistantTurn(parts: ReadonlyArray<NeutralPart>): OpenAIAssistantM
   const msg: OpenAIAssistantMessage = {
     role: 'assistant',
     content: textBits.length > 0 ? textBits.join('') : null,
+    ...(reasoningBits.length > 0 && { reasoning: reasoningBits.join('') }),
     ...(toolCalls.length > 0 && { tool_calls: toolCalls }),
   }
   return msg

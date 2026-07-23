@@ -8,7 +8,11 @@ OpenAI Chat Completions provider for [`agex-ts`](https://www.npmjs.com/package/a
 
 `baseUrl` override makes this drop-in for any OpenAI-compatible server — local models via ollama / vLLM / LM Studio, aggregators like OpenRouter / Together / Anyscale, or your own proxy. The same client handles tool calls, streaming, `AbortSignal` cancellation, and transient-network retry.
 
-**Scope (v1):** Chat Completions API (`gpt-4o`, `gpt-4o-mini`, `gpt-4-turbo`, local models), streaming, tool calls, cancellation, retry. **Out of scope:** Responses API (`gpt-5` / o-series reasoning models), OpenRouter `reasoning_details` round-trip.
+**Scope:** Chat Completions API, streaming, tool calls, cancellation, retry,
+and opt-in native reasoning for OpenAI-compatible extensions. The client
+normalizes streamed `reasoning`, `reasoning_content`, and visible
+`reasoning_details` text into agex thinking events. **Out of scope:** the
+Responses API and lossless replay of encrypted reasoning details.
 
 ## Quick start
 
@@ -23,8 +27,10 @@ import { OpenAI } from '@agex-ts/openai'
 const agent = await createAgent({
   name: 'analyst',
   llm: new OpenAI({
-    model: 'gpt-4o',
+    model: 'gpt-5',
     apiKey: process.env.OPENAI_API_KEY,
+    nativeThinking: true,
+    reasoningEffort: 'medium',
   }),
   // ...
 })
@@ -52,6 +58,8 @@ const llm = new OpenAI({
 | `timeoutMs` | `90_000` | Per-request timeout. |
 | `maxTokens` | `16_384` | Cap on output tokens. |
 | `forceToolUse` | `true` | Sends `tool_choice: 'required'`. Set false for models that don't reliably follow `required` (some local models). |
+| `nativeThinking` | `false` | Uses the provider reasoning channel, removes narration-style `thinking` from action schemas, and surfaces streamed reasoning as agex thinking events. |
+| `reasoningEffort` | `medium` | Sends OpenAI-style `reasoning_effort` when native thinking is enabled. |
 | `extras` | `{}` | Extra fields merged into the request body (`temperature`, `top_p`, `seed`, `response_format`, etc.). |
 | `headers` | `{}` | Per-request header overrides; `null` deletes a default header. |
 | `fetchImpl` | global `fetch` | Override `fetch` for tests / custom transports. |

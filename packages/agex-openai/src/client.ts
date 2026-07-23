@@ -17,9 +17,10 @@
  * `tool_choice: 'any'`); `stream_options: { include_usage: true }`
  * so the trailing chunk carries token totals.
  *
- * Out of scope (v1):
- *   - Responses API (gpt-5 / o-series). Use Chat Completions models.
- *   - OpenRouter `reasoning_details` round-trip.
+ * Out of scope:
+ *   - Responses API. This client deliberately targets Chat Completions.
+ *   - Lossless encrypted `reasoning_details` round-trip. Plain reasoning
+ *     text and summaries are preserved through agex thinking parts.
  */
 
 import {
@@ -48,6 +49,8 @@ const DEFAULT_TIMEOUT_MS = 90_000
 const STREAM_MAX_RETRIES = 2
 const RETRY_BACKOFF_MS = 1_000
 
+export type ReasoningEffort = 'low' | 'medium' | 'high'
+
 export interface OpenAIOptions {
   /** Model id. Defaults to `gpt-4o-mini`. For OpenAI-compatible
    *  servers (ollama, vLLM, etc.) pass the model name they expose. */
@@ -73,6 +76,15 @@ export interface OpenAIOptions {
    *  text-only turns — useful with models that don't reliably
    *  follow `required` (notably some local models). */
   readonly forceToolUse?: boolean
+  /** Use the provider's native reasoning channel. When enabled, the
+   *  action schemas omit their narration-style `thinking` field,
+   *  `reasoning_effort` is sent, and streamed reasoning text becomes
+   *  agex thinking events. Defaults to `false` for compatibility with
+   *  OpenAI-compatible servers that do not implement reasoning. */
+  readonly nativeThinking?: boolean
+  /** Native reasoning effort. Ignored when `nativeThinking` is false.
+   *  Defaults to `medium`. */
+  readonly reasoningEffort?: ReasoningEffort
   /** Extra fields merged into the request body (e.g. `temperature`,
    *  `top_p`, `seed`, `response_format`). Wins over computed
    *  defaults. */
@@ -102,6 +114,8 @@ export class OpenAI implements LLMClient {
   private readonly timeoutMs: number
   private readonly maxTokens: number
   private readonly forceToolUse: boolean
+  private readonly nativeThinking: boolean
+  private readonly reasoningEffort: ReasoningEffort
   private readonly extras: Readonly<Record<string, unknown>>
   private readonly fetchImpl: typeof fetch
   private readonly headerOverrides: Readonly<Record<string, string | null>>
@@ -113,6 +127,8 @@ export class OpenAI implements LLMClient {
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
     this.maxTokens = opts.maxTokens ?? DEFAULT_MAX_TOKENS
     this.forceToolUse = opts.forceToolUse ?? true
+    this.nativeThinking = opts.nativeThinking ?? false
+    this.reasoningEffort = opts.reasoningEffort ?? 'medium'
     this.extras = opts.extras ?? {}
     // Bind to globalThis so browsers don't throw "Illegal invocation"
     // — `window.fetch` requires `this === window` and we call it as
@@ -156,6 +172,8 @@ export class OpenAI implements LLMClient {
         baseUrl: this.baseUrl,
         maxTokens: this.maxTokens,
         forceToolUse: this.forceToolUse,
+        nativeThinking: this.nativeThinking,
+        reasoningEffort: this.reasoningEffort,
         ...this.extras,
       },
     }
@@ -164,14 +182,13 @@ export class OpenAI implements LLMClient {
   // ---------- Request construction ----------
 
   private buildBody(request: LLMRequest): Record<string, unknown> {
-    const lowered: ReadonlyArray<OpenAIMessage> = lowerNeutralTurns(request.turns)
+    const lowered: ReadonlyArray<OpenAIMessage> = lowerNeutralTurns(request.turns, {
+      nativeThinking: this.nativeThinking,
+    })
     const messages: OpenAIMessage[] = [{ role: 'system', content: request.system }, ...lowered]
-    // Native thinking is provider-specific; we don't strip the
-    // `thinking` schema field for OpenAI since most OpenAI-hosted
-    // models don't have a separate channel for it. Models that
-    // *do* (gpt-5 / o-series) use the Responses API, which is
-    // out of scope for v1.
-    const tools: OpenAITool[] = schemasToOpenAITools(toolSchemas())
+    const tools: OpenAITool[] = schemasToOpenAITools(
+      toolSchemas({ nativeThinking: this.nativeThinking }),
+    )
     const body: Record<string, unknown> = {
       model: this.model,
       messages,
@@ -191,6 +208,9 @@ export class OpenAI implements LLMClient {
     }
     if (this.forceToolUse) {
       body.tool_choice = 'required'
+    }
+    if (this.nativeThinking) {
+      body.reasoning_effort = this.reasoningEffort
     }
     Object.assign(body, this.extras)
     return body
@@ -255,7 +275,7 @@ export class OpenAI implements LLMClient {
     const usage: UsageHolder = { inputTokens: null, outputTokens: null }
     const sseLines = parseSseEvents(response.body)
     const events = sseLinesToEventDicts(sseLines)
-    const toolCallEvents = translateOpenAIStream(events, usage)
+    const toolCallEvents = translateOpenAIStream(events, usage, this.nativeThinking)
 
     let lastIndex = -1
     for await (const tok of parseToolEvents(toolCallEvents)) {

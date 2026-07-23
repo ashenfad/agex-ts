@@ -38,6 +38,12 @@ const result = await summarize([3, 1, 4, 1, 5, 9, 2, 6])
 
 For tests or trusted code without worker isolation, swap `workerRuntime` for `evalRuntime` from `agex-ts/runtime-eval` — same realm as the host.
 
+Embedders whose LLM provider exposes its own intercepted shell and file tools can
+set `actionSurface: 'provider-native'` on both the agent and supporting provider
+client. This keeps `ts_action` for computation and task completion while removing
+the agex terminal/write/edit vocabulary from the model-facing primer and tool
+schema. The default remains `actionSurface: 'agex'`.
+
 ## Sub-path imports
 
 The default `agex-ts` import is the lean surface (`Agent`, `createAgent`, types, errors, `prettyEvents`). Heavier surfaces live behind sub-paths so unused code paths tree-shake cleanly:

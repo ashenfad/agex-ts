@@ -587,6 +587,22 @@ describe('OutputEvent emissionId stamping', () => {
     expect(outputs[0]?.emissionId).toBe(makeToolUseId(action.timestamp, 2))
     expect(outputs[1]?.emissionId).toBe(makeToolUseId(action.timestamp, 3))
   })
+
+  it('preserves a provider tool-call id on the producing output', async () => {
+    const providerCallId = 'exec-97a4a41b-f4a8-4f30-94af-98b3a090f9e8'
+    const { agent } = await makeAgent([
+      r(
+        { type: 'terminal', commands: 'echo ok', providerCallId },
+        { type: 'ts', code: 'taskSuccess(null)' },
+      ),
+    ])
+    const fn = agent.task<undefined, null>({ description: 'Provider id test.' })
+    const events: AgentEvent[] = []
+    await fn(undefined, { onEvent: (e) => void events.push(e) })
+
+    const output = events.find((e): e is OutputEvent => e.type === 'output')
+    expect(output?.emissionId).toBe(providerCallId)
+  })
 })
 
 describe('emission dispatch — text/thinking are no-ops', () => {

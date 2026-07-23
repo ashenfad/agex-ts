@@ -30,7 +30,7 @@ import {
 import { dispatchFileEdit, dispatchFileWrite, dispatchTerminal } from './dispatcher'
 import { CancelledError, SchemaError, TaskFailError, isCancelledError } from './errors'
 import type { EventLogImpl } from './event-log'
-import { buildSystemMessage, buildTaskMessage, makeToolUseId, renderEvents } from './render'
+import { buildSystemMessage, buildTaskMessage, renderEvents, resolveToolUseId } from './render'
 import { createSpawn } from './spawn'
 import type {
   ActionEvent,
@@ -238,6 +238,7 @@ export function makeTask<I, O>(
     const runtimeAddendum = runtimeAdapter.primerAddendum?.()
     const system = buildSystemMessage({
       policy: agent.policy(),
+      actionSurface: agent.actionSurface,
       ...(agent.agexPrimerOverride !== undefined && {
         agexPrimerOverride: agent.agexPrimerOverride,
       }),
@@ -483,7 +484,7 @@ async function dispatchEmissions(
   for (let i = 0; i < emissions.length; i++) {
     const em = emissions[i] as Emission
     if (ctx.signal.aborted) throw new CancelledError()
-    const emissionId = makeToolUseId(actionTimestamp, i)
+    const emissionId = resolveToolUseId(em, actionTimestamp, i)
 
     if (em.type === 'ts') {
       const result = await runtime.execute(em.code, { ...ctx, emissionId })
@@ -659,7 +660,7 @@ async function emitSkippedMarkers(
       type: 'output',
       timestamp: new Date().toISOString(),
       agentName,
-      emissionId: makeToolUseId(actionTimestamp, k),
+      emissionId: resolveToolUseId(emissions[k] as Emission, actionTimestamp, k),
       parts: [{ type: 'text', text: SKIPPED_NOTICE }],
     }
     await emit(outputEvent, eventLog, onEvent)

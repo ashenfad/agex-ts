@@ -33,6 +33,7 @@ const agent = await createAgent({
 | `runtime` | `RuntimeAdapter` | `undefined` | Runtime that executes `ts` emissions. Required for any task. |
 | `state` | `StateConfig` | `{ type: 'live' }` | Persistent state. See [State](state.md). |
 | `fs` | `FSConfig` | `{ type: 'memory' }` | VFS. `{ type: 'kvgit' }` shares the agent's versioned state. |
+| `actionSurface` | `'agex' \| 'provider-native'` | `'agex'` | Model-facing workspace action vocabulary. Provider-native mode keeps `ts_action` but teaches the model to use a supporting provider's intercepted shell/file tools. Set the matching option on the provider client. |
 | `maxIterations` | `number` | `10` | Per-task turn cap. |
 | `maxSpawns` | `number` | `8` | Max concurrent in-agent `spawn` clones (bounds the per-task spawn semaphore). `0` disables `spawn` entirely — the capability isn't injected and the primer won't teach it. See [Spawn (sub-tasks)](#spawn-sub-tasks). |
 | `chapteringTrigger` | `number` | `undefined` | When latest action's `inputTokens` >= this, run a chapter task. Setting this option auto-registers an internal chapter task with the default primer; see [Chapters](../concepts/chapters.md). |
@@ -210,6 +211,7 @@ try {
 interface ReconfigurableOptions {
   readonly llm?: LLMClient
   readonly primer?: string
+  readonly actionSurface?: 'agex' | 'provider-native'
   readonly agexPrimerOverride?: string
   readonly capabilitiesPrimer?: string
   readonly chapteringTrigger?: number
@@ -229,7 +231,7 @@ Each provided field replaces its current value; omitted fields stay as they were
 | Field | Takes effect on... |
 |---|---|
 | `llm` | Next LLM call. In-flight HTTP requests continue with the old client. |
-| `primer` / `agexPrimerOverride` / `capabilitiesPrimer` | Next task's system message. (Note: invalidates the LLM provider's prompt cache for system text.) |
+| `primer` / `actionSurface` / `agexPrimerOverride` / `capabilitiesPrimer` | Next task's system message. (Note: invalidates the LLM provider's prompt cache for system text.) |
 | `chapteringTrigger` | Next task-boundary chaptering check. `undefined` disables. |
 | `chapterPrimer` | Next chapter task run. |
 | `maxIterations` | Start of the next task. |

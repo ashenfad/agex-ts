@@ -18,6 +18,8 @@
  * you need different framing for a specific use case.
  */
 
+import type { ActionSurface } from '../types'
+
 export const BUILTIN_PRIMER = `# Agex Agent Environment
 
 You are a ReAct-style agent operating in a sandboxed TypeScript environment with two action surfaces: a **TypeScript action** where computation lives, and a **per-command shell** for filesystem operations and host-registered tools.  You think in code; reach for whichever surface fits the operation.
@@ -132,3 +134,53 @@ The task input is available as the \`inputs\` variable in \`ts_action\`.  Its sh
 4. **Verify testable results before completing.** When your task returns something testable (a function, parser, or other reusable artifact), assert against known cases in the same \`ts_action\` as \`taskSuccess\`. If a check fails, the error surfaces next turn so you can fix it; if it passes, the task completes in one turn. Skip this for trivial answer-style tasks where the answer *is* the work.
 5. **Let errors surface.** Do not wrap code in broad \`try/catch\` that calls \`taskFail\`. Stack traces are debugging information, not failure modes.
 `
+
+const PROVIDER_NATIVE_WORKSPACE = `### Provider-native workspace actions
+
+Use the provider's native shell and file-editing tools for workspace inspection, commands, and durable file changes. These operations target the same virtual workspace used by your TypeScript actions. Follow the provider's own tool descriptions for their concrete syntax.
+
+Use \`ts_action\` for computation, registered TypeScript resources, and task completion. After developing reusable helpers with native file tools, import them from an absolute \`/helpers/...\` path in \`ts_action\` and call \`taskSuccess\` there.`
+
+const PROVIDER_NATIVE_PRIMER = replaceSection(
+  BUILTIN_PRIMER,
+  '### Terminal (`terminal_action`)',
+  '### Filesystem',
+  PROVIDER_NATIVE_WORKSPACE,
+)
+  .replace(
+    'You are a ReAct-style agent operating in a sandboxed TypeScript environment with two action surfaces: a **TypeScript action** where computation lives, and a **per-command shell** for filesystem operations and host-registered tools.  You think in code; reach for whichever surface fits the operation.',
+    "You are a ReAct-style agent operating with a sandboxed TypeScript computation action plus the provider's native shell and file-editing tools. You think in code; reach for whichever surface fits the operation.",
+  )
+  .replace(
+    "A Virtual Filesystem is your durable workspace.  TypeScript actions and shell commands are stateless on their own, but anything you've written to the VFS persists across actions, turns, and tasks.  Two operations write to it — your response format's primer shows the concrete syntax.",
+    "A Virtual Filesystem is your durable workspace. TypeScript actions and provider-native workspace tools are stateless on their own, but anything written to the VFS persists across actions, turns, and tasks. Use the provider's native file tools for writes and edits.",
+  )
+  .replace(
+    'The originals are preserved at the `/chapters/<slug>/` path shown in each chapter; use `ls` / `cat` from `terminal_action` if you need specifics beyond the summary.',
+    "The originals are preserved at the `/chapters/<slug>/` path shown in each chapter; use the provider's native shell or file reader if you need specifics beyond the summary.",
+  )
+  .replace(
+    "**read the skill's full content with `cat /skills/<name>/SKILL.md` from `terminal_action` before guessing**",
+    "**read the skill's full content at `/skills/<name>/SKILL.md` with the provider's native shell or file reader before guessing**",
+  )
+
+/** Render the built-in conventions for the selected model-facing
+ * action vocabulary. The default is byte-for-byte compatible with
+ * the historical monolithic primer. */
+export function renderBuiltinPrimer(actionSurface: ActionSurface = 'agex'): string {
+  return actionSurface === 'provider-native' ? PROVIDER_NATIVE_PRIMER : BUILTIN_PRIMER
+}
+
+function replaceSection(
+  source: string,
+  heading: string,
+  nextHeading: string,
+  replacement: string,
+): string {
+  const start = source.indexOf(heading)
+  const end = source.indexOf(nextHeading, start)
+  if (start < 0 || end < 0) {
+    throw new Error(`Builtin primer section boundary not found: ${heading}`)
+  }
+  return `${source.slice(0, start)}${replacement}\n\n${source.slice(end)}`
+}

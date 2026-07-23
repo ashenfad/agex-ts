@@ -21,6 +21,7 @@
  * into half-completing the schema instead of running real code.
  */
 
+import type { ActionSurface } from '../types'
 import type { ToolName } from './index'
 
 // `as const` so the constants are literal-typed (e.g. `'ts_action'`),
@@ -54,6 +55,10 @@ export interface ToolSchemaOptions {
    *  blocks; the model then emits real reasoning as a separate
    *  thought channel rather than as a JSON string. */
   readonly nativeThinking?: boolean
+  /** Which actions the model should see. `provider-native` exposes
+   *  only `ts_action`; shell and file work stays on the provider's
+   *  native tool surface. Defaults to `agex`. */
+  readonly actionSurface?: ActionSurface
 }
 
 const TS_SCHEMA: ToolSchema = {
@@ -180,9 +185,12 @@ const EDIT_FILE_SCHEMA: ToolSchema = {
  *  narrate reasoning into a JSON parameter. */
 export function toolSchemas(opts: ToolSchemaOptions = {}): ToolSchema[] {
   const action =
-    opts.nativeThinking === true
-      ? [stripNarrationParams(TS_SCHEMA), stripNarrationParams(TERMINAL_SCHEMA)]
-      : [TS_SCHEMA, TERMINAL_SCHEMA]
+    opts.actionSurface === 'provider-native'
+      ? [opts.nativeThinking === true ? stripNarrationParams(TS_SCHEMA) : TS_SCHEMA]
+      : opts.nativeThinking === true
+        ? [stripNarrationParams(TS_SCHEMA), stripNarrationParams(TERMINAL_SCHEMA)]
+        : [TS_SCHEMA, TERMINAL_SCHEMA]
+  if (opts.actionSurface === 'provider-native') return action
   return [...action, WRITE_FILE_SCHEMA, EDIT_FILE_SCHEMA]
 }
 

@@ -187,6 +187,8 @@ describe('Gemini — response streaming', () => {
     if (ts?.type !== 'ts') throw new Error('expected ts emission')
     expect(ts.code).toBe('taskSuccess(1)')
     expect(ts.title).toBe('x')
+    expect(ts.providerCallId).toBe('tu_1')
+    expect(ts.providerArguments).toEqual({ title: 'x', code: 'taskSuccess(1)' })
     expect(ts.signature).toBeDefined()
     expect(new TextDecoder().decode(ts.signature)).toBe('opaque-sig')
     const trailer = tokens.at(-1)

@@ -19,12 +19,11 @@
  * messages and lower them into their wire format (Anthropic content
  * blocks, OpenAI tool messages, Gemini parts arrays).
  *
- * Tool-use IDs are derived deterministically from the source
- * ActionEvent's timestamp + emission index. Stability matters
- * because each new request re-renders the full history; the IDs in
- * the historical parts must match what the provider has seen
- * before. As long as the renderer is pure and the events don't
- * mutate, the IDs stay stable.
+ * Tool-use IDs come from the provider when it supplied one, falling
+ * back to a deterministic value derived from the source ActionEvent's
+ * timestamp + emission index. Stability matters because each new
+ * request re-renders the full history; the IDs in historical parts
+ * must match what the provider has seen before.
  */
 
 import { buildChapterScopeFilter } from '../chaptering'
@@ -40,7 +39,7 @@ import type {
 } from '../types'
 
 // Re-exports — single import surface for provider packages
-export { BUILTIN_PRIMER } from './builtin-primer'
+export { BUILTIN_PRIMER, renderBuiltinPrimer } from './builtin-primer'
 export {
   extractJsonSchema,
   hasObjectProperties,
@@ -323,6 +322,26 @@ export function makeToolUseId(actionTimestamp: string, emissionIndex: number): s
   return `tu_${safeTs}_${emissionIndex}`
 }
 
+/** Resolve the id used to dispatch and render one actionable
+ * emission. Provider ids take precedence because stateful bridges
+ * require their exact value when continuing a parked tool call. */
+export function resolveToolUseId(
+  emission: Emission,
+  actionTimestamp: string,
+  emissionIndex: number,
+): string {
+  if (
+    (emission.type === 'ts' ||
+      emission.type === 'terminal' ||
+      emission.type === 'fileWrite' ||
+      emission.type === 'fileEdit') &&
+    emission.providerCallId !== undefined
+  ) {
+    return emission.providerCallId
+  }
+  return makeToolUseId(actionTimestamp, emissionIndex)
+}
+
 // ---------------------------------------------------------------------------
 // Per-event renderers
 // ---------------------------------------------------------------------------
@@ -335,7 +354,7 @@ function renderActionTurn(
   const content: NeutralPart[] = []
   for (let i = 0; i < event.emissions.length; i++) {
     const em = event.emissions[i] as Emission
-    const id = makeToolUseId(event.timestamp, i)
+    const id = resolveToolUseId(em, event.timestamp, i)
     const built = renderEmission(em, id)
     if (built === null) continue
     content.push(built.part)
@@ -360,11 +379,13 @@ function renderEmission(
         type: 'toolUse',
         toolUseId: emissionId,
         toolName: 'ts_action',
-        input: {
-          code: em.code,
-          ...(em.thinking !== undefined && { thinking: em.thinking }),
-          ...(em.title !== undefined && { title: em.title }),
-        },
+        input:
+          em.providerArguments ??
+          ({
+            code: em.code,
+            ...(em.thinking !== undefined && { thinking: em.thinking }),
+            ...(em.title !== undefined && { title: em.title }),
+          } satisfies Readonly<Record<string, unknown>>),
         ...(em.signature !== undefined && { signature: em.signature }),
       }
       return { part, toolName: 'ts_action' }
@@ -374,11 +395,13 @@ function renderEmission(
         type: 'toolUse',
         toolUseId: emissionId,
         toolName: 'terminal_action',
-        input: {
-          commands: em.commands,
-          ...(em.thinking !== undefined && { thinking: em.thinking }),
-          ...(em.title !== undefined && { title: em.title }),
-        },
+        input:
+          em.providerArguments ??
+          ({
+            commands: em.commands,
+            ...(em.thinking !== undefined && { thinking: em.thinking }),
+            ...(em.title !== undefined && { title: em.title }),
+          } satisfies Readonly<Record<string, unknown>>),
         ...(em.signature !== undefined && { signature: em.signature }),
       }
       return { part, toolName: 'terminal_action' }
@@ -388,7 +411,7 @@ function renderEmission(
         type: 'toolUse',
         toolUseId: emissionId,
         toolName: 'write_file',
-        input: { path: em.path, content: em.content, mode: em.mode },
+        input: em.providerArguments ?? { path: em.path, content: em.content, mode: em.mode },
         ...(em.signature !== undefined && { signature: em.signature }),
       }
       return { part, toolName: 'write_file' }
@@ -398,12 +421,14 @@ function renderEmission(
         type: 'toolUse',
         toolUseId: emissionId,
         toolName: 'edit_file',
-        input: {
-          path: em.path,
-          search: em.search,
-          content: em.content,
-          ...(em.matchAll !== undefined && { matchAll: em.matchAll }),
-        },
+        input:
+          em.providerArguments ??
+          ({
+            path: em.path,
+            search: em.search,
+            content: em.content,
+            ...(em.matchAll !== undefined && { matchAll: em.matchAll }),
+          } satisfies Readonly<Record<string, unknown>>),
         ...(em.signature !== undefined && { signature: em.signature }),
       }
       return { part, toolName: 'edit_file' }

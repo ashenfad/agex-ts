@@ -66,7 +66,18 @@ describe('parseToolEvents — ts_action tool', () => {
     const tokens = await collect(parseToolEvents(fromArray(events)))
     const emissions = emissionsOf(tokens)
     expect(emissions).toEqual([
-      { type: 'ts', code: 'taskSuccess(1)', thinking: 'plan', title: 'work' },
+      {
+        type: 'ts',
+        code: 'taskSuccess(1)',
+        thinking: 'plan',
+        title: 'work',
+        providerCallId: 'a',
+        providerArguments: {
+          title: 'work',
+          thinking: 'plan',
+          code: 'taskSuccess(1)',
+        },
+      },
     ])
   })
 
@@ -92,7 +103,15 @@ describe('parseToolEvents — ts_action tool', () => {
   it('handles native-thinking schema (no thinking field)', async () => {
     const events = callEvents('a', 'ts_action', '{"title":"x","code":"y"}')
     const tokens = await collect(parseToolEvents(fromArray(events)))
-    expect(emissionsOf(tokens)).toEqual([{ type: 'ts', code: 'y', title: 'x' }])
+    expect(emissionsOf(tokens)).toEqual([
+      {
+        type: 'ts',
+        code: 'y',
+        title: 'x',
+        providerCallId: 'a',
+        providerArguments: { title: 'x', code: 'y' },
+      },
+    ])
   })
 })
 
@@ -105,7 +124,14 @@ describe('parseToolEvents — terminal_action tool', () => {
     )
     const tokens = await collect(parseToolEvents(fromArray(events)))
     expect(emissionsOf(tokens)).toEqual([
-      { type: 'terminal', commands: 'ls /', thinking: 'glance', title: 't' },
+      {
+        type: 'terminal',
+        commands: 'ls /',
+        thinking: 'glance',
+        title: 't',
+        providerCallId: 'a',
+        providerArguments: { title: 't', commands: 'ls /', thinking: 'glance' },
+      },
     ])
     const streamedTypes = tokens.map((t) => t.type)
     expect(streamedTypes).toContain('terminal')
@@ -116,18 +142,39 @@ describe('parseToolEvents — write_file tool', () => {
   it('builds a FileWriteEmission with mode from the parsed JSON', async () => {
     const events = callEvents('a', 'write_file', '{"path":"/n.txt","content":"hi","mode":"append"}')
     expect(emissionsOf(await collect(parseToolEvents(fromArray(events))))).toEqual([
-      { type: 'fileWrite', path: '/n.txt', content: 'hi', mode: 'append' },
+      {
+        type: 'fileWrite',
+        path: '/n.txt',
+        content: 'hi',
+        mode: 'append',
+        providerCallId: 'a',
+        providerArguments: { path: '/n.txt', content: 'hi', mode: 'append' },
+      },
     ])
   })
 
   it('defaults mode to write when omitted or invalid', async () => {
     const omitted = callEvents('a', 'write_file', '{"path":"/n","content":"hi"}')
     expect(emissionsOf(await collect(parseToolEvents(fromArray(omitted))))).toEqual([
-      { type: 'fileWrite', path: '/n', content: 'hi', mode: 'write' },
+      {
+        type: 'fileWrite',
+        path: '/n',
+        content: 'hi',
+        mode: 'write',
+        providerCallId: 'a',
+        providerArguments: { path: '/n', content: 'hi' },
+      },
     ])
     const invalid = callEvents('a', 'write_file', '{"path":"/n","content":"","mode":"junk"}')
     expect(emissionsOf(await collect(parseToolEvents(fromArray(invalid))))).toEqual([
-      { type: 'fileWrite', path: '/n', content: '', mode: 'write' },
+      {
+        type: 'fileWrite',
+        path: '/n',
+        content: '',
+        mode: 'write',
+        providerCallId: 'a',
+        providerArguments: { path: '/n', content: '', mode: 'junk' },
+      },
     ])
   })
 
@@ -164,14 +211,34 @@ describe('parseToolEvents — edit_file tool', () => {
       '{"path":"/n","search":"old","content":"new","matchAll":true}',
     )
     expect(emissionsOf(await collect(parseToolEvents(fromArray(events))))).toEqual([
-      { type: 'fileEdit', path: '/n', search: 'old', content: 'new', matchAll: true },
+      {
+        type: 'fileEdit',
+        path: '/n',
+        search: 'old',
+        content: 'new',
+        matchAll: true,
+        providerCallId: 'a',
+        providerArguments: {
+          path: '/n',
+          search: 'old',
+          content: 'new',
+          matchAll: true,
+        },
+      },
     ])
   })
 
   it('omits matchAll when false / missing', async () => {
     const events = callEvents('a', 'edit_file', '{"path":"/n","search":"x","content":"y"}')
     expect(emissionsOf(await collect(parseToolEvents(fromArray(events))))).toEqual([
-      { type: 'fileEdit', path: '/n', search: 'x', content: 'y' },
+      {
+        type: 'fileEdit',
+        path: '/n',
+        search: 'x',
+        content: 'y',
+        providerCallId: 'a',
+        providerArguments: { path: '/n', search: 'x', content: 'y' },
+      },
     ])
   })
 

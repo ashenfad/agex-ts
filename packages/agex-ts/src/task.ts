@@ -35,6 +35,7 @@ import { buildSystemMessage, buildTaskMessage, renderEvents, resolveToolUseId } 
 import { createSpawn } from './spawn'
 import type {
   ActionEvent,
+  ActionSurface,
   AgentEvent,
   Cache,
   Emission,
@@ -56,6 +57,18 @@ import type {
 } from './types'
 
 const DEFAULT_SESSION = 'default'
+
+function noActionReminder(actionSurface: ActionSurface): string {
+  const nextAction =
+    actionSurface === 'provider-native'
+      ? "use ts_action or the provider's native shell/file-editing tools"
+      : `dispatch an action tool (${
+          actionSurface === 'agex-patch'
+            ? 'ts_action / terminal_action / apply_patch'
+            : 'ts_action / terminal_action / write_file / edit_file'
+        })`
+  return `[System reminder] The previous turn produced only narration — no action tool was dispatched. Call taskSuccess(...) (or taskFail(...)) inside ts_action to finish the task, or ${nextAction} to keep working. Text alone does not advance the task.`
+}
 
 export interface TaskDefinition<I, O> {
   /** What this task does — surfaced in the per-task user message. */
@@ -333,7 +346,7 @@ export function makeTask<I, O>(
             parts: [
               {
                 type: 'text',
-                text: '[System reminder] The previous turn produced only narration — no action tool was dispatched. Call taskSuccess(...) (or taskFail(...)) inside ts_action to finish the task, or dispatch an action tool (ts_action / terminal_action / write_file / edit_file / apply_patch) to keep working. Text alone does not advance the task.',
+                text: noActionReminder(agent.actionSurface),
               },
             ],
           }

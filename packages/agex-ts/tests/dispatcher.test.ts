@@ -480,6 +480,91 @@ describe('emission dispatch — apply_patch', () => {
     )
   })
 
+  it.each([
+    {
+      name: 'adds a final newline when only the removed line has a no-newline marker',
+      source: 'old',
+      hunk: ['-old', '\\ No newline at end of file', '+new'],
+      expected: 'new\n',
+    },
+    {
+      name: 'removes the final newline when the added line has a no-newline marker',
+      source: 'old\n',
+      hunk: ['-old', '+new', '\\ No newline at end of file'],
+      expected: 'new',
+    },
+    {
+      name: 'keeps no final newline when both sides have no-newline markers',
+      source: 'old',
+      hunk: ['-old', '\\ No newline at end of file', '+new', '\\ No newline at end of file'],
+      expected: 'new',
+    },
+  ])('$name', async ({ source, hunk, expected }) => {
+    const { agent } = await makeAgent([])
+    const fs = await agent.fs()
+    await fs.write('/newline.txt', enc.encode(source), 'w')
+    const patch = [
+      '*** Begin Patch',
+      '*** Update File: /newline.txt',
+      ...hunk,
+      '*** End Patch',
+    ].join('\n')
+
+    await dispatchApplyPatch({ type: 'patch', patch }, fs)
+
+    expect(dec.decode(await fs.read('/newline.txt'))).toBe(expected)
+  })
+
+  it('uses a no-newline marker to target the matching line at EOF', async () => {
+    const { agent } = await makeAgent([])
+    const fs = await agent.fs()
+    await fs.write('/repeated.txt', enc.encode('old\nold'), 'w')
+    const patch = [
+      '*** Begin Patch',
+      '*** Update File: /repeated.txt',
+      '-old',
+      '\\ No newline at end of file',
+      '+new',
+      '*** End Patch',
+    ].join('\n')
+
+    await dispatchApplyPatch({ type: 'patch', patch }, fs)
+
+    expect(dec.decode(await fs.read('/repeated.txt'))).toBe('old\nnew\n')
+  })
+
+  it('preserves the separator as a final newline when deleting an unterminated tail', async () => {
+    const { agent } = await makeAgent([])
+    const fs = await agent.fs()
+    await fs.write('/tail.txt', enc.encode('keep\ndelete'), 'w')
+    const patch = [
+      '*** Begin Patch',
+      '*** Update File: /tail.txt',
+      '-delete',
+      '\\ No newline at end of file',
+      '*** End Patch',
+    ].join('\n')
+
+    await dispatchApplyPatch({ type: 'patch', patch }, fs)
+
+    expect(dec.decode(await fs.read('/tail.txt'))).toBe('keep\n')
+  })
+
+  it('rejects a no-newline marker that does not follow a diff line', () => {
+    const patch = [
+      '*** Begin Patch',
+      '*** Update File: /keep.txt',
+      '\\ No newline at end of file',
+      '-old',
+      '+new',
+      '*** End Patch',
+    ].join('\n')
+
+    expect(() => parseApplyPatch(patch)).toThrow(
+      "apply_patch: invalid hunk at line 3: No-newline marker in update hunk for '/keep.txt' must follow a context, added, or removed line",
+    )
+  })
+
   it('applies add, update, delete, and move sections as one emission', async () => {
     const patch = [
       '*** Begin Patch',

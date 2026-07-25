@@ -10,7 +10,7 @@ import type { NeutralTurn } from '../src/render'
 import { evalRuntime } from '../src/runtime/eval'
 import { Live } from '../src/state'
 import type { TaskFnInternal } from '../src/task'
-import type { AgentEvent, LLMResponse, TokenChunk } from '../src/types'
+import type { ActionSurface, AgentEvent, LLMResponse, TokenChunk } from '../src/types'
 
 async function drain(log: { iter(): AsyncIterable<AgentEvent> }): Promise<AgentEvent[]> {
   const out: AgentEvent[] = []
@@ -172,6 +172,43 @@ describe('task — no-action nudge', () => {
     )
     expect(reminders).toHaveLength(1)
   })
+
+  it.each([
+    ['agex', 'dispatch an action tool (ts_action / terminal_action / write_file / edit_file)'],
+    ['agex-patch', 'dispatch an action tool (ts_action / terminal_action / apply_patch)'],
+    ['provider-native', "use ts_action or the provider's native shell/file-editing tools"],
+  ] satisfies ReadonlyArray<readonly [ActionSurface, string]>)(
+    'advertises only the %s action surface',
+    async (actionSurface, expectedActions) => {
+      const llm = new Dummy({
+        responses: [
+          r({ type: 'text', text: 'Done. Standing by.' }),
+          r({ type: 'ts', code: 'taskSuccess("ok")' }),
+        ],
+      })
+      const agent = await createAgent({
+        name: 'T',
+        llm,
+        runtime: evalRuntime(),
+        actionSurface,
+      })
+      await agent.task<undefined, string>({ description: 'X.' })(undefined)
+
+      const secondCall = llm.allTurns[1] ?? []
+      const lastTurn = secondCall[secondCall.length - 1]
+      const reminder = (lastTurn?.content ?? [])
+        .filter((part) => part.type === 'text')
+        .map((part) => (part as { text: string }).text)
+        .join('\n')
+      expect(reminder).toContain(expectedActions)
+      if (actionSurface !== 'agex') {
+        expect(reminder).not.toContain('write_file / edit_file')
+      }
+      if (actionSurface !== 'agex-patch') {
+        expect(reminder).not.toContain('/ apply_patch')
+      }
+    },
+  )
 
   it('does NOT fire the nudge when the action contains an actionable emission', async () => {
     // Even if the ts_action just continues (no terminator), an

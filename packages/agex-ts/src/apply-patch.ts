@@ -6,6 +6,8 @@ const decoder = new TextDecoder('utf-8', { fatal: false })
 interface HunkLine {
   readonly kind: 'context' | 'add' | 'delete'
   readonly text: string
+  /** Unified-diff marker attached to this preceding line. */
+  readonly noNewline?: boolean
 }
 
 interface PatchHunk {
@@ -301,6 +303,15 @@ export function parseApplyPatch(patch: string): ReadonlyArray<PatchChange> {
         }
 
         if (hunkLine === '\\ No newline at end of file') {
+          if (active === undefined || active.lines.length === 0) {
+            throw invalidHunk(
+              hunkSourceLine,
+              `No-newline marker in update hunk for '${path}' must follow a context, added, or removed line`,
+            )
+          }
+          const previousIndex = active.lines.length - 1
+          const previous = active.lines[previousIndex] as HunkLine
+          active.lines[previousIndex] = { ...previous, noNewline: true }
           index++
           continue
         }
@@ -415,14 +426,19 @@ function parseHunkHeader(
 function applyHunks(path: string, source: string, hunks: ReadonlyArray<PatchHunk>): string {
   const newline = source.includes('\r\n') ? '\r\n' : '\n'
   const normalized = source.replace(/\r\n/gu, '\n')
-  const hadTrailingNewline = normalized.endsWith('\n')
+  let hasTrailingNewline = normalized.endsWith('\n')
   const lines = normalized.split('\n')
-  if (hadTrailingNewline) lines.pop()
+  if (hasTrailingNewline) lines.pop()
   let cursor = 0
 
   for (const hunk of hunks) {
-    const oldLines = hunk.lines.filter((line) => line.kind !== 'add').map((line) => line.text)
-    const newLines = hunk.lines.filter((line) => line.kind !== 'delete').map((line) => line.text)
+    const oldSide = hunk.lines.filter((line) => line.kind !== 'add')
+    const newSide = hunk.lines.filter((line) => line.kind !== 'delete')
+    const oldLines = oldSide.map((line) => line.text)
+    const newLines = newSide.map((line) => line.text)
+    const oldEndsWithoutNewline = oldSide.at(-1)?.noNewline === true
+    const newEndsWithoutNewline = newSide.at(-1)?.noNewline === true
+    const mustMatchAtEnd = hunk.endOfFile || oldEndsWithoutNewline || newEndsWithoutNewline
     let searchStart = cursor
     if (hunk.oldStart !== undefined) searchStart = Math.max(0, hunk.oldStart - 1)
     if (hunk.anchor !== undefined) {
@@ -434,21 +450,33 @@ function applyHunks(path: string, source: string, hunks: ReadonlyArray<PatchHunk
       }
       searchStart = anchorIndex + 1
     }
-    const at = locateSequence(lines, oldLines, searchStart, hunk.endOfFile)
+    const at = locateSequence(lines, oldLines, searchStart, mustMatchAtEnd)
     if (at < 0) {
-      const suffix = hunk.endOfFile
+      const suffix = mustMatchAtEnd
         ? ' at end of file'
         : ` at or after file line ${searchStart + 1}`
       throw new Error(
         `apply_patch: ${path}: hunk starting at patch line ${hunk.sourceLine} could not find the expected context${suffix}: ${formatContext(oldLines)}`,
       )
     }
+    const touchesEndOfFile = at + oldLines.length === lines.length
+    if (touchesEndOfFile && hunk.lines.some((line) => line.noNewline === true)) {
+      if (newEndsWithoutNewline) {
+        hasTrailingNewline = false
+      } else if (oldEndsWithoutNewline) {
+        // An old-side marker without a corresponding new-side marker
+        // means the replacement restores the final newline. If the
+        // hunk deletes the whole tail, the separator before that tail
+        // becomes the surviving file's final newline.
+        hasTrailingNewline = newSide.length > 0 || lines.length > oldLines.length
+      }
+    }
     lines.splice(at, oldLines.length, ...newLines)
     cursor = at + newLines.length
   }
 
   const joined = lines.join(newline)
-  return hadTrailingNewline ? `${joined}${newline}` : joined
+  return hasTrailingNewline ? `${joined}${newline}` : joined
 }
 
 function locateSequence(

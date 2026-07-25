@@ -21,6 +21,7 @@
 import { TerminalError } from '@agex-ts/termish'
 import type { StandardSchemaV1 } from '@standard-schema/spec'
 import type { Agent } from './agent'
+import { dispatchApplyPatch } from './apply-patch'
 import {
   getLastFiredActionTimestamp,
   markChapteringFired,
@@ -316,7 +317,7 @@ export function makeTask<I, O>(
         )
 
         // No-action nudge. If the model emitted only text/thinking
-        // (no ts/terminal/write_file/edit_file) the task can't
+        // (no ts/terminal/write_file/edit_file/apply_patch) the task can't
         // advance — the next iteration would replay the same context
         // and the model tends to loop on its own narration. Surface
         // a synthetic OutputEvent with no emissionId so the renderer
@@ -332,7 +333,7 @@ export function makeTask<I, O>(
             parts: [
               {
                 type: 'text',
-                text: '[System reminder] The previous turn produced only narration — no action tool was dispatched. Call taskSuccess(...) (or taskFail(...)) inside ts_action to finish the task, or dispatch an action tool (ts_action / terminal_action / write_file / edit_file) to keep working. Text alone does not advance the task.',
+                text: '[System reminder] The previous turn produced only narration — no action tool was dispatched. Call taskSuccess(...) (or taskFail(...)) inside ts_action to finish the task, or dispatch an action tool (ts_action / terminal_action / write_file / edit_file / apply_patch) to keep working. Text alone does not advance the task.',
               },
             ],
           }
@@ -565,6 +566,27 @@ async function dispatchEmissions(
         return { kind: 'continue', lastError: describeError(e) }
       }
       await emitFileAck(`✓ edit_file: ${em.path}`, agentName, eventLog, onEvent)
+      continue
+    }
+
+    if (em.type === 'patch') {
+      let result: Awaited<ReturnType<typeof dispatchApplyPatch>>
+      try {
+        result = await dispatchApplyPatch(em, fs)
+      } catch (e) {
+        await emitErrorOutput(e, agentName, emissionId, eventLog, onEvent)
+        await emitSkippedMarkers(emissions, i + 1, actionTimestamp, agentName, eventLog, onEvent)
+        return { kind: 'continue', lastError: describeError(e) }
+      }
+      const outputEvent: OutputEvent = {
+        type: 'output',
+        timestamp: new Date().toISOString(),
+        agentName,
+        emissionId,
+        parts: [{ type: 'text', text: result.summary }],
+      }
+      await emit(outputEvent, eventLog, onEvent)
+      await emitFileAck(`✓ ${result.summary}`, agentName, eventLog, onEvent)
       continue
     }
 
@@ -804,6 +826,10 @@ function hasActionableEmission(emissions: ReadonlyArray<Emission>): boolean {
  *  a paired tool_result). Text / thinking are pure narration. */
 function isActionEmission(em: Emission): boolean {
   return (
-    em.type === 'ts' || em.type === 'terminal' || em.type === 'fileWrite' || em.type === 'fileEdit'
+    em.type === 'ts' ||
+    em.type === 'terminal' ||
+    em.type === 'fileWrite' ||
+    em.type === 'fileEdit' ||
+    em.type === 'patch'
   )
 }

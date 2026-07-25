@@ -59,7 +59,7 @@ const llm = new OpenAI({
 | `timeoutMs` | `90_000` | Per-request timeout. |
 | `maxTokens` | `16_384` | Cap on output tokens. |
 | `forceToolUse` | `true` | Sends `tool_choice: 'required'`. Set false for models that don't reliably follow `required` (some local models). |
-| `actionSurface` | `agex` | Set to `provider-native` for a compatibility endpoint that supplies its own shell/file tools. Only `ts_action` is advertised and forced dynamic-tool selection is disabled. Set the same value on `AgentOptions`. |
+| `actionSurface` | `agex` | Set to `agex-patch` to advertise `apply_patch` instead of `write_file` / `edit_file`, or `provider-native` for a compatibility endpoint that supplies its own shell/file tools. In provider-native mode only `ts_action` is advertised and forced dynamic-tool selection is disabled. Set the same value on `AgentOptions`. |
 | `nativeThinking` | `false` | Uses the provider reasoning channel, removes narration-style `thinking` from action schemas, and surfaces streamed reasoning as agex thinking events. |
 | `reasoningEffort` | `medium` | Sends OpenAI-style `reasoning_effort` when native thinking is enabled. |
 | `extras` | `{}` | Extra fields merged into the request body (`temperature`, `top_p`, `seed`, `response_format`, etc.). |
@@ -71,6 +71,12 @@ workspace actions back into agex events. A typical compatible endpoint also
 needs an opt-in request field in `extras`; consult that bridge's documentation.
 Ordinary OpenAI and OpenAI-compatible endpoints should keep the default `agex`
 surface.
+
+`agex-patch` is useful with GPT/Codex-style models that natively produce the
+`*** Begin Patch` grammar. A provider-native bridge may also return an
+`apply_patch` call even though only `ts_action` was advertised; the shared
+parser preserves it as a single patch emission and dispatches it against the
+agent VFS.
 
 See [the LLM API doc](https://github.com/ashenfad/agex-ts/blob/main/docs/api/llm.md) for the broader provider contract.
 

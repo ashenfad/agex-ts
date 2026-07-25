@@ -51,7 +51,7 @@ const defaultWrite = (s: string): void => {
  *    - `thinking` → content streamed inline (model's reasoning).
  *    - `text` → content streamed inline (model-facing prose).
  *    - `ts` / `terminal` → content streamed inline (code / commands).
- *    - `filePath` / `fileSearch` / `fileContent` → labeled, inline.
+ *    - `filePath` / `fileSearch` / `fileContent` / `patch` → labeled, inline.
  *    - `emission` → trailing newline so the next emission starts
  *      cleanly.
  *    - `signature` → skipped (opaque binary). */
@@ -90,6 +90,7 @@ export function prettyTokens(token: TokenChunk, opts: PrettyOptions = {}): void 
       return
     }
     case 'fileContent':
+    case 'patch':
       // Streams as the model writes; print inline.
       write(token.content)
       return
@@ -113,7 +114,7 @@ export function prettyTokens(token: TokenChunk, opts: PrettyOptions = {}): void 
  *  console output. Trade-off: titles / paths land at the close of
  *  the field rather than streaming character-by-character — fine
  *  because they're short. Streaming fields (`thinking`, `text`,
- *  `ts`, `terminal`, `fileContent`) still flow live.
+ *  `ts`, `terminal`, `fileContent`, `patch`) still flow live.
  *
  *  Use one factory per task call (state is per-emission keyed by
  *  emissionIndex; running multiple agents through the same callback
@@ -143,6 +144,7 @@ export function createPrettyTokens(opts: PrettyOptions = {}): (token: TokenChunk
       case 'ts':
       case 'terminal':
       case 'fileContent':
+      case 'patch':
         write(token.content)
         return
       case 'title': {
@@ -229,6 +231,9 @@ export function prettyEvents(event: AgentEvent, opts: PrettyEventOptions = {}): 
             break
           case 'fileEdit':
             write(`[fileEdit] ${em.path}`)
+            break
+          case 'patch':
+            write(`[apply_patch]\n${indent(cap(em.patch, maxBody))}`)
             break
         }
       }

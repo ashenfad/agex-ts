@@ -146,6 +146,8 @@ function emissionContent(em: Emission): string {
       return em.content
     case 'fileEdit':
       return em.content
+    case 'patch':
+      return em.patch
     case 'text':
       return em.text
     case 'thinking':

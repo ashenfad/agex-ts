@@ -3,6 +3,7 @@ import { PolicyBuilder } from '../src/policy'
 import {
   BUILTIN_PRIMER,
   type NeutralTurn,
+  TOOL_APPLY_PATCH,
   TOOL_EDIT_FILE,
   TOOL_TERMINAL,
   TOOL_TS,
@@ -412,6 +413,38 @@ describe('renderEvents', () => {
     expect(result?.type).toBe('toolResult')
     if (use?.type === 'toolUse') expect(use.toolUseId).toBe(providerCallId)
     if (result?.type === 'toolResult') expect(result.toolUseId).toBe(providerCallId)
+  })
+
+  it('round-trips a provider apply_patch id instead of synthesizing one', () => {
+    const providerCallId = 'tu_native_71ac7196a0134f738c301216347b8db3'
+    const patch = '*** Begin Patch\n*** Add File: /proof.txt\n+proof\n*** End Patch'
+    const actionEvent = action(1, 'unused')
+    const turns = renderEvents([
+      {
+        ...actionEvent,
+        emissions: [
+          {
+            type: 'patch',
+            patch,
+            providerCallId,
+            providerArguments: { patch },
+          },
+        ],
+      },
+    ])
+
+    const use = turns[0]?.content[0]
+    const result = turns[1]?.content[0]
+    expect(use).toMatchObject({
+      type: 'toolUse',
+      toolUseId: providerCallId,
+      toolName: 'apply_patch',
+      input: { patch },
+    })
+    expect(result).toMatchObject({
+      type: 'toolResult',
+      toolUseId: providerCallId,
+    })
   })
 
   it('replays original provider arguments before normalized execution fields', () => {
@@ -1158,6 +1191,14 @@ describe('toolSchemas', () => {
   it('provider-native surface advertises only ts_action', () => {
     expect(toolSchemas({ actionSurface: 'provider-native' }).map((schema) => schema.name)).toEqual([
       TOOL_TS,
+    ])
+  })
+
+  it('agex-patch replaces write/edit schemas with apply_patch', () => {
+    expect(toolSchemas({ actionSurface: 'agex-patch' }).map((schema) => schema.name)).toEqual([
+      TOOL_TS,
+      TOOL_TERMINAL,
+      TOOL_APPLY_PATCH,
     ])
   })
 

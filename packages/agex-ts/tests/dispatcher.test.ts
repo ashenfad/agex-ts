@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createAgent } from '../src/agent'
+import { dispatchApplyPatch, parseApplyPatch } from '../src/apply-patch'
 import { Dummy } from '../src/llm/dummy'
 import { makeToolUseId } from '../src/render'
 import { evalRuntime } from '../src/runtime/eval'
@@ -443,6 +444,200 @@ describe('emission dispatch — fileEdit', () => {
     ])
     const fn = agent.task<undefined, null>({ description: 'Edit not-found.' })
     await expect(fn(undefined)).rejects.toThrow(/search string not found/)
+  })
+})
+
+describe('emission dispatch — apply_patch', () => {
+  it('accepts Codex-lenient patch syntax', () => {
+    const patch = [
+      "<<'EOF'",
+      '  *** Begin Patch  ',
+      '*** Update File: /keep.txt',
+      ' keep',
+      '',
+      '+added after blank context',
+      '*** End of File',
+      '',
+      '*** End Patch',
+      'EOF',
+    ].join('\n')
+
+    expect(parseApplyPatch(patch)).toHaveLength(1)
+  })
+
+  it('reports the exact malformed patch line and expected syntax', () => {
+    const patch = [
+      '*** Begin Patch',
+      '*** Update File: /keep.txt',
+      '@@',
+      '-old',
+      'malformed',
+      '*** End Patch',
+    ].join('\n')
+
+    expect(() => parseApplyPatch(patch)).toThrow(
+      "apply_patch: invalid hunk at line 5: Expected the next update hunk for '/keep.txt' to start with a @@ context marker, got: 'malformed'",
+    )
+  })
+
+  it('applies add, update, delete, and move sections as one emission', async () => {
+    const patch = [
+      '*** Begin Patch',
+      '*** Add File: /added.txt',
+      '+added',
+      '*** Update File: /keep.txt',
+      '@@',
+      '-keep old',
+      '+keep new',
+      '*** Delete File: /remove.txt',
+      '*** Update File: /move.txt',
+      '*** Move to: /moved.txt',
+      '@@ -1,1 +1,1 @@',
+      '-move old',
+      '+move new',
+      '*** End Patch',
+    ].join('\n')
+    const { agent } = await makeAgent([
+      r(
+        { type: 'fileWrite', path: '/keep.txt', content: 'keep old\n', mode: 'write' },
+        { type: 'fileWrite', path: '/remove.txt', content: 'remove\n', mode: 'write' },
+        { type: 'fileWrite', path: '/move.txt', content: 'move old\n', mode: 'write' },
+        { type: 'patch', patch },
+        { type: 'ts', code: 'taskSuccess(null)' },
+      ),
+    ])
+    await agent.task<undefined, null>({ description: 'Patch files.' })(undefined)
+    const fs = await agent.fs()
+    expect(dec.decode(await fs.read('/added.txt'))).toBe('added\n')
+    expect(dec.decode(await fs.read('/keep.txt'))).toBe('keep new\n')
+    expect(await fs.exists('/remove.txt')).toBe(false)
+    expect(await fs.exists('/move.txt')).toBe(false)
+    expect(dec.decode(await fs.read('/moved.txt'))).toBe('move new\n')
+  })
+
+  it('returns explicit committed transaction status to the model and host', async () => {
+    const patch = [
+      '*** Begin Patch',
+      '*** Add File: /added.txt',
+      '+added',
+      '*** Update File: /keep.txt',
+      '-old',
+      '+new',
+      '*** End Patch',
+    ].join('\n')
+    const { agent } = await makeAgent([
+      r(
+        { type: 'fileWrite', path: '/keep.txt', content: 'old\n', mode: 'write' },
+        { type: 'patch', patch },
+        { type: 'ts', code: 'taskSuccess(null)' },
+      ),
+    ])
+    const events: AgentEvent[] = []
+    await agent.task<undefined, null>({ description: 'Patch status.' })(undefined, {
+      onEvent: (event) => void events.push(event),
+    })
+
+    const output = events.find(
+      (event): event is OutputEvent =>
+        event.type === 'output' &&
+        event.parts.some(
+          (part) => part.type === 'text' && part.text.includes('transaction committed'),
+        ),
+    )
+    expect(output?.parts).toEqual([
+      {
+        type: 'text',
+        text: 'apply_patch: applied 2 changes across 2 paths (1 added, 1 updated); transaction committed',
+      },
+    ])
+    expect(
+      events.some(
+        (event) =>
+          event.type === 'systemNote' &&
+          event.message ===
+            '✓ apply_patch: applied 2 changes across 2 paths (1 added, 1 updated); transaction committed',
+      ),
+    ).toBe(true)
+  })
+
+  it('validates every hunk before changing any files', async () => {
+    const patch = [
+      '*** Begin Patch',
+      '*** Add File: /should-not-exist.txt',
+      '+new',
+      '*** Update File: /existing.txt',
+      '@@',
+      '-missing context',
+      '+replacement',
+      '*** End Patch',
+    ].join('\n')
+    const { agent } = await makeAgent([
+      r(
+        { type: 'fileWrite', path: '/existing.txt', content: 'original\n', mode: 'write' },
+        { type: 'patch', patch },
+      ),
+      r({ type: 'ts', code: 'taskSuccess(null)' }),
+    ])
+    const events: AgentEvent[] = []
+    await agent.task<undefined, null>({ description: 'Reject bad patch.' })(undefined, {
+      onEvent: (event) => void events.push(event),
+    })
+    const fs = await agent.fs()
+    expect(await fs.exists('/should-not-exist.txt')).toBe(false)
+    expect(dec.decode(await fs.read('/existing.txt'))).toBe('original\n')
+    const error = events
+      .filter((event): event is OutputEvent => event.type === 'output')
+      .flatMap((event) => event.parts)
+      .find((part) => part.type === 'error')
+    expect(error).toMatchObject({
+      errorMessage: expect.stringContaining(
+        'hunk starting at patch line 5 could not find the expected context',
+      ),
+    })
+    if (error?.type === 'error') {
+      expect(error.errorMessage).toContain('No files were changed.')
+    }
+  })
+
+  it('reports a successful rollback after a commit-time write failure', async () => {
+    const { agent } = await makeAgent([])
+    const base = await agent.fs()
+    await base.write('/one.txt', enc.encode('one old\n'), 'w')
+    await base.write('/two.txt', enc.encode('two old\n'), 'w')
+    let writes = 0
+    let failOnce = true
+    const failing = new Proxy(base, {
+      get(target, property) {
+        if (property === 'write') {
+          return async (...args: Parameters<typeof target.write>) => {
+            writes++
+            if (writes === 2 && failOnce) {
+              failOnce = false
+              throw new Error('simulated disk full')
+            }
+            return target.write(...args)
+          }
+        }
+        const value = Reflect.get(target, property, target) as unknown
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+    const patch = [
+      '*** Begin Patch',
+      '*** Update File: /one.txt',
+      '-one old',
+      '+one new',
+      '*** Update File: /two.txt',
+      '-two old',
+      '+two new',
+      '*** End Patch',
+    ].join('\n')
+
+    await expect(dispatchApplyPatch({ type: 'patch', patch }, failing)).rejects.toThrow(
+      'commit failed after 1 of 2 filesystem operations: simulated disk full. Rollback succeeded; no files were changed.',
+    )
+    expect(dec.decode(await base.read('/one.txt'))).toBe('one old\n')
+    expect(dec.decode(await base.read('/two.txt'))).toBe('two old\n')
   })
 })
 

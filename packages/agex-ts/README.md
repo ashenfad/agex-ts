@@ -44,6 +44,17 @@ client. This keeps `ts_action` for computation and task completion while removin
 the agex terminal/write/edit vocabulary from the model-facing primer and tool
 schema. The default remains `actionSurface: 'agex'`.
 
+For models trained on Codex-style patches, `actionSurface: 'agex-patch'`
+keeps `terminal_action` but replaces `write_file` and `edit_file` with one
+`apply_patch` action. Its `*** Begin Patch` payload can add, update, move, and
+delete several VFS files as one emission. The dispatcher validates every hunk
+before mutation and accepts the lenient forms used by Codex, including an
+omitted first `@@`, bare blank context lines, and heredoc-wrapped payloads.
+Failures identify the patch line and whether any files changed; successful
+calls report the committed change/path counts. If an underlying VFS operation
+fails during commit, the dispatcher attempts rollback and reports whether every
+original file state was restored.
+
 ## Sub-path imports
 
 The default `agex-ts` import is the lean surface (`Agent`, `createAgent`, types, errors, `prettyEvents`). Heavier surfaces live behind sub-paths so unused code paths tree-shake cleanly:

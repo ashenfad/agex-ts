@@ -8,7 +8,7 @@
  *     `JsonStringExtractor` emits per-key string deltas as the model
  *     writes. Each delta becomes a `TokenChunk` whose `type` is the
  *     per-tool mapped name (`title` / `thinking` / `ts` / `terminal`
- *     / `filePath` / `fileSearch` / `fileContent`) so callers can
+ *     / `filePath` / `fileSearch` / `fileContent` / `patch`) so callers can
  *     forward UI text in real time via `onToken`.
  *
  *  2. **Final emission** — at `ToolCallEnd`, we re-parse the buffered
@@ -25,6 +25,7 @@
 
 import {
   KNOWN_TOOL_NAMES,
+  TOOL_APPLY_PATCH,
   TOOL_EDIT_FILE,
   TOOL_TERMINAL,
   TOOL_TS,
@@ -35,6 +36,7 @@ import type {
   Emission,
   FileEditEmission,
   FileWriteEmission,
+  PatchEmission,
   TerminalEmission,
   TextEmission,
   ThinkingEmission,
@@ -67,6 +69,9 @@ const EDIT_FILE_KEY_MAP: Readonly<Record<string, TokenChunkType>> = {
   search: 'fileSearch',
   content: 'fileContent',
 }
+const APPLY_PATCH_KEY_MAP: Readonly<Record<string, TokenChunkType>> = {
+  patch: 'patch',
+}
 
 const EMPTY_KEY_MAP: Readonly<Record<string, TokenChunkType>> = Object.freeze({})
 
@@ -87,6 +92,8 @@ function keyMapFor(toolName: string): Readonly<Record<string, TokenChunkType>> {
       return WRITE_FILE_KEY_MAP
     case TOOL_EDIT_FILE:
       return EDIT_FILE_KEY_MAP
+    case TOOL_APPLY_PATCH:
+      return APPLY_PATCH_KEY_MAP
     default:
       return EMPTY_KEY_MAP
   }
@@ -196,6 +203,8 @@ class CallState {
         return buildWriteFileEmission(args, this.callId, this.signature)
       case TOOL_EDIT_FILE:
         return buildEditFileEmission(args, this.callId, this.signature)
+      case TOOL_APPLY_PATCH:
+        return buildPatchEmission(args, this.callId, this.signature)
       default:
         // Unknown tool name (LLM hallucination). Return null so
         // `finalize()` routes through the synthetic-TextEmission
@@ -280,6 +289,21 @@ function buildEditFileEmission(
     providerCallId,
     providerArguments: args,
     ...(args.matchAll === true && { matchAll: true }),
+    ...(signature !== undefined && { signature }),
+  }
+}
+
+function buildPatchEmission(
+  args: Record<string, unknown>,
+  providerCallId: string,
+  signature?: Uint8Array,
+): PatchEmission | null {
+  if (typeof args.patch !== 'string' || args.patch.length === 0) return null
+  return {
+    type: 'patch',
+    patch: args.patch,
+    providerCallId,
+    providerArguments: args,
     ...(signature !== undefined && { signature }),
   }
 }

@@ -287,6 +287,8 @@ function describeEmission(em: Emission): string {
       return `**${em.path}** (${em.mode})\n\n\`\`\`\n${em.content}\n\`\`\``
     case 'fileEdit':
       return `**${em.path}**\n\nsearch:\n\n\`\`\`\n${em.search}\n\`\`\`\n\nreplace:\n\n\`\`\`\n${em.content}\n\`\`\``
+    case 'patch':
+      return `\`\`\`diff\n${em.patch}\n\`\`\``
     case 'text':
       return em.text
     case 'thinking':

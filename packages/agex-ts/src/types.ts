@@ -39,11 +39,13 @@ export type VirtualFileSystem = FileSystem
 /**
  * The action vocabulary advertised to the model.
  *
- * `agex` exposes all four agex actions directly. `provider-native`
- * keeps `ts_action` as the dynamic computation/lifecycle action while
- * delegating shell and file operations to the provider's native tools.
+ * `agex` exposes the historical four agex actions directly.
+ * `agex-patch` replaces the two file actions with a Codex-shaped
+ * `apply_patch` action. `provider-native` keeps `ts_action` as the
+ * dynamic computation/lifecycle action while delegating shell and file
+ * operations to the provider's native tools.
  */
-export type ActionSurface = 'agex' | 'provider-native'
+export type ActionSurface = 'agex' | 'agex-patch' | 'provider-native'
 
 /**
  * Optional host-supplied resolver for unregistered import specifiers.
@@ -119,6 +121,15 @@ export interface FileEditEmission {
   readonly signature?: Uint8Array
 }
 
+/** Apply a Codex-shaped multi-file patch against the VFS. */
+export interface PatchEmission {
+  readonly type: 'patch'
+  readonly patch: string
+  readonly providerCallId?: string
+  readonly providerArguments?: Readonly<Record<string, unknown>>
+  readonly signature?: Uint8Array
+}
+
 /** Free-text observation from the agent. No side effect; logged. */
 export interface TextEmission {
   readonly type: 'text'
@@ -144,6 +155,7 @@ export type Emission =
   | TerminalEmission
   | FileWriteEmission
   | FileEditEmission
+  | PatchEmission
   | TextEmission
   | ThinkingEmission
 
@@ -160,6 +172,7 @@ export type TokenChunkType =
   | 'filePath'
   | 'fileSearch'
   | 'fileContent'
+  | 'patch'
   | 'emission'
   | 'signature'
   | 'toolStart'

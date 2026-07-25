@@ -53,6 +53,7 @@ export {
   TOOL_TERMINAL,
   TOOL_WRITE_FILE,
   TOOL_EDIT_FILE,
+  TOOL_APPLY_PATCH,
   KNOWN_TOOL_NAMES,
   toolSchemas,
   type ToolSchema,
@@ -65,9 +66,9 @@ export {
 
 export type Role = 'user' | 'assistant'
 
-/** The four "actions" the agent can emit. Each becomes a tool_use
+/** The model-facing actions the agent can emit. Each becomes a tool_use
  *  block in the provider's wire format. */
-export type ToolName = 'ts_action' | 'terminal_action' | 'write_file' | 'edit_file'
+export type ToolName = 'ts_action' | 'terminal_action' | 'write_file' | 'edit_file' | 'apply_patch'
 
 export interface TextPart {
   readonly type: 'text'
@@ -136,7 +137,7 @@ export interface NeutralTurn {
  *      each task's opening prompt at its actual position in the
  *      timeline, not floating at the front of the request.
  *    - `ActionEvent` becomes one assistant turn. Tool-call
- *      emissions (`ts` / `terminal` / `fileWrite` / `fileEdit`)
+ *      emissions (`ts` / `terminal` / `fileWrite` / `fileEdit` / `patch`)
  *      become `tool_use` parts. `text` / `thinking` become
  *      text / thinking parts inline in the same assistant turn.
  *    - `OutputEvent`s following the action are routed by their
@@ -329,14 +330,21 @@ export function resolveToolUseId(
   actionTimestamp: string,
   emissionIndex: number,
 ): string {
-  if (
-    (emission.type === 'ts' ||
-      emission.type === 'terminal' ||
-      emission.type === 'fileWrite' ||
-      emission.type === 'fileEdit') &&
-    emission.providerCallId !== undefined
-  ) {
-    return emission.providerCallId
+  switch (emission.type) {
+    case 'ts':
+    case 'terminal':
+    case 'fileWrite':
+    case 'fileEdit':
+    case 'patch':
+      if (emission.providerCallId !== undefined) return emission.providerCallId
+      break
+    case 'text':
+    case 'thinking':
+      break
+    default: {
+      const exhaustive: never = emission
+      void exhaustive
+    }
   }
   return makeToolUseId(actionTimestamp, emissionIndex)
 }
@@ -432,6 +440,16 @@ function renderEmission(
       }
       return { part, toolName: 'edit_file' }
     }
+    case 'patch': {
+      const part: ToolUsePart = {
+        type: 'toolUse',
+        toolUseId: emissionId,
+        toolName: 'apply_patch',
+        input: em.providerArguments ?? { patch: em.patch },
+        ...(em.signature !== undefined && { signature: em.signature }),
+      }
+      return { part, toolName: 'apply_patch' }
+    }
     case 'text':
       return { part: { type: 'text', text: em.text }, toolName: null }
     case 'thinking': {
@@ -464,6 +482,7 @@ function synthesizeFileResult(em: Emission): string | null {
     const suffix = em.matchAll === true ? ' (matchAll)' : ''
     return `edit_file: replace applied to ${em.path}${suffix}`
   }
+  if (em.type === 'patch') return 'apply_patch: applied'
   return null
 }
 

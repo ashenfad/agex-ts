@@ -266,6 +266,32 @@ describe('parseToolEvents — edit_file tool', () => {
   })
 })
 
+describe('parseToolEvents — apply_patch tool', () => {
+  it('builds a PatchEmission and streams the patch body as patch content', async () => {
+    const patch = '*** Begin Patch\n*** Add File: /n.txt\n+hi\n*** End Patch'
+    const events = callEvents('patch-a', 'apply_patch', JSON.stringify({ patch }), [20, 45])
+    const tokens = await collect(parseToolEvents(fromArray(events)))
+    expect(emissionsOf(tokens)).toEqual([
+      {
+        type: 'patch',
+        patch,
+        providerCallId: 'patch-a',
+        providerArguments: { patch },
+      },
+    ])
+    expect(tokens.map((token) => token.type)).toContain('patch')
+  })
+
+  it('drops an apply_patch call without a patch string', async () => {
+    const events = callEvents('patch-a', 'apply_patch', '{}')
+    const emissions = emissionsOf(await collect(parseToolEvents(fromArray(events))))
+    expect(emissions[0]?.type).toBe('text')
+    if (emissions[0]?.type === 'text') {
+      expect(emissions[0].text).toContain('apply_patch call dropped')
+    }
+  })
+})
+
 describe('parseToolEvents — TextPart / ThinkingPart events', () => {
   it('TextPart becomes a TextEmission', async () => {
     const events: ToolCallEvent[] = [{ type: 'textPart', text: 'aside to user' }]

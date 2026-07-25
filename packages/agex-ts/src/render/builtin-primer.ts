@@ -141,6 +141,27 @@ Use the provider's native shell and file-editing tools for workspace inspection,
 
 Use \`ts_action\` for computation, registered TypeScript resources, and task completion. After developing reusable helpers with native file tools, import them from an absolute \`/helpers/...\` path in \`ts_action\` and call \`taskSuccess\` there.`
 
+const PATCH_WORKSPACE = `### Filesystem
+
+A Virtual Filesystem is your durable workspace. TypeScript actions and shell commands are stateless on their own, but anything written to the VFS persists across actions, turns, and tasks.
+
+Use \`apply_patch\` for durable file changes. It accepts the Codex patch format:
+
+- Wrap the complete patch in \`*** Begin Patch\` and \`*** End Patch\`.
+- Use \`*** Add File: path\`, \`*** Update File: path\`, or \`*** Delete File: path\`.
+- In an update, prefix unchanged, removed, and added lines with a space, \`-\`, and \`+\` respectively. Start each hunk with \`@@\`.
+- Put \`*** Move to: new/path\` immediately after an update header to rename while editing.
+- Include enough unchanged context to identify each edit unambiguously.
+
+Prefer one patch for related changes across several files. A malformed patch or context mismatch changes no files; inspect the current content and retry with corrected context.`
+
+const PATCH_PRIMER = replaceSection(
+  BUILTIN_PRIMER,
+  '### Filesystem',
+  '**Importing your code**',
+  PATCH_WORKSPACE,
+)
+
 const PROVIDER_NATIVE_PRIMER = replaceSection(
   BUILTIN_PRIMER,
   '### Terminal (`terminal_action`)',
@@ -168,7 +189,9 @@ const PROVIDER_NATIVE_PRIMER = replaceSection(
  * action vocabulary. The default is byte-for-byte compatible with
  * the historical monolithic primer. */
 export function renderBuiltinPrimer(actionSurface: ActionSurface = 'agex'): string {
-  return actionSurface === 'provider-native' ? PROVIDER_NATIVE_PRIMER : BUILTIN_PRIMER
+  if (actionSurface === 'provider-native') return PROVIDER_NATIVE_PRIMER
+  if (actionSurface === 'agex-patch') return PATCH_PRIMER
+  return BUILTIN_PRIMER
 }
 
 function replaceSection(

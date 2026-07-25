@@ -1,6 +1,5 @@
 /**
- * Provider-agnostic JSON schemas for the four action tools the agent
- * may call: `ts_action`, `terminal_action`, `write_file`, `edit_file`.
+ * Provider-agnostic JSON schemas for the action tools an agent may call.
  *
  * Each schema is a plain dict — `{ name, description, parameters }`.
  * Provider packages translate the envelope:
@@ -31,6 +30,7 @@ export const TOOL_TS = 'ts_action' as const
 export const TOOL_TERMINAL = 'terminal_action' as const
 export const TOOL_WRITE_FILE = 'write_file' as const
 export const TOOL_EDIT_FILE = 'edit_file' as const
+export const TOOL_APPLY_PATCH = 'apply_patch' as const
 
 /** Runtime registry of every known tool name. Kept next to the
  *  literal constants so adding a fifth tool here is a one-line edit
@@ -41,6 +41,7 @@ export const KNOWN_TOOL_NAMES: ReadonlySet<ToolName> = new Set([
   TOOL_TERMINAL,
   TOOL_WRITE_FILE,
   TOOL_EDIT_FILE,
+  TOOL_APPLY_PATCH,
 ])
 
 export interface ToolSchema {
@@ -179,6 +180,26 @@ const EDIT_FILE_SCHEMA: ToolSchema = {
   },
 }
 
+const APPLY_PATCH_SCHEMA: ToolSchema = {
+  name: TOOL_APPLY_PATCH,
+  description:
+    'Apply one multi-file patch to the virtual workspace. The patch must use the ' +
+    '`*** Begin Patch` / `*** End Patch` format with `*** Add File`, ' +
+    '`*** Update File`, `*** Delete File`, and optional `*** Move to` sections. ' +
+    'Use this instead of write_file/edit_file when several related file changes ' +
+    'belong together.',
+  parameters: {
+    type: 'object',
+    required: ['patch'],
+    properties: {
+      patch: {
+        type: 'string',
+        description: 'Complete Codex-style patch text.',
+      },
+    },
+  },
+}
+
 /** Return the four action tool schemas. Pass `nativeThinking: true`
  *  on providers that deliver native thinking blocks (Claude 4+,
  *  Gemini 3) so the action tools don't ask the model to also
@@ -191,6 +212,7 @@ export function toolSchemas(opts: ToolSchemaOptions = {}): ToolSchema[] {
         ? [stripNarrationParams(TS_SCHEMA), stripNarrationParams(TERMINAL_SCHEMA)]
         : [TS_SCHEMA, TERMINAL_SCHEMA]
   if (opts.actionSurface === 'provider-native') return action
+  if (opts.actionSurface === 'agex-patch') return [...action, APPLY_PATCH_SCHEMA]
   return [...action, WRITE_FILE_SCHEMA, EDIT_FILE_SCHEMA]
 }
 

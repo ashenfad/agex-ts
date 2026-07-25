@@ -62,7 +62,8 @@ describe('prettyTokens', () => {
     prettyTokens(tk({ type: 'fileSearch', content: '', done: true }), { write })
     prettyTokens(tk({ type: 'fileContent', content: 'new ' }), { write })
     prettyTokens(tk({ type: 'fileContent', content: 'value' }), { write })
-    expect(out()).toBe('\npath: /n.txt\n\nsearch: old\nnew value')
+    prettyTokens(tk({ type: 'patch', content: '\n*** Begin Patch' }), { write })
+    expect(out()).toBe('\npath: /n.txt\n\nsearch: old\nnew value\n*** Begin Patch')
   })
 
   it('skips signature tokens (opaque)', () => {
@@ -108,6 +109,7 @@ describe('prettyEvents', () => {
         { type: 'terminal', commands: 'ls /' },
         { type: 'fileWrite', path: '/n', content: 'hi', mode: 'append' },
         { type: 'fileEdit', path: '/n', search: 'a', content: 'b' },
+        { type: 'patch', patch: '*** Begin Patch\n*** End Patch' },
         { type: 'text', text: 'aside' },
       ],
     }
@@ -119,6 +121,7 @@ describe('prettyEvents', () => {
       '[terminal] ls /',
       '[fileWrite] /n (append)',
       '[fileEdit] /n',
+      '[apply_patch]\n  *** Begin Patch\n  *** End Patch',
       '[text] aside',
     ])
   })

@@ -61,9 +61,10 @@ export interface AgentOptions {
   /** System-prompt addendum (the "agent's voice"). Optional. */
   readonly primer?: string
   /** Action vocabulary taught by the built-in primer. Defaults to
-   *  `agex`. `provider-native` retains `ts_action` while directing
-   *  shell and file work through the provider's native tools. The
-   *  selected LLM client must be configured with the same surface. */
+   *  `agex`. `agex-patch` replaces write/edit with `apply_patch`;
+   *  `provider-native` retains `ts_action` while directing shell and
+   *  file work through the provider's native tools. The selected LLM
+   *  client must be configured with the same surface. */
   readonly actionSurface?: ActionSurface
   /** LLM driver. Required for any task that calls the model. v1 ships
    *  the `Dummy` client for tests; production agents bring their own. */

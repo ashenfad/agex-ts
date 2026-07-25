@@ -655,6 +655,22 @@ describe('emission dispatch — terminal', () => {
     expect(dec.decode(await (await agent.fs()).read('/sorted.txt'))).toBe('a\nb\nc\n')
   })
 
+  it('writes a multiline VFS file through a terminal heredoc', async () => {
+    const { agent } = await makeAgent([
+      r(
+        {
+          type: 'terminal',
+          commands: "cat <<'TS' > /generated.ts\nexport const answer = 42\nconsole.log(answer)\nTS",
+        },
+        { type: 'ts', code: 'taskSuccess(null)' },
+      ),
+    ])
+    await agent.task<undefined, null>({ description: 'Write through heredoc.' })(undefined)
+    expect(dec.decode(await (await agent.fs()).read('/generated.ts'))).toBe(
+      'export const answer = 42\nconsole.log(answer)\n',
+    )
+  })
+
   it('host-registered terminal commands are reachable', async () => {
     const { agent } = await makeAgent([
       r(

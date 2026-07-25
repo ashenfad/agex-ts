@@ -6,7 +6,13 @@ Pure-TypeScript shell parser + builtin commands operating over an async `FileSys
 
 ## Concept
 
-A virtual terminal that runs inside your application. Parses shell text (`ls -la | grep .ts`), executes against a pluggable `FileSystem`, supports custom commands. Used by agex-ts to power agent `terminal` emissions.
+A virtual terminal that runs inside your application. Parses shell text (`ls -la | grep .ts`), executes against a pluggable `FileSystem`, supports custom commands, and accepts literal heredocs such as `cat <<'EOF' > file`. Used by agex-ts to power agent `terminal` emissions.
+
+Heredoc bodies are extracted before tokenization, so quotes, pipes, redirects,
+and backslashes inside them are literal. Bare, single-quoted, and double-quoted
+delimiters have identical no-expansion semantics. Closing delimiters may be
+indented for agent ergonomics. Here-strings (`<<<`) and tab-stripping heredocs
+(`<<-`) are not supported.
 
 ## Backends shipped in v1
 

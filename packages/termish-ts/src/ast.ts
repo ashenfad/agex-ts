@@ -15,8 +15,9 @@
  * - `'<'`  read input from a file
  * - `'>'`  write output to a file (overwrite)
  * - `'>>'` write output to a file (append)
+ * - `'<<'` read literal inline input from a heredoc
  */
-export type RedirectType = '<' | '>' | '>>'
+export type RedirectType = '<' | '>' | '>>' | '<<'
 
 /** Operators between pipelines.
  * - `';'`  always run the next pipeline
@@ -28,7 +29,10 @@ export type Operator = ';' | '&&' | '||'
 /** A single I/O redirection on a command. */
 export interface Redirect {
   readonly type: RedirectType
+  /** Filename for file redirects; delimiter word for heredocs. */
   readonly target: string
+  /** Literal inline body. Present only for `<<` heredocs. */
+  readonly content?: string
 }
 
 /** A single executable command invocation. */

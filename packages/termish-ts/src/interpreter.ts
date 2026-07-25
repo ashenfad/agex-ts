@@ -2,7 +2,7 @@
  * Pipeline executor.
  *
  * Walks a `Script` AST, runs each pipeline through the chain of its
- * commands (stdout → stdin), honors redirects (`<`, `>`, `>>`),
+ * commands (stdout → stdin), honors redirects (`<`, `<<`, `>`, `>>`),
  * threads exit codes through `&&` / `||`, and accumulates stdout
  * into a single returned string.
  *
@@ -140,16 +140,24 @@ async function executePipeline(
     const cmd = pipeline.commands[cmdIdx] as Pipeline['commands'][number]
     if (signal.aborted) throw new TerminalError('aborted')
 
-    // Input redirect overrides piped stdin.
+    // Input redirect overrides piped stdin; the last input-ish
+    // redirect wins, matching shell and termish-py semantics.
     let stdin = pipedInput
-    const inputRedirect = cmd.redirects.find((r) => r.type === '<')
+    let inputRedirect: (typeof cmd.redirects)[number] | undefined
+    for (const redirect of cmd.redirects) {
+      if (redirect.type === '<' || redirect.type === '<<') inputRedirect = redirect
+    }
     if (inputRedirect) {
-      const target = expandPath(inputRedirect.target)
-      try {
-        const bytes = await fs.read(target)
-        stdin = decoder.decode(bytes)
-      } catch (e) {
-        throw new TerminalError(`${cmd.name}: ${target}: ${describeError(e)}`)
+      if (inputRedirect.type === '<<') {
+        stdin = inputRedirect.content ?? ''
+      } else {
+        const target = expandPath(inputRedirect.target)
+        try {
+          const bytes = await fs.read(target)
+          stdin = decoder.decode(bytes)
+        } catch (e) {
+          throw new TerminalError(`${cmd.name}: ${target}: ${describeError(e)}`)
+        }
       }
     }
 

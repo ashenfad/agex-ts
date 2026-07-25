@@ -4,7 +4,8 @@
  * Pipeline:
  *
  *   text
- *     → handleLineContinuation (strip backslash-newline joins)
+ *     → extractHeredocs (replace bodies with opaque placeholders)
+ *     → handleLineContinuation (strip remaining backslash-newline joins)
  *     → maskQuotes (preserve quoted spans through tokenization)
  *     → tokenize (split into words + operators + newlines)
  *     → parseTokens (build Script AST, unmasking quoted spans)
@@ -25,7 +26,12 @@ import { maskQuotes, unmaskQuotes } from './quote-masker'
 const OPERATOR_CHARS = new Set(['|', ';', '<', '>', '&'])
 
 /** Tokens that can never appear where a redirect target / fd is expected. */
-const NON_TARGET_TOKENS = new Set(['|', ';', '<', '>', '>>', '>&', '\n', '&&', '||'])
+const NON_TARGET_TOKENS = new Set(['|', ';', '<', '<<', '>', '>>', '>&', '\n', '&&', '||'])
+
+interface HeredocEntry {
+  readonly delimiter: string
+  readonly body: string
+}
 
 /**
  * Parse shell script text into a `Script` AST. Throws `ParseError`
@@ -38,10 +44,157 @@ export function toScript(text: string): Script {
   if (!text || !text.trim()) {
     return { pipelines: [], operators: [] }
   }
-  const joined = handleLineContinuation(text)
+  const extracted = extractHeredocs(text)
+  const joined = handleLineContinuation(extracted.text)
   const { masked, map } = maskQuotes(joined)
   const tokens = tokenize(masked)
-  return parseTokens(tokens, map)
+  return parseTokens(tokens, map, extracted.heredocs)
+}
+
+/** Locate `<<` operators outside quoted spans on a command line.
+ * `<<<` here-strings are deliberately unsupported and left for the
+ * normal parser to reject. Backslash escapes the next character
+ * outside single quotes. */
+interface HeredocScan {
+  readonly positions: ReadonlyArray<number>
+  readonly inSingle: boolean
+  readonly inDouble: boolean
+}
+
+function findHeredocOperators(
+  line: string,
+  initial: Pick<HeredocScan, 'inSingle' | 'inDouble'>,
+): HeredocScan {
+  const positions: number[] = []
+  let { inSingle, inDouble } = initial
+  let index = 0
+  while (index < line.length) {
+    const char = line[index] as string
+    if (char === '\\' && !inSingle) {
+      index += 2
+      continue
+    }
+    if (char === "'" && !inDouble) {
+      inSingle = !inSingle
+    } else if (char === '"' && !inSingle) {
+      inDouble = !inDouble
+    } else if (
+      char === '<' &&
+      !inSingle &&
+      !inDouble &&
+      line[index + 1] === '<' &&
+      line[index + 2] !== '<' &&
+      line[index - 1] !== '<'
+    ) {
+      positions.push(index)
+      index += 2
+      continue
+    }
+    index++
+  }
+  return { positions, inSingle, inDouble }
+}
+
+/** Pull heredoc bodies out before tokenization so their quotes,
+ * operators, redirects, and backslashes remain literal. Each command
+ * line operator is replaced with an opaque key whose body is carried
+ * separately into the redirect AST.
+ *
+ * Delimiters may be bare, single-quoted, or double-quoted. All three
+ * forms have identical literal-body semantics because termish does
+ * not expand heredoc bodies. A delimiter line may be indented; this
+ * intentional leniency matches termish-py and agent-generated shell.
+ */
+function extractHeredocs(text: string): {
+  readonly text: string
+  readonly heredocs: ReadonlyMap<string, HeredocEntry>
+} {
+  if (!text.includes('<<')) return { text, heredocs: new Map() }
+
+  const heredocs = new Map<string, HeredocEntry>()
+  const outputLines: string[] = []
+  const lines = text.split('\n')
+  let counter = 0
+  let index = 0
+  let quoteState: Pick<HeredocScan, 'inSingle' | 'inDouble'> = {
+    inSingle: false,
+    inDouble: false,
+  }
+
+  while (index < lines.length) {
+    let line = lines[index] as string
+
+    // Join continuations on the command line before scanning it. Body
+    // lines are consumed below and never pass through this operation,
+    // so a trailing backslash inside a body remains literal.
+    while (hasOddTrailingBackslashCount(line) && index + 1 < lines.length) {
+      index++
+      line = `${line.slice(0, -1)} ${(lines[index] as string).replace(/^[ \t]*/u, '')}`
+    }
+
+    const pending: Array<readonly [key: string, delimiter: string]> = []
+    const scan = findHeredocOperators(line, quoteState)
+    quoteState = { inSingle: scan.inSingle, inDouble: scan.inDouble }
+    const operators = scan.positions
+    // Rewrite right-to-left so earlier operator offsets remain valid.
+    for (let operatorIndex = operators.length - 1; operatorIndex >= 0; operatorIndex--) {
+      const position = operators[operatorIndex] as number
+      let cursor = position + 2
+      while (cursor < line.length && (line[cursor] === ' ' || line[cursor] === '\t')) cursor++
+      if (cursor >= line.length) throw new ParseError("Expected delimiter after '<<'")
+
+      const quote = line[cursor] === "'" || line[cursor] === '"' ? line[cursor] : undefined
+      let delimiter: string
+      let end: number
+      if (quote !== undefined) {
+        end = line.indexOf(quote, cursor + 1)
+        if (end < 0) throw new ParseError('Unterminated quote in heredoc delimiter')
+        delimiter = line.slice(cursor + 1, end)
+        end++
+      } else {
+        end = cursor
+        while (end < line.length && !/[ \t|;&<>]/u.test(line[end] as string)) end++
+        delimiter = line.slice(cursor, end)
+      }
+      if (delimiter.length === 0) throw new ParseError("Expected delimiter after '<<'")
+
+      const key = `__termish_heredoc_${counter++}__`
+      line = `${line.slice(0, position)}<< ${key}${line.slice(end)}`
+      pending.unshift([key, delimiter])
+    }
+
+    outputLines.push(line)
+    index++
+
+    for (const [key, delimiter] of pending) {
+      const bodyLines: string[] = []
+      let terminated = false
+      while (index < lines.length) {
+        const candidate = lines[index] as string
+        index++
+        if (candidate === delimiter || candidate.trim() === delimiter) {
+          terminated = true
+          break
+        }
+        bodyLines.push(candidate)
+      }
+      if (!terminated) {
+        throw new ParseError(`Unterminated heredoc: expected '${delimiter}' before end of input`)
+      }
+      heredocs.set(key, {
+        delimiter,
+        body: bodyLines.length > 0 ? `${bodyLines.join('\n')}\n` : '',
+      })
+    }
+  }
+
+  return { text: outputLines.join('\n'), heredocs }
+}
+
+function hasOddTrailingBackslashCount(line: string): boolean {
+  let count = 0
+  for (let index = line.length - 1; index >= 0 && line[index] === '\\'; index--) count++
+  return count % 2 === 1
 }
 
 /** Replace `\<newline><optional indent>` with a single space. Lets
@@ -106,7 +259,7 @@ function tokenize(text: string): string[] {
     // Multi-char operators (greedy, before single-char check).
     if (i + 1 < n) {
       const two = `${c}${text[i + 1]}`
-      if (two === '&&' || two === '||' || two === '>>' || two === '>&') {
+      if (two === '&&' || two === '||' || two === '<<' || two === '>>' || two === '>&') {
         tokens.push(two)
         i += 2
         continue
@@ -128,7 +281,8 @@ function tokenize(text: string): string[] {
         // Peek for multi-char to avoid stealing the second char.
         if (i + 1 < n) {
           const peek = `${ch}${text[i + 1]}`
-          if (peek === '&&' || peek === '||' || peek === '>>' || peek === '>&') break
+          if (peek === '&&' || peek === '||' || peek === '<<' || peek === '>>' || peek === '>&')
+            break
         }
         break
       }
@@ -151,7 +305,11 @@ function tokenize(text: string): string[] {
  * termish-py's `_parse_tokens`; comments inline call out the
  * non-obvious moves.
  */
-function parseTokens(tokens: readonly string[], maskMap: ReadonlyMap<string, string>): Script {
+function parseTokens(
+  tokens: readonly string[],
+  maskMap: ReadonlyMap<string, string>,
+  heredocs: ReadonlyMap<string, HeredocEntry>,
+): Script {
   const pipelines: Pipeline[] = []
   const operators: Operator[] = []
 
@@ -210,6 +368,22 @@ function parseTokens(tokens: readonly string[], maskMap: ReadonlyMap<string, str
         throw new ParseError(`Expected command after '|', got '${next}'`)
       }
       cmdName = unmask(next)
+      continue
+    }
+
+    if (token === '<<') {
+      if (i >= tokens.length) throw new ParseError("Expected delimiter after '<<'")
+      const key = tokens[i] as string
+      i++
+      const heredoc = heredocs.get(key)
+      if (heredoc === undefined) {
+        throw new ParseError(`Expected heredoc after '<<', got '${key}'`)
+      }
+      cmdRedirects.push({
+        type: '<<',
+        target: heredoc.delimiter,
+        content: heredoc.body,
+      })
       continue
     }
 

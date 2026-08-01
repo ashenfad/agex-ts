@@ -270,6 +270,65 @@ describe('PolicyBuilder — fingerprint', () => {
     b.registerSkill('helpful', 'tips')
     expect(a.fingerprint()).toBe(b.fingerprint())
   })
+
+  // Live host values are opaque to the hash. Traversing them broke
+  // three ways — caught in review on PR #55.
+
+  it('handles a cyclic namespace target without recursing', () => {
+    // A namespace target is an arbitrary user object and may be
+    // self-referential; traversal blew the stack on a property read.
+    const p = new PolicyBuilder()
+    const ns: Record<string, unknown> = { a: 1 }
+    ns.self = ns
+    p.registerNamespace('ns', { target: ns })
+    expect(() => p.fingerprint()).not.toThrow()
+  })
+
+  it('does not invoke getters on a namespace target', () => {
+    // fingerprint() must be free of side effects on embedder data.
+    let getterCalls = 0
+    const p = new PolicyBuilder()
+    p.registerNamespace('ns', {
+      target: {
+        get hot() {
+          getterCalls++
+          return 1
+        },
+      },
+    })
+    p.fingerprint()
+    p.fingerprint()
+    expect(getterCalls).toBe(0)
+  })
+
+  it('is stable when the target mutates but the registration does not', () => {
+    // The rendered surface is member names and descriptions, not live
+    // values — a fingerprint that drifts with runtime state would
+    // invalidate caches constantly and defeat its own purpose.
+    const p = new PolicyBuilder()
+    const target: Record<string, unknown> = { counter: 0 }
+    p.registerNamespace('ns', { target })
+    const before = p.fingerprint()
+    target.counter = 999
+    expect(p.fingerprint()).toBe(before)
+  })
+
+  it('returns the same string on repeated calls', () => {
+    const p = new PolicyBuilder()
+    p.registerFn('x', { fn: () => null, description: 'd' })
+    p.registerNamespace('ns', { target: { a: 1 }, include: ['a'] })
+    expect(p.fingerprint()).toBe(p.fingerprint())
+  })
+
+  it('still distinguishes a host-bound registration from a URL-shipped one', () => {
+    // Opaque means "don't traverse", not "ignore" — presence of the
+    // live value is part of the hash.
+    const a = new PolicyBuilder()
+    a.registerFn('x', { fn: () => null })
+    const b = new PolicyBuilder()
+    b.registerFn('x', { url: 'https://example.com/m.js' })
+    expect(a.fingerprint()).not.toBe(b.fingerprint())
+  })
 })
 
 describe('memberAllowed — filter rules', () => {

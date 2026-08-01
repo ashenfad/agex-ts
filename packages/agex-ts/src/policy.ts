@@ -225,11 +225,17 @@ export class PolicyBuilder {
    *  different primers, and `Agent.fingerprint` is public precisely so
    *  a host can decide whether a cached snapshot still applies.
    *
-   *  Live JS references (`fn`, `cls`, `target`, terminal handlers)
-   *  can't be hashed meaningfully, so they're reduced to a presence
-   *  marker. The one difference this can't see is two policies whose
-   *  configs match but whose function bodies differ — which by
-   *  definition doesn't alter the rendered surface. */
+   *  Live host values (`fn`, `cls`, `target`, terminal handlers,
+   *  `paramsSchema`) are treated as **opaque** — a presence marker,
+   *  never traversed. See `OPAQUE_FIELDS` for why that's required and
+   *  not merely a simplification. The consequence: two policies whose
+   *  configs match but whose function bodies or target contents differ
+   *  fingerprint identically. That's the intended granularity — the
+   *  rendered surface is names and descriptions, which config already
+   *  pins.
+   *
+   *  Pure with respect to the policy: repeated calls with no
+   *  intervening registration always return the same string. */
   fingerprint(): string {
     const parts: string[] = []
     for (const m of [this.#fns, this.#classes, this.#namespaces, this.#skills, this.#terminals]) {
@@ -456,11 +462,36 @@ function stableConfig(reg: object | undefined): string {
   const parts: string[] = []
   for (const key of Object.keys(reg).sort()) {
     const value = (reg as Record<string, unknown>)[key]
-    parts.push(`${key}=${stableValue(value)}`)
+    parts.push(`${key}=${OPAQUE_FIELDS.has(key) ? presence(value) : stableValue(value)}`)
   }
   return parts.join(',')
 }
 
+/** Registration fields holding a live host value the embedder handed
+ *  us: the fn / class / namespace target / terminal handler, and the
+ *  `paramsSchema` validator. These are reduced to a presence marker,
+ *  never traversed.
+ *
+ *  Traversing them would be wrong three ways. A namespace target is an
+ *  arbitrary user object, so it can be cyclic (`ns.self = ns`) —
+ *  recursion would blow the stack on a plain property read. Reading
+ *  its properties invokes getters, giving `fingerprint()` side effects
+ *  and a dependence on live values. And because it reflects mutable
+ *  runtime state, two calls with no registration change could disagree
+ *  — which defeats the entire point of a fingerprint. What the primer
+ *  renders is the member *names*, and those are already pinned by the
+ *  registration's own config (`include` / `exclude` / `configure`). */
+const OPAQUE_FIELDS = new Set(['fn', 'cls', 'target', 'handler', 'paramsSchema'])
+
+function presence(value: unknown): string {
+  return value === undefined ? 'absent' : 'present'
+}
+
+/** Serialize a *config* value — strings, booleans, numbers, member
+ *  filters, and the small `configure` record. Never reached for the
+ *  opaque fields above, so recursion depth is bounded by our own
+ *  registration types rather than by embedder data. A `MemberFilter`
+ *  may itself be a predicate function, which collapses to `fn`. */
 function stableValue(value: unknown): string {
   if (typeof value === 'function') return 'fn'
   if (value === null || value === undefined) return String(value)

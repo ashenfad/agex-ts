@@ -5,9 +5,10 @@
  *
  * Helpers under test (exported for testing only; not part of the
  * public API):
- *   - buildChapterScopeFilter — Filter A/B's shared boundary detector
- *   - buildBoundaryIndex      — boundary index + log ranges
- *   - hasCompletableBoundary  — runtime no-op guard
+ *   - closedChapterScopes / allChapterScopes — the renderer's and the
+ *     index builder's views of `__chapter__` task scopes
+ *   - buildBoundaryIndex — boundary index, log ranges, and the
+ *     `hasCompletable` no-op guard derived from the same scan
  *
  * These tests exist primarily as regression guards; several were
  * suggested verbatim by an agent porting these improvements back to
@@ -15,11 +16,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import {
-  buildBoundaryIndex,
-  buildChapterScopeFilter,
-  hasCompletableBoundary,
-} from '../src/chaptering'
+import { allChapterScopes, buildBoundaryIndex, closedChapterScopes } from '../src/chaptering'
 import type {
   ActionEvent,
   AgentEvent,
@@ -63,27 +60,27 @@ const chapter = (slug: string, idx = 0): ChapterEvent => ({
   eventRefs: [],
 })
 
-describe('hasCompletableBoundary', () => {
+describe('buildBoundaryIndex — hasCompletable', () => {
   it('false when the only boundary is an in-progress task', () => {
     const events: AgentEvent[] = [taskStart('parent', 0), action(1)]
-    const { ranges } = buildBoundaryIndex(events)
-    expect(hasCompletableBoundary(events, ranges)).toBe(false)
+    const { hasCompletable } = buildBoundaryIndex(events)
+    expect(hasCompletable).toBe(false)
   })
 
   it('true when a parent task has succeeded inside its range', () => {
     const events: AgentEvent[] = [taskStart('parent', 0), action(1), success(2)]
-    const { ranges } = buildBoundaryIndex(events)
-    expect(hasCompletableBoundary(events, ranges)).toBe(true)
+    const { hasCompletable } = buildBoundaryIndex(events)
+    expect(hasCompletable).toBe(true)
   })
 
   it('true when there is a prior chapter event in the index', () => {
     const events: AgentEvent[] = [chapter('phase-1', 0), taskStart('parent', 1), action(2)]
-    const { ranges } = buildBoundaryIndex(events)
-    expect(hasCompletableBoundary(events, ranges)).toBe(true)
+    const { hasCompletable } = buildBoundaryIndex(events)
+    expect(hasCompletable).toBe(true)
   })
 
   // Regression: a closed __chapter__ scope nested inside an in-progress
-  // parent's range used to make hasCompletableBoundary report true
+  // parent's range used to make the completable check report true
   // (it found the chapter task's own success while scanning the parent
   // for a terminator). Surfaced by an agent porting these improvements
   // back to agex-py; the same shape applied here.
@@ -96,13 +93,13 @@ describe('hasCompletableBoundary', () => {
       success(4), //                 [4] — chapter-scope end
       action(5), //               [5] — parent continues, still no terminator
     ]
-    const { ranges } = buildBoundaryIndex(events)
+    const { ranges, hasCompletable } = buildBoundaryIndex(events)
     // The boundary index has just one entry (the parent), and its
-    // range absorbs the chapter scope. Without the filter inside
-    // hasCompletableBoundary, the chapter task's success at [4]
+    // range absorbs the chapter scope. Without the scope filter
+    // applied to the outcome scan, the chapter task's success at [4]
     // would be misread as the parent's completion.
     expect(ranges.length).toBe(1)
-    expect(hasCompletableBoundary(events, ranges)).toBe(false)
+    expect(hasCompletable).toBe(false)
   })
 })
 
@@ -140,8 +137,8 @@ describe('buildBoundaryIndex', () => {
   })
 })
 
-describe('buildChapterScopeFilter', () => {
-  it('marks closed chapter scopes (default includeOpen=false)', () => {
+describe('chapter scope filters', () => {
+  it('closedChapterScopes marks closed chapter scopes', () => {
     const events: AgentEvent[] = [
       taskStart('parent', 0),
       action(1),
@@ -150,7 +147,7 @@ describe('buildChapterScopeFilter', () => {
       success(4),
       action(5),
     ]
-    const skip = buildChapterScopeFilter(events)
+    const skip = closedChapterScopes(events)
     // Closed scope [2..4] is marked.
     expect(skip.has(2)).toBe(true)
     expect(skip.has(3)).toBe(true)
@@ -161,20 +158,20 @@ describe('buildChapterScopeFilter', () => {
     expect(skip.has(5)).toBe(false)
   })
 
-  it('leaves open chapter scopes unmarked when includeOpen=false', () => {
+  it('closedChapterScopes leaves open chapter scopes unmarked', () => {
     // The renderer needs the running chapter task's own taskStart and
     // prior turns visible so its own loop can render itself.
     const events: AgentEvent[] = [taskStart('parent', 0), taskStart('__chapter__', 1), action(2)]
-    const skip = buildChapterScopeFilter(events) // default false
+    const skip = closedChapterScopes(events)
     expect(skip.size).toBe(0)
   })
 
-  it('marks open chapter scopes when includeOpen=true', () => {
+  it('allChapterScopes marks open chapter scopes too', () => {
     // The boundary index builder filters even open scopes — the
     // running chapter task's bookkeeping must never appear as a
     // foldable boundary.
     const events: AgentEvent[] = [taskStart('parent', 0), taskStart('__chapter__', 1), action(2)]
-    const skip = buildChapterScopeFilter(events, true)
+    const skip = allChapterScopes(events)
     expect(skip.has(1)).toBe(true)
     expect(skip.has(2)).toBe(true)
     // Parent stays visible.

@@ -97,6 +97,25 @@ export class EventLogImpl implements EventLog {
     return ((await this.#state.get<string[]>(INDEX_KEY)) ?? []) as string[]
   }
 
+  /** Read the active log as aligned `(ref, event)` pairs.
+   *
+   *  Chaptering maps boundary *positions* to a slice of state keys, so
+   *  its positional view and its ref view have to agree exactly. They
+   *  can't be derived separately: `iter()` drops entries whose value
+   *  is missing while `refs()` returns every key, so a single absent
+   *  value would shift positions against refs and fold the wrong
+   *  range. Pairing them from one index read makes the alignment
+   *  structural — a missing value drops from both sides together. */
+  async entries(): Promise<ReadonlyArray<{ ref: string; event: AgentEvent }>> {
+    const index = ((await this.#state.get<string[]>(INDEX_KEY)) ?? []) as string[]
+    const out: Array<{ ref: string; event: AgentEvent }> = []
+    for (const ref of index) {
+      const event = await this.#state.get<AgentEvent>(ref)
+      if (event !== undefined) out.push({ ref, event })
+    }
+    return out
+  }
+
   /** Replace a contiguous run of event refs with a single
    *  `ChapterEvent`. The originals stay at their state keys (so
    *  `chapterEvent.eventRefs` can resolve them) but are removed

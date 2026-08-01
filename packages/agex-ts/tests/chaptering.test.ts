@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createAgent } from '../src/agent'
-import { isChapteringInFlight, shouldTriggerChaptering } from '../src/chaptering'
+import { shouldTriggerChaptering } from '../src/chaptering'
 import { Dummy } from '../src/llm/dummy'
 import { evalRuntime } from '../src/runtime/eval'
 import type { AgentEvent, ChapterEvent, LLMResponse } from '../src/types'
@@ -627,9 +627,7 @@ describe('agent.runChaptering — manual trigger', () => {
   })
 })
 
-describe('isChapteringInFlight (recursion guard)', () => {
-  it('is false outside of a chapter run', async () => {
-    const agent = await createAgent({ name: 'A' })
-    expect(isChapteringInFlight(agent)).toBe(false)
-  })
-})
+// The recursion guard's actual behavior — chaptering not re-firing
+// while the chapter task itself runs — is covered above ("Exactly one
+// chapter event — the recursion guard worked"). The guard is internal
+// to `runChaptering`; there's no accessor to assert against.

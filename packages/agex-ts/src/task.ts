@@ -769,7 +769,7 @@ async function maybeFireBoundaryChaptering(
   const allEvents = await collectEvents(eventLog)
   const lastFiredTs = getLastFiredActionTimestamp(eventLog)
   if (!shouldTriggerChaptering(allEvents, agent.chapteringTrigger, lastFiredTs)) return
-  await runChaptering(allEvents, eventLog, agent, session, signal, async (e) => {
+  await runChaptering(eventLog, agent, session, signal, async (e) => {
     if (onEvent !== undefined) await onEvent(e)
   })
   // Stamp the latest action in the (possibly mutated) log so that any

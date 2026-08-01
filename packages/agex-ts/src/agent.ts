@@ -536,10 +536,8 @@ export class Agent {
     } = {},
   ): Promise<number> {
     const eventLog = await this.events(session)
-    const events: import('./types').AgentEvent[] = []
-    for await (const e of eventLog.iter()) events.push(e)
     const signal = opts.signal ?? new AbortController().signal
-    return runChapteringInternal(events, eventLog, this, session, signal, async (e) => {
+    return runChapteringInternal(eventLog, this, session, signal, async (e) => {
       if (opts.onEvent !== undefined) await opts.onEvent(e)
     })
   }

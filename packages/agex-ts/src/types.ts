@@ -289,7 +289,7 @@ export interface OutputEvent extends EventBase {
  *  same ones streamed live via `onEvent`, batched here for the durable
  *  record. Invisible to the parent LLM: `renderEvents` reads only
  *  `result` / `message` / `taskName` off a terminal event, never this
- *  field, so the payload rides along unseen. See `docs/roadmap/spawn.md`. */
+ *  field, so the payload rides along unseen. See `docs/api/agent.md § Spawn`. */
 export interface SpawnEventsEntry {
   readonly spawnIndex: number
   readonly events: ReadonlyArray<AgentEvent>
@@ -416,7 +416,7 @@ export type TaskOutcome =
 
 /** A sub-task an agent defines and runs at runtime via `spawn`. The
  *  string form is shorthand for `{ task: <string> }`. See
- *  `docs/roadmap/spawn.md`. */
+ *  `docs/api/agent.md § Spawn`. */
 export interface SpawnSpec {
   /** What the sub-task should do — the clone's task description. */
   readonly task: string
@@ -729,9 +729,6 @@ export interface EventLog {
   add(event: AgentEvent): Promise<string>
   /** Iterate events in chronological order. */
   iter(): AsyncIterable<AgentEvent>
-  /** Read-only view at a historical commit hash. Returns `null` if
-   *  the underlying state isn't versioned. */
-  at(commitHash: string): Promise<EventLog | null>
   /** Fetch a single event by its state key. Returns `null` if no
    *  event lives at that key. The originals replaced by
    *  `replaceRange` remain at their state keys (only the active

@@ -124,24 +124,29 @@ interface ErrorEvent extends EventBase {
   readonly type: 'error'
   readonly errorName: string
   readonly errorMessage: string
+  readonly recoverable: boolean
 }
 ```
 
 Unexpected error: parse failure, transform error, runtime crash, etc. Distinct from task-control errors (fail / cancelled), which surface as their own event types. `error` events are filtered out of the LLM render.
+
+**The framework never emits this event.** Runtime errors reach the agent as an error *output part* on the `ActionEvent` instead, so it reads them the way it reads any other observation. `ErrorEvent` remains in the `AgentEvent` union — with a renderer branch that skips it — as an embedder-emittable type for hosts that log their own failures into the event stream.
 
 ### `FileEvent`
 
 ```ts
 interface FileEvent extends EventBase {
   readonly type: 'file'
+  readonly source: 'user' | 'agent'
   readonly added: ReadonlyArray<string>
   readonly modified: ReadonlyArray<string>
   readonly removed: ReadonlyArray<string>
-  readonly fileSource: string
 }
 ```
 
-Recap of a batch of filesystem changes (e.g. from a single action's `fileWrite` / `fileEdit` emissions). Useful for live UIs showing the agent's VFS edits.
+Recap of a batch of filesystem changes. Useful for live UIs showing the agent's VFS edits.
+
+Like `ErrorEvent`, this is **embedder-emitted** — the framework doesn't construct it. `source: 'user'` is the case the renderer handles specially: a host that drops files into the agent's VFS on the user's behalf can record that as a `FileEvent`, and the LLM render turns it into a note telling the agent which paths appeared. `source: 'agent'` events are skipped in the render (the agent already saw its own writes).
 
 ### `SystemNoteEvent`
 
@@ -198,7 +203,7 @@ interface EventLog {
 }
 ```
 
-The append-only log surface. `add(event)` writes and returns the storage key. `iter()` yields events in chronological order — with chapter splicing applied (chaptered ranges show up as `ChapterEvent`). For historical views (the log as it was at a past commit), use `agent.eventsAt(hash, session)` instead of `at()` on a live log instance.
+The append-only log surface. `add(event)` writes and returns the storage key. `iter()` yields events in chronological order — with chapter splicing applied (chaptered ranges show up as `ChapterEvent`). For historical views (the log as it was at a past commit), use [`agent.eventsAt(hash, session)`](agent.md#agenteventsathash-session).
 
 `EventLogImpl` (the concrete class returned by `agent.events(session)`) adds `refs()` (read-only access to the index) and `replaceRange(refs, chapterEvent)` (used by the chaptering machinery).
 
@@ -244,7 +249,7 @@ await myTask(input, {
 When an agent calls `spawn(...)` (see [Agent § Spawn](agent.md#spawn-sub-tasks)), the clone runs the same task loop and emits the **same event types** (`taskStart`, `action`, `output`, `success` / `fail`, …). Two things distinguish them for a host:
 
 - **They're tagged.** A clone's events come through the parent task's `onEvent` with `agentName` set to **`"<parentName>:spawn#<n>"`** — `<parentName>` is the agent's name, and `<n>` is a 0-based counter **per parent task**, distinct per concurrent clone. So you can both tell sub-agent events apart from the parent's *and* demux concurrent clones from each other. The same `<n>` is also exposed as a structured **`spawnIndex`** field on the event, so you can key per-clone UI off it directly instead of parsing it back out of `agentName` (it's `undefined` on a top-level run's events). The host-facing [`agent.spawn`](agent.md#spawn-sub-tasks) tags its events the same way.
-- **They're stream-only.** Clone events are forwarded **live to `onEvent` but never written to the durable log** — they won't appear in `agent.events(session)` or its replay. (Clones run on throwaway state; the parent's log stays clean.) If you need to observe or record sub-agent work, do it from `onEvent`; the durable log alone won't show it.
+- **They're stream-only by default.** Clone events are forwarded **live to `onEvent` but not written to the durable log** — they won't appear in `agent.events(session)` or its replay. (Clones run on throwaway state; the parent's log stays clean.) To record them as well, set [`captureSpawnEvents: true`](agent.md#agentoptions) on the agent: each clone's timeline is then attached to the task's terminal `success` / `fail` event as a `spawnEvents` array of `{ spawnIndex, events }`. The parent LLM never sees it — `renderEvents` skips the field — so it's an audit record, not context. Capture is uncapped; a wide fan-out makes a correspondingly large terminal event.
 
 ```ts
 await myTask(input, {

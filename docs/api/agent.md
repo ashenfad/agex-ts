@@ -33,9 +33,10 @@ const agent = await createAgent({
 | `runtime` | `RuntimeAdapter` | `undefined` | Runtime that executes `ts` emissions. Required for any task. |
 | `state` | `StateConfig` | `{ type: 'live' }` | Persistent state. See [State](state.md). |
 | `fs` | `FSConfig` | `{ type: 'memory' }` | VFS. `{ type: 'kvgit' }` shares the agent's versioned state. |
-| `actionSurface` | `'agex' \| 'provider-native'` | `'agex'` | Model-facing workspace action vocabulary. Provider-native mode keeps `ts_action` but teaches the model to use a supporting provider's intercepted shell/file tools. Set the matching option on the provider client. |
+| `actionSurface` | `'agex' \| 'agex-patch' \| 'provider-native'` | `'agex'` | Model-facing workspace action vocabulary — see [Action surfaces](#action-surfaces) below. |
 | `maxIterations` | `number` | `10` | Per-task turn cap. |
 | `maxSpawns` | `number` | `8` | Max concurrent in-agent `spawn` clones (bounds the per-task spawn semaphore). `0` disables `spawn` entirely — the capability isn't injected and the primer won't teach it. See [Spawn (sub-tasks)](#spawn-sub-tasks). |
+| `captureSpawnEvents` | `boolean` | `false` | Retain each clone's events and attach them to the task's terminal event as `spawnEvents`, making sub-agent work part of the durable record. Invisible to the parent LLM. Uncapped — a wide fan-out yields a large terminal event. See [Observing sub-agent work](#spawn-sub-tasks). |
 | `chapteringTrigger` | `number` | `undefined` | When latest action's `inputTokens` >= this, run a chapter task. Setting this option auto-registers an internal chapter task with the default primer; see [Chapters](../concepts/chapters.md). |
 | `chapterPrimer` | `string` | `DEFAULT_CHAPTER_PRIMER` | Override the auto-registered chapter task's primer. Most embedders should leave this undefined. Ignored when `chapteringTrigger` is undefined. |
 | `agexPrimerOverride` | `string` | `undefined` | Replace the built-in environment description. Use only if you really mean to override agex-ts's conventions. |
@@ -66,6 +67,22 @@ agent.task<I, O>(def: TaskDefinition<I, O>): TaskFn<I, O>
 
 Returns a typed callable: `(input: I, options?: TaskCallOptions) => Promise<O>`. See [Task](task.md).
 
+## Action surfaces
+
+`actionSurface` picks the workspace-editing vocabulary the model is offered. Every surface keeps `ts_action` — that's where work finishes, and `taskSuccess` only fires from there. What changes is how the agent edits files.
+
+| Surface | Tools offered | Use when |
+|---|---|---|
+| `'agex'` (default) | `ts_action`, `terminal_action`, `write_file`, `edit_file` | Default. Whole-file writes and targeted string edits. |
+| `'agex-patch'` | `ts_action`, `terminal_action`, `apply_patch` | The model is Codex-family, or otherwise reliably fluent in unified-diff `apply_patch` blocks. |
+| `'provider-native'` | `ts_action` only | The provider intercepts its own shell / file-editing tools. Set the matching option on the provider client too. |
+
+**`'agex-patch'`** swaps the write/edit pair for a single Codex-shaped `apply_patch` tool (`*** Begin Patch` format) taking a unified-diff-style patch that can touch several files at once.
+
+The patch is fully parsed and validated against a staged snapshot **before any VFS mutation**, so a hunk that fails to anchor changes nothing — the agent gets line-specific diagnostics naming the hunk that missed, rather than a half-applied tree. If I/O fails partway through the commit itself, agex-ts attempts a rollback to the original contents and tells the model explicitly which case it landed in: rollback succeeded and no files changed, or rollback was incomplete and named paths may hold partial changes.
+
+Worth choosing when the model was trained on that dialect; the default surface is easier for models that weren't.
+
 ## Spawn (sub-tasks)
 
 When `maxSpawns > 0` and the runtime supports it, agent code is given a `spawn` builtin: it runs an ephemeral, memoryless **clone** of the agent on a typed sub-task and returns the result. The clone shares the agent's registrations (same fns/classes/skills) but runs on throwaway state — a blank VFS, no cache, an event log discarded at the end — so nothing it does touches the parent's session. Agents fan out with `Promise.all`; concurrency is bounded by `maxSpawns`. This is primarily an *agent-authored* capability — the agent decides at runtime to decompose its work, rather than the host wiring sub-agents ahead of time. The same clone is also reachable from host code via [`agent.spawn`](#agentspawnspec-opts) below, for when something outside an agent turn must trigger a sub-task.
@@ -75,7 +92,7 @@ When `maxSpawns > 0` and the runtime supports it, agent code is given a `spawn` 
 - **Enable / disable / bound:** the `maxSpawns` [option](#agentoptions) (default `8`). Set `0` to turn `spawn` off (not injected, not taught in the primer).
 - **Runtime support:** `evalRuntime` injects `spawn` today; `workerRuntime` injects it via its `injectsSpawn` capability. A runtime that doesn't support it leaves `spawn` unavailable, and the primer won't advertise it.
 - **Clones are depth-1** — a clone never gets its own `spawn` (no recursive fan-out).
-- **Observing sub-agent work:** clone events stream through the parent task's `onEvent`, tagged so you can demux them — see [Events § Sub-agent events](events.md#sub-agent-spawn-events). They are **not** written to the durable log.
+- **Observing sub-agent work:** clone events stream through the parent task's `onEvent`, tagged so you can demux them — see [Events § Sub-agent events](events.md#sub-agent-spawn-events). By default they are **not** written to the durable log. Set `captureSpawnEvents: true` to also retain them: each clone's timeline is bucketed by `spawnIndex` and drained onto the task's terminal (`success` / `fail`) event as `spawnEvents`, giving you a durable audit record without the parent LLM ever seeing it (`renderEvents` doesn't read the field). Capture is uncapped, so a wide fan-out produces a correspondingly large terminal event.
 - **Read-only file sharing:** an agent can pass `view` to a spawn call to expose part of its VFS to the clone read-only. See [Task § Spawn (`SpawnSpec`)](task.md#spawn-spawnspec) for the call shape.
 
 ### `agent.spawn(spec, opts?)`
@@ -211,7 +228,7 @@ try {
 interface ReconfigurableOptions {
   readonly llm?: LLMClient
   readonly primer?: string
-  readonly actionSurface?: 'agex' | 'provider-native'
+  readonly actionSurface?: 'agex' | 'agex-patch' | 'provider-native'
   readonly agexPrimerOverride?: string
   readonly capabilitiesPrimer?: string
   readonly chapteringTrigger?: number

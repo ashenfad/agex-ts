@@ -1,7 +1,7 @@
 /**
- * Vitest config for the *Node* lane. Today this lane has nothing to
- * run — Web Workers are the whole point of the package and need a
- * real browser, which lives in `vitest.browser.config.ts`.
+ * Vitest config for the *Node* lane — `tests/node/`, covering the
+ * `worker_threads` target. The browser lane (Web Worker target, the
+ * bulk of the coverage) lives in `vitest.browser.config.ts`.
  *
  * The split (and the deliberately scoped `include` here) is what
  * keeps `pnpm -r test` green on the workspace's Node CI runner: the

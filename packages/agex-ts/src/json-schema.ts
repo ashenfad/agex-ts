@@ -1,7 +1,7 @@
 /**
  * Compile a JSON Schema object into a Standard Schema validator.
  *
- * `spawn` (see `docs/roadmap/spawn.md`) lets an agent hand a plain JSON
+ * `spawn` (see `docs/api/agent.md § Spawn`) lets an agent hand a plain JSON
  * Schema *object* as a sub-task's `output` contract — but the task loop
  * validates output through a `StandardSchemaV1` validator (`def.output`),
  * not a schema object. This bridges the two: wrap the object in a

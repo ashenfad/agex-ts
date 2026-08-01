@@ -33,7 +33,9 @@ const out = await greet('Ada')
 console.log(out) // → "Hello, Ada — welcome!"
 ```
 
-The `description` is what the agent sees. The agent emits a `ts` action calling `taskSuccess(...)` with a string; agex-ts validates against the typed contract and returns it.
+The `description` is what the agent sees. The agent emits a `ts` action calling `taskSuccess(...)` with a string, and agex-ts returns it.
+
+The type parameters on `agent.task<string, string>` are a **compile-time** contract — they tell TypeScript what you get back, but nothing checks the agent's value at runtime unless you supply a schema. Pass `output:` (any [Standard Schema](https://standardschema.dev/) — Zod, Valibot, ArkType) to have the returned value validated, with a mismatch fed back to the agent as a correctable error rather than thrown at your call site. Same for `input:`.
 
 ## Registering your code
 
@@ -128,7 +130,7 @@ Without a schema, the typed call signature is enforced at the TS layer (compile 
 
 ## Production runtime: workers
 
-For production, use `@agex-ts/runtime-worker` — agent code runs in an isolated Web Worker. Browser-side today; Node `worker_threads` is on the [roadmap](https://github.com/ashenfad/agex-ts/blob/main/roadmap.md).
+For production, use `@agex-ts/runtime-worker` — agent code runs in an isolated worker realm. Both targets ship: a Web Worker in the browser and `worker_threads` on Node, picked automatically (override with `target`). See [Runtime](api/runtime.md).
 
 ```ts
 import { createAgent } from 'agex-ts'

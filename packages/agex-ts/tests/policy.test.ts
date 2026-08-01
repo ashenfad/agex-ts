@@ -226,6 +226,50 @@ describe('PolicyBuilder — fingerprint', () => {
     p.registerSkill('helpful', 'tips')
     expect(p.fingerprint()).not.toBe(oneFn)
   })
+
+  // Registration is add-only (re-registering a name throws), so the
+  // interesting comparisons are across two policies rather than one
+  // builder over time — that's what a host does when deciding whether
+  // a cached primer snapshot still applies.
+
+  it('distinguishes policies whose names match but descriptions differ', () => {
+    // The primer renders descriptions, so these are not interchangeable.
+    const a = new PolicyBuilder()
+    a.registerFn('x', { fn: () => null, description: 'first' })
+    const b = new PolicyBuilder()
+    b.registerFn('x', { fn: () => null, description: 'second' })
+    expect(a.fingerprint()).not.toBe(b.fingerprint())
+  })
+
+  it('distinguishes policies whose member filters differ', () => {
+    const a = new PolicyBuilder()
+    a.registerNamespace('ns', { target: { a: 1, b: 2 }, include: 'a' })
+    const b = new PolicyBuilder()
+    b.registerNamespace('ns', { target: { a: 1, b: 2 }, include: 'b' })
+    expect(a.fingerprint()).not.toBe(b.fingerprint())
+  })
+
+  it('distinguishes descriptions swapped between two names', () => {
+    // Same name set and same count either way — only a config-aware
+    // fingerprint separates these.
+    const a = new PolicyBuilder()
+    a.registerFn('x', { fn: () => null, description: 'one' })
+    a.registerFn('y', { fn: () => null, description: 'two' })
+    const b = new PolicyBuilder()
+    b.registerFn('x', { fn: () => null, description: 'two' })
+    b.registerFn('y', { fn: () => null, description: 'one' })
+    expect(a.fingerprint()).not.toBe(b.fingerprint())
+  })
+
+  it('matches for two policies configured identically', () => {
+    const a = new PolicyBuilder()
+    a.registerFn('x', { fn: () => null, description: 'same' })
+    a.registerSkill('helpful', 'tips')
+    const b = new PolicyBuilder()
+    b.registerFn('x', { fn: () => null, description: 'same' })
+    b.registerSkill('helpful', 'tips')
+    expect(a.fingerprint()).toBe(b.fingerprint())
+  })
 })
 
 describe('memberAllowed — filter rules', () => {

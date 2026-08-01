@@ -82,7 +82,7 @@ export interface AgentOptions {
   /** Max concurrent in-agent `spawn` clones — bounds the per-task
    *  spawn semaphore. Default `8`. Set `0` to disable `spawn` entirely
    *  (the capability isn't injected and the primer won't teach it).
-   *  See `docs/roadmap/spawn.md`. */
+   *  See `docs/api/agent.md § Spawn`. */
   readonly maxSpawns?: number
   /** Capture each `spawn` clone's event timeline onto the parent task's
    *  terminal event (`SuccessEvent` / `FailEvent` / `CancelledEvent`) as
@@ -90,7 +90,7 @@ export interface AgentOptions {
    *  covering every clone the task launched. Invisible to the parent LLM
    *  (`renderEvents` never reads the field). Default `false`; uncapped
    *  when on, so a wide fan-out yields a large terminal event. See
-   *  `docs/roadmap/spawn.md`. */
+   *  `docs/api/agent.md § Spawn`. */
   readonly captureSpawnEvents?: boolean
   /** Threshold (in input tokens, as reported by the latest
    *  `ActionEvent`) at which chaptering fires. When set, the

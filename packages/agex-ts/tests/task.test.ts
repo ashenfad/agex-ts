@@ -318,7 +318,7 @@ describe('task — output validation (recoverable)', () => {
 })
 
 describe('task — injected run resources (spawn seam)', () => {
-  // The run-resource bundle seam (decision #1 in roadmap/spawn.md): a
+  // The run-resource bundle seam behind `spawn`: a
   // caller can hand the loop pre-built throwaway state so an ephemeral
   // clone runs without touching the parent's configured session. These
   // assert the override path is wired and isolates correctly. The public

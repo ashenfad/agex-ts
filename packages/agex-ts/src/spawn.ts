@@ -1,5 +1,5 @@
 /**
- * `spawn` — agent-authored ephemeral sub-tasks (see `docs/roadmap/spawn.md`).
+ * `spawn` — agent-authored ephemeral sub-tasks (see `docs/api/agent.md § Spawn`).
  *
  * `createSpawn` builds the `spawn` capability injected into a top-level
  * agent's code. Calling `spawn(spec)` runs a **clone** of the agent — the

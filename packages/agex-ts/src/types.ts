@@ -552,18 +552,12 @@ export interface LLMClient {
 // Registration records — what the Policy table holds
 // ---------------------------------------------------------------------------
 
-/** Common to every registration. Capability flags propagate to the
- *  runtime adapter; the runtime decides whether to allow the call. */
+/** Common to every registration. */
 export interface RegistrationCommon {
   /** Description-presence is the prominence lever. Items with a
    *  description appear in the agent's primer; without, they exist
    *  but aren't advertised. */
   readonly description?: string
-  /** True if the registered code may touch the host real filesystem.
-   *  Default `false`. */
-  readonly hostFsAccess?: boolean
-  /** True if the registered code may make network requests. Default `false`. */
-  readonly networkAccess?: boolean
 }
 
 /** A registered fn / cls / namespace can either be **host-bound**

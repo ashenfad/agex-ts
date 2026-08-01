@@ -12,7 +12,7 @@ interface RuntimeAdapter {
 }
 ```
 
-`policy` is the registration table — every fn / cls / namespace / skill / terminal the agent has access to, plus capability flags (`hostFsAccess`, `networkAccess`). `ExecuteContext` carries the per-emission VFS, cache, signal, and validated inputs. `ExecResult` carries the outcome, captured outputs (`console.*`, image views), and timing.
+`policy` is the registration table — every fn / cls / namespace / skill / terminal the agent has access to. `ExecuteContext` carries the per-emission VFS, cache, signal, and validated inputs. `ExecResult` carries the outcome, captured outputs (`console.*`, image views), and timing.
 
 agex-ts ships two adapters; embedders can implement their own.
 

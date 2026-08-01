@@ -25,8 +25,6 @@ agent.fn(
 interface FnRegistration {
   readonly name?: string
   readonly description?: string
-  readonly hostFsAccess?: boolean
-  readonly networkAccess?: boolean
   readonly paramsSchema?: StandardSchemaV1  // host-side input validation
 }
 ```
@@ -44,7 +42,15 @@ agent.fn(
 )
 ```
 
-**`paramsSchema`** validates the agent's call args before the host fn runs. Validation failure surfaces as a runtime error the agent sees and can adjust to. Cannot combine with the URL form (URL-shipped fns are called natively; no host hook for the schema check).
+**`paramsSchema`** validates the agent's call args before the host fn runs. Validation failure surfaces as a `SchemaError` in the agent's observation — an ordinary runtime error it can read and adjust to — and the host fn never runs. Cannot combine with the URL form (URL-shipped fns are called natively; no host hook for the schema check).
+
+The validation subject is the **argument list**, so the schema describes all params at once — a tuple schema is the natural shape:
+
+```ts
+agent.fn(clamp, { name: 'clamp', paramsSchema: z.tuple([z.number(), z.number()]) })
+```
+
+A schema that transforms (coercion) has its output spread as the call args; a validator returning a non-array is ignored in favor of the original args. Enforcement is host-side in both runtimes, and applies equally when an agent-authored helper module under `/helpers/` calls the fn. Schemas that validate synchronously (the default for Zod, Valibot and ArkType) keep the call synchronous under `evalRuntime`; an async validator makes it async.
 
 ## `agent.cls`
 
@@ -61,8 +67,6 @@ interface ClsRegistration {
   readonly include?: MemberFilter
   readonly exclude?: MemberFilter
   readonly configure?: Record<string, MemberConfig>
-  readonly hostFsAccess?: boolean
-  readonly networkAccess?: boolean
 }
 ```
 
@@ -93,8 +97,6 @@ interface NsRegistration {
   readonly include?: MemberFilter
   readonly exclude?: MemberFilter
   readonly configure?: Record<string, MemberConfig>
-  readonly hostFsAccess?: boolean
-  readonly networkAccess?: boolean
 }
 ```
 
@@ -143,8 +145,6 @@ agent.terminal(handler: TerminalCommandHandler, opts: TerminalRegistration): thi
 interface TerminalRegistration {
   readonly name: string
   readonly description: string         // required (no docstring fallback in TS)
-  readonly hostFsAccess?: boolean
-  readonly networkAccess?: boolean
 }
 ```
 
@@ -233,17 +233,6 @@ How it relates to the rest of registration:
 - **Worker mode round-trips via RPC.** When the runtime is `workerRuntime`, the worker posts `resolveNamespace` to the host, which calls your resolver and posts the URL back — so the resolver runs in host code (closures over host state are fine).
 
 A thrown resolver is treated as `null`. The resolver's URL must be ESM-resolvable from wherever the runtime executes (host realm for `evalRuntime`, worker realm for `workerRuntime`).
-
-## Capability flags
-
-Two flags propagate to the registration record for adapters to consult:
-
-| Flag | Meaning |
-|---|---|
-| `hostFsAccess?: boolean` | Hint that this registration may read/write the host's real filesystem (vs. just the agent's VFS). |
-| `networkAccess?: boolean` | Hint that this registration may make network requests. |
-
-These are advisory: agex-ts doesn't enforce sandboxing based on them. They're surfaced on the registration record for embedders building audit / review tooling around agent activity, and may inform future capability-based isolation.
 
 ## Member filters
 

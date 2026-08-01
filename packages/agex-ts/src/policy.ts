@@ -22,7 +22,8 @@
 // `agex-ts/policy` from a Worker / browser context can do so
 // without dragging the shell layer.
 import { globMatch as termishGlobMatch } from '@agex-ts/termish/glob'
-import { RegistrationError } from './errors'
+import type { StandardSchemaV1 } from '@standard-schema/spec'
+import { RegistrationError, SchemaError } from './errors'
 import type {
   MemberConfig,
   MemberFilter,
@@ -342,6 +343,78 @@ export function memberAllowed(
   if (exclude !== undefined && matchesFilter(name, exclude)) return false
   if (include === undefined) return true
   return matchesFilter(name, include)
+}
+
+/**
+ * Wrap a host-bound fn so its `paramsSchema` validates the agent's
+ * call args before the underlying function runs.
+ *
+ * Both runtimes call this at their host-side dispatch site — the eval
+ * runtime when injecting the binding, the worker runtime when servicing
+ * an RPC. Enforcement has to live host-side: `paramsSchema` is a live
+ * validator object, and only registration names cross to the worker
+ * realm (see `buildConfigure`). That's the same reason `registerFn`
+ * rejects `paramsSchema` combined with `{ url }` — a URL-shipped fn is
+ * called natively in the worker with no host hook to validate at.
+ *
+ * Returns `fn` unchanged when no schema is registered: zero overhead,
+ * and — importantly — zero change to call semantics for the common
+ * case. Wrapping unconditionally would turn every registered sync fn
+ * into a promise-returning one under the eval runtime, where bindings
+ * are injected raw rather than bridged.
+ *
+ * For the same reason the wrapper stays synchronous when the validator
+ * answers synchronously (Zod, Valibot and ArkType all do for non-async
+ * schemas). Only a genuinely async validator forces an async call.
+ *
+ * The args array is the validation subject, so `paramsSchema` describes
+ * the whole parameter list — a tuple schema (`z.tuple([...])`) is the
+ * natural shape. A validator that returns a transformed array (coercion)
+ * has its output passed through to the fn; a non-array return is
+ * ignored in favor of the original args, since spreading it would
+ * silently mangle the call.
+ */
+export function enforceParamsSchema<F extends (...args: never[]) => unknown>(
+  fn: F,
+  schema: StandardSchemaV1 | undefined,
+  fnName: string,
+): F {
+  if (schema === undefined) return fn
+  const target = fn as unknown as (...a: unknown[]) => unknown
+  const wrapped = function (this: unknown, ...args: unknown[]): unknown {
+    const result = schema['~standard'].validate(args)
+    if (isThenable(result)) {
+      return result.then((settled) => target.apply(this, applyParams(settled, args, fnName)))
+    }
+    return target.apply(this, applyParams(result, args, fnName))
+  }
+  return wrapped as unknown as F
+}
+
+function isThenable<T>(v: T | Promise<T>): v is Promise<T> {
+  return typeof (v as { then?: unknown } | null)?.then === 'function'
+}
+
+/** Throw on validation issues, else pick the arg list to call with. */
+function applyParams(
+  result: StandardSchemaV1.Result<unknown>,
+  args: readonly unknown[],
+  fnName: string,
+): unknown[] {
+  if (result.issues !== undefined) {
+    const issues = result.issues.map((i) => ({
+      path: (i.path ?? []).map((p) =>
+        typeof p === 'object' && p !== null ? (p.key as PropertyKey) : p,
+      ),
+      message: i.message,
+    }))
+    throw new SchemaError(
+      `fn '${fnName}': params validation failed: ${issues.map((i) => i.message).join('; ')}`,
+      issues,
+    )
+  }
+  const value = (result as { value: unknown }).value
+  return Array.isArray(value) ? (value as unknown[]) : [...args]
 }
 
 function matchesFilter(name: string, filter: MemberFilter): boolean {

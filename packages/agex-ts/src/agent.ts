@@ -167,8 +167,6 @@ export async function createAgent(opts: AgentOptions): Promise<Agent> {
 export interface FnRegistration {
   readonly name?: string
   readonly description?: string
-  readonly hostFsAccess?: boolean
-  readonly networkAccess?: boolean
   readonly paramsSchema?: import('@standard-schema/spec').StandardSchemaV1
   /** When true, the framework appends a `HostFnContext` (`{ console,
    *  signal }`) as the trailing positional argument to the handler.
@@ -187,8 +185,6 @@ export interface ClsRegistration {
   readonly include?: MemberFilter
   readonly exclude?: MemberFilter
   readonly configure?: Readonly<Record<string, MemberConfig>>
-  readonly hostFsAccess?: boolean
-  readonly networkAccess?: boolean
 }
 
 /** Options accepted by `agent.namespace()`. The target object is
@@ -201,8 +197,6 @@ export interface NsRegistration {
   readonly include?: MemberFilter
   readonly exclude?: MemberFilter
   readonly configure?: Readonly<Record<string, MemberConfig>>
-  readonly hostFsAccess?: boolean
-  readonly networkAccess?: boolean
 }
 
 /** Options accepted by `agent.terminal()`. The handler is the
@@ -211,8 +205,6 @@ export interface NsRegistration {
 export interface TerminalRegistration {
   readonly name: string
   readonly description: string
-  readonly hostFsAccess?: boolean
-  readonly networkAccess?: boolean
 }
 
 /** Options accepted by `agent.skill()`. The markdown content is

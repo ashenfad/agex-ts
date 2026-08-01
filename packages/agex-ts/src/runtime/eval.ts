@@ -44,6 +44,7 @@
 
 import tsBlankSpace from 'ts-blank-space'
 import { CancelledError, TaskFailError, isTaskControlError } from '../errors'
+import { enforceParamsSchema } from '../policy'
 import type {
   ExecResult,
   ExecuteContext,
@@ -286,14 +287,24 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
       // names are NOT injected here — the rewriter routes their imports
       // through `__load(name)` (see `urlSpecs` / `__load` above) so the
       // dynamic `import()` only fires on first reference.
+      // Built once and reused for both the main-scope bindings below
+      // and the `__registered` map that flows names into helper
+      // modules — a helper calling a registered fn has to hit the same
+      // paramsSchema check the agent's own code does.
+      const effectiveFns = new Map<string, (...args: never[]) => unknown>()
       for (const [name, reg] of policy.fns) {
         if (reg.fn === undefined) continue
-        if (reg.wantsContext === true) {
-          const fn = reg.fn
-          injected[name] = (...args: unknown[]) => fn(...args, getHostCtx())
-        } else {
-          injected[name] = reg.fn
-        }
+        const fn = reg.fn
+        // `wantsContext` appends the host ctx *after* validation, so the
+        // schema describes the agent-facing parameter list only.
+        const base =
+          reg.wantsContext === true
+            ? (...args: unknown[]): unknown => fn(...args, getHostCtx())
+            : fn
+        effectiveFns.set(name, enforceParamsSchema(base, reg.paramsSchema, name))
+      }
+      for (const [name, fn] of effectiveFns) {
+        injected[name] = fn
       }
       for (const [name, reg] of policy.namespaces) {
         if (reg.target !== undefined) injected[name] = reg.target
@@ -323,8 +334,8 @@ export function evalRuntime(opts: EvalRuntimeOptions = {}): RuntimeAdapter {
         // their imports rewrite to `await __load('name')`, which
         // closes over the eval runtime's lazy loader.
         const registeredValues = new Map<string, unknown>()
-        for (const [n, reg] of policy.fns) {
-          if (reg.fn !== undefined) registeredValues.set(n, reg.fn)
+        for (const [n, fn] of effectiveFns) {
+          registeredValues.set(n, fn)
         }
         for (const [n, reg] of policy.namespaces) {
           if (reg.target !== undefined) registeredValues.set(n, reg.target)

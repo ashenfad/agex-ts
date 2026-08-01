@@ -41,7 +41,7 @@
 import { installConsoleProxy, makeHostFnContext, runWithCapture } from 'agex-ts/console-capture'
 import { CancelledError } from 'agex-ts/errors'
 import { prepareScriptForWire } from 'agex-ts/module-loader'
-import { memberAllowed } from 'agex-ts/policy'
+import { enforceParamsSchema, memberAllowed } from 'agex-ts/policy'
 import type {
   ExecResult,
   ExecuteContext,
@@ -781,13 +781,20 @@ async function dispatch(
       // (`node:async_hooks` available). Browser-host falls through
       // to the real console; opt in to `wantsContext: true` for
       // explicit capture there.
-      return await runWithCapture({ outputs, passConsole: false }, async () => {
-        if (reg.wantsContext === true) {
-          const hostCtx = makeHostFnContext({ outputs, signal: ctx.signal })
-          return await fn(...args, hostCtx)
-        }
-        return await fn(...args)
-      })
+      // `wantsContext` appends the host ctx *after* validation, so a
+      // registered `paramsSchema` describes the agent-facing parameter
+      // list only. Enforced here rather than worker-side because the
+      // validator never crosses the boundary — `buildConfigure` ships
+      // names, not schemas.
+      const base =
+        reg.wantsContext === true
+          ? (...a: unknown[]): unknown =>
+              fn(...a, makeHostFnContext({ outputs, signal: ctx.signal }))
+          : fn
+      const guarded = enforceParamsSchema(base, reg.paramsSchema, method)
+      return await runWithCapture({ outputs, passConsole: false }, async () =>
+        (guarded as (...a: unknown[]) => unknown)(...args),
+      )
     }
     case 'namespace': {
       if (policy === null) {

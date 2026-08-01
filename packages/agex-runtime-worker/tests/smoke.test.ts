@@ -829,6 +829,54 @@ describe('workerRuntime — fn / namespace bridge', () => {
     expect(counter).toBe(3)
   })
 
+  // `paramsSchema` is enforced host-side at the RPC dispatch site —
+  // the validator never crosses to the worker realm (`buildConfigure`
+  // ships names, not schemas). The helper itself is unit-tested in
+  // agex-ts's `params-schema.test.ts`; these two pin the worker wiring.
+  const numbersOnly = {
+    '~standard': {
+      version: 1 as const,
+      vendor: 'test',
+      validate: (value: unknown) => {
+        const args = value as unknown[]
+        const bad = args.findIndex((a) => typeof a !== 'number')
+        return bad >= 0 ? { issues: [{ message: `arg ${bad} must be a number` }] } : { value: args }
+      },
+    },
+  } as NonNullable<RegisteredFn['paramsSchema']>
+
+  it('paramsSchema passes valid args through to the host fn', async () => {
+    const rt = runtime()
+    const reg: RegisteredFn = {
+      kind: 'fn',
+      name: 'addUp',
+      paramsSchema: numbersOnly,
+      fn: (...args: unknown[]) => (args[0] as number) + (args[1] as number),
+    }
+    await rt.init({ ...EMPTY_POLICY, fns: new Map([['addUp', reg]]) })
+    const result = await rt.execute('taskSuccess(await addUp(2, 3))', makeCtx())
+    expect(result.outcome).toEqual({ kind: 'success', value: 5 })
+  })
+
+  it('paramsSchema rejects bad args before the host fn runs', async () => {
+    let called = false
+    const rt = runtime()
+    const reg: RegisteredFn = {
+      kind: 'fn',
+      name: 'addUp',
+      paramsSchema: numbersOnly,
+      fn: (...args: unknown[]) => {
+        called = true
+        return args[0]
+      },
+    }
+    await rt.init({ ...EMPTY_POLICY, fns: new Map([['addUp', reg]]) })
+    const result = await rt.execute('taskSuccess(await addUp(2, "three"))', makeCtx())
+    expect(result.outcome).toEqual({ kind: 'continue' })
+    expect(result.error?.message).toMatch(/params validation failed/)
+    expect(called).toBe(false)
+  })
+
   // Implicit (ALS-based) host-fn console capture works on Node-host
   // only; browser-host (no `node:async_hooks`) requires the explicit
   // `ctx.console` path. The Node-host implicit case is exercised in

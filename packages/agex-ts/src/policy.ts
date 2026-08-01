@@ -212,13 +212,30 @@ export class PolicyBuilder {
     }
   }
 
-  /** Hash-style fingerprint of the current policy. Cheap to compute;
-   *  any registration mutation changes the value. The agent uses
-   *  this to invalidate cached primer/dependency snapshots. */
+  /** Hash-style fingerprint of the current policy, for invalidating
+   *  cached primer / dependency snapshots.
+   *
+   *  Covers the agent-visible *configuration* of each registration —
+   *  name, description, filters, url/export, flags — not just the set
+   *  of names. Registration is add-only (re-registering a name throws,
+   *  and nothing removes), so a name-and-count scheme would already
+   *  catch every mutation of a single builder over time. The reason to
+   *  hash config is comparison *across* policies: two agents
+   *  registering the same names with different descriptions render
+   *  different primers, and `Agent.fingerprint` is public precisely so
+   *  a host can decide whether a cached snapshot still applies.
+   *
+   *  Live JS references (`fn`, `cls`, `target`, terminal handlers)
+   *  can't be hashed meaningfully, so they're reduced to a presence
+   *  marker. The one difference this can't see is two policies whose
+   *  configs match but whose function bodies differ — which by
+   *  definition doesn't alter the rendered surface. */
   fingerprint(): string {
     const parts: string[] = []
     for (const m of [this.#fns, this.#classes, this.#namespaces, this.#skills, this.#terminals]) {
-      for (const k of [...m.keys()].sort()) parts.push(`${k}@${m.size}`)
+      for (const k of [...m.keys()].sort()) {
+        parts.push(`${k}:${stableConfig(m.get(k))}`)
+      }
     }
     return parts.join('|')
   }
@@ -424,6 +441,37 @@ function matchesFilter(name: string, filter: MemberFilter): boolean {
     if (termishGlobMatch(f, name)) return true
   }
   return false
+}
+
+/** Serialize a registration record's config for `fingerprint()`.
+ *
+ *  Key order is normalized so an equivalent record always produces the
+ *  same string. Non-serializable values (functions, class
+ *  constructors, namespace targets, schemas) collapse to a presence
+ *  marker — see `fingerprint()` for why that's the right granularity.
+ *  A `MemberFilter` may itself be a predicate function, which lands in
+ *  the same bucket. */
+function stableConfig(reg: object | undefined): string {
+  if (reg === undefined) return '∅'
+  const parts: string[] = []
+  for (const key of Object.keys(reg).sort()) {
+    const value = (reg as Record<string, unknown>)[key]
+    parts.push(`${key}=${stableValue(value)}`)
+  }
+  return parts.join(',')
+}
+
+function stableValue(value: unknown): string {
+  if (typeof value === 'function') return 'fn'
+  if (value === null || value === undefined) return String(value)
+  if (Array.isArray(value)) return `[${value.map(stableValue).join(',')}]`
+  if (typeof value === 'object') {
+    const inner = Object.keys(value as object)
+      .sort()
+      .map((k) => `${k}=${stableValue((value as Record<string, unknown>)[k])}`)
+    return `{${inner.join(',')}}`
+  }
+  return String(value)
 }
 
 /** Strip keys whose value is `undefined`. With `exactOptionalPropertyTypes`,

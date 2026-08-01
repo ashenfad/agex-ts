@@ -48,7 +48,7 @@ export interface SystemMessageInputs {
   readonly runtimeAddendum?: string
   /** When true, append the `spawn` (sub-tasks) section. Set by the task
    *  loop only for spawn-enabled top-level runs, so the primer never
-   *  teaches a `spawn` the agent can't call. See `docs/roadmap/spawn.md`. */
+   *  teaches a `spawn` the agent can't call. See `docs/api/agent.md § Spawn`. */
   readonly spawnEnabled?: boolean
   /** When true, this run is an ephemeral sub-task clone (a `spawn`
    *  child). Appends a short note setting its expectations: it has its

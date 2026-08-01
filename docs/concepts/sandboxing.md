@@ -6,9 +6,15 @@ The agent's action surface is TypeScript code emitted by the LLM. agex-ts runs t
 
 ```ts
 interface RuntimeAdapter {
-  init(policy: Policy): Promise<void>
+  init(policy: Policy, opts?: RuntimeInitOptions): Promise<void>
   execute(code: string, ctx: ExecuteContext): Promise<ExecResult>
   dispose(): Promise<void>
+  /** Text appended to the built-in primer, when the runtime's
+   *  configuration is worth telling the agent about. */
+  primerAddendum?(): string | undefined
+  /** Whether this runtime injects `ExecuteContext.spawn`. The task
+   *  loop only builds the capability and teaches it when true. */
+  injectsSpawn?: boolean
 }
 ```
 
@@ -115,7 +121,7 @@ agex-ts is honest about what's outside its scope:
 - **Side-channel leaks.** A worker that knows your registration policy is a worker that's seen your registration policy. Don't ship secrets in the policy.
 - **Worker-internal crashes.** A throw inside the worker propagates as `error` on the result; persistent corrupting state would have to be deliberate. The next emission spawns a fresh worker after a kill.
 
-For stronger isolation, the natural next step would be process-level (Node `worker_threads` with permissions, or a separate process). The current package is browser-focused; Node `worker_threads` is on the [roadmap](https://github.com/ashenfad/agex-ts/blob/main/roadmap.md).
+For stronger isolation, the natural next step would be OS-level (a separate process, or a container). `@agex-ts/runtime-worker` covers both JS worker targets already — Web Worker in the browser, `worker_threads` on Node, selected by `target` (see [Runtime](../api/runtime.md)) — but neither adds an OS-level boundary beyond the realm split.
 
 ## Implementing your own RuntimeAdapter
 

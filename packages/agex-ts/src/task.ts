@@ -99,7 +99,7 @@ export interface TaskDefinition<I, O> {
 }
 
 /** Host-internal substrate override for a single task run. Empty on the
- *  normal path. `spawn` (see `docs/roadmap/spawn.md`) supplies one to run
+ *  normal path. `spawn` (see `docs/api/agent.md § Spawn`) supplies one to run
  *  an ephemeral clone on throwaway state without touching the parent's
  *  configured per-session substrate. Never agent-reachable. */
 export interface RunContext {

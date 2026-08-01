@@ -2,15 +2,20 @@
  * Chaptering — context compaction triggered by token budget.
  *
  * Mechanism (mirrors agex-py):
- *   - The user registers a chapter task via `agent.chapterTask({...})`.
- *     It's a normal task that runs through the action loop, sees
- *     registered fns/namespaces, and uses the agent's LLM. Contract:
- *     input is a numbered task index (string); output is `Chapter[]`
- *     where each chapter has 1-based inclusive `start`/`end`
- *     positions into that index.
- *   - After each `ActionEvent`, the parent task's loop calls
- *     `shouldTriggerChaptering`. If it trips and a chapter task is
- *     registered, `runChaptering` builds the index, invokes the
+ *   - The chapter task is auto-registered by the `Agent` constructor
+ *     when `chapteringTrigger` is set — the embedder opts in via that
+ *     option rather than registering a task themselves. It's a normal
+ *     task that runs through the action loop, sees registered
+ *     fns/namespaces, and uses the agent's LLM. Contract: input is a
+ *     numbered task index (string); output is `Chapter[]` where each
+ *     chapter has 1-based inclusive `start`/`end` positions into that
+ *     index.
+ *   - At each *task boundary* (success / fail), the loop calls
+ *     `maybeFireBoundaryChaptering`, which consults
+ *     `shouldTriggerChaptering`. Firing mid-task isn't possible —
+ *     chapters fold whole completed tasks, so a long-running single
+ *     task has no completable boundary to compact. If it trips,
+ *     `runChaptering` builds the index, invokes the
  *     chapter task **in the parent's session** (so the chapter task's
  *     LLM sees the parent's full conversation history rendered as
  *     turns), and for each returned `Chapter`:

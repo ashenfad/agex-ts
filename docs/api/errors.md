@@ -129,7 +129,9 @@ class TransientError extends Error {
 }
 ```
 
-Used by provider clients to distinguish failures that should be retried (`TransientError` — network blip, 429) from ones that shouldn't (`FatalError` — auth failure, malformed request). Provider-internal — embedders typically don't construct these directly.
+Distinguish failures worth retrying (`TransientError` — network blip, 429) from ones that aren't (`FatalError` — auth failure, malformed request).
+
+These are an **extension point, not a path the bundled providers take**: `@agex-ts/anthropic`, `@agex-ts/openai` and `@agex-ts/gemini` classify retryable failures with `isTransientNetworkError` (exported from `agex-ts/providers`) and re-throw the original error rather than wrapping it. Nothing in agex-ts throws either class today. They're exported for embedders writing their own `LLMClient` who want a typed retry signal — `TransientError`'s optional `retryAfterMs` is the hint a custom client can carry.
 
 ## `AgentError`
 

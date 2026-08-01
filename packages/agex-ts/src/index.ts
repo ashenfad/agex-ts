@@ -18,7 +18,10 @@ export {
   createAgent,
   type FnRegistration,
   type NsRegistration,
+  type ReconfigurableOptions,
+  type SkillRegistration,
   type TerminalRegistration,
+  type UrlSpec,
 } from './agent'
 export { shouldTriggerChaptering } from './chaptering'
 export {

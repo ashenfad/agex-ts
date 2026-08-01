@@ -56,13 +56,6 @@ describe('EventLog — add + iter', () => {
   })
 })
 
-describe('EventLog — at()', () => {
-  it('returns null on a non-versioned backend (Live)', async () => {
-    const log = new EventLogImpl(new Live())
-    expect(await log.at('any-hash')).toBeNull()
-  })
-})
-
 describe('EventLog — commitHash stamping', () => {
   // Mirrors agex-py's `add_event_to_log` (state/log.py:47-57): on a
   // versioned backend, every added event gets `commitHash` set to the

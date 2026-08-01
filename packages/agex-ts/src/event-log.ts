@@ -57,9 +57,11 @@ export class EventLogImpl implements EventLog {
 
   async add(event: AgentEvent): Promise<string> {
     // The read-modify-write of the index isn't atomic. Safe under the
-    // v1 contract — the action loop is sequential within a session,
-    // and the chapter task runs in a child session — so two `add()`
-    // calls on the same EventLogImpl never overlap. If we ever permit
+    // v1 contract because the action loop is sequential within a
+    // session. Note the chapter task runs in the PARENT's session
+    // (not a child one) and shares this EventLogImpl — it's
+    // non-overlapping only because the parent awaits it to completion
+    // at a task boundary before continuing. If we ever permit
     // concurrent tasks per session, this needs a CAS loop or an index
     // mutex. Note also: `set` is sync per `StateBackend` (writes go to
     // the kvgit Staged buffer; transactions only fire on commit), so
@@ -86,15 +88,6 @@ export class EventLogImpl implements EventLog {
   async byKey(stateKey: string): Promise<AgentEvent | null> {
     const v = await this.#state.get<AgentEvent>(stateKey)
     return v ?? null
-  }
-
-  async at(commitHash: string): Promise<EventLog | null> {
-    if (!isVersioned(this.#state)) return null
-    // Time-travel via kvgit checkout is a future enhancement — the
-    // surface is here so callers can probe with `await log.at(...)
-    // !== null` to detect support without crashing. v1 returns null.
-    void commitHash
-    return null
   }
 
   /** Read the index of active event refs in chronological order.

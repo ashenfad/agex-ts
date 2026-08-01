@@ -54,6 +54,7 @@ agex-ts is a small monorepo. Pick what you need:
 | `@agex-ts/anthropic` | Anthropic provider (`Anthropic`). |
 | `@agex-ts/openai` | OpenAI provider (`OpenAI`). |
 | `@agex-ts/gemini` | Gemini provider (`Gemini`). |
+| `@agex-ts/git` | Agent-view `git` for `terminal_action` — branches / commits / diff / merge over the agent's VFS. Opt-in via `registerGit(agent)`. |
 | `@agex-ts/kvgit` | Versioned KV store powering state. Standalone-usable. |
 | `@agex-ts/termish` | Async filesystem protocol + parser/interpreter for `terminal_action`. Standalone-usable. |
 

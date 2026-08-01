@@ -49,8 +49,9 @@
  *
  * **Filtering:** the chapter task's own bookkeeping events
  * (`taskStart` with `taskName === '__chapter__'` and its closing
- * outcome) are filtered from both the LLM render path (Filter A in
- * `renderEvents`) and the chaptering index builder (Filter B here).
+ * outcome) are filtered from both the LLM render path
+ * (`closedChapterScopes`, used by `renderEvents`) and the chaptering
+ * index builder (`allChapterScopes`, here).
  * They stay in the log for UI / undo. This avoids the summary text
  * being duplicated (once in the ChapterEvent, again in the chapter
  * task's emitted code) and keeps future chapter tasks from seeing
@@ -67,7 +68,7 @@ import type { AgentEvent, Chapter, ChapterEvent } from './types'
 export const CHAPTER_TASK_NAME = '__chapter__'
 
 /** Default primer attached to chapter tasks unless the embedder
- *  overrides via `agent.chapterTask({ primer })`. Adapted from
+ *  overrides via `AgentOptions.chapterPrimer`. Adapted from
  *  agex-py's `CHAPTER_TASK_PRIMER` for our boundary-based index.
  *
  *  Key bits the LLM needs to know:
@@ -173,15 +174,17 @@ export function markChapteringFired(log: EventLogImpl, actionTimestamp: string):
 }
 
 /** Recursion guard — chaptering doesn't fire while its own chapter
- *  task is executing. WeakSet so finished agents don't leak. */
+ *  task is executing.
+ *
+ *  The chapter task runs through the normal loop in the parent's
+ *  session, so it reaches the same task-boundary trigger on its way
+ *  out. `runChaptering` checks this set on entry and bails, which is
+ *  what stops the recursion; the loop itself doesn't need to know.
+ *
+ *  WeakSet so finished agents don't leak. Keyed by `Agent` rather
+ *  than by session, so chaptering in one session currently suppresses
+ *  it in another on the same agent — see the note in `runChaptering`. */
 const chapteringInFlight = new WeakSet<Agent>()
-
-/** Returns true if the agent is currently inside a chapter-task run.
- *  The action loop checks this to skip the chaptering trigger while
- *  the chapter task itself is producing ActionEvents. */
-export function isChapteringInFlight(agent: Agent): boolean {
-  return chapteringInFlight.has(agent)
-}
 
 /** Run the registered chapter task and apply each returned `Chapter`
  *  to the parent log via `replaceRange`. No-op if no chapter task is
@@ -194,7 +197,6 @@ export function isChapteringInFlight(agent: Agent): boolean {
  *  success). The chaptering machinery handles writing to the log
  *  itself — `notify` is purely for the live event stream. */
 export async function runChaptering(
-  parentEvents: ReadonlyArray<AgentEvent>,
   parentEventLog: EventLogImpl,
   agent: Agent,
   parentSession: string,
@@ -203,16 +205,23 @@ export async function runChaptering(
 ): Promise<number> {
   const chapterTask = agent.getChapterTask()
   if (chapterTask === undefined) return 0
+  // Bailing here is what prevents recursion: the chapter task runs
+  // the normal loop in this same session and hits the boundary
+  // trigger on its way out.
   if (chapteringInFlight.has(agent)) return 0
 
-  // Snapshot the index before we run the chapter task — chapter
-  // positions resolve against this exact ordering.
-  const refsAtTrigger = await parentEventLog.refs()
+  // One aligned read of the log, taken before the chapter task runs.
+  // Boundary positions index into `parentEvents`; the fold resolves
+  // them against `refsAtTrigger` at the same positions, so the two
+  // must come from a single snapshot — see `EventLogImpl.entries`.
+  const snapshot = await parentEventLog.entries()
+  const parentEvents = snapshot.map((e) => e.event)
+  const refsAtTrigger = snapshot.map((e) => e.ref)
 
   // Build the boundary-based index. Each boundary entry maps to a
   // contiguous range of underlying log positions; the chapter task
   // picks boundary positions and we fold the corresponding log range.
-  const { text: indexText, ranges } = buildBoundaryIndex(parentEvents)
+  const { text: indexText, ranges, hasCompletable } = buildBoundaryIndex(parentEvents)
 
   // Skip the chapter task entirely when there's nothing safe to
   // fold. The trigger fires *during* a task — its taskStart is one
@@ -222,17 +231,15 @@ export async function runChaptering(
   // task: another completed task or a prior ChapterEvent. Invoking
   // the chapter task without one wastes an LLM call (it'd return
   // `[]`) and pollutes the parent log with empty chaptering
-  // bookkeeping that Filter A would then filter out anyway.
-  if (!hasCompletableBoundary(parentEvents, ranges)) {
-    return 0
-  }
+  // bookkeeping the renderer would then filter out anyway.
+  if (!hasCompletable) return 0
 
   chapteringInFlight.add(agent)
   let chapters: ReadonlyArray<Chapter>
   try {
     // Run the chapter task in the parent's session. Its loop will
     // render the parent's full log as conversation history (the
-    // open chapter scope is not filtered — see Filter A) so the
+    // open chapter scope is not filtered — see `closedChapterScopes`) so the
     // LLM has actual context to reflect on. The numbered index is
     // a navigational aid pointing at boundary positions.
     const raw = await chapterTask(indexText, {
@@ -305,41 +312,49 @@ export async function runChaptering(
 // Filter helpers — also used by the renderer
 // ---------------------------------------------------------------------------
 
-/** Walk events and mark which indices fall inside a `__chapter__`
- *  task scope.
+/** Indices inside a **closed** `__chapter__` task scope — the
+ *  renderer's filter.
  *
- *  Two callers, two contracts — controlled by `includeOpen`:
+ *  A currently-running chapter task's own events stay unmarked, which
+ *  is how its `renderEvents(...)` call sees its own taskStart prompt
+ *  and prior turns. Once it closes (success / fail / cancelled), the
+ *  parent's next render skips the now-closed scope.
  *
- *  - **Renderer (Filter A, `includeOpen=false`, default):** mark only
- *    *closed* chapter scopes. The currently-running chapter task's
- *    own events stay unmarked so its loop's `renderEvents(...)` call
- *    can see its own taskStart prompt and any prior turns. Once the
- *    chapter task closes (success / fail / cancelled), the parent's
- *    next render skips the now-closed scope.
+ *  Exported so `renderEvents` gets this without duplicating the
+ *  scope-detection walk. */
+export function closedChapterScopes(events: ReadonlyArray<AgentEvent>): ReadonlySet<number> {
+  return walkChapterScopes(events, false)
+}
+
+/** Indices inside **any** `__chapter__` task scope, open or closed —
+ *  the chaptering index builder's filter.
  *
- *  - **Index builder (Filter B, `includeOpen=true`):** mark events
- *    inside *both* open and closed chapter scopes. The boundary
- *    index handed to the chapter task should never enumerate the
- *    chapter task's own (in-progress) bookkeeping as a foldable
- *    boundary — the chapter task can't chapter itself.
+ *  The boundary index handed to the chapter task must never enumerate
+ *  the chapter task's own in-progress bookkeeping as a foldable
+ *  boundary: a chapter task can't chapter itself. Also applied when
+ *  scanning *inside* a boundary range, since ranges absorb trailing
+ *  filtered events (see `buildBoundaryIndex`). */
+export function allChapterScopes(events: ReadonlyArray<AgentEvent>): ReadonlySet<number> {
+  return walkChapterScopes(events, true)
+}
+
+/** Shared walk behind the two filters above.
  *
- *  Implementation: stack-based scope tracking with non-chapter
- *  task frames recorded too (so close events pair with the right
- *  frame inside nested cases). Closed scopes are marked via a
- *  range fill at close time (`for j in [start, close]`). Open-scope
- *  marking happens *after* the stack update for the current event,
- *  so the chapter taskStart that opens the scope gets marked when
- *  `includeOpen` is true (its push has just happened, putting it in
- *  range). For close events, the pop happens first, then the close
- *  branch's range-fill marks the close index — `inChapterRange()`
- *  is false post-pop, so the open-scope mark below correctly
- *  declines to re-mark it.
+ *  Stack-based scope tracking, with non-chapter task frames recorded
+ *  too so close events pair with the right frame in nested cases.
+ *  Closed scopes are marked by a range fill at close time
+ *  (`for j in [start, close]`).
  *
- *  Exported so `renderEvents` can apply the renderer-mode filter
- *  without duplicating the boundary-detection logic. */
-export function buildChapterScopeFilter(
+ *  Ordering is load-bearing: the open-scope mark happens *after* the
+ *  stack update for the current event, so a chapter `taskStart` gets
+ *  marked under `includeOpen` (its push has just landed, putting it
+ *  in range). On a close event the pop happens first, so
+ *  `inChapterRange()` is already false and the open-scope branch
+ *  correctly declines to re-mark the index the range fill just
+ *  covered. */
+function walkChapterScopes(
   events: ReadonlyArray<AgentEvent>,
-  includeOpen = false,
+  includeOpen: boolean,
 ): ReadonlySet<number> {
   const skip = new Set<number>()
   type Frame = { kind: 'chapter'; start: number } | { kind: 'other' }
@@ -365,8 +380,8 @@ export function buildChapterScopeFilter(
     }
 
     // Open-scope marking — only when the caller wants in-progress
-    // chapter scopes filtered too (Filter B). For the renderer
-    // (Filter A), this stays off so the running chapter task can
+    // chapter scopes filtered too (`allChapterScopes`). For the
+    // renderer, this stays off so the running chapter task can
     // see its own loop history.
     if (includeOpen && inChapterRange()) skip.add(i)
   }
@@ -413,17 +428,26 @@ interface BoundaryRange {
  *  closed chapter scope's terminator inside an in-progress parent's
  *  range doesn't get misread as the parent's own outcome. The first
  *  match becomes the rendered outcome; absence marks the task
- *  `(in progress)`. */
+ *  `(in progress)`.
+ *
+ *  `hasCompletable` rides along from the same scan rather than being
+ *  recomputed: it's true when at least one boundary is foldable — a
+ *  ChapterEvent (always) or a task whose range contains a closing
+ *  outcome. The running task isn't completable, since its range has
+ *  no terminator yet. Deriving it here means the scope filter is
+ *  computed once per run and the two consumers can't drift apart on
+ *  which indices they skip. */
 /** Exported for unit testing. Not part of the public API surface;
  *  consumers should drive chaptering through `runChaptering`. */
 export function buildBoundaryIndex(events: ReadonlyArray<AgentEvent>): {
   text: string
   ranges: BoundaryRange[]
+  hasCompletable: boolean
 } {
-  // Filter B — exclude *both* open and closed `__chapter__` scopes.
-  // The currently-running chapter task (if any) must not appear in
-  // the index; it can't chapter itself.
-  const skip = buildChapterScopeFilter(events, true)
+  // Exclude *both* open and closed `__chapter__` scopes. The
+  // currently-running chapter task (if any) must not appear in the
+  // index; it can't chapter itself.
+  const skip = allChapterScopes(events)
 
   // First pass: locate boundary indices, in order.
   const boundaryIndices: number[] = []
@@ -439,77 +463,56 @@ export function buildBoundaryIndex(events: ReadonlyArray<AgentEvent>): {
     end: i + 1 < boundaryIndices.length ? (boundaryIndices[i + 1] as number) : events.length,
   }))
 
-  // Third pass: render index lines.
+  // Third pass: render index lines, tracking foldability as we go.
   const lines: string[] = []
+  let hasCompletable = false
   for (let i = 0; i < boundaryIndices.length; i++) {
     const idx = boundaryIndices[i] as number
     const range = ranges[i] as BoundaryRange
     const e = events[idx] as AgentEvent
-    const label = describeBoundary(e, events, range, skip)
-    lines.push(`[${i + 1}] ${label}`)
+    const outcome = findOutcome(events, range, skip)
+    // A ChapterEvent is always foldable; a task is foldable once its
+    // range holds a terminator.
+    if (e.type === 'chapter' || outcome !== null) hasCompletable = true
+    lines.push(`[${i + 1}] ${describeBoundary(e, outcome)}`)
   }
 
-  return { text: lines.join('\n'), ranges }
+  return { text: lines.join('\n'), ranges, hasCompletable }
 }
 
-/** True if at least one boundary in `ranges` represents foldable
- *  content: a ChapterEvent (always completable) or a TaskStartEvent
- *  whose range contains a closing outcome event (success / fail /
- *  cancelled). The currently-running task is *not* completable — its
- *  boundary range has no closing event yet.
+/** The closing event for a boundary's range, or `null` while the task
+ *  is still running.
  *
- *  Important: scan past `__chapter__`-scoped events when looking for
- *  the parent's terminator. Boundary ranges absorb trailing filtered
- *  events (see `buildBoundaryIndex`), so a chapter task that ran and
- *  closed *inside* a still-running parent's range would otherwise be
- *  misread as the parent's own completion — the chapter task's
- *  `success` would land in the loop and we'd return `true` for an
- *  in-progress parent. Apply the same `includeOpen=true` filter the
- *  index builder uses to skip those indices. */
-/** Exported for unit testing. Not part of the public API surface. */
-export function hasCompletableBoundary(
-  events: ReadonlyArray<AgentEvent>,
-  ranges: ReadonlyArray<BoundaryRange>,
-): boolean {
-  const skip = buildChapterScopeFilter(events, true)
-  for (const r of ranges) {
-    const head = events[r.start] as AgentEvent
-    if (head.type === 'chapter') return true
-    for (let j = r.start + 1; j < r.end; j++) {
-      if (skip.has(j)) continue
-      const ev = events[j] as AgentEvent
-      if (ev.type === 'success' || ev.type === 'fail' || ev.type === 'cancelled') {
-        return true
-      }
-    }
-  }
-  return false
-}
-
-function describeBoundary(
-  boundary: AgentEvent,
+ *  Skips `__chapter__`-scoped indices. Boundary ranges absorb trailing
+ *  filtered events, so a chapter task that ran and closed *inside* a
+ *  still-running parent's range would otherwise be misread as the
+ *  parent's own terminator. */
+function findOutcome(
   events: ReadonlyArray<AgentEvent>,
   range: BoundaryRange,
   skip: ReadonlySet<number>,
-): string {
+): AgentEvent | null {
+  for (let j = range.start + 1; j < range.end; j++) {
+    if (skip.has(j)) continue
+    const ev = events[j] as AgentEvent
+    if (ev.type === 'success' || ev.type === 'fail' || ev.type === 'cancelled') return ev
+  }
+  return null
+}
+
+function describeBoundary(boundary: AgentEvent, outcome: AgentEvent | null): string {
   if (boundary.type === 'chapter') {
     return `chapter "${truncate(boundary.name, 60)}" — ${truncate(boundary.message, 80)}`
   }
   if (boundary.type !== 'taskStart') return 'unknown'
-  // taskStart: find the closing event in the range, if any.
-  const taskName = boundary.taskName
   const message = boundary.message ?? ''
-  const head = `task "${truncate(taskName, 50)}"`
+  const head = `task "${truncate(boundary.taskName, 50)}"`
   const trailer = message.length > 0 ? `: ${truncate(message.replace(/\n/g, ' '), 80)}` : ''
 
-  for (let j = range.start + 1; j < range.end; j++) {
-    if (skip.has(j)) continue
-    const ev = events[j] as AgentEvent
-    if (ev.type === 'success') return `${head}${trailer} → success`
-    if (ev.type === 'fail') return `${head}${trailer} → fail "${truncate(ev.message, 60)}"`
-    if (ev.type === 'cancelled') return `${head}${trailer} → cancelled`
-  }
-  return `${head}${trailer} (in progress)`
+  if (outcome === null) return `${head}${trailer} (in progress)`
+  if (outcome.type === 'success') return `${head}${trailer} → success`
+  if (outcome.type === 'fail') return `${head}${trailer} → fail "${truncate(outcome.message, 60)}"`
+  return `${head}${trailer} → cancelled`
 }
 
 function truncate(s: string, max: number): string {

@@ -26,7 +26,7 @@
  * must match what the provider has seen before.
  */
 
-import { buildChapterScopeFilter } from '../chaptering'
+import { closedChapterScopes } from '../chaptering'
 import { formatErrorPart } from '../output-part'
 import type {
   ActionEvent,
@@ -161,7 +161,7 @@ export interface NeutralTurn {
 export function renderEvents(events: ReadonlyArray<AgentEvent>): NeutralTurn[] {
   const turns: NeutralTurn[] = []
 
-  // Filter A: skip events inside *closed* `__chapter__` task scopes.
+  // Skip events inside *closed* `__chapter__` task scopes.
   // The chapter task's bookkeeping (taskStart, action with the
   // `taskSuccess([Chapter(...)])` code, success) sits in the parent's
   // log alongside everything else, but rendering it to the LLM would
@@ -171,7 +171,7 @@ export function renderEvents(events: ReadonlyArray<AgentEvent>): NeutralTurn[] {
   // (the chapter task currently running, mid-loop) are intentionally
   // *not* filtered — that's how the chapter task's own LLM call sees
   // its own user prompt (the TaskStartEvent) plus any prior turns.
-  const skip = buildChapterScopeFilter(events)
+  const skip = closedChapterScopes(events)
 
   // Per-action state, reset each time a new ActionEvent arrives.
   let toolUseOrder: { id: string; toolName: ToolName }[] = []

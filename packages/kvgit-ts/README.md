@@ -50,6 +50,65 @@ windows. Neither pass reclaims blobs belonging to an orphan whose
 keyset is unreadable — nothing scans blobs by namespace, so a blob is
 only ever found through the keyset entry that points at it.
 
+## HEAD recovery
+
+A branch HEAD lives in one key, `__branch_head__<branch>`, and a backup
+of the value it held before its current one lives in
+`__branch_head_prev__<branch>`. If HEAD is unreadable — truncated
+bytes, a hash whose commit metadata is gone — head resolution falls
+back in tiers: the backup first, then the optional
+`recoverFromCorruptHead` callback you can pass to `VersionedKV.open`,
+then nothing. That third tier is caller-supplied here (kvgit-py's
+built-in commit scan is not ported), so out of the box a branch
+recovers only as far back as its backup.
+
+Two rules govern this.
+
+**Reads never write.** Resolving a damaged branch on a read path —
+opening a handle, `peek`, `switchBranch`, `refresh`, the mark phase of
+a sweep — recovers in memory and leaves the store exactly as it found
+it. A read-only consumer can therefore read a damaged store, two
+concurrent readers cannot race each other repairing the same branch to
+different answers, and the damage stays visible instead of being
+quietly papered over. The cost is that the fallback runs on every read
+until someone repairs it.
+
+Two things persist a recovery:
+
+- `repairHead(store, branch)` — or `vk.repairHead()` — the explicit
+  maintenance call, and the one to reach for. It returns the commit
+  HEAD names when it returns, which is not necessarily the one it
+  recovered: if another writer repaired, advanced or deleted the
+  branch in between, the answer describes the store rather than the
+  attempt. `null` means the branch does not exist or nothing was
+  recoverable.
+- A successful write. A CAS against a damaged HEAD always fails, which
+  would leave the branch permanently unwritable, so a writer that
+  finds HEAD unresolvable replaces it with the recovered commit and
+  retries once. The replacement is itself a CAS against the exact
+  damaged bytes, so two writers racing it cannot both win; a HEAD that
+  merely *moved* — an ordinary lost race — is never touched, and a
+  HEAD that is *absent* is never recreated, since that is the
+  deleted-branch resurrection `deleteBranch` drops the backup to
+  prevent.
+
+**The backup only ever names a commit HEAD really held.**
+`__branch_head_prev__` is written after a HEAD swap succeeds, never
+before. Written first it would land whether or not the swap did, so a
+writer losing a race would leave its own stale value as the branch's
+recovery target — and where that value came from a recovery tier, a
+commit that was never HEAD at all, which recovery would then graft
+onto the branch as a lineage it never had. It does **not** guarantee a
+backup exactly one commit back. The swap and the backup write are two
+steps, and anything that separates them — a crash, or simply losing
+the CPU while another writer completes both of its own — lets the
+older writer's backup land last, leaving HEAD two or more commits
+ahead of it. Recovery then skips whatever came between. That is the
+deliberate trade: recovering to an older real HEAD loses commits,
+recovering to a commit that was never HEAD loses the branch. No
+backend offers a CAS spanning two keys, so the two writes cannot be
+made one.
+
 ## Sync & remotes
 
 kvgit histories can be replicated between stores (cross-device session

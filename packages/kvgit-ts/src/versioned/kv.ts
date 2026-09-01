@@ -94,8 +94,19 @@ async function resolveHead(
     }
   }
 
-  // Try prev HEAD.
-  const prevBytes = await store.get(BRANCH_HEAD_PREV(branch))
+  // HEAD is present but unusable — try the backup.
+  //
+  // Gated on HEAD *existing*, the same condition the injected tier
+  // below already applies. An absent HEAD is not damage, it means the
+  // branch is gone: `deleteBranch` removes the key. A backup that
+  // outlives it — a writer descheduled between its CAS and its backup
+  // write, resuming after a concurrent delete and recreating only the
+  // backup — must not bring the branch back through this tier.
+  //
+  // Nothing legitimate needs the ungated form: `casHead` writes the
+  // backup only after a successful CAS, so HEAD exists whenever the
+  // backup means anything.
+  const prevBytes = headBytes === null ? null : await store.get(BRANCH_HEAD_PREV(branch))
   if (prevBytes !== null) {
     const commitHash = safeLoads(prevBytes)
     if (typeof commitHash === 'string' && (await store.get(COMMIT_ROOT(commitHash))) !== null) {

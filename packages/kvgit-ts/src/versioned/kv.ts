@@ -13,6 +13,12 @@
  *   `kvgit:keyset:<node_hash>`       — HAMT node bytes (via Keyset)
  *   `<commit_hash>:<user_key>`       — blob value bytes
  *
+ * `__branch_head_prev__` is written only after a HEAD swap succeeds, so
+ * it always names a commit `__branch_head__` really held. Recovery
+ * reads it, so a value that was never HEAD would graft onto the branch
+ * a lineage it never had. See `casHead` for what that does and does
+ * not guarantee.
+ *
  * The keyset is a content-addressable HAMT (`Keyset` over `Hamt`) so
  * unchanged subtrees are shared across commits by hash equality. A
  * single-key change writes O(log N) new HAMT nodes instead of
@@ -61,7 +67,7 @@ export type CorruptHeadRecoverer = (store: KVStore, branch: string) => Promise<s
  *
  * Tries:
  *   1. `__branch_head__<branch>` — current pointer
- *   2. `__branch_head_prev__<branch>` — backup written before each CAS
+ *   2. `__branch_head_prev__<branch>` — backup written after each CAS
  *   3. `recoverFromCorruptHead` — optional injected fallback (slot-only in v1)
  *
  * If `repair` is true, a recovered HEAD is written back to current.
@@ -389,12 +395,37 @@ export class VersionedKV extends VersionedBase {
     return mergeHash
   }
 
+  /**
+   * Atomically advance the branch HEAD, then back up what it held.
+   *
+   * The prev-HEAD backup is written **after** the swap succeeds, never
+   * before. Written first, it lands whether or not the CAS does, so a
+   * writer that loses the race still leaves its own stale `expected`
+   * as the branch's recovery target — clobbering the winner's backup,
+   * and, when `expected` came from a corrupt-HEAD recovery, naming a
+   * commit that was never HEAD at all. Writing it afterwards makes it
+   * always a value `__branch_head__` really held.
+   *
+   * What this does **not** buy is a backup that is always exactly one
+   * commit back. The swap and the backup write are two steps, and
+   * anything that separates them — a crash, or simply losing the CPU
+   * while another writer completes both of its own — lets the older
+   * writer's backup land last. HEAD then sits two or more commits
+   * ahead of a backup that is still a real former HEAD, and recovery
+   * skips whatever came between.
+   *
+   * So the guarantee is the narrower one: the backup always names a
+   * commit `__branch_head__` really held, never a commit invented by a
+   * losing writer. Recovery may lose more than one commit; it cannot
+   * graft on a lineage the branch never had. `KVStore.cas` takes a
+   * single key and no backend exposes a transaction spanning two, so
+   * HEAD and its backup cannot move in one step.
+   */
   protected async casHead(expected: string, newHead: string): Promise<boolean> {
-    // Save current as prev BEFORE the CAS so a crash mid-write can
-    // be recovered from. The slight cost is one extra write per
-    // commit; the value is durable HEAD recovery.
-    await this.store.set(BRANCH_HEAD_PREV(this.branch), dumps(expected))
-    return this.store.cas(BRANCH_HEAD(this.branch), dumps(newHead), dumps(expected))
+    const expectedBytes = dumps(expected)
+    const won = await this.store.cas(BRANCH_HEAD(this.branch), dumps(newHead), expectedBytes)
+    if (won) await this.store.set(BRANCH_HEAD_PREV(this.branch), expectedBytes)
+    return won
   }
 
   protected async loadKeyset(commitHash: string): Promise<Map<string, string>> {

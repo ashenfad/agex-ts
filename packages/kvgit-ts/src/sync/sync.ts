@@ -134,10 +134,12 @@ export async function pullBranch(
 
   if (await isAncestor(store, localHead, remoteHead)) {
     // Fast-forward, with the same prev-HEAD backup discipline as
-    // VersionedKV's casHead.
-    await store.set(BRANCH_HEAD_PREV(branch), dumps(localHead))
+    // VersionedKV's casHead: the backup lands only after the swap
+    // does, so a pull that loses the race to a local writer cannot
+    // leave its own stale value as the branch's recovery target.
     const ok = await store.cas(BRANCH_HEAD(branch), dumps(remoteHead), dumps(localHead))
     if (!ok) return result('diverged', applied.applied) // local writer race
+    await store.set(BRANCH_HEAD_PREV(branch), dumps(localHead))
     await setSyncHead(store, branch, remoteHead)
     return { ...result('fast-forwarded', applied.applied), localHead: remoteHead }
   }

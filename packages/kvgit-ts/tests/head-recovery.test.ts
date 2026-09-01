@@ -1,0 +1,517 @@
+/**
+ * HEAD backup, recovery, and repair semantics.
+ *
+ * Three contracts live here.
+ *
+ * **prev-HEAD only ever names a commit HEAD really held.**
+ * `__branch_head_prev__<branch>` is the input to `resolveHead`'s
+ * recovery fallback, so what it names decides what a damaged branch
+ * recovers *to*. A value that was never in `__branch_head__<branch>`
+ * hands the branch a lineage it never had. Note the guarantee is not
+ * "exactly one commit back": the swap and the backup write are two
+ * steps, and anything separating them lets an older writer's backup
+ * land last (see the limitation pinned at the bottom of this file).
+ *
+ * **Reading never writes.** Recovery on a read path is in-memory only.
+ * Persisting it is either an explicit `repairHead` call or a side
+ * effect of a write that has to move HEAD anyway.
+ *
+ * **`repairHead` reports the store, not its own attempt.** Its answer
+ * is the commit HEAD names when it returns, even when another writer
+ * moved HEAD underneath it.
+ *
+ * Every race here is a seam, not a sleep. `HookStore` runs a one-shot
+ * callback at a chosen point in a chosen store operation, so "the
+ * winner lands between the loser's commit write and its CAS" is
+ * expressed exactly and repeats identically. The seams are points
+ * every version of the code passes through — a commit's write batch, a
+ * read of the HEAD key — never one that exists only in the buggy
+ * ordering, so a test written against them means the same thing before
+ * and after a fix.
+ */
+
+import { describe, expect, it } from 'vitest'
+import { Memory } from '../src/backends/memory'
+import { ConcurrencyError, VersionedKV, repairHead } from '../src/index'
+import type { CorruptHeadRecoverer } from '../src/index'
+import {
+  BRANCH_HEAD,
+  BRANCH_HEAD_PREFIX,
+  BRANCH_HEAD_PREV,
+  COMMIT_ROOT,
+  dumps,
+  safeLoads,
+} from '../src/versioned/layout'
+
+const enc = new TextEncoder()
+const dec = new TextDecoder()
+const bytes = (s: string): Uint8Array => enc.encode(s)
+const one = (key: string, value: string) => ({ updates: new Map([[key, bytes(value)]]) })
+
+/** Bytes that are not a valid encoded commit hash. */
+const CORRUPT = bytes('')
+const COMMIT_ROOT_PREFIX = COMMIT_ROOT('')
+
+// ---------------------------------------------------------------------------
+// Test seam
+// ---------------------------------------------------------------------------
+
+/**
+ * A `Memory` that records HEAD history and arms one-shot seams.
+ *
+ * `headHistory(branch)` is the ground truth for "was this commit ever
+ * HEAD of that branch": every successful write to a `__branch_head__`
+ * key is appended, whichever store method made it. Assertions about
+ * prev-HEAD compare against this rather than against what the code
+ * under test believes.
+ *
+ * Three seams, each one-shot:
+ *
+ * - `armCommitBatch` fires when a commit's write batch is written —
+ *   after its writer has read HEAD, before it reaches its CAS.
+ * - `armGet` fires after the *nth* read of a key has been served but
+ *   before the caller sees it.
+ * - `armSet` fires before a chosen key is written, so a writer can be
+ *   paused mid-sequence while another completes.
+ */
+class HookStore extends Memory {
+  private readonly history = new Map<string, string[]>()
+  private onCommitBatch: (() => Promise<void>) | null = null
+  private readonly onGet = new Map<string, { fire: () => Promise<void>; nth: number }>()
+  private readonly onSet = new Map<string, () => Promise<void>>()
+
+  /** Every commit `__branch_head__<branch>` has ever held, in order. */
+  headHistory(branch: string): string[] {
+    return this.history.get(branch) ?? []
+  }
+
+  armCommitBatch(fire: () => Promise<void>): void {
+    this.onCommitBatch = fire
+  }
+
+  armGet(key: string, fire: () => Promise<void>, nth = 1): void {
+    this.onGet.set(key, { fire, nth })
+  }
+
+  armSet(key: string, fire: () => Promise<void>): void {
+    this.onSet.set(key, fire)
+  }
+
+  private record(key: string, value: Uint8Array): void {
+    if (!key.startsWith(BRANCH_HEAD_PREFIX)) return
+    const commit = safeLoads(value)
+    if (typeof commit !== 'string') return
+    const branch = key.slice(BRANCH_HEAD_PREFIX.length)
+    const seen = this.history.get(branch)
+    if (seen === undefined) this.history.set(branch, [commit])
+    else seen.push(commit)
+  }
+
+  override async get(key: string): Promise<Uint8Array | null> {
+    const value = await super.get(key)
+    const armed = this.onGet.get(key)
+    if (armed !== undefined) {
+      armed.nth -= 1
+      if (armed.nth <= 0) {
+        this.onGet.delete(key)
+        await armed.fire()
+      }
+    }
+    return value
+  }
+
+  override async set(key: string, value: Uint8Array): Promise<void> {
+    const fire = this.onSet.get(key)
+    if (fire !== undefined) {
+      this.onSet.delete(key)
+      await fire()
+    }
+    await super.set(key, value)
+    this.record(key, value)
+  }
+
+  override async setMany(items: Iterable<readonly [string, Uint8Array]>): Promise<void> {
+    const batch = [...items]
+    if (this.onCommitBatch !== null && batch.some(([k]) => k.startsWith(COMMIT_ROOT_PREFIX))) {
+      const fire = this.onCommitBatch
+      this.onCommitBatch = null
+      await fire()
+    }
+    await super.setMany(batch)
+    for (const [k, v] of batch) this.record(k, v)
+  }
+
+  override async cas(
+    key: string,
+    value: Uint8Array,
+    expected: Uint8Array | null,
+  ): Promise<boolean> {
+    const won = await super.cas(key, value, expected)
+    if (won) this.record(key, value)
+    return won
+  }
+}
+
+/** Read `__branch_head_prev__<branch>` as a commit hash. */
+async function prevHead(store: Memory, branch = 'main'): Promise<unknown> {
+  const raw = await store.get(BRANCH_HEAD_PREV(branch))
+  return raw === null ? null : safeLoads(raw)
+}
+
+/** Read `__branch_head__<branch>` as a commit hash. */
+async function head(store: Memory, branch = 'main'): Promise<unknown> {
+  const raw = await store.get(BRANCH_HEAD(branch))
+  return raw === null ? null : safeLoads(raw)
+}
+
+/** Every key/value in the store, comparable with `toEqual`. */
+async function contents(store: Memory): Promise<Map<string, string>> {
+  const out = new Map<string, string>()
+  for await (const [k, v] of store.items()) out.set(k, dec.decode(v))
+  return out
+}
+
+// ---------------------------------------------------------------------------
+
+describe('prev-HEAD names a commit HEAD really held', () => {
+  it('is not planted with a commit that was never HEAD by a losing writer', async () => {
+    // `casHead`'s `expected` is whatever head resolution returned. On a
+    // branch whose HEAD is corrupt and whose backup is gone, that is
+    // the injected recoverer's answer — a recovery *candidate*, not a
+    // HEAD. Writing it into the backup on the way into a CAS that then
+    // fails makes the candidate durable, and every later read
+    // short-circuits recovery onto a lineage the branch never had.
+    const store = new HookStore()
+    let candidate: string | null = null
+    const recoverer: CorruptHeadRecoverer = async () => candidate
+    const vk = await VersionedKV.open(store, { recoverFromCorruptHead: recoverer })
+    await vk.commit(one('a', '1'))
+
+    // A commit that is never main's HEAD: a branch tip that outlives
+    // its branch, which is what a commit scan would surface.
+    const tmp = (await vk.createBranch('tmp')) as VersionedKV
+    await tmp.commit(one('t', 'tmp-only'))
+    const tmpTip = tmp.currentCommit
+    await vk.deleteBranch('tmp')
+    candidate = tmpTip
+
+    // The damage the recovery path exists for: unreadable HEAD, and no
+    // backup to fall back on.
+    await store.set(BRANCH_HEAD('main'), CORRUPT)
+    await store.remove(BRANCH_HEAD_PREV('main'))
+
+    try {
+      await vk.commit(one('a', '2'))
+    } catch (e) {
+      if (!(e instanceof ConcurrencyError)) throw e
+    }
+
+    const prev = await prevHead(store)
+    const history = store.headHistory('main')
+    expect(
+      history,
+      `prev-HEAD names ${String(prev)}, which was never main's HEAD (history: ${history.join(
+        ', ',
+      )}). It is the deleted branch's tip (${tmpTip}), so recovery would resurrect that branch onto main.`,
+    ).toContain(prev)
+  })
+
+  it('is not overwritten by a losing writer', async () => {
+    // The loser reads HEAD, builds its commit, and only then reaches
+    // the CAS. Two commits land in that window. Writing the backup on
+    // the way *into* the CAS makes the loser's stale value the last
+    // one written, so recovery from here silently drops both of the
+    // winner's commits.
+    const store = new HookStore()
+    const seed = await VersionedKV.open(store)
+    await seed.commit(one('a', '1'))
+
+    const loser = await VersionedKV.open(store)
+    const winner = await VersionedKV.open(store)
+    store.armCommitBatch(async () => {
+      await winner.commit(one('w', '1'))
+      await winner.commit(one('w', '2'))
+    })
+
+    await expect(loser.commit(one('a', '2'))).rejects.toThrow(ConcurrencyError)
+
+    const prev = await prevHead(store)
+    const history = store.headHistory('main')
+    expect(
+      prev,
+      `prev-HEAD is ${String(prev)}, the loser's stale value; the immediately-previous HEAD is ${
+        history[history.length - 2]
+      } (history: ${history.join(', ')})`,
+    ).toBe(history[history.length - 2])
+  })
+
+  it('degrades to an older real HEAD when a crash separates the swap from the backup', async () => {
+    // Writing the backup after the CAS opens a window where HEAD has
+    // advanced but the backup has not. Recovery from that state lands
+    // on the *previous* previous HEAD — one commit further back than
+    // ideal, but a commit that really was HEAD, with real ancestry.
+    // That is the trade this ordering buys; `cas` takes a single key,
+    // so the pair cannot be made atomic.
+    const store = new HookStore()
+    const vk = await VersionedKV.open(store)
+    await vk.commit(one('a', '1'))
+    const first = vk.currentCommit
+    await vk.commit(one('a', '2'))
+    const second = vk.currentCommit
+
+    class Died extends Error {}
+    store.armSet(BRANCH_HEAD_PREV('main'), async () => {
+      throw new Died('the process dies between the swap and the backup')
+    })
+    await expect(vk.commit(one('a', '3'))).rejects.toThrow(Died)
+
+    const third = await head(store)
+    expect(
+      [first, second],
+      'the swap should have landed before the crash — the backup write must not precede it',
+    ).not.toContain(third)
+    expect(await prevHead(store), 'the backup should still hold its pre-crash value').toBe(first)
+
+    // HEAD is then damaged; recovery lands on a real, older HEAD.
+    await store.set(BRANCH_HEAD('main'), CORRUPT)
+    const recovered = await VersionedKV.open(store)
+    expect(recovered.currentCommit).toBe(first)
+    expect(store.headHistory('main')).toContain(first)
+  })
+})
+
+describe('reads never write', () => {
+  it('opening, peeking at and switching to a damaged branch leave the store alone', async () => {
+    // Every read path resolves HEAD. Healing the damage in place makes
+    // an ordinary read a mutation — impossible for a read-only
+    // consumer, and a race between two readers repairing the same
+    // branch to different answers.
+    const store = new Memory()
+    const vk = await VersionedKV.open(store)
+    await vk.commit(one('x', '1'))
+    const dev = (await vk.createBranch('dev')) as VersionedKV
+    await dev.commit(one('d', '1'))
+    const good = dev.currentCommit
+    await dev.commit(one('d', '2'))
+    await store.set(BRANCH_HEAD('dev'), CORRUPT)
+
+    const before = await contents(store)
+
+    const reader = await VersionedKV.open(store, { branch: 'dev' })
+    expect(reader.currentCommit, 'recovery must still happen').toBe(good)
+    expect(await contents(store), 'opening a damaged branch repaired it in place').toEqual(before)
+
+    expect(await vk.peek('d', { branch: 'dev' })).toEqual(bytes('1'))
+    expect(await contents(store), 'peek wrote to the store').toEqual(before)
+
+    await vk.switchBranch('dev')
+    expect(vk.currentCommit).toBe(good)
+    expect(await contents(store), 'switchBranch wrote to the store').toEqual(before)
+
+    await vk.refresh()
+    expect(await contents(store), 'refresh wrote to the store').toEqual(before)
+  })
+
+  it('still lets the write path heal a damaged HEAD', async () => {
+    // A CAS against corrupt HEAD bytes always fails, so with nothing
+    // repairing on read a damaged branch would be permanently
+    // unwritable. The heal moves to the writer, which has to move HEAD
+    // anyway, and is itself a CAS against the exact damaged bytes.
+    const store = new HookStore()
+    const vk = await VersionedKV.open(store)
+    await vk.commit(one('x', '1'))
+    const good = vk.currentCommit
+    await vk.commit(one('x', '2'))
+    await store.set(BRANCH_HEAD('main'), CORRUPT)
+
+    const writer = await VersionedKV.open(store)
+    expect(writer.currentCommit, 'the read should recover').toBe(good)
+    expect(await store.get(BRANCH_HEAD('main')), 'and not persist it').toEqual(CORRUPT)
+
+    const result = await writer.commit(one('x', '3'))
+    expect(result.merged, 'a damaged HEAD must not make a branch read-only').toBe(true)
+    expect(await head(store)).toBe(result.commit)
+
+    const history = store.headHistory('main')
+    expect(history[history.length - 1]).toBe(result.commit)
+    expect(history[history.length - 2], 'the heal is itself a recorded HEAD write').toBe(good)
+    expect(await prevHead(store)).toBe(good)
+  })
+})
+
+describe('repairHead', () => {
+  it('persists the recovery a read would have made', async () => {
+    const store = new Memory()
+    const vk = await VersionedKV.open(store)
+    await vk.commit(one('x', '1'))
+    const good = vk.currentCommit
+    await vk.commit(one('x', '2'))
+    await store.set(BRANCH_HEAD('main'), CORRUPT)
+
+    expect(await repairHead(store, 'main')).toBe(good)
+    expect(await head(store)).toBe(good)
+    // Idempotent, and a no-op on an already-healthy branch.
+    expect(await repairHead(store, 'main')).toBe(good)
+    expect(await (await VersionedKV.open(store)).repairHead()).toBe(good)
+  })
+
+  it('reports what HEAD names when another writer wins the race', async () => {
+    // The contract is "the commit HEAD now names". When the heal CAS
+    // declines because someone else repaired, advanced or deleted the
+    // branch in between, the recovery candidate is stale, and returning
+    // it hands the caller an *older* commit than the store holds.
+    const store = new HookStore()
+    const vk = await VersionedKV.open(store)
+    await vk.commit(one('k', '1'))
+    await vk.commit(one('k', '2'))
+    const second = vk.currentCommit
+    await store.set(BRANCH_HEAD('main'), CORRUPT) // resolves to the first commit
+
+    // Fire between head resolution's read of HEAD and the heal's, so
+    // the heal CAS finds a HEAD it must not touch and declines.
+    store.armGet(
+      BRANCH_HEAD('main'),
+      async () => {
+        await store.set(BRANCH_HEAD('main'), dumps(second))
+      },
+      2,
+    )
+
+    const returned = await repairHead(store, 'main')
+    const actual = await head(store)
+    expect(actual, 'the other writer should hold HEAD').toBe(second)
+    expect(
+      returned,
+      `repairHead returned ${String(returned)}, but HEAD names ${String(
+        actual,
+      )}; its contract is "the commit HEAD now names", and returning the stale candidate hands the caller an older commit than the store has`,
+    ).toBe(actual)
+  })
+
+  it('is a no-op on a healthy branch that still reports HEAD', async () => {
+    const store = new HookStore()
+    const vk = await VersionedKV.open(store)
+    await vk.commit(one('k', '1'))
+    await vk.commit(one('k', '2'))
+    const expected = vk.currentCommit
+
+    const before = await contents(store)
+    expect(await repairHead(store, 'main')).toBe(expected)
+    expect(await contents(store), 'a healthy branch must not be rewritten').toEqual(before)
+  })
+
+  it('returns null for a missing branch, and for an unrecoverable one', async () => {
+    const store = new Memory()
+    const vk = await VersionedKV.open(store)
+    await vk.commit(one('k', '1'))
+    expect(await repairHead(store, 'no-such-branch')).toBeNull()
+
+    // HEAD is corrupt, the backup is gone, and nothing is injected to
+    // recover with: there is no answer to persist. Recreating the key
+    // for a *deleted* branch is likewise refused — that is the
+    // resurrection `deleteBranch` drops the backup to prevent.
+    await store.set(BRANCH_HEAD('main'), CORRUPT)
+    await store.remove(BRANCH_HEAD_PREV('main'))
+    expect(await repairHead(store, 'main')).toBeNull()
+    expect(await store.get(BRANCH_HEAD('main')), 'nothing was recoverable to write').toEqual(
+      CORRUPT,
+    )
+  })
+})
+
+describe('limitation: the backup is not guaranteed to be one commit back', () => {
+  // This is not a regression guard. It pins what writing the backup
+  // after the swap does *not* buy, so the guarantee cannot be quietly
+  // re-widened: the swap and the backup write are two steps, and a
+  // writer that loses the CPU between them lets its older backup land
+  // after a newer one. The invariant that survives is the narrower one
+  // — the backup names a commit HEAD really held.
+  it('lets a paused winner clobber a newer backup', async () => {
+    const store = new HookStore()
+    const writer = await VersionedKV.open(store)
+    await writer.commit(one('k', '1'))
+    const first = writer.currentCommit
+
+    let third: string | null = null
+    store.armSet(BRANCH_HEAD_PREV('main'), async () => {
+      const other = await VersionedKV.open(store)
+      await other.commit(one('k2', '3'))
+      third = other.currentCommit
+    })
+    await writer.commit(one('k', '2'))
+    const second = writer.currentCommit
+
+    const currentHead = await head(store)
+    const prev = await prevHead(store)
+    const history = store.headHistory('main')
+
+    expect(currentHead, 'the later writer should hold HEAD').toBe(third)
+    expect(prev, "this pins the limitation: the paused winner's backup landed last").not.toBe(
+      second,
+    )
+    expect(prev).toBe(first)
+
+    // The guarantee that does survive.
+    expect(history, `prev-HEAD ${String(prev)} was never HEAD`).toContain(prev)
+    expect(
+      history.indexOf(prev as string),
+      'the backup must name a commit older than HEAD, not a sibling',
+    ).toBeLessThan(history.indexOf(currentHead as string))
+  })
+})
+
+describe('deleteBranch drops the backup with the branch', () => {
+  it('leaves nothing for a same-named branch to recover onto', async () => {
+    // The prev-HEAD tier does not require `__branch_head__` to exist,
+    // so a backup left behind would resurrect the deleted branch's
+    // state under a later branch of the same name.
+    const store = new Memory()
+    const vk = await VersionedKV.open(store)
+    await vk.commit(one('a', '1'))
+    const dev = (await vk.createBranch('dev')) as VersionedKV
+    await dev.commit(one('d', '1'))
+    await dev.commit(one('d', '2'))
+    await vk.deleteBranch('dev')
+
+    expect(await store.get(BRANCH_HEAD_PREV('dev'))).toBeNull()
+    expect(await repairHead(store, 'dev')).toBeNull()
+
+    const recreated = (await vk.createBranch('dev')) as VersionedKV
+    expect(await recreated.get('d'), 'the deleted branch was resurrected').toBeNull()
+  })
+})
+
+describe('resetTo backs up the bytes HEAD actually held', () => {
+  it('never writes a commit HEAD did not hold', async () => {
+    // `resetTo` is a blind overwrite with no CAS to lose, and it copies
+    // the bytes it just read out of `__branch_head__` rather than a
+    // resolved value, so the backup still names a real former HEAD.
+    const store = new HookStore()
+    const vk = await VersionedKV.open(store)
+    await vk.commit(one('a', '1'))
+    const first = vk.currentCommit
+    await vk.commit(one('a', '2'))
+    const second = vk.currentCommit
+
+    expect(await vk.resetTo(first)).toBe(true)
+    expect(await head(store)).toBe(first)
+    expect(await prevHead(store)).toBe(second)
+    expect(store.headHistory('main')).toContain(second)
+  })
+
+  it('does not launder a corrupt HEAD into the backup as a commit', async () => {
+    const store = new HookStore()
+    const vk = await VersionedKV.open(store)
+    await vk.commit(one('a', '1'))
+    const first = vk.currentCommit
+    await vk.commit(one('a', '2'))
+    await store.set(BRANCH_HEAD('main'), CORRUPT)
+
+    expect(await vk.resetTo(first)).toBe(true)
+    // The corrupt bytes are copied verbatim, so the backup names no
+    // commit at all — recovery rejects it rather than following it.
+    expect(await store.get(BRANCH_HEAD_PREV('main'))).toEqual(CORRUPT)
+    expect(await prevHead(store)).toBeNull()
+    expect(await head(store)).toBe(first)
+  })
+})

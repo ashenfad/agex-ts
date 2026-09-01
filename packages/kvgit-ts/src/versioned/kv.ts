@@ -17,7 +17,7 @@
  * it always names a commit `__branch_head__` really held. Recovery
  * reads it, so a value that was never HEAD would graft onto the branch
  * a lineage it never had. See `casHead` for what that does and does
- * not guarantee.
+ * not guarantee, and `repairHead` for the explicit repair path.
  *
  * The keyset is a content-addressable HAMT (`Keyset` over `Hamt`) so
  * unchanged subtrees are shared across commits by hash equality. A
@@ -70,16 +70,21 @@ export type CorruptHeadRecoverer = (store: KVStore, branch: string) => Promise<s
  *   2. `__branch_head_prev__<branch>` — backup written after each CAS
  *   3. `recoverFromCorruptHead` — optional injected fallback (slot-only in v1)
  *
- * If `repair` is true, a recovered HEAD is written back to current.
+ * **Never writes.** Every read path in the library goes through here,
+ * so healing the damage in place would make an ordinary `get` a
+ * mutation — impossible for a read-only consumer, and a race between
+ * two readers repairing the same branch to different answers. The
+ * recovery is returned to the caller and forgotten; {@link repairHead}
+ * is the explicit call that makes it durable, and the write path heals
+ * HEAD itself as part of the CAS that has to move it anyway.
+ *
  * Returns null if nothing recovers.
  */
 async function resolveHead(
   store: KVStore,
   branch: string,
-  opts: { repair?: boolean; recoverFromCorruptHead?: CorruptHeadRecoverer } = {},
+  opts: { recoverFromCorruptHead?: CorruptHeadRecoverer } = {},
 ): Promise<string | null> {
-  const repair = opts.repair ?? true
-
   // Try current HEAD.
   const headBytes = await store.get(BRANCH_HEAD(branch))
   if (headBytes !== null) {
@@ -95,7 +100,6 @@ async function resolveHead(
     const commitHash = safeLoads(prevBytes)
     if (typeof commitHash === 'string' && (await store.get(COMMIT_ROOT(commitHash))) !== null) {
       console.warn(`kvgit: branch '${branch}' HEAD corrupt, recovered from prev HEAD`)
-      if (repair) await store.set(BRANCH_HEAD(branch), dumps(commitHash))
       return commitHash
     }
   }
@@ -105,12 +109,89 @@ async function resolveHead(
     const recovered = await opts.recoverFromCorruptHead(store, branch)
     if (recovered !== null) {
       console.warn(`kvgit: branch '${branch}' HEAD corrupt, recovered via scan`)
-      if (repair) await store.set(BRANCH_HEAD(branch), dumps(recovered))
       return recovered
     }
   }
 
   return null
+}
+
+/** Bytewise equality for two `Uint8Array`s. */
+function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+  if (a.length !== b.length) return false
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false
+  }
+  return true
+}
+
+/**
+ * Atomically replace an unresolvable HEAD with a recovered value.
+ *
+ * Returns true only when HEAD was damaged *and* this call is the one
+ * that replaced it. Three cases are deliberately left alone:
+ *
+ *   - HEAD resolves fine — it did not break, it *moved*, and another
+ *     writer won a legitimate race. Overwriting it would destroy a
+ *     good commit to make a losing CAS succeed.
+ *   - HEAD already holds `recovered` — nothing to do.
+ *   - HEAD is absent — the branch was deleted. Re-creating the key is
+ *     exactly the resurrection `deleteBranch` drops the prev-HEAD
+ *     backup to prevent.
+ *
+ * The replacement is a CAS against the exact damaged bytes, so two
+ * writers healing the same branch cannot both win, and a HEAD that
+ * someone else repaired (or advanced) in the meantime is never
+ * clobbered.
+ */
+async function healHead(store: KVStore, branch: string, recovered: Uint8Array): Promise<boolean> {
+  const branchKey = BRANCH_HEAD(branch)
+  const raw = await store.get(branchKey)
+  if (raw === null || bytesEqual(raw, recovered)) return false
+  const commitHash = safeLoads(raw)
+  if (typeof commitHash === 'string' && (await store.get(COMMIT_ROOT(commitHash))) !== null) {
+    return false
+  }
+  if (!(await store.cas(branchKey, recovered, raw))) return false
+  console.warn(`kvgit: branch '${branch}' corrupt HEAD replaced with recovered commit`)
+  return true
+}
+
+/**
+ * Persist a recovered HEAD for a damaged branch.
+ *
+ * Read paths recover a corrupt `__branch_head__` in memory and leave
+ * the store untouched, so the damage stays visible until someone
+ * decides what to do about it. This is that decision: resolve the
+ * branch the way a read would, and write the answer back.
+ *
+ * Handle-independent, like `cleanOrphans` — it takes a raw `KVStore`,
+ * so it works with or without a `VersionedKV` anchored on the branch.
+ *
+ * Idempotent, and a no-op on a healthy branch. The write is a CAS
+ * against the damaged bytes, so it cannot overwrite a HEAD another
+ * writer fixed, or advanced, in the meantime.
+ *
+ * When that CAS does not win, the recovery candidate is stale and
+ * returning it would name an older commit than HEAD actually holds.
+ * The branch is re-resolved instead, so the answer describes the store
+ * rather than the attempt.
+ *
+ * @returns The commit HEAD now names, or null if the branch does not
+ *   exist or nothing recoverable was found.
+ */
+export async function repairHead(
+  store: KVStore,
+  branch = 'main',
+  opts: { recoverFromCorruptHead?: CorruptHeadRecoverer } = {},
+): Promise<string | null> {
+  const commitHash = await resolveHead(store, branch, opts)
+  if (commitHash === null) return null
+  if (await healHead(store, branch, dumps(commitHash))) return commitHash
+  // The heal declined: another writer repaired, advanced or deleted
+  // the branch in between, so the candidate is stale and returning it
+  // would name an older commit than HEAD actually holds.
+  return resolveHead(store, branch, opts)
 }
 
 // ---------------------------------------------------------------------------
@@ -209,7 +290,6 @@ export class VersionedKV extends VersionedBase {
 
   async latestHead(): Promise<string | null> {
     return resolveHead(this.store, this.branch, {
-      repair: false,
       ...(this.recoverFromCorruptHead !== undefined && {
         recoverFromCorruptHead: this.recoverFromCorruptHead,
       }),
@@ -420,10 +500,20 @@ export class VersionedKV extends VersionedBase {
    * graft on a lineage the branch never had. `KVStore.cas` takes a
    * single key and no backend exposes a transaction spanning two, so
    * HEAD and its backup cannot move in one step.
+   *
+   * A CAS that fails against a *damaged* HEAD is retried once behind
+   * {@link healHead}, which repairs it atomically. That is the only
+   * place a corrupt HEAD is written back, now that reads do not.
    */
   protected async casHead(expected: string, newHead: string): Promise<boolean> {
+    const branchKey = BRANCH_HEAD(this.branch)
     const expectedBytes = dumps(expected)
-    const won = await this.store.cas(BRANCH_HEAD(this.branch), dumps(newHead), expectedBytes)
+    const newBytes = dumps(newHead)
+
+    let won = await this.store.cas(branchKey, newBytes, expectedBytes)
+    if (!won && (await healHead(this.store, this.branch, expectedBytes))) {
+      won = await this.store.cas(branchKey, newBytes, expectedBytes)
+    }
     if (won) await this.store.set(BRANCH_HEAD_PREV(this.branch), expectedBytes)
     return won
   }
@@ -557,7 +647,7 @@ export class VersionedKV extends VersionedBase {
   }
 
   async peek(key: string, opts: { branch: string }): Promise<Uint8Array | null> {
-    const head = await resolveHead(this.store, opts.branch, { repair: false })
+    const head = await resolveHead(this.store, opts.branch)
     if (head === null) return null
     const rootBytes = await this.store.get(COMMIT_ROOT(head))
     if (rootBytes === null) return null
@@ -595,6 +685,26 @@ export class VersionedKV extends VersionedBase {
     const raw = await this.store.get(INFO_KEY(target))
     if (raw === null) return null
     return loads(raw) as CommitInfo
+  }
+
+  // --- Recovery ---
+
+  /**
+   * Persist a recovered HEAD for this branch.
+   *
+   * Thin instance wrapper over the module-level {@link repairHead}.
+   * Reads recover a damaged HEAD without writing it back; this is the
+   * explicit call that makes the recovery durable.
+   *
+   * @returns The commit HEAD now names, or null if nothing was
+   *   recoverable.
+   */
+  async repairHead(): Promise<string | null> {
+    return repairHead(this.store, this.branch, {
+      ...(this.recoverFromCorruptHead !== undefined && {
+        recoverFromCorruptHead: this.recoverFromCorruptHead,
+      }),
+    })
   }
 
   // --- Orphan cleanup ---
@@ -700,7 +810,7 @@ export class VersionedKV extends VersionedBase {
     // — see listBranches comment).
     for await (const k of this.store.keys(BRANCH_HEAD_PREFIX)) {
       const branchName = k.slice(BRANCH_HEAD_PREFIX.length)
-      const branchHead = await resolveHead(this.store, branchName, { repair: false })
+      const branchHead = await resolveHead(this.store, branchName)
       if (branchHead === null) continue
       // Use allParents=true to follow merge commits' second parents too.
       for await (const commit of this.history(branchHead, { allParents: true })) {

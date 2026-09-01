@@ -460,11 +460,61 @@ describe('limitation: the backup is not guaranteed to be one commit back', () =>
   })
 })
 
+describe('an absent HEAD means the branch is gone, not damaged', () => {
+  it('a delayed backup write does not resurrect a deleted branch', async () => {
+    // Writing the backup after the CAS is right, but it opens a window:
+    // a writer descheduled between the two, resuming after a concurrent
+    // deleteBranch, recreates only `__branch_head_prev__`. Recovering a
+    // branch from a lone backup is the v0.3.1 failure class, reached
+    // from a new direction.
+    const store = new HookStore()
+    const vk = await VersionedKV.open(store)
+    await vk.commit(one('anchor', '1'))
+    const doomed = (await vk.createBranch('doomed')) as VersionedKV
+    await doomed.commit(one('secret', 'classified'))
+
+    store.armSet(BRANCH_HEAD_PREV('doomed'), async () => {
+      await vk.deleteBranch('doomed')
+    })
+    await doomed.commit(one('secret', 'classified-v2'))
+
+    expect(await store.get(BRANCH_HEAD('doomed')), 'the delete should have won').toBeNull()
+    expect(
+      await store.get(BRANCH_HEAD_PREV('doomed')),
+      'only meaningful while the delayed write recreates the backup — if that stops, the seam has drifted',
+    ).not.toBeNull()
+    expect(
+      await repairHead(store, 'doomed'),
+      "a backup outliving its branch resurrected it — the deleted branch's state is readable again",
+    ).toBeNull()
+    const recreated = (await vk.createBranch('doomed')) as VersionedKV
+    expect(await recreated.get('secret'), 'the deleted branch was resurrected').toBeNull()
+  })
+
+  it('still recovers a HEAD that is present but corrupt', async () => {
+    // The gate must not cost the tier its actual purpose.
+    const store = new Memory()
+    const vk = await VersionedKV.open(store)
+    await vk.commit(one('k', '1'))
+    const first = vk.currentCommit
+    await vk.commit(one('k', '2'))
+    await store.set(BRANCH_HEAD('main'), bytes(''))
+    expect(await repairHead(store, 'main')).toBe(first)
+  })
+
+  it('leaves a healthy branch alone', async () => {
+    const store = new Memory()
+    const vk = await VersionedKV.open(store)
+    await vk.commit(one('k', '1'))
+    expect(await repairHead(store, 'main')).toBe(vk.currentCommit)
+  })
+})
+
 describe('deleteBranch drops the backup with the branch', () => {
   it('leaves nothing for a same-named branch to recover onto', async () => {
-    // The prev-HEAD tier does not require `__branch_head__` to exist,
-    // so a backup left behind would resurrect the deleted branch's
-    // state under a later branch of the same name.
+    // A backup left behind would be one half of a resurrection: see
+    // the delayed-backup suite below for the other half, and for why
+    // the prev-HEAD tier now requires `__branch_head__` to exist.
     const store = new Memory()
     const vk = await VersionedKV.open(store)
     await vk.commit(one('a', '1'))

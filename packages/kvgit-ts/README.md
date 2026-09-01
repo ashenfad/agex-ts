@@ -62,12 +62,25 @@ then nothing. That third tier is caller-supplied here (kvgit-py's
 built-in commit scan is not ported), so out of the box a branch
 recovers only as far back as its backup.
 
+A recoverer is not a trusted tier. Its answer is accepted only if it
+is a string naming a commit whose `__commit_root__` is present in this
+store; anything else is logged with what was returned, and the branch
+is reported unrecoverable. Head resolution promises a valid commit or
+`null`, and an unchecked answer is worse than no answer — `repairHead`
+would make it durable, replacing obviously corrupt HEAD bytes with a
+plausible hash that names nothing, on a store whose backup is already
+gone.
+
 Two rules govern this.
 
 **Reads never write.** Resolving a damaged branch on a read path —
 opening a handle, `peek`, `switchBranch`, `refresh`, the mark phase of
 a sweep — recovers in memory and leaves the store exactly as it found
-it. A read-only consumer can therefore read a damaged store, two
+it. The mark phase is the one place that stops at the backup tier even
+when the handle carries a recoverer: GC must not decide reachability
+from a guess, so a branch whose HEAD does not resolve marks nothing
+and keeps its commits as young orphans until `minAge` and an explicit
+`repairHead` settle what it points at. A read-only consumer can therefore read a damaged store, two
 concurrent readers cannot race each other repairing the same branch to
 different answers, and the damage stays visible instead of being
 quietly papered over. The cost is that the fallback runs on every read

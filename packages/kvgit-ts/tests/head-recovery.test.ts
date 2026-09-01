@@ -565,3 +565,157 @@ describe('resetTo backs up the bytes HEAD actually held', () => {
     expect(await head(store)).toBe(first)
   })
 })
+
+// ---------------------------------------------------------------------------
+// The injected third tier
+// ---------------------------------------------------------------------------
+
+/**
+ * A store whose `main` is healthy and whose `branch` is doubly damaged:
+ * HEAD unreadable *and* the prev-HEAD backup gone. That is the only
+ * shape that reaches the injected tier — tiers 1 and 2 both fail, and
+ * HEAD still exists so the branch is damage rather than a deletion.
+ *
+ * Returns the tip the damaged branch last really had, which is what a
+ * correct recoverer would name.
+ */
+async function doublyDamaged(
+  store: Memory,
+  branch: string,
+): Promise<{ tip: string; mainTip: string }> {
+  const vk = await VersionedKV.open(store)
+  await vk.commit(one('anchor', '1'))
+  const mainTip = vk.currentCommit
+  let tip = mainTip
+  if (branch !== 'main') {
+    const other = (await vk.createBranch(branch)) as VersionedKV
+    await other.commit(one('k', 'payload'))
+    tip = other.currentCommit
+  }
+  await store.set(BRANCH_HEAD(branch), CORRUPT)
+  await store.remove(BRANCH_HEAD_PREV(branch))
+  return { tip, mainTip }
+}
+
+/** A recoverer that records the branches it was asked about. */
+function spy(answer: (branch: string) => string | null): {
+  recoverer: CorruptHeadRecoverer
+  calls: string[]
+} {
+  const calls: string[] = []
+  return {
+    calls,
+    recoverer: async (_store, branch) => {
+      calls.push(branch)
+      return answer(branch)
+    },
+  }
+}
+
+describe('an injected recoverer is checked, not trusted', () => {
+  const DANGLING = 'deadbeef'.repeat(5)
+
+  it('rejects a hash that names no commit in this store', async () => {
+    // A recoverer is caller-supplied, so its answer is no more
+    // trustworthy than anything else read out of the store. Head
+    // resolution promises a valid commit or null.
+    const store = new Memory()
+    const { mainTip } = await doublyDamaged(store, 'main')
+    const { recoverer } = spy(() => DANGLING)
+
+    const vk = await VersionedKV.open(store, {
+      commitHash: mainTip,
+      recoverFromCorruptHead: recoverer,
+    })
+    expect(
+      await vk.latestHead(),
+      'a hash naming no commit was accepted as a recovered HEAD',
+    ).toBeNull()
+  })
+
+  it('does not let repairHead make a rejected candidate durable', async () => {
+    // The half that turns a bad answer into a bad store: repairHead
+    // CASes the candidate over the damaged bytes, replacing visible
+    // corruption with a plausible hash that names nothing — harder to
+    // diagnose than the damage it replaced, on a store whose backup is
+    // already gone.
+    const store = new Memory()
+    await doublyDamaged(store, 'main')
+    const { recoverer } = spy(() => DANGLING)
+
+    const repaired = await repairHead(store, 'main', { recoverFromCorruptHead: recoverer })
+    expect(
+      await store.get(BRANCH_HEAD('main')),
+      'a rejected candidate was written into HEAD, replacing visible damage ' +
+        'with a plausible hash that names nothing',
+    ).toEqual(CORRUPT)
+    expect(repaired).toBeNull()
+  })
+
+  it('rejects an answer that is not a string at all', async () => {
+    // The type says `string | null`, but a recoverer crossing from
+    // untyped JS can return anything, and `dumps` would happily encode
+    // it into HEAD.
+    const store = new Memory()
+    await doublyDamaged(store, 'main')
+    const bogus = (async () => 12345) as unknown as CorruptHeadRecoverer
+
+    const repaired = await repairHead(store, 'main', { recoverFromCorruptHead: bogus })
+    expect(await store.get(BRANCH_HEAD('main')), 'a non-string was encoded into HEAD').toEqual(
+      CORRUPT,
+    )
+    expect(repaired).toBeNull()
+  })
+
+  it('still honours a recoverer that names a real commit', async () => {
+    // The check must not cost the tier its purpose.
+    const store = new Memory()
+    const { mainTip } = await doublyDamaged(store, 'main')
+    const { recoverer, calls } = spy(() => mainTip)
+
+    const vk = await VersionedKV.open(store, {
+      commitHash: mainTip,
+      recoverFromCorruptHead: recoverer,
+    })
+    expect(await vk.latestHead()).toBe(mainTip)
+    expect(calls).toEqual(['main'])
+
+    expect(await repairHead(store, 'main', { recoverFromCorruptHead: recoverer })).toBe(mainTip)
+    expect(await head(store)).toBe(mainTip)
+  })
+})
+
+describe('a handle applies its recoverer to every read it makes', () => {
+  it('peek resolves another branch through it', async () => {
+    const store = new Memory()
+    const { tip } = await doublyDamaged(store, 'dev')
+    const { recoverer, calls } = spy(() => tip)
+
+    const vk = await VersionedKV.open(store, { recoverFromCorruptHead: recoverer })
+    expect(await vk.peek('k', { branch: 'dev' })).toEqual(bytes('payload'))
+    expect(calls).toEqual(['dev'])
+
+    const bare = await VersionedKV.open(store)
+    expect(await bare.peek('k', { branch: 'dev' })).toBeNull()
+  })
+
+  it('never uses it for the mark phase of a sweep', async () => {
+    // GC must not decide reachability from a guess. Deliberate, and
+    // the inconsistency with the read paths is the point: a wrong
+    // answer marks the wrong commits live, so real garbage survives
+    // forever and a guessed tip gets walked as though it were this
+    // branch's own history, pinning another branch's ancestry into
+    // this one's mark set.
+    const store = new Memory()
+    const { tip } = await doublyDamaged(store, 'dev')
+    const { recoverer, calls } = spy(() => tip)
+
+    const vk = await VersionedKV.open(store, { recoverFromCorruptHead: recoverer })
+    expect(await vk.cleanOrphans({ minAge: -1 })).toBe(1)
+    expect(calls, 'the mark phase must not resolve a branch by guessing').toEqual([])
+    expect(
+      await store.get(COMMIT_ROOT(tip)),
+      "the unresolvable branch's tip was marked live off a guess",
+    ).toBeNull()
+  })
+})

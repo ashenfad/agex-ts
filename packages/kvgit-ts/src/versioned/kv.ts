@@ -51,14 +51,21 @@ import type { MergeResolution } from './merge'
 // ---------------------------------------------------------------------------
 
 /**
- * Optional second-tier corrupt-HEAD recovery.
+ * Last-resort recovery for a HEAD that is present but unresolvable.
  *
- * Slot for the deferred kvgit-py `_resolve_head` commit-scan fallback.
- * v1 ships without an implementation; users with a corruption surface
- * can wire one in (the function gets the store + branch and returns a
- * recovered commit hash, or null if unrecoverable).
+ * Called with the store and the branch name; returns a commit hash to
+ * treat as that branch's HEAD, or null if it cannot say.
  *
- * If unset, corrupt-HEAD recovery stops at the prev-HEAD tier.
+ * There is no default, and none is shipped. When HEAD is unresolvable
+ * and the prev-HEAD backup is missing or equally broken, the
+ * information needed is no longer in the store, so no implementation
+ * can be correct — only lucky. kvgit reports null and leaves the guess
+ * to a caller who has decided the trade is worth it. Unset, corrupt-
+ * HEAD recovery stops at the prev-HEAD tier.
+ *
+ * The answer is checked before it is used: it must be a string naming
+ * a commit whose `__commit_root__` is present in this store. Anything
+ * else leaves the branch unrecoverable.
  */
 export type CorruptHeadRecoverer = (store: KVStore, branch: string) => Promise<string | null>
 
@@ -68,7 +75,7 @@ export type CorruptHeadRecoverer = (store: KVStore, branch: string) => Promise<s
  * Tries:
  *   1. `__branch_head__<branch>` — current pointer
  *   2. `__branch_head_prev__<branch>` — backup written after each CAS
- *   3. `recoverFromCorruptHead` — optional injected fallback (slot-only in v1)
+ *   3. `recoverFromCorruptHead` — optional caller-supplied last resort
  *
  * **Never writes.** Every read path in the library goes through here,
  * so healing the damage in place would make an ordinary `get` a
@@ -115,16 +122,45 @@ async function resolveHead(
     }
   }
 
-  // Try the injected commit-scan fallback (slot-only in v1).
+  // HEAD existed, is corrupt, and the backup did not save it. The
+  // store no longer holds the answer, so there is nothing left to read
+  // — only to guess. Guessing is the caller's call, not ours.
   if (opts.recoverFromCorruptHead && headBytes !== null) {
-    const recovered = await opts.recoverFromCorruptHead(store, branch)
-    if (recovered !== null) {
-      console.warn(`kvgit: branch '${branch}' HEAD corrupt, recovered via scan`)
+    const recovered: unknown = await opts.recoverFromCorruptHead(store, branch)
+    // A recoverer is caller-supplied, so its answer is no more
+    // trustworthy than anything else read out of the store: it counts
+    // only if it is a string naming a commit whose `__commit_root__`
+    // is present. This function promises a valid commit or null, and
+    // an unchecked answer is worse than no answer — `repairHead` makes
+    // it durable, replacing obviously corrupt HEAD bytes with a
+    // plausible hash that names nothing, which is harder to diagnose
+    // than the damage it replaced.
+    if (typeof recovered === 'string' && (await store.get(COMMIT_ROOT(recovered))) !== null) {
+      console.warn(`kvgit: branch '${branch}' HEAD corrupt, recovered via injected recoverer`)
       return recovered
+    }
+    if (recovered !== null && recovered !== undefined) {
+      console.warn(
+        `kvgit: branch '${branch}' recoverer returned ${describeCandidate(recovered)}, which is not a commit in this store; treating the branch as unrecoverable`,
+      )
     }
   }
 
   return null
+}
+
+/**
+ * Render a value for a log line, showing what it actually was.
+ *
+ * A rejected recovery candidate is worth naming: the whole point of
+ * rejecting it is that someone has to go and fix the recoverer.
+ */
+function describeCandidate(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? String(value)
+  } catch {
+    return Object.prototype.toString.call(value)
+  }
 }
 
 /** Bytewise equality for two `Uint8Array`s. */
@@ -213,7 +249,7 @@ export interface VersionedKVOptions {
   branch?: string
   /** Pin to a specific commit instead of resolving the branch HEAD. */
   commitHash?: string
-  /** Slot for second-tier corrupt-HEAD recovery (see `CorruptHeadRecoverer`). */
+  /** Last resort for a corrupt HEAD with no usable backup (see `CorruptHeadRecoverer`). */
   recoverFromCorruptHead?: CorruptHeadRecoverer
 }
 
@@ -658,7 +694,11 @@ export class VersionedKV extends VersionedBase {
   }
 
   async peek(key: string, opts: { branch: string }): Promise<Uint8Array | null> {
-    const head = await resolveHead(this.store, opts.branch)
+    const head = await resolveHead(this.store, opts.branch, {
+      ...(this.recoverFromCorruptHead !== undefined && {
+        recoverFromCorruptHead: this.recoverFromCorruptHead,
+      }),
+    })
     if (head === null) return null
     const rootBytes = await this.store.get(COMMIT_ROOT(head))
     if (rootBytes === null) return null
@@ -821,6 +861,18 @@ export class VersionedKV extends VersionedBase {
     // — see listBranches comment).
     for await (const k of this.store.keys(BRANCH_HEAD_PREFIX)) {
       const branchName = k.slice(BRANCH_HEAD_PREFIX.length)
+      // No `recoverFromCorruptHead` here, deliberately, even when this
+      // handle carries one. GC must not decide reachability from a
+      // guess: a wrong answer marks the wrong commits live, so real
+      // garbage survives forever, and a guessed tip gets walked as
+      // though it were this branch's own history, pinning another
+      // branch's ancestry into this one's mark set. The sweep sees
+      // only what the store actually claims — a branch whose HEAD
+      // resolves is marked from its real HEAD, and one whose HEAD does
+      // not resolve marks nothing and keeps its commits as young
+      // orphans until `minAge` and an explicit `repairHead` settle
+      // what it points at. The inconsistency with the read paths is
+      // the point, not an oversight.
       const branchHead = await resolveHead(this.store, branchName)
       if (branchHead === null) continue
       // Use allParents=true to follow merge commits' second parents too.

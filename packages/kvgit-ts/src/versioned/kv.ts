@@ -505,7 +505,8 @@ export class VersionedKV extends VersionedBase {
     }
     await this.store.remove(BRANCH_HEAD(name))
     await this.store.remove(BRANCH_HEAD_PREV(name))
-    // Note: orphan cleanup happens in cleanOrphans (TBD), not here.
+    // Note: the branch's now-unreachable commits are left in place;
+    // reclaim them with cleanOrphans (or deepClean).
   }
 
   async switchBranch(name: string): Promise<void> {
@@ -568,25 +569,81 @@ export class VersionedKV extends VersionedBase {
   // --- Orphan cleanup ---
 
   /**
-   * Remove orphaned commits (and their unreachable blobs + HAMT nodes)
-   * not reachable from any live branch HEAD.
+   * Remove orphaned commits — and the blobs and HAMT nodes they own —
+   * that are not reachable from any live branch HEAD.
    *
    * Mark phase walks every branch's full ancestry, accumulating
    * reachable commits / blobs / HAMT node hashes. `Keyset.walk(skipNodes)`
    * is given the cumulative seen-set so subtrees shared via structural
    * sharing across commits are visited exactly once.
    *
+   * **Safe under concurrent writers.** Every deletion candidate is
+   * discovered by walking an orphan commit's own keyset — never by
+   * scanning a storage namespace. Both classes it deletes are
+   * commit-scoped: blob keys are `<commitHash>:<userKey>`, and a HAMT
+   * leaf payload is `[blobPointer, meta]`, so node hashes transitively
+   * embed a commit-scoped pointer and never dedup across unrelated
+   * commits. A commit that lands mid-sweep is therefore in no orphan's
+   * tree and cannot contribute a candidate. `store.keys()` is an async
+   * iterable here, so a namespace scan would interleave with the event
+   * loop and lose that race inside a single JS context — see
+   * `tests/gc-concurrency.test.ts`.
+   *
+   * **What it deliberately leaves.** HAMT nodes that no commit points
+   * at — an interrupted write, a crash between the node write and the
+   * CAS, damage from an older sweep — are unreachable from any orphan
+   * keyset, so nothing finds them. {@link deepClean} reclaims those, at
+   * the cost of requiring a quiescent store. Blobs belonging to an
+   * orphan whose keyset is unreadable are leaked permanently by either
+   * path: nothing scans blobs by namespace, so a blob is only ever
+   * found through the keyset that points at it.
+   *
    * The `minAge` guard (default 1 hour) protects recently-created
    * commits from being swept. Within that window, an orphan commit's
-   * blobs are marked reachable too — they may belong to an in-flight
-   * writer whose CAS hasn't landed yet.
+   * blobs and nodes are marked reachable too — they may belong to an
+   * in-flight writer whose CAS hasn't landed yet.
    *
    * @param opts.minAge Milliseconds. Commits younger than this are
    *   protected from sweep, even if currently unreachable. Default: 1 hour.
    * @returns Number of orphaned commits removed.
    */
   async cleanOrphans(opts: { minAge?: number } = {}): Promise<number> {
-    const minAge = opts.minAge ?? 3_600_000
+    return this.sweep(opts.minAge ?? 3_600_000, false)
+  }
+
+  /**
+   * Orphan sweep plus a full unreferenced-node scan. **Unsafe against
+   * concurrent writers.**
+   *
+   * Does everything {@link cleanOrphans} does, then additionally scans
+   * the whole `kvgit:keyset:` namespace and deletes any node not
+   * reachable from a live branch head or a young orphan. That scan is
+   * the only way to reclaim nodes no commit references any more —
+   * leftovers from an interrupted write, a crash between a write and
+   * its CAS, or historical damage — because no orphan keyset points at
+   * them.
+   *
+   * The scan runs after the mark phase, so it sees, and deletes,
+   * anything written by a commit that landed in between — including a
+   * commit that has since become a live branch HEAD, leaving a live
+   * head whose keyset root is missing. Run it only on a quiescent
+   * store: no other tab, worker, or process writing, for the whole
+   * call. `minAge` does not protect you here; it governs commit
+   * deletion, not the namespace scan.
+   *
+   * Use {@link cleanOrphans} for routine cleanup; schedule this one for
+   * maintenance windows.
+   *
+   * @param opts.minAge Milliseconds. Commits younger than this are
+   *   protected from sweep, even if currently unreachable. Default: 1 hour.
+   * @returns Number of orphaned commits removed.
+   */
+  async deepClean(opts: { minAge?: number } = {}): Promise<number> {
+    return this.sweep(opts.minAge ?? 3_600_000, true)
+  }
+
+  /** Shared mark-and-sweep behind `cleanOrphans` / `deepClean`. */
+  private async sweep(minAge: number, deep: boolean): Promise<number> {
     const cutoffTime = Date.now() - minAge
 
     const reachableCommits = new Set<string>()
@@ -650,7 +707,21 @@ export class VersionedKV extends VersionedBase {
 
     // Collect everything to delete in one batch so the sweep is atomic
     // at the store level (defends against partial sweeps under crash).
-    const allRemovals: string[] = []
+    const allRemovals = new Set<string>()
+    const KEYSET_PREFIX = Keyset.DEFAULT_PREFIX
+
+    // Every deletion candidate comes from walking an orphan's own
+    // keyset — never from a namespace scan. That is what makes the
+    // incremental path safe under concurrent writers: a commit that
+    // lands after the mark phase is in nobody's orphan tree, so
+    // nothing it wrote can end up on this list.
+    //
+    // `skipNodes` starts as the reachable set (subtrees shared with a
+    // live commit or a young orphan must not be touched, and are the
+    // bulk of the tree) and grows with each orphan's nodes, so a
+    // subtree shared between two orphans is walked once and queued
+    // once rather than per orphan.
+    const skipNodes = new Set(reachableNodes)
 
     for (const orphan of orphans) {
       const orphanRootBytes = await this.store.get(COMMIT_ROOT(orphan))
@@ -658,35 +729,49 @@ export class VersionedKV extends VersionedBase {
         try {
           const orphanRoot = loads(orphanRootBytes) as string
           const orphanKs = Keyset.fromRoot(this.store, orphanRoot)
-          const orphanEntries = await orphanKs.materialize()
+          const [orphanEntries, orphanNodes] = await orphanKs.walk(skipNodes)
           for (const entry of orphanEntries.values()) {
-            if (!reachableBlobs.has(entry.blob)) {
-              allRemovals.push(entry.blob)
-            }
+            if (!reachableBlobs.has(entry.blob)) allRemovals.add(entry.blob)
+          }
+          for (const node of orphanNodes) {
+            skipNodes.add(node)
+            allRemovals.add(KEYSET_PREFIX + node)
           }
         } catch {
-          // best-effort — a corrupt orphan keyset just means we leave
-          // its blobs (they'll be unreachable HAMT-side and swept by a
-          // future GC pass once the format settles)
+          // Deliberate catch-all: a damaged orphan must not stall the
+          // sweep. We drop its payload and still reclaim its commit
+          // metadata below. Narrowing this would let one corrupt
+          // keyset block GC for the whole store.
+          //
+          // The cost is a permanent leak: the orphan's nodes survive
+          // until a `deepClean`, and its blobs survive forever —
+          // nothing scans blobs by namespace, and once the commit
+          // metadata is gone there is no keyset left to find them
+          // through. That is why nodes and blobs are collected in the
+          // same walk above rather than in separate passes.
         }
       }
-      allRemovals.push(COMMIT_ROOT(orphan))
-      allRemovals.push(PARENT_COMMIT(orphan))
-      allRemovals.push(COMMIT_TIME(orphan))
-      allRemovals.push(INFO_KEY(orphan))
+      allRemovals.add(COMMIT_ROOT(orphan))
+      allRemovals.add(PARENT_COMMIT(orphan))
+      allRemovals.add(COMMIT_TIME(orphan))
+      allRemovals.add(INFO_KEY(orphan))
     }
 
-    // Orphan HAMT nodes: any keyset node not reachable from a live
-    // commit (or a young orphan, see above) is fair game.
-    const KEYSET_PREFIX = Keyset.DEFAULT_PREFIX
-    for await (const k of this.store.keys(KEYSET_PREFIX)) {
-      const nodeHash = k.slice(KEYSET_PREFIX.length)
-      if (nodeHash.length > 0 && !reachableNodes.has(nodeHash)) {
-        allRemovals.push(k)
+    if (deep) {
+      // Namespace scan: reclaims nodes no orphan keyset points at
+      // (interrupted writes, crashes between a write and its CAS,
+      // historical damage). Unsafe against a concurrent writer,
+      // because anything committed since the mark phase looks
+      // unreferenced here. Quiescent stores only — see `deepClean`.
+      for await (const k of this.store.keys(KEYSET_PREFIX)) {
+        const nodeHash = k.slice(KEYSET_PREFIX.length)
+        if (nodeHash.length > 0 && !reachableNodes.has(nodeHash)) {
+          allRemovals.add(k)
+        }
       }
     }
 
-    if (allRemovals.length > 0) {
+    if (allRemovals.size > 0) {
       await this.store.removeMany(allRemovals)
     }
     return orphans.length

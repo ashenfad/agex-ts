@@ -12,6 +12,44 @@ A `Map<string, T>` with git-like history. Every `commit()` creates a checkpoint;
 
 The canonical type contracts live in [`src/types.ts`](./src/types.ts). For how @agex-ts/kvgit is used inside agex-ts, see [agex-ts's State & Sessions concepts doc](../../docs/concepts/state-and-sessions.md).
 
+## Garbage collection
+
+Resetting a branch, deleting one, or losing a CAS race leaves commits
+nothing points at. Two passes reclaim them, with different safety
+contracts:
+
+- **`vk.cleanOrphans({ minAge })` — safe to run any time, including
+  while other writers commit.** It walks every branch's ancestry to
+  mark what's live, then finds every deletion candidate by walking an
+  orphaned commit's *own* keyset. It never scans a storage namespace.
+  Both classes it deletes are commit-scoped — blob keys are
+  `<commitHash>:<userKey>`, and HAMT leaves carry that pointer, so node
+  hashes never dedup across unrelated commits — which means a commit
+  landing mid-sweep is in no orphan's tree and cannot become a
+  candidate. `minAge` (default 1 hour) additionally protects commits
+  too young to be sure about; an in-flight writer's commit is often
+  unreachable for a moment before its CAS lands.
+
+  It cannot reclaim HAMT nodes that *no* commit points at — an
+  interrupted write, a crash between the node write and its CAS,
+  damage from an older kvgit — because there is no orphan keyset to
+  find them through.
+
+- **`vk.deepClean({ minAge })` — requires a quiescent store.** Same
+  sweep, plus a scan of the whole `kvgit:keyset:` namespace that
+  deletes any node not reachable from a live head or a young orphan.
+  That scan runs after the mark phase, so it will happily delete
+  artifacts written by a concurrent writer — including ones a live
+  branch HEAD has since come to depend on, leaving a head whose keyset
+  root is missing. No other tab, worker, or process may write for the
+  duration of the call. `minAge` does not protect you here: it governs
+  which commits are old enough to delete, not the namespace scan.
+
+Routine cleanup is `cleanOrphans`; schedule `deepClean` for maintenance
+windows. Neither pass reclaims blobs belonging to an orphan whose
+keyset is unreadable — nothing scans blobs by namespace, so a blob is
+only ever found through the keyset entry that points at it.
+
 ## Sync & remotes
 
 kvgit histories can be replicated between stores (cross-device session

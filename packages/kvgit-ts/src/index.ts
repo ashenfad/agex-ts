@@ -10,6 +10,7 @@ export {
 export { VersionedBase } from './versioned/base'
 export {
   VersionedKV,
+  repairHead,
   type CorruptHeadRecoverer,
   type VersionedKVOptions,
 } from './versioned/kv'

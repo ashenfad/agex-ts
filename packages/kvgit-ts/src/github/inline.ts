@@ -19,6 +19,14 @@
  *      one request body stays sane. This is a policy gate, not a known
  *      API limit; see `INLINE_LIMIT`.
  *
+ * A per-value gate alone is not enough. Every inlined value in a commit
+ * lands in ONE tree request, so an unbounded aggregate is the real
+ * hazard: values that each pass the gate can still add up to a body no
+ * endpoint will take, and unlike the per-key uploads this replaced,
+ * there is no smaller request to fall back to once it is too big. The
+ * pusher therefore spends a budget (`INLINE_TREE_BUDGET`) measured with
+ * `inlineCost`, and sends anything that no longer fits as its own blob.
+ *
  * Deliberately NOT conditions: line endings and control bytes. Probing
  * the live API showed CRLF, a lone CR, NUL and C0 controls all stored
  * verbatim, with no trailing newline appended and the empty string
@@ -65,4 +73,32 @@ export function inlinable(bytes: Uint8Array, limit: number = INLINE_LIMIT): stri
     if (round[i] !== bytes[i]) return null
   }
   return text
+}
+
+/**
+ * Aggregate cap on inlined content within a single tree request.
+ *
+ * Like `INLINE_LIMIT`, a conservative policy number rather than a
+ * documented ceiling — chosen far enough below any plausible request
+ * limit that it need not be measured, while still admitting thousands
+ * of ordinary session values or ~60 at the per-value maximum. Exceeding
+ * it costs an ordinary `createBlob`, which is what every value cost
+ * before inlining existed.
+ *
+ * The budget covers content only. Each entry's `path`, `mode` and
+ * `type` add a bounded overhead that is noise at this scale.
+ */
+export const INLINE_TREE_BUDGET = 4 * 1024 * 1024
+
+/**
+ * Bytes `text` will occupy inside the tree request's JSON body.
+ *
+ * Not the same as the value's own byte length: JSON escaping expands
+ * quotes and backslashes to two bytes and control characters to six
+ * (`\u0000`), so a value made of NULs costs six times what it measures
+ * on disk. Budgeting on raw length would undercount exactly the content
+ * most likely to blow the request up.
+ */
+export function inlineCost(text: string): number {
+  return _encoder.encode(JSON.stringify(text)).length
 }

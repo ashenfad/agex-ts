@@ -10,8 +10,9 @@
  * Push pipeline, per wire commit in topological order:
  *
  *   tree (`base_tree` on the first parent's tree + delta entries,
- *         values carried INLINE where `inlinable` allows, so most
- *         commits cost no per-key request at all)
+ *         values carried INLINE where `inlinable` allows and the
+ *         per-tree budget still has room, so most commits cost no
+ *         per-key request at all)
  *     → commit (explicit dates ⇒ deterministic git SHAs)
  *
  * Values that have no UTF-8 spelling, or that exceed the inline size
@@ -49,7 +50,7 @@ import type { KVStore, WireCommit } from '../types'
 import { PARENT_COMMIT, blobPointer, dumps, safeLoads } from '../versioned/layout'
 import type { GithubClient, TreeEntry } from './client'
 import { gitBlobSha1 } from './git-hash'
-import { inlinable } from './inline'
+import { INLINE_LIMIT, INLINE_TREE_BUDGET, inlinable, inlineCost } from './inline'
 import { PathPlanner, SIDECAR_PATH, naturalPath, relocatedPath } from './paths'
 import { decodeSidecar, encodeSidecar, wireFromSidecar } from './sidecar'
 
@@ -58,6 +59,14 @@ export interface GithubRemoteOptions {
   author?: { name: string; email: string }
   /** Encoder discriminator recorded in sidecars. Default 'ts'. */
   kernel?: string
+  /** Largest single value to carry inline in a tree entry, in bytes.
+   *  Anything larger takes a `createBlob` POST. Default `INLINE_LIMIT`. */
+  inlineLimit?: number
+  /** Aggregate cap on inlined content per tree request, in bytes.
+   *  Values that no longer fit take a `createBlob` POST, so a commit
+   *  can never build a request body larger than roughly this.
+   *  Default `INLINE_TREE_BUDGET`. */
+  inlineBudget?: number
 }
 
 const TRAILER = /^Kvgit-Hash: ([0-9a-f]{40})$/m
@@ -160,6 +169,8 @@ export class GithubRemote implements Remote {
   readonly #store: KVStore
   readonly #author: { name: string; email: string }
   readonly #kernel: string
+  readonly #inlineLimit: number
+  readonly #inlineBudget: number
   /** git tip SHA → kvgit hash, resolved from trailers (tips only;
    *  small and long-lived). */
   readonly #kvgitBySha = new Map<string, string>()
@@ -169,6 +180,8 @@ export class GithubRemote implements Remote {
     this.#store = store
     this.#author = opts.author ?? { name: 'kvgit-sync', email: 'kvgit-sync@agex.dev' }
     this.#kernel = opts.kernel ?? 'ts'
+    this.#inlineLimit = opts.inlineLimit ?? INLINE_LIMIT
+    this.#inlineBudget = opts.inlineBudget ?? INLINE_TREE_BUDGET
   }
 
   // -------------------------------------------------------------------------
@@ -653,6 +666,26 @@ export class GithubRemote implements Remote {
           : new PathPlanner()
 
       const entries: TreeEntry[] = []
+      // Spent down as values are inlined. Every inlined value in this
+      // commit ships in ONE tree request, so without a running budget a
+      // set of individually-acceptable values can still build a body no
+      // endpoint will take — and there would be no smaller request to
+      // retry with, where before inlining each value had its own.
+      let inlineBudget = this.#inlineBudget
+
+      /** Inline `bytes` at `path` when it fits both gates, else upload
+       *  it as its own blob and reference the SHA. */
+      const placeValue = async (path: string, bytes: Uint8Array): Promise<TreeEntry> => {
+        const text = inlinable(bytes, this.#inlineLimit)
+        if (text !== null) {
+          const cost = inlineCost(text)
+          if (cost <= inlineBudget) {
+            inlineBudget -= cost
+            return { path, mode: '100644', type: 'blob', content: text }
+          }
+        }
+        return { path, mode: '100644', type: 'blob', sha: await this.client.createBlob(bytes) }
+      }
 
       // Updates: place bytes at planned paths, inline where we can.
       //
@@ -670,13 +703,7 @@ export class GithubRemote implements Remote {
       for (const key of [...wc.updates.keys()].sort()) {
         const bytes = wc.updates.get(key) as Uint8Array
         uploadedBlobs.set(`${wc.hash}:${key}`, await gitBlobSha1(bytes))
-        const path = planner.assign(key)
-        const text = inlinable(bytes)
-        entries.push(
-          text !== null
-            ? { path, mode: '100644', type: 'blob', content: text }
-            : { path, mode: '100644', type: 'blob', sha: await this.client.createBlob(bytes) },
-        )
+        entries.push(await placeValue(planner.assign(key), bytes))
       }
 
       // Carries: same bytes as the owning commit's write — find the
@@ -701,17 +728,7 @@ export class GithubRemote implements Remote {
       // fallback is kept so one policy governs every entry rather than
       // this one assuming its own answer.
       const sidecar = encodeSidecar(wc, { kernel: this.#kernel, paths: plannerView(planner) })
-      const sidecarText = inlinable(sidecar)
-      entries.push(
-        sidecarText !== null
-          ? { path: SIDECAR_PATH, mode: '100644', type: 'blob', content: sidecarText }
-          : {
-              path: SIDECAR_PATH,
-              mode: '100644',
-              type: 'blob',
-              sha: await this.client.createBlob(sidecar),
-            },
-      )
+      entries.push(await placeValue(SIDECAR_PATH, sidecar))
 
       const treeSha = await this.client.createTree(entries, parentRender?.treeSha)
 

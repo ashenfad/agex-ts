@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { INLINE_LIMIT, inlinable } from '../src/github/inline'
+import { INLINE_LIMIT, INLINE_TREE_BUDGET, inlinable, inlineCost } from '../src/github/inline'
 
 const enc = new TextEncoder()
 const bytes = (s: string): Uint8Array => enc.encode(s)
@@ -67,5 +67,37 @@ describe('inlinable', () => {
     expect(bytes(emoji).length).toBe(16)
     expect(inlinable(bytes(emoji), 15)).toBeNull()
     expect(inlinable(bytes(emoji), 16)).toBe(emoji)
+  })
+})
+
+describe('inlineCost', () => {
+  it('measures the JSON body cost, not the value length', () => {
+    // Plain ASCII: the two quotes are the only overhead.
+    expect(inlineCost('hello')).toBe(7)
+    expect(inlineCost('')).toBe(2)
+  })
+
+  it('accounts for escape expansion, which raw length would miss', () => {
+    // A control byte is one byte on disk and six inside JSON. Budgeting
+    // on raw length would undercount this by 6x — exactly the content
+    // most able to blow a request body past its limit.
+    expect(inlineCost('\u0000')).toBe(2 + 6)
+    expect(inlineCost('\u0000'.repeat(100))).toBe(2 + 600)
+    // Quote and backslash double.
+    expect(inlineCost('"')).toBe(2 + 2)
+    expect(inlineCost('\\')).toBe(2 + 2)
+  })
+
+  it('counts UTF-8 bytes, not code units', () => {
+    // One emoji: two UTF-16 units, four bytes on the wire.
+    expect('🌳'.length).toBe(2)
+    expect(inlineCost('🌳')).toBe(2 + 4)
+  })
+
+  it('keeps the per-value gate well inside the aggregate budget', () => {
+    // A sanity check on the two constants relating sensibly: the budget
+    // must admit a meaningful number of maximum-size values, or the
+    // per-value gate is doing nothing.
+    expect(INLINE_TREE_BUDGET / INLINE_LIMIT).toBeGreaterThanOrEqual(16)
   })
 })

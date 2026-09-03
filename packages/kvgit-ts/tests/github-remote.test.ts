@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { Memory } from '../src/backends/memory'
 import { gitBlobSha1 } from '../src/github/git-hash'
 import { GithubClient, GithubRemote, kvgitHashFromMessage } from '../src/github/index'
+import { inlineCost } from '../src/github/inline'
 import type { WireCommit } from '../src/types'
 
 interface Scripted {
@@ -32,7 +33,10 @@ const treeEntries = (call: Call | undefined): WireTreeEntry[] =>
 const entryAt = (call: Call | undefined, path: string): WireTreeEntry | undefined =>
   treeEntries(call).find((e) => e.path === path)
 
-function makeHarness(script: Scripted[]): {
+function makeHarness(
+  script: Scripted[],
+  remoteOpts: ConstructorParameters<typeof GithubRemote>[2] = {},
+): {
   remote: GithubRemote
   store: Memory
   calls: Call[]
@@ -57,7 +61,7 @@ function makeHarness(script: Scripted[]): {
     sleeper: async () => {},
   })
   const store = new Memory()
-  return { remote: new GithubRemote(client, store), store, calls }
+  return { remote: new GithubRemote(client, store, remoteOpts), store, calls }
 }
 
 const KV_A = 'a'.repeat(40)
@@ -382,5 +386,93 @@ describe('GithubRemote.push request cost', () => {
     // The carry cites the hash we computed locally for the inlined write.
     expect(entryAt(trees[1], 'k')?.sha).toBe(await gitBlobSha1(bytes))
     expect(entryAt(trees[1], 'k')?.content).toBeUndefined()
+  })
+})
+
+describe('GithubRemote.push inline budget', () => {
+  const enc = new TextEncoder()
+  const wire = (over: Partial<WireCommit> = {}): WireCommit =>
+    ({
+      hash: KV_A,
+      parents: [],
+      time: 1_700_000_000_000,
+      info: null,
+      updates: new Map(),
+      removals: new Set(),
+      meta: new Map(),
+      carries: new Map(),
+      ...over,
+    }) as WireCommit
+
+  /** getRef 404, then `blobs` uploads, then tree + commit + ref. */
+  const script = (blobs: number): Scripted[] => [
+    { status: 404, body: { message: 'Not Found' } },
+    ...Array.from({ length: blobs }, (_, i) => ({
+      status: 201,
+      body: { sha: String(i).padStart(40, '0') },
+    })),
+    { status: 201, body: { sha: 't'.repeat(40) } },
+    { status: 201, body: { sha: 'c'.repeat(40) } },
+    { status: 201, body: {} },
+  ]
+
+  const updatesOf = (n: number, value: string): Partial<WireCommit> => ({
+    updates: new Map(Array.from({ length: n }, (_, i) => [`k${i}`, enc.encode(value)])),
+    meta: new Map(Array.from({ length: n }, (_, i) => [`k${i}`, { createdAt: i }])),
+  })
+
+  it('falls back to blobs once the tree body budget is spent', async () => {
+    // Ten values that each clear the per-value gate but together exceed
+    // the aggregate. Without a budget all ten would inline and build one
+    // oversized request with nothing smaller to retry.
+    const value = 'x'.repeat(100)
+    const { remote, calls } = makeHarness(script(10), {
+      inlineBudget: inlineCost(value) * 4,
+    })
+    await remote.push('chat-x', null, KV_A, [wire(updatesOf(10, value))])
+
+    const inlined = treeEntries(calls.find((c) => c.url.includes('git/trees'))).filter(
+      (e) => e.content !== undefined,
+    )
+    const uploaded = calls.filter((c) => c.url.includes('git/blobs'))
+    // Four fit the budget; the rest went the old way. The sidecar is
+    // budgeted too, and is added after the values have spent it.
+    expect(inlined.length).toBe(4)
+    expect(uploaded.length).toBe(10 - 4 + 1) // + the sidecar
+  })
+
+  it('keeps the assembled request body under the budget', async () => {
+    const value = 'y'.repeat(500)
+    const budget = inlineCost(value) * 3
+    const { remote, calls } = makeHarness(script(20), { inlineBudget: budget })
+    await remote.push('chat-x', null, KV_A, [wire(updatesOf(20, value))])
+
+    const tree = treeEntries(calls.find((c) => c.url.includes('git/trees')))
+    const spent = tree
+      .filter((e) => e.content !== undefined)
+      .reduce((n, e) => n + inlineCost(e.content as string), 0)
+    expect(spent).toBeLessThanOrEqual(budget)
+  })
+
+  it('charges escape expansion against the budget, not raw length', async () => {
+    // Six bytes of JSON per byte of value. A budget tracked on raw
+    // length would admit six times as many of these as it should.
+    const nuls = '\u0000'.repeat(50) // 50 bytes raw, 300 encoded
+    const { remote, calls } = makeHarness(script(10), { inlineBudget: 320 })
+    await remote.push('chat-x', null, KV_A, [wire(updatesOf(10, nuls))])
+
+    const inlined = treeEntries(calls.find((c) => c.url.includes('git/trees'))).filter(
+      (e) => e.content !== undefined,
+    )
+    // Only one fits: 302 bytes spent of 320. Raw-length budgeting would
+    // have inlined six.
+    expect(inlined.length).toBe(1)
+  })
+
+  it('still inlines everything when the budget is ample', async () => {
+    const { remote, calls } = makeHarness(script(0))
+    await remote.push('chat-x', null, KV_A, [wire(updatesOf(10, 'small'))])
+    expect(calls.filter((c) => c.url.includes('git/blobs'))).toEqual([])
+    expect(calls.length).toBe(4)
   })
 })

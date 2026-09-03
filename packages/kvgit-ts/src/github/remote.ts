@@ -9,9 +9,16 @@
  *
  * Push pipeline, per wire commit in topological order:
  *
- *   blobs (content-addressed, skipped when already uploaded)
- *     → tree (`base_tree` on the first parent's tree + delta entries)
- *       → commit (explicit dates ⇒ deterministic git SHAs)
+ *   tree (`base_tree` on the first parent's tree + delta entries,
+ *         values carried INLINE where `inlinable` allows, so most
+ *         commits cost no per-key request at all)
+ *     → commit (explicit dates ⇒ deterministic git SHAs)
+ *
+ * Values that have no UTF-8 spelling, or that exceed the inline size
+ * gate, fall back to a `createBlob` POST and a `sha` entry — the path
+ * every value took before. Either way the blob object GitHub stores is
+ * byte-identical, so the repo format is unchanged and a reader cannot
+ * tell which route a value took.
  *
  * with ONE trailing ref CAS — `createRef` for `expectedOld === null`,
  * `force:false` `updateRef` otherwise. An interrupted push strands
@@ -42,6 +49,7 @@ import type { KVStore, WireCommit } from '../types'
 import { PARENT_COMMIT, blobPointer, dumps, safeLoads } from '../versioned/layout'
 import type { GithubClient, TreeEntry } from './client'
 import { gitBlobSha1 } from './git-hash'
+import { inlinable } from './inline'
 import { PathPlanner, SIDECAR_PATH, naturalPath, relocatedPath } from './paths'
 import { decodeSidecar, encodeSidecar, wireFromSidecar } from './sidecar'
 
@@ -646,12 +654,29 @@ export class GithubRemote implements Remote {
 
       const entries: TreeEntry[] = []
 
-      // Updates: upload bytes, place at planned paths.
+      // Updates: place bytes at planned paths, inline where we can.
+      //
+      // `content` on a tree entry makes GitHub write the blob as part
+      // of the tree call, so the per-key POST disappears into a request
+      // that was happening anyway — the difference between N + 3 and 2
+      // requests for a commit, against a budget of 500 an hour.
+      //
+      // The blob SHA still has to be recorded for later carries, and it
+      // comes from `gitBlobSha1` rather than a response body. That is
+      // not a new leap of faith: `#carryBlobSha` already references
+      // locally-derived SHAs in trees without asking GitHub to confirm
+      // them. Probing the live API showed inline content stored
+      // verbatim for every shape kvgit ships, so the two agree.
       for (const key of [...wc.updates.keys()].sort()) {
         const bytes = wc.updates.get(key) as Uint8Array
-        const sha = await this.client.createBlob(bytes)
-        uploadedBlobs.set(`${wc.hash}:${key}`, sha)
-        entries.push({ path: planner.assign(key), mode: '100644', type: 'blob', sha })
+        uploadedBlobs.set(`${wc.hash}:${key}`, await gitBlobSha1(bytes))
+        const path = planner.assign(key)
+        const text = inlinable(bytes)
+        entries.push(
+          text !== null
+            ? { path, mode: '100644', type: 'blob', content: text }
+            : { path, mode: '100644', type: 'blob', sha: await this.client.createBlob(bytes) },
+        )
       }
 
       // Carries: same bytes as the owning commit's write — find the
@@ -672,13 +697,21 @@ export class GithubRemote implements Remote {
       }
 
       // Sidecar last — its paths must reflect this commit's planning.
+      // Deterministic compact JSON, so `inlinable` always says yes; the
+      // fallback is kept so one policy governs every entry rather than
+      // this one assuming its own answer.
       const sidecar = encodeSidecar(wc, { kernel: this.#kernel, paths: plannerView(planner) })
-      entries.push({
-        path: SIDECAR_PATH,
-        mode: '100644',
-        type: 'blob',
-        sha: await this.client.createBlob(sidecar),
-      })
+      const sidecarText = inlinable(sidecar)
+      entries.push(
+        sidecarText !== null
+          ? { path: SIDECAR_PATH, mode: '100644', type: 'blob', content: sidecarText }
+          : {
+              path: SIDECAR_PATH,
+              mode: '100644',
+              type: 'blob',
+              sha: await this.client.createBlob(sidecar),
+            },
+      )
 
       const treeSha = await this.client.createTree(entries, parentRender?.treeSha)
 

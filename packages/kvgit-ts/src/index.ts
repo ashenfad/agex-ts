@@ -21,6 +21,16 @@ export {
   type ResolveMergeOptions,
 } from './versioned/merge'
 export { diffKeysets, walkHistory, type ParentLoader } from './versioned/helpers'
+export {
+  CantMark,
+  makeTextMerge,
+  MAX_MARK_BYTES,
+  splitLinesKeepEnds,
+  text,
+  textMerge,
+  textMergeResult,
+  type TextMergeOptions,
+} from './merges'
 export { walkDelta, type WalkDeltaOptions } from './sync/walk'
 export {
   applyWire,

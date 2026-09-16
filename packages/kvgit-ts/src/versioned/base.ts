@@ -372,4 +372,5 @@ export abstract class VersionedBase implements Versioned {
   protected abstract loadParents(commitHash: string): Promise<readonly string[]>
   protected abstract findLca(commitA: string, commitB: string): Promise<string | null>
   protected abstract readBlob(blobId: string): Promise<Uint8Array | null>
+  abstract branchExists(name: string): Promise<boolean>
 }

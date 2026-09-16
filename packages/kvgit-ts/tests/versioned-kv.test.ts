@@ -8,7 +8,7 @@ import {
   VersionedKV,
 } from '../src/index'
 import { Keyset } from '../src/keyset'
-import { COMMIT_ROOT, loads } from '../src/versioned/layout'
+import { BRANCH_HEAD, COMMIT_ROOT, loads } from '../src/versioned/layout'
 
 const enc = new TextEncoder()
 const dec = new TextDecoder()
@@ -554,6 +554,45 @@ describe('VersionedKV — fast-forward race retry', () => {
       return realCas(expected, newHead)
     }
     await expect(v2.commit(one('mine', '2'))).rejects.toThrow(ConcurrencyError)
+  })
+
+  it('a retry that finds its branch gone restores pre-commit state', async () => {
+    const store = new Memory()
+    const v1 = await VersionedKV.open(store)
+    await v1.commit(one('base', '0'))
+    const baseHead = v1.currentCommit
+    const v2 = await VersionedKV.open(store)
+    raceOnce(v2, () => store.remove(BRANCH_HEAD('main')))
+
+    await expect(v2.commit(one('mine', '2'))).rejects.toThrow(/has no HEAD/)
+    expect(v2.currentCommit).toBe(baseHead)
+    expect(await v2.get('mine')).toBeNull()
+    expect(text((await v2.get('base')) as Uint8Array)).toBe('0')
+  })
+
+  it('a failing HEAD re-read restores pre-commit state', async () => {
+    const store = new Memory()
+    const v1 = await VersionedKV.open(store)
+    await v1.commit(one('base', '0'))
+    const baseHead = v1.currentCommit
+    const v2 = await VersionedKV.open(store)
+    const patchedHead = v2 as unknown as { latestHead(): Promise<string | null> }
+    const realHead = patchedHead.latestHead.bind(v2)
+    raceOnce(v2, async () => {
+      await v1.commit(one('other', '1'))
+      patchedHead.latestHead = async () => {
+        throw new Error('transient storage boom')
+      }
+    })
+
+    await expect(v2.commit(one('mine', '2'))).rejects.toThrow('transient storage boom')
+    expect(v2.currentCommit).toBe(baseHead)
+    expect(await v2.get('mine')).toBeNull()
+    // The handle stays usable: restore the read and commit cleanly.
+    patchedHead.latestHead = realHead
+    const result = await v2.commit(one('mine', '2'))
+    expect(result.merged).toBe(true)
+    expect(text((await v2.get('mine')) as Uint8Array)).toBe('2')
   })
 
   it('a raced merge strands no HAMT nodes', async () => {

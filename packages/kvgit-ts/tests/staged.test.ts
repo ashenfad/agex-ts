@@ -134,6 +134,31 @@ describe('Staged — commit race', () => {
   })
 })
 
+describe('Staged — mergeHeads', () => {
+  it('merges another head and reads through it', async () => {
+    const store = new Memory()
+    const v = await VersionedKV.open(store)
+    const a = new Staged(v)
+    a.set('a', '1')
+    await a.commit()
+    const b = new Staged((await v.createBranch('b')) as VersionedKV)
+    b.set('b', '2')
+    await b.commit()
+
+    const rm = await a.mergeHeads(b.versioned.currentCommit)
+    expect(rm.merged).toBe(true)
+    expect(rm.strategy).toBe('three_way')
+    expect(await a.get('a')).toBe('1')
+    expect(await a.get('b')).toBe('2')
+  })
+
+  it('refuses while the buffer is dirty', async () => {
+    const { staged } = await freshStaged()
+    staged.set('k', 'v')
+    await expect(staged.mergeHeads('deadbeef')).rejects.toThrow(/staged changes/)
+  })
+})
+
 describe('Staged — Map-shaped iteration', () => {
   it('keys() yields committed + staged updates and excludes staged removals', async () => {
     const { staged } = await freshStaged()

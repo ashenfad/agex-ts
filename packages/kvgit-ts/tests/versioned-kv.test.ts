@@ -623,6 +623,117 @@ describe('VersionedKV — fast-forward race retry', () => {
   })
 })
 
+describe('VersionedKV — mergeBase best common ancestor', () => {
+  const one = (key: string, value: string) => ({ updates: new Map([[key, bytes(value)]]) })
+  const oursFn: BytesMergeFn = (_old, ours, _theirs) => {
+    if (ours === null) throw new Error('unreachable in these tests')
+    return ours
+  }
+  const counterFn: BytesMergeFn = (oldB, oursB, theirsB) => {
+    const num = (b: Uint8Array | null): number => (b === null ? 0 : Number(text(b)))
+    return bytes(String(num(oursB) + num(theirsB) - num(oldB)))
+  }
+
+  it('a fork resolves to the fork point either order', async () => {
+    const store = new Memory()
+    const v = await VersionedKV.open(store)
+    await v.commit(one('x', '0'))
+    const fork = v.currentCommit
+    const a = (await v.createBranch('a')) as VersionedKV
+    const b = (await v.createBranch('b')) as VersionedKV
+    await a.commit(one('a', '1'))
+    await b.commit(one('b', '2'))
+
+    expect(await v.mergeBase(a.currentCommit, b.currentCommit)).toBe(fork)
+    expect(await v.mergeBase(b.currentCommit, a.currentCommit)).toBe(fork)
+  })
+
+  it('merge commits resolve through either order', async () => {
+    // h2 loses the fast-forward race and lands a merge commit; the
+    // base is the fork point whichever order the tips are given in.
+    const store = new Memory()
+    const v = await VersionedKV.open(store)
+    await v.commit(one('x', '0'))
+    const fork = v.currentCommit
+    const h1 = await VersionedKV.open(store)
+    const h2 = await VersionedKV.open(store)
+    await h1.commit(one('a', '1'))
+    const merged = await h2.commit(one('b', '2'))
+    expect(merged.strategy).toBe('three_way')
+
+    const tipA = h1.currentCommit
+    const tipM = h2.currentCommit
+    expect(await v.mergeBase(tipM, tipA)).toBe(tipA)
+    expect(await v.mergeBase(tipA, tipM)).toBe(tipA)
+    expect(await v.mergeBase(tipM, fork)).toBe(fork)
+    expect(await v.mergeBase(tipM, tipM)).toBe(tipM)
+  })
+
+  it('merging the root into branches keeps the base', async () => {
+    // Issue kvgit#47: naming the root as a merge parent must not
+    // demote the base from the fork back to the root.
+    const store = new Memory()
+    const v = await VersionedKV.open(store)
+    const root = v.currentCommit
+    await v.commit(one('x', '1'))
+    const fork = v.currentCommit
+    const a = (await v.createBranch('a')) as VersionedKV
+    const b = (await v.createBranch('b')) as VersionedKV
+    await a.commit(one('a', '1'))
+    await b.commit(one('b', '2'))
+    await a.mergeHeads(root)
+    await b.mergeHeads(root)
+
+    expect(await v.mergeBase(a.currentCommit, b.currentCommit)).toBe(fork)
+    expect(await v.mergeBase(b.currentCommit, a.currentCommit)).toBe(fork)
+  })
+
+  it('criss-cross base is deterministic', async () => {
+    // Two best ancestors: the smallest hash wins, whichever order
+    // the commits are given in.
+    const store = new Memory()
+    const v = await VersionedKV.open(store)
+    const pa = (await v.createBranch('pa')) as VersionedKV
+    const pb = (await v.createBranch('pb')) as VersionedKV
+    await pa.commit(one('k', 'v1'))
+    await pb.commit(one('k', 'v2'))
+    const p1 = pa.currentCommit
+    const p2 = pb.currentCommit
+    const m = (await v.createBranch('m', { at: p1 })) as VersionedKV
+    await m.mergeHeads(p2, { mergeFns: new Map([['k', oursFn]]) })
+    const q = (await v.createBranch('q', { at: p2 })) as VersionedKV
+    await q.mergeHeads(p1, { mergeFns: new Map([['k', oursFn]]) })
+
+    const lo = p1 < p2 ? p1 : p2
+    expect(await v.mergeBase(m.currentCommit, q.currentCommit)).toBe(lo)
+    expect(await v.mergeBase(q.currentCommit, m.currentCommit)).toBe(lo)
+  })
+
+  it('criss-cross merge is direction independent', async () => {
+    // Both merge directions use the same base now (and a symmetric
+    // counter fn), so they resolve to the same value instead of each
+    // side winning its own merge.
+    const store = new Memory()
+    const v = await VersionedKV.open(store)
+    const pa = (await v.createBranch('pa')) as VersionedKV
+    const pb = (await v.createBranch('pb')) as VersionedKV
+    await pa.commit(one('n', '10'))
+    await pb.commit(one('n', '20'))
+    const p1 = pa.currentCommit
+    const p2 = pb.currentCommit
+    const m = (await v.createBranch('m', { at: p1 })) as VersionedKV
+    await m.mergeHeads(p2, { mergeFns: new Map([['n', oursFn]]) })
+    const q = (await v.createBranch('q', { at: p2 })) as VersionedKV
+    await q.mergeHeads(p1, { mergeFns: new Map([['n', oursFn]]) })
+
+    const fwd = (await v.createBranch('fwd', { at: m.currentCommit })) as VersionedKV
+    await fwd.mergeHeads(q.currentCommit, { mergeFns: new Map([['n', counterFn]]) })
+    const back = (await v.createBranch('back', { at: q.currentCommit })) as VersionedKV
+    await back.mergeHeads(m.currentCommit, { mergeFns: new Map([['n', counterFn]]) })
+    expect(text((await fwd.get('n')) as Uint8Array)).toBe(text((await back.get('n')) as Uint8Array))
+  })
+})
+
 describe('VersionedKV — sanity: ConcurrencyError import path', () => {
   it('exports ConcurrencyError as a real class', () => {
     expect(typeof ConcurrencyError).toBe('function')

@@ -444,6 +444,7 @@ export class VersionedKV extends VersionedBase {
     resolution: MergeResolution,
     parents: readonly string[],
     info: CommitInfo | null,
+    theirHead: string,
   ): Promise<string> {
     const mergedKeyset = new Map(resolution.mergedKeyset)
     const mergedValues = resolution.mergedValues
@@ -469,8 +470,10 @@ export class VersionedKV extends VersionedBase {
     // we don't already have meta for. That's typically a small set
     // (keys "they" added that "we" didn't have). Look those up
     // pointwise rather than walking the entire "their" keyset.
-    const theirParent = parents[0] as string
-    const theirRootBytes = await this.store.get(COMMIT_ROOT(theirParent))
+    // NOTE: read theirs via `theirHead`, not `parents[0]` — the
+    // commit path orders parents [theirs, ours] but `mergeHeads`
+    // orders them [ours, theirs].
+    const theirRootBytes = await this.store.get(COMMIT_ROOT(theirHead))
     const theirKs =
       theirRootBytes !== null ? Keyset.fromRoot(this.store, loads(theirRootBytes) as string) : null
 
@@ -596,38 +599,87 @@ export class VersionedKV extends VersionedBase {
   }
 
   protected async findLca(commitA: string, commitB: string): Promise<string | null> {
+    // Ancestor-set intersection with non-minimal candidates dropped
+    // (a candidate that is itself an ancestor of another candidate is
+    // not lowest). When several commits tie for lowest — criss-cross
+    // histories — the smallest hash wins: deterministic, but
+    // arbitrary, so criss-cross merges resolve cleanly rather than
+    // raising.
     if (commitA === commitB) return commitA
 
-    const seenA = new Set<string>([commitA])
-    const seenB = new Set<string>([commitB])
-    const queueA: string[] = [commitA]
-    const queueB: string[] = [commitB]
+    const parents = new Map<string, readonly string[]>()
+    const ancestorsA = await this.walkAncestors(commitA, parents)
+    // Fast path: B inside A's history (or vice versa) names the
+    // lowest directly — every other common ancestor sits above it.
+    if (ancestorsA.has(commitB)) return commitB
+    const ancestorsB = await this.walkAncestors(commitB, parents)
+    if (ancestorsB.has(commitA)) return commitA
 
-    while (queueA.length > 0 || queueB.length > 0) {
-      if (queueA.length > 0) {
-        const current = queueA.shift() as string
-        if (seenB.has(current)) return current
-        for (const p of await this.loadParents(current)) {
-          if (!seenA.has(p)) {
-            seenA.add(p)
-            queueA.push(p)
-            if (seenB.has(p)) return p
-          }
-        }
+    const common = new Set<string>()
+    for (const c of ancestorsA) {
+      if (ancestorsB.has(c)) common.add(c)
+    }
+    if (common.size === 0) return null
+    // Minimality in one bottom-up pass: a candidate is lowest when no
+    // other candidate sits below it. Propagate "a candidate is
+    // at-or-below here" from tips to roots over the in-memory parent
+    // map — no further store reads, linear in the history.
+    const children = new Map<string, string[]>()
+    for (const node of parents.keys()) children.set(node, [])
+    for (const [node, nodeParents] of parents) {
+      for (const parent of nodeParents) {
+        const kids = children.get(parent)
+        if (kids !== undefined) kids.push(node)
       }
-      if (queueB.length > 0) {
-        const current = queueB.shift() as string
-        if (seenA.has(current)) return current
-        for (const p of await this.loadParents(current)) {
-          if (!seenB.has(p)) {
-            seenB.add(p)
-            queueB.push(p)
-            if (seenA.has(p)) return p
-          }
+    }
+    const below = new Map<string, boolean>()
+    const remaining = new Map<string, number>()
+    for (const [node, kids] of children) {
+      below.set(node, false)
+      remaining.set(node, kids.length)
+    }
+    const queue: string[] = []
+    for (const [node, kids] of children) {
+      if (kids.length === 0) queue.push(node)
+    }
+    while (queue.length > 0) {
+      const node = queue.shift() as string
+      const nodeParents = parents.get(node) ?? []
+      for (const parent of nodeParents) {
+        if (common.has(node) || below.get(node) === true) below.set(parent, true)
+        const left = (remaining.get(parent) ?? 1) - 1
+        remaining.set(parent, left)
+        if (left === 0) queue.push(parent)
+      }
+    }
+    let best: string | null = null
+    for (const c of common) {
+      if (below.get(c) !== true && (best === null || c < best)) best = c
+    }
+    return best
+  }
+
+  private async walkAncestors(
+    start: string,
+    parents: Map<string, readonly string[]>,
+  ): Promise<Set<string>> {
+    // All ancestors of `start` (itself included), recording each
+    // visited commit's parents in `parents` for later passes.
+    const ancestors = new Set<string>([start])
+    const stack = [start]
+    while (stack.length > 0) {
+      const current = stack.pop() as string
+      if (parents.has(current)) continue
+      const nodeParents = await this.loadParents(current)
+      parents.set(current, nodeParents)
+      for (const parent of nodeParents) {
+        if (!ancestors.has(parent)) {
+          ancestors.add(parent)
+          stack.push(parent)
         }
       }
     }
-    return null
+    return ancestors
   }
 
   protected async readBlob(blobId: string): Promise<Uint8Array | null> {

@@ -49,6 +49,15 @@ export interface StagedCommitOptions {
   info?: CommitInfo
 }
 
+/** Options for `Staged.mergeHeads()`. */
+export interface StagedMergeHeadsOptions {
+  onConflict?: ConflictDisposition
+  /** Per-key merge fns added on top of the registered ones for this merge. */
+  mergeFns?: Map<string, MergeFn>
+  defaultMerge?: MergeFn
+  info?: CommitInfo
+}
+
 /**
  * Buffered writes over a `Versioned`. Implements a Map-shaped surface;
  * staged changes flush atomically via `commit()`.
@@ -379,6 +388,51 @@ export class Staged {
       // a three-way merge may have introduced changes from the other
       // side under keys we haven't touched, leaving cached entries
       // stale.
+      this.cache.clear()
+    }
+    return result
+  }
+
+  /**
+   * Merge another head (usually another branch's HEAD) into this branch.
+   *
+   * Lowest common ancestor + three-way resolve + a two-parent merge
+   * commit, CAS-guarded on our own head. Refuses when the staging
+   * buffer holds uncommitted changes — commit or reset first, so the
+   * merge reads committed heads on both sides.
+   */
+  async mergeHeads(theirHead: string, opts: StagedMergeHeadsOptions = {}): Promise<MergeResult> {
+    if (this.updates.size > 0 || this.removals.size > 0) {
+      throw new Error('cannot merge with staged changes; commit or reset first')
+    }
+    // Same assembly as commit(): registered fns first, per-call
+    // overrides on top.
+    const effectiveFns = new Map(this.userMergeFns)
+    if (opts.mergeFns) {
+      for (const [k, fn] of opts.mergeFns) effectiveFns.set(k, fn)
+    }
+    const effectiveDefault = opts.defaultMerge ?? this.userDefaultMerge
+
+    let bytesMergeFns: Map<string, BytesMergeFn> | null = null
+    if (effectiveFns.size > 0) {
+      bytesMergeFns = new Map()
+      for (const [k, fn] of effectiveFns) {
+        bytesMergeFns.set(k, this.wrapMergeFn(fn))
+      }
+    }
+    const bytesDefault: BytesMergeFn | null =
+      effectiveDefault !== null && effectiveDefault !== undefined
+        ? this.wrapMergeFn(effectiveDefault)
+        : null
+
+    const result = await this.versioned.mergeHeads(theirHead, {
+      ...(opts.onConflict !== undefined && { onConflict: opts.onConflict }),
+      ...(bytesMergeFns !== null && { mergeFns: bytesMergeFns }),
+      ...(bytesDefault !== null && { defaultMerge: bytesDefault }),
+      ...(opts.info !== undefined && { info: opts.info }),
+    })
+    if (result.merged) {
+      // HEAD moved: cached values may be stale after a merge.
       this.cache.clear()
     }
     return result

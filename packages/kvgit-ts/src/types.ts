@@ -240,6 +240,14 @@ export interface VersionedCommitOptions {
   info?: CommitInfo | null
 }
 
+/** Options for `Versioned.mergeHeads()`. */
+export interface MergeHeadsOptions {
+  onConflict?: ConflictDisposition
+  mergeFns?: Map<string, BytesMergeFn> | null
+  defaultMerge?: BytesMergeFn | null
+  info?: CommitInfo | null
+}
+
 /**
  * Versioned key-value store. A commit log over a `KVStore`.
  *
@@ -274,6 +282,7 @@ export interface Versioned {
   // --- Writes ---
 
   commit(opts?: VersionedCommitOptions): Promise<MergeResult>
+  mergeHeads(theirHead: string, opts?: MergeHeadsOptions): Promise<MergeResult>
 
   // --- Navigation ---
 

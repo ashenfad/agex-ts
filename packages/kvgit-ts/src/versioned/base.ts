@@ -18,6 +18,7 @@ import {
   type ConflictDisposition,
   type DiffResult,
   MergeConflict,
+  type MergeHeadsOptions,
   type MergeResult,
   type Versioned,
   type VersionedCommitOptions,
@@ -139,6 +140,11 @@ export abstract class VersionedBase implements Versioned {
     return this.loadParents(commitHash ?? this.currentCommitHash)
   }
 
+  /**
+   * Lowest common ancestor of two commits, or null if unrelated.
+   * On a criss-cross tie the smallest hash wins (deterministic but
+   * arbitrary) — exactly the base a merge of the two would use.
+   */
   async mergeBase(commitA: string, commitB: string): Promise<string | null> {
     return this.findLca(commitA, commitB)
   }
@@ -244,6 +250,31 @@ export abstract class VersionedBase implements Versioned {
     })
   }
 
+  /**
+   * Merge another head into this branch. Finds the lowest common
+   * ancestor with our head, three-way resolves, and creates a
+   * two-parent merge commit, CAS-guarded on our own head (a race
+   * raises `ConcurrencyError` and changes nothing). No common ancestor
+   * raises `ConcurrencyError` likewise without changing anything.
+   */
+  async mergeHeads(theirHead: string, opts: MergeHeadsOptions = {}): Promise<MergeResult> {
+    const onConflict = opts.onConflict ?? 'raise'
+    if (onConflict !== 'raise' && onConflict !== 'skip') {
+      throw new TypeError(`onConflict must be 'raise' or 'skip', got ${String(onConflict)}`)
+    }
+    const ourHead = this.currentCommitHash
+    return this.threeWayMerge(theirHead, {
+      onConflict,
+      ...(opts.mergeFns !== null && opts.mergeFns !== undefined && { mergeFns: opts.mergeFns }),
+      ...(opts.defaultMerge !== null &&
+        opts.defaultMerge !== undefined && { defaultMerge: opts.defaultMerge }),
+      ...(opts.info !== null && opts.info !== undefined && { info: opts.info }),
+      savedState: this.snapshotState(),
+      casFrom: ourHead,
+      parents: [ourHead, theirHead],
+    })
+  }
+
   private async threeWayMerge(
     theirHead: string,
     opts: {
@@ -252,6 +283,8 @@ export abstract class VersionedBase implements Versioned {
       defaultMerge?: BytesMergeFn
       info?: CommitInfo
       savedState: unknown
+      casFrom?: string
+      parents?: readonly string[]
     },
   ): Promise<MergeResult> {
     const lca = await this.findLca(this.currentCommitHash, theirHead)
@@ -316,12 +349,12 @@ export abstract class VersionedBase implements Versioned {
       throw e
     }
 
-    const parents: readonly string[] = [theirHead, this.currentCommitHash]
-    await this.createMergeCommit(resolution, parents, opts.info ?? null)
+    const parents: readonly string[] = opts.parents ?? [theirHead, this.currentCommitHash]
+    await this.createMergeCommit(resolution, parents, opts.info ?? null, theirHead)
     const mergeHash = this.currentCommitHash
     const mergedKeyset = this.commitKeys
 
-    if (await this.casHead(theirHead, mergeHash)) {
+    if (await this.casHead(opts.casFrom ?? theirHead, mergeHash)) {
       this.baseCommitHash = mergeHash
       const carriedKeys: string[] = []
       for (const k of mergedKeyset.keys()) {
@@ -379,6 +412,7 @@ export abstract class VersionedBase implements Versioned {
     resolution: MergeResolution,
     parents: readonly string[],
     info: CommitInfo | null,
+    theirHead: string,
   ): Promise<string>
   protected abstract casHead(expected: string, newHead: string): Promise<boolean>
   protected abstract loadKeyset(commitHash: string): Promise<Map<string, string>>

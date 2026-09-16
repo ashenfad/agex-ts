@@ -245,9 +245,7 @@ describe('VersionedKV — mergeBase', () => {
     const store = new Memory()
     const main = await VersionedKV.open(store)
     await main.commit({ updates: new Map([['k', bytes('v')]]) })
-    expect(await main.mergeBase(main.currentCommit, main.currentCommit)).toBe(
-      main.currentCommit,
-    )
+    expect(await main.mergeBase(main.currentCommit, main.currentCommit)).toBe(main.currentCommit)
   })
 
   it('resolves diverged branches to the fork point, either order', async () => {

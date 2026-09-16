@@ -252,6 +252,11 @@ export class Staged {
     return this.versioned.listBranches()
   }
 
+  /** Lowest common ancestor of two commits, or null if unrelated. */
+  async mergeBase(commitA: string, commitB: string): Promise<string | null> {
+    return this.versioned.mergeBase(commitA, commitB)
+  }
+
   /**
    * Delete a branch by name. Cannot delete the current branch — the
    * underlying `Versioned` enforces this and throws.

@@ -139,6 +139,10 @@ export abstract class VersionedBase implements Versioned {
     return this.loadParents(commitHash ?? this.currentCommitHash)
   }
 
+  async mergeBase(commitA: string, commitB: string): Promise<string | null> {
+    return this.findLca(commitA, commitB)
+  }
+
   // --- Commit orchestration ---
 
   async commit(opts: VersionedCommitOptions = {}): Promise<MergeResult> {

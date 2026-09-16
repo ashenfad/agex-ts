@@ -272,6 +272,7 @@ export interface Versioned {
   commitInfo(commitHash?: string): Promise<CommitInfo | null>
   diff(commitA: string, commitB: string): Promise<DiffResult>
   parents(commitHash?: string): Promise<readonly string[]>
+  mergeBase(commitA: string, commitB: string): Promise<string | null>
 }
 
 // ---------------------------------------------------------------------------

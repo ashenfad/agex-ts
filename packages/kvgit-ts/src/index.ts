@@ -54,6 +54,7 @@ export {
   jsonDecoder,
   jsonEncoder,
   type StagedCommitOptions,
+  type StagedMergeHeadsOptions,
   type StagedOptions,
 } from './staged'
 export { Namespaced, type NamespaceableStore } from './namespaced'

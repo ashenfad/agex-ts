@@ -327,8 +327,10 @@ export interface WireCommit {
   /** kvgit commit hash (40-hex). */
   readonly hash: string
   /** Parent hashes, order-significant (order participates in `hash`).
-   *  For three-way merges, `parents[0]` is "theirs" (the head that won
-   *  the CAS race) and `parents[1]` is "ours" — see `VersionedBase`. */
+   *  For three-way merges, `parents[0]` is the head the merge landed
+   *  on — the CAS winner for `commit()`, our own head for
+   *  `mergeHeads()` — and the sync delta (updates/removals/carries)
+   *  is always relative to it. See `VersionedBase`. */
   readonly parents: readonly string[]
   /** Wall time epoch ms (`__commit_time__`). Not part of `hash`. */
   readonly time: number

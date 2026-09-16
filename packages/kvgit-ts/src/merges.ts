@@ -44,8 +44,10 @@ function checkLabels(oursLabel: string, theirsLabel: string): void {
     ['oursLabel', oursLabel],
     ['theirsLabel', theirsLabel],
   ] as const) {
-    if (label.includes('\n')) {
-      throw new TypeError(`${name} may not contain a newline: ${JSON.stringify(label)}`)
+    for (const boundary of LINE_BOUNDARIES) {
+      if (label.includes(boundary)) {
+        throw new TypeError(`${name} may not contain a newline: ${JSON.stringify(label)}`)
+      }
     }
   }
 }
@@ -111,13 +113,17 @@ function changes(base: string[], side: string[]): Change[] {
 }
 
 /**
- * Ensure every non-final line ends with a newline. A line without a
- * trailing newline glued onto following output would corrupt both;
+ * Ensure every non-final line ends with a line break. A line without
+ * a trailing break glued onto following output would corrupt both;
  * clean regions stay byte-exact (a final line keeps its missing
- * newline), markers pay the newline tax.
+ * break, and lines ending in a non-LF split boundary such as lone
+ * `\r` are already terminated, so no `\n` is added), markers pay the
+ * newline tax.
  */
 function terminate(lines: string[]): string[] {
-  return lines.map((ln, i) => (ln.endsWith('\n') || i + 1 >= lines.length ? ln : `${ln}\n`))
+  return lines.map((ln, i) =>
+    i + 1 >= lines.length || LINE_BOUNDARIES.has(ln.slice(-1)) ? ln : `${ln}\n`,
+  )
 }
 
 interface Event {
@@ -297,7 +303,8 @@ export function textMergeResult(
  * Build a marker-merge fn with custom conflict labels. Labels ride
  * git's positions (`<<<<<<< <ours>` / `>>>>>>> <theirs>`); pass branch
  * names so conflicts read attributably. Labels may not contain
- * newlines.
+ * newlines (any `splitLinesKeepEnds` boundary: LF, lone CR, VT/FF,
+ * FS/GS/RS, NEL, U+2028/2029).
  *
  * With `strict: true` the fn throws `CantMark` instead of writing
  * markers when sides conflict — for branches where a true conflict

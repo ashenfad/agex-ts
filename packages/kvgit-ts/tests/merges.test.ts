@@ -158,6 +158,24 @@ describe('strict mode and conflict flag', () => {
     expect(() => makeTextMerge({ oursLabel: 'a\nb' })).toThrow(TypeError)
   })
 
+  it.each(['\r', '\v', '\f', '\x1c', '\x1d', '\x1e', '\x85', '\u2028', '\u2029'])(
+    'other line-break labels are rejected (%j)',
+    (br) => {
+      expect(() => makeTextMerge({ oursLabel: `a${br}b` })).toThrow(TypeError)
+      expect(() => makeTextMerge({ theirsLabel: `a${br}b` })).toThrow(TypeError)
+    },
+  )
+
+  it('lone-CR endings survive a clean merge byte-exact', () => {
+    const base = bytes('a\rb\rc\r')
+    expect(textOf(text(base, bytes('a\rB\rc\r'), bytes('a\rb\rC\r')))).toBe('a\rB\rC\r')
+  })
+
+  it('conflict markers stay newline-terminated over CR content', () => {
+    const out = textOf(text(bytes('a\rb\rc\r'), bytes('a\rB\rc\r'), bytes('a\rX\rc\r')))
+    expect(out).toBe('a\r<<<<<<< ours\nB\r=======\nX\r>>>>>>> theirs\nc\r')
+  })
+
   it('strict conflict aborts a Staged merge', async () => {
     const store = new Memory()
     const a = await VersionedKV.open(store)

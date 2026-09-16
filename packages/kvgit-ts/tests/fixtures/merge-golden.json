@@ -179,5 +179,29 @@
     "inputs": ["YQo=", "/yBiaW5hcnk=", "YQo="],
     "labels": {},
     "error": "CantMark"
+  },
+  "cr_clean_union": {
+    "inputs": ["YQ1iDWMN", "YQ1CDWMN", "YQ1iDUMN"],
+    "labels": {},
+    "merged": "YQ1CDUMN",
+    "conflicted": false,
+    "strict_raised": false,
+    "strict_bytes": "YQ1CDUMN"
+  },
+  "cr_overlap_conflict": {
+    "inputs": ["YQ1iDWMN", "YQ1CDWMN", "YQ1YDWMN"],
+    "labels": {},
+    "merged": "YQ08PDw8PDw8IG91cnMKQg09PT09PT09ClgNPj4+Pj4+PiB0aGVpcnMKYw0=",
+    "conflicted": true,
+    "strict_raised": true,
+    "strict_bytes": null
+  },
+  "cr_custom_labels": {
+    "inputs": ["YQ1iDWMN", "YQ1CDWMN", "YQ1YDWMN"],
+    "labels": { "ours_label": "main", "theirs_label": "dev" },
+    "merged": "YQ08PDw8PDw8IG1haW4KQg09PT09PT09ClgNPj4+Pj4+PiBkZXYKYw0=",
+    "conflicted": true,
+    "strict_raised": true,
+    "strict_bytes": null
   }
 }

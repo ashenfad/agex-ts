@@ -175,6 +175,38 @@ describe('VersionedKV — branches', () => {
   })
 })
 
+describe('VersionedKV — mergeBase', () => {
+  it('returns the commit itself for identical inputs', async () => {
+    const store = new Memory()
+    const main = await VersionedKV.open(store)
+    await main.commit({ updates: new Map([['k', bytes('v')]]) })
+    expect(await main.mergeBase(main.currentCommit, main.currentCommit)).toBe(
+      main.currentCommit,
+    )
+  })
+
+  it('resolves diverged branches to the fork point, either order', async () => {
+    const store = new Memory()
+    const main = await VersionedKV.open(store)
+    await main.commit({ updates: new Map([['k', bytes('v')]]) })
+    const fork = main.currentCommit
+    const worker = (await main.createBranch('worker')) as VersionedKV
+    await main.commit({ updates: new Map([['a', bytes('1')]]) })
+    await worker.commit({ updates: new Map([['b', bytes('2')]]) })
+    expect(await main.mergeBase(main.currentCommit, worker.currentCommit)).toBe(fork)
+    expect(await worker.mergeBase(worker.currentCommit, main.currentCommit)).toBe(fork)
+  })
+
+  it('returns the ancestor for linear history', async () => {
+    const store = new Memory()
+    const main = await VersionedKV.open(store)
+    await main.commit({ updates: new Map([['k', bytes('v')]]) })
+    const base = main.currentCommit
+    await main.commit({ updates: new Map([['a', bytes('1')]]) })
+    expect(await main.mergeBase(base, main.currentCommit)).toBe(base)
+  })
+})
+
 describe('VersionedKV — three-way merge', () => {
   it('auto-merges non-overlapping changes', async () => {
     const store = new Memory()

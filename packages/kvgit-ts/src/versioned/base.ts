@@ -204,7 +204,13 @@ export abstract class VersionedBase implements Versioned {
       // base-behind-head case already does — in either mode, so a lost
       // race is never mistaken for a conflict and the caller never has to
       // refresh (and drop staged work) just to replay a mergeable commit.
-      currentHead = await this.latestHead()
+      try {
+        currentHead = await this.latestHead()
+      } catch (e) {
+        // A failing re-read must not leave phantom state behind either.
+        this.restoreState(saved)
+        throw e
+      }
       // Keep the commit just built as our side of the merge rather than
       // restoring and rebuilding it: a rebuild hashes identically but
       // writes different HAMT nodes, orphaning the first attempt's nodes
@@ -214,6 +220,11 @@ export abstract class VersionedBase implements Versioned {
 
     // Three-way merge path: HEAD has moved.
     if (currentHead === null) {
+      // A retry that finds its branch gone restores the pre-commit
+      // snapshot, so the failed commit leaves the handle exactly as it
+      // found it. A null first read builds nothing, so only a retry can
+      // have anything to restore.
+      if (oursBuilt) this.restoreState(saved)
       throw new Error(`Branch '${this.branch}' has no HEAD`)
     }
     if (!oursBuilt) {

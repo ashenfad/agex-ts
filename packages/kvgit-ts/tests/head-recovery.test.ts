@@ -233,7 +233,12 @@ describe('prev-HEAD names a commit HEAD really held', () => {
       await winner.commit(one('w', '2'))
     })
 
-    await expect(loser.commit(one('a', '2'))).rejects.toThrow(ConcurrencyError)
+    // Issue #39 (kvgit-py): the lost fast-forward race merges internally
+    // instead of raising, so the loser lands a merge commit on top. The
+    // invariant under test is unchanged: whatever wins the final CAS
+    // writes the backup, so prev-HEAD is still the immediately-prior
+    // HEAD rather than the loser's stale value.
+    await loser.commit(one('a', '2'))
 
     const prev = await prevHead(store)
     const history = store.headHistory('main')

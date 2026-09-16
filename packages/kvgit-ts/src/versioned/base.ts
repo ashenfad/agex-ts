@@ -174,11 +174,13 @@ export abstract class VersionedBase implements Versioned {
       throw new TypeError(`onConflict must be 'raise' or 'skip', got ${String(onConflict)}`)
     }
 
-    const currentHead = await this.latestHead()
+    let currentHead = await this.latestHead()
+    let oursBuilt = false
+    let saved: unknown = null
 
     // Fast-forward path: HEAD hasn't moved.
     if (currentHead === this.baseCommitHash) {
-      const saved = this.snapshotState()
+      saved = this.snapshotState()
       await this.createCommit({
         ...(updates !== null && { updates }),
         ...(removals !== null && { removals }),
@@ -197,30 +199,30 @@ export abstract class VersionedBase implements Versioned {
         this.lastMergeResult = result
         return result
       }
-      this.restoreState(saved)
-      if (onConflict === 'skip') {
-        const result: MergeResult = {
-          merged: false,
-          commit: null,
-          strategy: 'fast_forward',
-          autoMergedKeys: [],
-          carriedKeys: [],
-        }
-        this.lastMergeResult = result
-        return result
-      }
-      throw new ConcurrencyError(`HEAD changed from ${this.baseCommitHash}. Refresh and retry.`)
+      // Lost the fast-forward race: another writer advanced HEAD between
+      // our read and our CAS. Re-read HEAD and merge, the way the
+      // base-behind-head case already does — in either mode, so a lost
+      // race is never mistaken for a conflict and the caller never has to
+      // refresh (and drop staged work) just to replay a mergeable commit.
+      currentHead = await this.latestHead()
+      // Keep the commit just built as our side of the merge rather than
+      // restoring and rebuilding it: a rebuild hashes identically but
+      // writes different HAMT nodes, orphaning the first attempt's nodes
+      // where cleanOrphans cannot find them.
+      oursBuilt = true
     }
 
     // Three-way merge path: HEAD has moved.
     if (currentHead === null) {
       throw new Error(`Branch '${this.branch}' has no HEAD`)
     }
-    const saved = this.snapshotState()
-    await this.createCommit({
-      ...(updates !== null && { updates }),
-      ...(removals !== null && { removals }),
-    })
+    if (!oursBuilt) {
+      saved = this.snapshotState()
+      await this.createCommit({
+        ...(updates !== null && { updates }),
+        ...(removals !== null && { removals }),
+      })
+    }
     return this.threeWayMerge(currentHead, {
       onConflict,
       ...(opts.mergeFns !== null && opts.mergeFns !== undefined && { mergeFns: opts.mergeFns }),

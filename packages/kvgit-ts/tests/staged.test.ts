@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { Memory } from '../src/backends/memory'
 import { Staged, type jsonDecoder, type jsonEncoder } from '../src/staged'
-import type { MergeFn } from '../src/types'
+import type { MergeFn, Versioned } from '../src/types'
 import { VersionedKV } from '../src/versioned/kv'
 
 async function freshStaged(opts?: { encoder?: typeof jsonEncoder; decoder?: typeof jsonDecoder }) {
@@ -89,6 +89,48 @@ describe('Staged — commit', () => {
     expect(staged.isStaged('a')).toBe(false)
     expect(staged.isStaged('b')).toBe(true)
     expect(staged.isStaged('c')).toBe(true)
+  })
+})
+
+describe('Staged — commit race', () => {
+  /** Make `loser`'s next CAS lose: advance HEAD first, then run it. */
+  function raceOnce(loser: Versioned, advance: () => Promise<unknown>): void {
+    const patched = loser as unknown as {
+      casHead(expected: string, newHead: string): Promise<boolean>
+    }
+    const realCas = patched.casHead.bind(loser)
+    let raced = false
+    patched.casHead = async (expected: string, newHead: string) => {
+      if (!raced) {
+        raced = true
+        await advance()
+      }
+      return realCas(expected, newHead)
+    }
+  }
+
+  it('commit survives a fast-forward race without refresh', async () => {
+    // Dirty before, committed after — no refresh (which would discard
+    // the buffer) required.
+    const store = new Memory()
+    const s1 = new Staged(await VersionedKV.open(store))
+    s1.set('seed', '0')
+    await s1.commit()
+    const s2 = new Staged(await VersionedKV.open(store))
+
+    s1.set('mine', '2')
+    expect(s1.hasChanges).toBe(true)
+    raceOnce(s1.versioned, async () => {
+      s2.set('other', '1')
+      await s2.commit()
+    })
+    const result = await s1.commit()
+
+    expect(result.merged).toBe(true)
+    expect(result.strategy).toBe('three_way')
+    expect(s1.hasChanges).toBe(false)
+    expect(await s1.get('mine')).toBe('2')
+    expect(await s1.get('other')).toBe('1')
   })
 })
 

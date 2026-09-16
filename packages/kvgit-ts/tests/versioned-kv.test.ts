@@ -7,6 +7,8 @@ import {
   UnknownBranchError,
   VersionedKV,
 } from '../src/index'
+import { Keyset } from '../src/keyset'
+import { COMMIT_ROOT, loads } from '../src/versioned/layout'
 
 const enc = new TextEncoder()
 const dec = new TextDecoder()
@@ -469,6 +471,116 @@ describe('VersionedKV — corrupt-HEAD recovery', () => {
       recoverFromCorruptHead: async () => goodHead,
     })
     expect(vk2.currentCommit).toBe(goodHead)
+  })
+})
+
+describe('VersionedKV — fast-forward race retry', () => {
+  /** Make `loser`'s next CAS lose: advance HEAD first, then run it. */
+  function raceOnce(loser: VersionedKV, advance: () => Promise<unknown>): void {
+    const patched = loser as unknown as {
+      casHead(expected: string, newHead: string): Promise<boolean>
+    }
+    const realCas = patched.casHead.bind(loser)
+    let raced = false
+    patched.casHead = async (expected: string, newHead: string) => {
+      if (!raced) {
+        raced = true
+        await advance()
+      }
+      return realCas(expected, newHead)
+    }
+  }
+
+  const one = (key: string, value: string) => ({ updates: new Map([[key, bytes(value)]]) })
+
+  it('a lost race merges instead of raising', async () => {
+    const store = new Memory()
+    const v1 = await VersionedKV.open(store)
+    await v1.commit(one('base', '0'))
+    const v2 = await VersionedKV.open(store)
+    raceOnce(v2, () => v1.commit(one('other', '1')))
+
+    const result = await v2.commit(one('mine', '2'))
+
+    expect(result.merged).toBe(true)
+    expect(result.strategy).toBe('three_way')
+    expect(text((await v2.get('mine')) as Uint8Array)).toBe('2')
+    expect(text((await v2.get('other')) as Uint8Array)).toBe('1')
+  })
+
+  it('a lost race with skip merges a clean change', async () => {
+    // A lost race is not a conflict: like the base-behind-head case,
+    // `skip` still attempts the merge and succeeds when clean.
+    const store = new Memory()
+    const v1 = await VersionedKV.open(store)
+    await v1.commit(one('base', '0'))
+    const v2 = await VersionedKV.open(store)
+    raceOnce(v2, () => v1.commit(one('other', '1')))
+
+    const result = await v2.commit({ ...one('mine', '2'), onConflict: 'skip' })
+
+    expect(result.merged).toBe(true)
+    expect(result.strategy).toBe('three_way')
+  })
+
+  it('a lost race with skip bails on a true conflict', async () => {
+    const store = new Memory()
+    const v1 = await VersionedKV.open(store)
+    await v1.commit(one('x', '1'))
+    const v2 = await VersionedKV.open(store)
+    raceOnce(v2, () => v1.commit(one('x', 'v1')))
+
+    const result = await v2.commit({ ...one('x', 'v2'), onConflict: 'skip' })
+
+    expect(result.merged).toBe(false)
+    expect(result.strategy).toBe('three_way')
+    expect(v1.currentCommit).toBe(await v2.latestHead()) // branch untouched
+    expect(text((await v2.get('x')) as Uint8Array)).toBe('1') // loser restored
+  })
+
+  it('a repeated race still raises', async () => {
+    // The internal retry is bounded: a race on the merge CAS too still
+    // surfaces ConcurrencyError instead of looping.
+    const store = new Memory()
+    const v1 = await VersionedKV.open(store)
+    await v1.commit(one('base', '0'))
+    const v2 = await VersionedKV.open(store)
+    const patched = v2 as unknown as {
+      casHead(expected: string, newHead: string): Promise<boolean>
+    }
+    const realCas = patched.casHead.bind(v2)
+    patched.casHead = async (expected: string, newHead: string) => {
+      await v1.commit(one('other', '1'))
+      return realCas(expected, newHead)
+    }
+    await expect(v2.commit(one('mine', '2'))).rejects.toThrow(ConcurrencyError)
+  })
+
+  it('a raced merge strands no HAMT nodes', async () => {
+    // The retry must keep its first attempt as our side: rebuilding the
+    // commit after a lost CAS hashes identically but writes different
+    // HAMT nodes, detaching the first attempt's nodes where the
+    // incremental sweep cannot find them.
+    const store = new Memory()
+    const v1 = await VersionedKV.open(store)
+    await v1.commit(one('base', '0'))
+    const v2 = await VersionedKV.open(store)
+    raceOnce(v2, () => v1.commit(one('other', '1')))
+    const result = await v2.commit(one('mine', '2'))
+    expect(result.merged).toBe(true)
+
+    const reachable = new Set<string>()
+    for await (const h of v2.history(v2.currentCommit, { allParents: true })) {
+      const raw = await store.get(COMMIT_ROOT(h))
+      if (raw === null) throw new Error(`commit ${h} has no root`)
+      const [, nodes] = await Keyset.fromRoot(store, loads(raw) as string).walk()
+      for (const n of nodes) reachable.add(n)
+    }
+    const present = new Set<string>()
+    for await (const k of store.keys()) {
+      if (k.startsWith(Keyset.DEFAULT_PREFIX)) present.add(k.slice(Keyset.DEFAULT_PREFIX.length))
+    }
+    expect([...present].filter((h) => !reachable.has(h))).toEqual([])
   })
 })
 

@@ -257,6 +257,11 @@ export class Staged {
     return this.versioned.mergeBase(commitA, commitB)
   }
 
+  /** Whether a branch exists in the underlying store. Never writes. */
+  async branchExists(name: string): Promise<boolean> {
+    return this.versioned.branchExists(name)
+  }
+
   /**
    * Delete a branch by name. Cannot delete the current branch — the
    * underlying `Versioned` enforces this and throws.

@@ -38,6 +38,25 @@ export class MergeConflict extends Error {
   }
 }
 
+/**
+ * Opening (with `create: false`) or switching to a branch that does
+ * not exist. Carries the branch name; the message matches the
+ * plain-Error throws it replaces, with an opt-in creation hint.
+ */
+export class UnknownBranchError extends Error {
+  override readonly name = 'UnknownBranchError'
+  readonly branch: string
+
+  constructor(branch: string, createHint = false) {
+    super(
+      createHint
+        ? `Branch '${branch}' does not exist (open with create: true to create it)`
+        : `Branch '${branch}' does not exist`,
+    )
+    this.branch = branch
+  }
+}
+
 // ---------------------------------------------------------------------------
 // KV store
 // ---------------------------------------------------------------------------
@@ -273,6 +292,7 @@ export interface Versioned {
   diff(commitA: string, commitB: string): Promise<DiffResult>
   parents(commitHash?: string): Promise<readonly string[]>
   mergeBase(commitA: string, commitB: string): Promise<string | null>
+  branchExists(name: string): Promise<boolean>
 }
 
 // ---------------------------------------------------------------------------

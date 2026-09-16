@@ -27,6 +27,7 @@
 
 import { Keyset } from '../keyset'
 import type { CommitInfo, KVStore, KeysetEntry, MetaEntry, Versioned } from '../types'
+import { UnknownBranchError } from '../types'
 import { VersionedBase } from './base'
 import {
   BRANCH_HEAD,
@@ -249,6 +250,13 @@ export interface VersionedKVOptions {
   branch?: string
   /** Pin to a specific commit instead of resolving the branch HEAD. */
   commitHash?: string
+  /**
+   * Mint the branch with an initial commit when it does not exist
+   * (default true). Pass false to throw `UnknownBranchError` instead,
+   * so a read after a delete cannot resurrect the branch and block a
+   * later create.
+   */
+  create?: boolean
   /** Last resort for a corrupt HEAD with no usable backup (see `CorruptHeadRecoverer`). */
   recoverFromCorruptHead?: CorruptHeadRecoverer
 }
@@ -297,6 +305,7 @@ export class VersionedKV extends VersionedBase {
   static async open(store: KVStore, opts: VersionedKVOptions = {}): Promise<VersionedKV> {
     await checkStorageVersion(store)
     const branch = opts.branch ?? 'main'
+    const create = opts.create ?? true
 
     let commitHash = opts.commitHash
     if (commitHash === undefined) {
@@ -309,6 +318,8 @@ export class VersionedKV extends VersionedBase {
         commitHash = recovered
       } else if ((await store.get(BRANCH_HEAD(branch))) !== null) {
         throw new Error(`Branch '${branch}' HEAD is corrupt and unrecoverable`)
+      } else if (!create) {
+        throw new UnknownBranchError(branch, true)
       } else {
         // Create initial empty commit.
         const initialHash = await contentHash([], new Map(), new Map(), null)
@@ -687,7 +698,7 @@ export class VersionedKV extends VersionedBase {
       if ((await this.store.get(BRANCH_HEAD(name))) !== null) {
         throw new Error(`Branch '${name}' HEAD is corrupt and unrecoverable`)
       }
-      throw new Error(`Branch '${name}' does not exist`)
+      throw new UnknownBranchError(name)
     }
     this.branch = name
     await this.loadCommitInto(head, true)
@@ -729,6 +740,18 @@ export class VersionedKV extends VersionedBase {
       if (name.length > 0) out.push(name)
     }
     return out.sort()
+  }
+
+  static async exists(store: KVStore, name: string): Promise<boolean> {
+    // Same predicate listBranches lists by: the branch has a HEAD
+    // entry. A single read that never writes, so checking cannot
+    // resurrect a deleted branch. A damaged HEAD still counts as
+    // existing; opening it raises either way.
+    return (await store.get(BRANCH_HEAD(name))) !== null
+  }
+
+  async branchExists(name: string): Promise<boolean> {
+    return VersionedKV.exists(this.store, name)
   }
 
   async commitInfo(commitHash?: string): Promise<CommitInfo | null> {

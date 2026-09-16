@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { Memory } from '../src/backends/memory'
-import { type BytesMergeFn, ConcurrencyError, MergeConflict, VersionedKV } from '../src/index'
+import {
+  type BytesMergeFn,
+  ConcurrencyError,
+  MergeConflict,
+  UnknownBranchError,
+  VersionedKV,
+} from '../src/index'
 
 const enc = new TextEncoder()
 const dec = new TextDecoder()
@@ -44,6 +50,65 @@ describe('VersionedKV — open', () => {
     const otherBranch = (await main.createBranch('feature')) as VersionedKV
     expect(otherBranch.currentBranch).toBe('feature')
     expect(text((await otherBranch.get('k')) as Uint8Array)).toBe('main-v')
+  })
+})
+
+describe('VersionedKV — open without creating', () => {
+  it('mints a missing branch by default', async () => {
+    const store = new Memory()
+    const vk = await VersionedKV.open(store, { branch: 'dev' })
+    expect(vk.currentBranch).toBe('dev')
+    expect(await vk.listBranches()).toContain('dev')
+  })
+
+  it('open with create:false throws and lists no branch', async () => {
+    const store = new Memory()
+    await expect(VersionedKV.open(store, { branch: 'dev', create: false })).rejects.toThrow(
+      UnknownBranchError,
+    )
+    expect(await VersionedKV.exists(store, 'dev')).toBe(false)
+    const vk = await VersionedKV.open(store)
+    expect(await vk.listBranches()).not.toContain('dev')
+  })
+
+  it('open with create:false opens an existing branch', async () => {
+    const store = new Memory()
+    const vk = await VersionedKV.open(store)
+    await vk.commit({ updates: new Map([['k', bytes('v')]]) })
+    const vk2 = await VersionedKV.open(store, { branch: 'main', create: false })
+    expect(text((await vk2.get('k')) as Uint8Array)).toBe('v')
+  })
+
+  it('exists and branchExists track branches without writing', async () => {
+    const store = new Memory()
+    expect(await VersionedKV.exists(store, 'dev')).toBe(false)
+    await VersionedKV.open(store, { branch: 'dev' })
+    expect(await VersionedKV.exists(store, 'dev')).toBe(true)
+    expect(await VersionedKV.exists(store, 'nope')).toBe(false)
+    const vk = await VersionedKV.open(store)
+    expect(await vk.branchExists('main')).toBe(true)
+    expect(await vk.branchExists('dev')).toBe(true)
+    expect(await vk.branchExists('nope')).toBe(false)
+  })
+
+  it('delete then open does not resurrect or block recreate', async () => {
+    const store = new Memory()
+    const vk = await VersionedKV.open(store)
+    await vk.createBranch('dev')
+    await vk.deleteBranch('dev')
+    expect(await VersionedKV.exists(store, 'dev')).toBe(false)
+    await expect(VersionedKV.open(store, { branch: 'dev', create: false })).rejects.toThrow(
+      UnknownBranchError,
+    )
+    expect(await VersionedKV.exists(store, 'dev')).toBe(false)
+    await vk.createBranch('dev')
+    expect(await VersionedKV.exists(store, 'dev')).toBe(true)
+  })
+
+  it('switchBranch throws UnknownBranchError for a missing branch', async () => {
+    const store = new Memory()
+    const vk = await VersionedKV.open(store)
+    await expect(vk.switchBranch('nope')).rejects.toThrow(UnknownBranchError)
   })
 })
 

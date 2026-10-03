@@ -1,5 +1,58 @@
 # agex-ts
 
+## 0.5.0
+
+### Minor Changes
+
+- 12219da: Add an optional Codex-shaped `apply_patch` action surface, durable patch
+  emissions, streaming patch tokens, and validated multi-file VFS dispatch.
+  Match Codex's lenient patch syntax, provide line-specific diagnostics, and
+  return explicit commit or rollback status to the model.
+- 6e9a4c3: Enforce `paramsSchema` on registered fns, and drop the inert capability flags.
+
+  `paramsSchema` was documented as validating the agent's call args before a host fn runs, but nothing ever read it — both runtimes invoked the handler with raw args. An embedder who attached a schema believing it gated agent-supplied arguments had an unguarded host function. It's now enforced at both runtimes' host-side dispatch sites via a shared `enforceParamsSchema` helper (exported from `agex-ts/policy`), including when an agent-authored helper module under `/helpers/` calls the fn.
+
+  The validation subject is the argument list, so a tuple schema is the natural shape (`z.tuple([z.number(), z.string()])`). A failure raises `SchemaError` into the agent's observation as an ordinary runtime error it can adjust to, and the host fn doesn't run. A transforming schema has its output spread as the call args; a non-array return is ignored in favor of the original args. Enforcement stays synchronous when the validator is synchronous — Zod, Valibot and ArkType all are for non-async schemas — so a registered sync fn doesn't silently become promise-returning under `evalRuntime`.
+
+  **Breaking for anyone who set `paramsSchema` expecting it to be ignored:** calls that don't satisfy the schema now fail instead of reaching the handler. That's the documented behavior, so this is a fix rather than a change of contract.
+
+  **Removed:** `hostFsAccess` and `networkAccess` on every registration. Both were declaration-only — no runtime ever read them — while `docs/concepts/sandboxing.md` presented them alongside the policy as if enforced. A capability flag that does nothing is worse than no flag; they can return designed against real enforcement. Registrations passing either field just need it deleted.
+
+- 7bad540: Add a provider-native action surface that keeps `ts_action` dynamic while delegating shell and file operations to provider tools.
+
+### Patch Changes
+
+- 0ab568e: Simplify chaptering internals. No behavior change.
+
+  Chaptering had accumulated the most coupled invariants of any subsystem, so this is a structural pass with the existing three test files as the safety net:
+
+  - `buildChapterScopeFilter(events, includeOpen)` served two callers with opposite contracts off one boolean. Split into `closedChapterScopes` (the renderer's view — a running chapter task stays visible so its own loop can render itself) and `allChapterScopes` (the index builder's view — a chapter task can't chapter itself), over one shared walker.
+  - `hasCompletableBoundary` recomputed the same scope filter the index builder had just computed, and the two had to agree on which indices to skip or ranges would silently misresolve. It's now derived inside `buildBoundaryIndex` from the same scan, as `hasCompletable`. One filter computation per run, no cross-function agreement to maintain.
+  - `runChaptering` derived boundary _positions_ and the _state keys_ it folds from two independently-fetched views of the log, assumed index-aligned. They could diverge: `iter()` drops entries whose value is missing while `refs()` returns every key, so one absent value would shift positions against refs and fold the wrong range. Both now come from a single `EventLogImpl.entries()` read that pairs them, making alignment structural. `runChaptering` no longer takes a `parentEvents` argument — it reads its own snapshot — which also removes a redundant log walk from `agent.runChaptering`.
+  - Removed `isChapteringInFlight`, which had no callers outside a test and whose doc claimed the action loop consulted it. Recursion is prevented by `runChaptering`'s own check on entry; the comment now says so.
+
+  Also fixes two stale references in comments: the default-primer docstring pointed at a removed `agent.chapterTask({ primer })` API (it's `AgentOptions.chapterPrimer`), and the "Filter A / Filter B" vocabulary is replaced by the function names.
+
+- 6aef3c1: Correct documentation drift, and remove the dead `EventLog.at()` stub.
+
+  Docs had fallen behind several shipped features. Fixed: `FileEvent`'s field is `source: 'user' | 'agent'`, not `fileSource: string`; `ErrorEvent` carries `recoverable` and is embedder-emitted rather than framework-emitted (as is `FileEvent`); `RuntimeAdapter` has five members, not three; `ActionSurface` has three values, and the `'agex-patch'` surface is now documented; `captureSpawnEvents` is documented for the first time, including that it makes clone events durable — which the events page previously described as impossible; Node `worker_threads` is documented as shipped in `sandboxing.md` and `quick-start.md` rather than as roadmap material; `docs/index.md` lists `@agex-ts/git`; `errors.md` no longer claims the bundled providers throw `TransientError` / `FatalError` (they classify with `isTransientNetworkError` and re-throw — the classes are an extension point for custom `LLMClient`s); `quick-start.md` no longer implies task type parameters are validated at runtime without a schema.
+
+  Eight source comments pointed at `docs/roadmap/spawn.md`, which doesn't exist; they now point at the spawn section of `docs/api/agent.md`. Three comments stated _wrong reasons_ for correct behavior — the event-log index comment claimed the chapter task runs in a child session (it runs in the parent's, and non-overlap comes from the parent awaiting it at a task boundary), the chaptering header described a removed `agent.chapterTask()` API and an after-every-action trigger (it fires at task boundaries), and runtime-worker's Node vitest config claimed the lane had nothing to run.
+
+  **Removed:** `EventLog.at()`. It returned `null` unconditionally while its interface doc implied a historical view on versioned state, and the docs already redirected callers to `agent.eventsAt(hash, session)`, which is the working path.
+
+  `PolicyBuilder.fingerprint()` now hashes each registration's agent-visible config rather than name-and-count. Registration is add-only, so the old form already caught every mutation of one builder over time; the change matters for comparing two policies, where identical names with different descriptions render different primers but previously produced identical fingerprints. Also exports `ReconfigurableOptions`, `SkillRegistration` and `UrlSpec`, which the docs referenced by name but weren't importable.
+
+- 7bad540: Preserve provider-assigned tool-call IDs and original arguments through
+  parsing, dispatch, and conversation rendering so stateful OpenAI-compatible
+  endpoints receive the exact call required to continue a parked tool.
+- Updated dependencies [d660ff6]
+- Updated dependencies [c271f52]
+- Updated dependencies [fe74fd6]
+- Updated dependencies [d83f06c]
+  - @agex-ts/kvgit@0.1.3
+  - @agex-ts/termish@0.2.0
+
 ## 0.4.1
 
 ### Patch Changes

@@ -1,5 +1,17 @@
 # @agex-ts/gemini
 
+## 4.0.0
+
+### Patch Changes
+
+- Updated dependencies [12219da]
+- Updated dependencies [0ab568e]
+- Updated dependencies [6aef3c1]
+- Updated dependencies [6e9a4c3]
+- Updated dependencies [7bad540]
+- Updated dependencies [7bad540]
+  - agex-ts@0.5.0
+
 ## 3.0.0
 
 ### Patch Changes

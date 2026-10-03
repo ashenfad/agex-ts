@@ -1,5 +1,23 @@
 # @agex-ts/git
 
+## 4.0.0
+
+### Patch Changes
+
+- Updated dependencies [12219da]
+- Updated dependencies [0ab568e]
+- Updated dependencies [d660ff6]
+- Updated dependencies [6aef3c1]
+- Updated dependencies [6e9a4c3]
+- Updated dependencies [c271f52]
+- Updated dependencies [7bad540]
+- Updated dependencies [fe74fd6]
+- Updated dependencies [d83f06c]
+- Updated dependencies [7bad540]
+  - agex-ts@0.5.0
+  - @agex-ts/kvgit@0.1.3
+  - @agex-ts/termish@0.2.0
+
 ## 3.0.0
 
 ### Patch Changes

@@ -694,10 +694,13 @@ export interface RegisteredTerminal extends RegistrationCommon {
  *  type module's surface stays small. */
 export type TerminalCommandHandler = (ctx: {
   readonly args: ReadonlyArray<string>
-  readonly stdin: string
-  readonly stdout: { write(s: string): void }
+  /** The input: decoded as UTF-8 by `text()`, or byte for byte. */
+  readonly stdin: { readonly bytes: Uint8Array; text(): string }
+  /** The output: text (encoded UTF-8) or bytes, in the order written. */
+  readonly stdout: { write(text: string): void; writeBytes(data: Uint8Array): void }
   readonly fs: VirtualFileSystem
-  readonly env: Readonly<Record<string, string>>
+  /** The shell's variables, shared across the script's commands. */
+  readonly env: Record<string, string>
   readonly signal: AbortSignal
   // biome-ignore lint/suspicious/noConfusingVoidType: matches @agex-ts/termish's CommandHandler signature so handlers with no return statement type-check.
 }) => Promise<{ exitCode: number; stderr: string } | undefined | void>

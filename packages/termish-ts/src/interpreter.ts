@@ -243,6 +243,33 @@ async function executePipeline(pipeline: Pipeline, run: Run): Promise<void> {
     // stderr routing: the last stderr redirect wins.
     const stderrRedirect = lastOf(cmd.redirects, ['2>', '2>>', '2>&1'])
     const outputRedirects = cmd.redirects.filter((r) => r.type === '>' || r.type === '>>')
+    // Write `data` to each output redirect; /dev/null is discarded,
+    // never written (a file of that name would turn up in every later
+    // listing of the tree).
+    const writeRedirects = async (data: Uint8Array): Promise<void> => {
+      for (const r of outputRedirects) {
+        const target = expandWord(r.target, env, lastExitCode)
+        const path = resolve(target, fs.getcwd())
+        if (path === DEV_NULL) continue
+        try {
+          await fs.write(path, data, r.type === '>>' ? 'a' : 'w')
+        } catch (e) {
+          throw new TerminalError(`${name}: redirect failed: ${describeError(e)}`)
+        }
+      }
+    }
+    // A failing command's own stdout still goes where it was sent: to
+    // its output redirects (`cat a missing > out` writes a's content),
+    // or, with none, to the transcript. The failure stays the outcome
+    // even if that write fails.
+    const drainPartial = async (): Promise<void> => {
+      const data = stdout.value()
+      if (outputRedirects.length === 0) {
+        if (data.byteLength > 0) transcript.push(data)
+        return
+      }
+      await writeRedirects(data).catch(() => undefined)
+    }
     const stdout = new ByteStdout()
     const ctx: CommandContext = {
       args,
@@ -282,7 +309,7 @@ async function executePipeline(pipeline: Pipeline, run: Run): Promise<void> {
           ? e
           : new TerminalError(`${name}: execution error: ${describeError(e)}`)
       if (stderrRedirect === undefined) {
-        flushPartial(stdout, transcript)
+        await drainPartial()
         throw error
       }
       failure = error
@@ -320,25 +347,14 @@ async function executePipeline(pipeline: Pipeline, run: Run): Promise<void> {
     // it go on, so later stages see the merged text (`cmd 2>&1 | head`);
     // as the last stage, it resurfaces after the loop.
     if (failure !== null && stderrRedirect?.type !== '2>&1') {
-      flushPartial(stdout, transcript)
+      await drainPartial()
       throw new TerminalError(failure.message, { exitCode: failure.exitCode, stderr: '' })
     }
     mergedFailure = failure
 
     const output = stdout.value()
     if (outputRedirects.length > 0) {
-      for (const r of outputRedirects) {
-        const target = expandWord(r.target, env, lastExitCode)
-        const path = resolve(target, fs.getcwd())
-        // Discarded, never written: a file named /dev/null would turn up
-        // in every later listing of the tree.
-        if (path === DEV_NULL) continue
-        try {
-          await fs.write(path, output, r.type === '>>' ? 'a' : 'w')
-        } catch (e) {
-          throw new TerminalError(`${name}: redirect failed: ${describeError(e)}`)
-        }
-      }
+      await writeRedirects(output)
       currentInput = EMPTY
     } else {
       currentInput = output
@@ -355,15 +371,6 @@ async function executePipeline(pipeline: Pipeline, run: Run): Promise<void> {
       stderr: '',
     })
   }
-}
-
-/** Move a failing command's own stdout to the transcript. A throw jumps
- *  past the stage's usual drain (pipe it on, or write it out), but a
- *  terminal still shows what the command printed before it failed: an
- *  HTTP client's error body, say, written before it exits non-zero. */
-function flushPartial(stdout: ByteStdout, transcript: Uint8Array[]): void {
-  const data = stdout.value()
-  if (data.byteLength > 0) transcript.push(data)
 }
 
 function lastOf(

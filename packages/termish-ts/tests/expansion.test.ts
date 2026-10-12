@@ -135,6 +135,26 @@ describe('$NAME and ${NAME}', () => {
   })
 })
 
+describe('an unquoted backslash', () => {
+  it('keeps an escaped $ literal', async () => {
+    expect(await execute('echo \\$NAME', fs, { env: { NAME: 'alice' } })).toBe('$NAME\n')
+    expect(await execute('echo \\${NAME}', fs, { env: { NAME: 'alice' } })).toBe('${NAME}\n')
+  })
+
+  it('escapes itself before an expansion', async () => {
+    expect(await execute('echo \\\\$NAME', fs, { env: { NAME: 'alice' } })).toBe('\\alice\n')
+  })
+
+  it('still escapes other characters', async () => {
+    expect(await execute('echo a\\ b', fs)).toBe('a b\n')
+    expect(await execute('echo a\\\\b', fs)).toBe('a\\b\n')
+  })
+
+  it('makes an escaped $( a literal, not a substitution', async () => {
+    expect(await execute('echo \\$(pwd)', fs)).toBe('$(pwd)\n')
+  })
+})
+
 describe('forms with $ that stay literal', () => {
   it('keeps a trailing anchor and $1', async () => {
     await fs.write('/f.txt', bytes('foo\nfoobar\n'))

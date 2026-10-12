@@ -368,9 +368,10 @@ export async function dispatchTerminal(
   // @agex-ts/termish merges these on top of its own builtins.
   const hostCommands = new Map<string, CommandHandler>()
   for (const [name, reg] of policy.terminals) {
-    // The agent's TerminalCommandHandler is shape-compatible with
-    // @agex-ts/termish's CommandHandler; cast through unknown is safe.
-    hostCommands.set(name, reg.handler as unknown as CommandHandler)
+    // The agent's TerminalCommandHandler is @agex-ts/termish's
+    // CommandHandler restated; assigned without a cast, so the two
+    // can't drift apart unnoticed.
+    hostCommands.set(name, reg.handler)
   }
   return execute(commands, fs, {
     commands: hostCommands,

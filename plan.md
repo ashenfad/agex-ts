@@ -1,6 +1,7 @@
 # agex-ts rebuild: plan
 
-Status: under way, 2026-10-12. F1 (termish-ts) is next.
+Status: under way, 2026-10-12. F1 (termish-ts) is done but for the FS
+conformance kit's export; F2 (kvgit-ts) is next.
 
 The Python side was rebuilt as three layers: kvgit (versioned storage),
 nontainer (the world: workspace, kernel, turn, delegation) and agex (the
@@ -147,11 +148,66 @@ is a studio-phase decision (below).
    turn's end stamped with how the run ended. Today the studio commits
    once per turn.
 
+## Decided for apps and services (2026-10-12)
+
+What agex-studio's agent builds, and what it reaches, shape the world's
+tools and the studio's bridge.
+
+- **No agent-written backend.** nontainer's handlers exist for
+  authority, shared state, server compute and a test loop. Without a
+  server the first three fall away, and the test loop comes from logic
+  kept in plain modules. An app is a static page, modules tested on
+  their own, and data files in the world.
+- **Everything is brought by the user,** as the model key already is:
+
+  | need | provided by | how the app reaches it |
+  |---|---|---|
+  | a model, for building and for apps' AI calls | the user's own key | the studio holds it; an app calls through the bridge and never sees it |
+  | sync and publishing | the user's GitHub token | the studio |
+  | shared, persistent state | the user's Supabase project | from the page, with row-level security as the guard (`supabase-auth` skill) |
+  | live multiplayer | free signaling, then WebRTC peer to peer | from the page (a `multiplayer` skill, to write) |
+  | public data | CORS-friendly APIs | fetched while building and committed, or live from the page |
+
+- **Fetch while building, by default.** Static data is fetched into the
+  world, cleaned and committed: versioned, reviewable, and working
+  offline on a tablet. A page goes to the network at run time only for
+  what must be live (shared state, multiplayer, fresh data), and its
+  README lists every service it depends on.
+- **`curl` is a studio host command:** `-o`, `-L`, `-H`, `-X`, `-d`,
+  `-s`/`-f` and a size cap, writing into the world, and saying plainly
+  when CORS refused a request. It fetches data while building, and
+  tests the user's own services from the terminal (Supabase's REST API
+  with the anon key, say), as `ws-curl` tests a handler.
+- **Live services get stand-ins.** The skills teach wrapping Supabase or
+  peer-to-peer access in a small module with an in-memory fake, so
+  module tests and `testApp` never touch a real project, as
+  `agex_stand_in` does for tasks on the Python side.
+- **Variables and secrets.** The user gives the agent keys (a Supabase
+  URL and anon key, an API token) in the studio, never by pasting them
+  into chat. The world exposes them as shell variables (`$SUPABASE_URL`)
+  and to code, and termish expands them when a command runs, so a
+  command the model writes names the variable and never holds the
+  value. A secret's value:
+  - stays on the device, as the model key does: never in a commit, the
+    conversation, a published bundle, a gist or a sync;
+  - is redacted from tool results (shown as `$NAME`) if a command
+    prints it;
+  - is distinct from a plain variable, whose value may live in the
+    world's profile, as nontainer's `Profile.variables` do.
+
+  Open: how a value that is public by design (an anon key) reaches a
+  published app that needs it at run time, without the model copying it
+  into the page.
+
 ## The foundation
 
 ### F1. termish-ts to parity (independent; can start at once)
 
 In roughly this order, each with Python's tests ported as the spec:
+Items 1-4 are merged (#67, #68, #69): the interpreter core, globbing,
+`ls`, POSIX errors (`FsError`) and the builtins. The ranged `read` and
+`makedirs` of item 1 were left out: nothing needed them.
+
 1. **Bytes in pipes,** and a ranged `read` in the FS protocol (which
    also gains `makedirs`, matching Python's protocol). Fixes binary.
 2. **Exit codes and stderr:** `TerminalError` carries an exit code (127
@@ -165,8 +221,10 @@ In roughly this order, each with Python's tests ported as the spec:
    control flow and `$(...)`.
 5. **The FS conformance kit exported,** as Python's `check_filesystem`
    is.
-6. **`jq`** last, or not at all: it is 1.7k lines of Python, and agent
-   JS can parse JSON itself. Decide when the rest is done.
+6. **`jq`: not now** (decided 2026-10-12). It is 1.7k lines of Python,
+   and the agent parses JSON in code. A small subset (`.`, `.key`,
+   `.[]`, `.[n]`, `keys`, `length`) comes later if dogfooding shows
+   agents reaching for `curl ... | jq`.
 
 **Exit:** Python termish's behavioural tests (expansion, stderr, binary,
 injection, BRE, globs) pass in TS, ported or as golden fixtures.
@@ -208,10 +266,14 @@ nontainer's semantics for a serverless studio. In order:
    executor. Host objects are granted to the world, not the agent (a
    profile, inherited by forks), reached by async RPC with a declared
    surface. Cancel terminates the worker and restarts it; the work kept
-   is what the last commit holds.
+   is what the last commit holds. **Variables and secrets** come with
+   the profile (see "Decided for apps and services").
 3. **W3. The tools:** `terminal` (termish-ts with the world's host
    commands), the code tool, `file_write` and `file_edit`, with
-   nontainer's names and MCP-shaped results.
+   nontainer's names and MCP-shaped results. There is no `ws-curl` or
+   `ws-pytest` (no handlers to call): an app is checked by a module test
+   runner and by `testApp`. `curl` is a host command the studio grants,
+   not a termish builtin, so termish stays network-free.
 4. **W4. The turn:** `ws.turn(runId)`, a commit per mutating call and
    one at the end stamped with the run's status (`completed`,
    `cancelled`, `failed`, `interrupted`), and the harness-neutral
@@ -251,6 +313,15 @@ Rebuilt on the new agex-ts, with its apps ported by hand. Open there:
   would let one store serve both kernels.
 - **Sync** moves onto kvgit-ts v4 (F2e) and the world's branches.
 - **agex-git** is folded into the world as its ws-git, or dropped.
+- **The bridge** is the app's whole server-side surface, designed on
+  purpose: agent-defined tasks on the viewer's own key with a per-page
+  budget, storage and cache. Live network access from a page is direct,
+  to the services in "Decided for apps and services".
+- **Skills:** `interactive-app` and `supabase-auth` carry over; new ones
+  teach fetching while building, stand-ins for live services, and the
+  `multiplayer` pattern (signaling, then peer to peer).
+- **Variables and secrets** get their settings screen, beside the model
+  key.
 
 ## Risks
 

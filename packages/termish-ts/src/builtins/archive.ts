@@ -1,5 +1,6 @@
 /**
- * Archive commands: `gzip`, `gunzip`, `tar`, `zip`, `unzip`.
+ * Archive commands: `gzip`, `gunzip`, `zcat` (`gzcat`), `tar`, `zip`,
+ * `unzip`.
  *
  * gzip + zip are powered by `fflate`, lazy-loaded inside each handler
  * so that just importing `@agex-ts/termish` (or anything that depends on it,
@@ -9,11 +10,8 @@
  *
  * tar uses an in-house USTAR reader/writer in `_tar.ts`.
  *
- * stdout for binary data: `gzip -c` writes compressed bytes to stdout.
- * Termish stdout is a string pipeline, so we encode the bytes via
- * latin-1 (1:1 byte→codepoint), matching termish-py. Pipelines that
- * need to round-trip the bytes through a builtin that decodes UTF-8
- * will misbehave — the docs surface this caveat.
+ * Pipes carry bytes, so `gzip -c f | zcat` and `cat f.gz | gzip -d`
+ * round-trip exactly.
  */
 
 import type { CommandHandler } from '../context'
@@ -64,7 +62,28 @@ export const gzip: CommandHandler = async (ctx) => {
     'gzip',
   )
 
-  if (parsed.positional.length === 0) throw new TerminalError('gzip: no files specified')
+  if (parsed.positional.length === 0) {
+    // No file operands: compress or decompress stdin to stdout, as gzip
+    // does when it is handed a pipe. Empty stdin means nothing was piped
+    // in, which is a usage error rather than a request to compress
+    // nothing.
+    const data = ctx.stdin.bytes
+    if (data.byteLength === 0) throw new TerminalError('gzip: no files specified')
+    if (parsed.flags.decompress === true) {
+      let result: Uint8Array
+      try {
+        result = gunzipSync(data)
+      } catch {
+        throw new TerminalError('gzip: stdin: not in gzip format')
+      }
+      ctx.stdout.writeBytes(result)
+    } else {
+      ctx.stdout.writeBytes(
+        gzipSync(data, { level: level as 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 }),
+      )
+    }
+    return
+  }
 
   for (const path of parsed.positional) {
     const decompress = parsed.flags.decompress === true
@@ -120,6 +139,38 @@ export const gzip: CommandHandler = async (ctx) => {
 
 export const gunzip: CommandHandler = async (ctx) => {
   return gzip({ ...ctx, args: ['-d', ...ctx.args] })
+}
+
+/** `zcat` / `gzcat`: decompress to stdout, as `gzip -dc` does. Unlike
+ *  `gzip -d` it needs no `.gz` suffix, and with no file operands it
+ *  decompresses stdin. */
+export const zcat: CommandHandler = async (ctx) => {
+  const { gunzipSync } = await loadFflate()
+  const parsed = parseArgs(ctx.args, { flags: { force: { aliases: ['-f', '--force'] } } }, 'zcat')
+  const emit = (content: Uint8Array, label: string): void => {
+    let result: Uint8Array
+    try {
+      result = gunzipSync(content)
+    } catch {
+      throw new TerminalError(`zcat: ${label}: not in gzip format`)
+    }
+    ctx.stdout.writeBytes(result)
+  }
+  if (parsed.positional.length === 0) {
+    // Empty stdin means nothing was piped in: a usage error.
+    if (ctx.stdin.bytes.byteLength === 0) throw new TerminalError('zcat: no files specified')
+    emit(ctx.stdin.bytes, 'stdin')
+    return
+  }
+  for (const path of parsed.positional) {
+    let content: Uint8Array
+    try {
+      content = await ctx.fs.read(path)
+    } catch (e) {
+      throw new TerminalError(`zcat: ${path}: ${describeError(e)}`)
+    }
+    emit(content, path)
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -8,7 +8,8 @@
  */
 
 import type { CommandHandler } from '../context'
-import { gunzip, gzip, tar, unzip, zip } from './archive'
+import { gunzip, gzip, tar, unzip, zcat, zip } from './archive'
+import { bracket, test } from './conditional'
 import { false_, true_ } from './control'
 import { diff } from './diff'
 import { file } from './file'
@@ -56,6 +57,8 @@ export const BUILTINS: ReadonlyMap<string, CommandHandler> = new Map<string, Com
   // Archive
   ['gzip', gzip],
   ['gunzip', gunzip],
+  ['zcat', zcat],
+  ['gzcat', zcat],
   ['tar', tar],
   ['zip', zip],
   ['unzip', unzip],
@@ -64,4 +67,6 @@ export const BUILTINS: ReadonlyMap<string, CommandHandler> = new Map<string, Com
   // Control
   ['true', true_],
   ['false', false_],
+  ['test', test],
+  ['[', bracket],
 ])

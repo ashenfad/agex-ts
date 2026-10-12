@@ -10,15 +10,15 @@
  * deep via a module-local counter — `echo x | xargs xargs xargs ...`
  * can otherwise stack arbitrarily.
  *
- * Implementation note: like `find -exec`, we re-enter the interpreter
- * via a shell-quoted command string, threading `ctx.commands` and
- * `ctx.signal` through so host-injected commands and cancellation
- * remain in scope inside the nested invocation.
+ * The command runs from its argv through the registry (`dispatchArgv`),
+ * never re-parsed as shell text, so an item with spaces or quotes
+ * arrives as one argument, host-injected commands stay reachable, and
+ * the command's output passes through byte for byte.
  */
 
 import type { CommandHandler } from '../context'
 import { TerminalError } from '../errors'
-import { describeFsError } from '../fs/errors'
+import { dispatchArgv } from './_dispatch'
 
 const MAX_DEPTH = 16
 let xargsDepth = 0
@@ -79,13 +79,6 @@ function parseXargsArgs(args: readonly string[]): ParsedXargs {
   return { replace, maxArgs, nullDelim, verbose, cmdName: 'echo', cmdBaseArgs: [] }
 }
 
-/** Single-quote-escape an arg for safe re-parsing by the shell. */
-function shellQuote(s: string): string {
-  if (s.length === 0) return "''"
-  if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(s)) return s
-  return `'${s.replaceAll("'", "'\\''")}'`
-}
-
 export const xargs: CommandHandler = async (ctx) => {
   if (xargsDepth >= MAX_DEPTH) {
     throw new TerminalError(`xargs: maximum recursion depth exceeded (${MAX_DEPTH})`)
@@ -102,27 +95,19 @@ export const xargs: CommandHandler = async (ctx) => {
 
   if (items.length === 0) return
 
-  const { execute } = await import('../interpreter')
+  if (!ctx.commands.has(cmdName)) {
+    throw new TerminalError(`xargs: ${cmdName}: command not found`, { exitCode: 127 })
+  }
 
   const runOne = async (cmdArgs: readonly string[]): Promise<void> => {
-    const cmdStr = [cmdName, ...cmdArgs].map(shellQuote).join(' ')
     if (verbose) ctx.stdout.write(`${cmdName} ${cmdArgs.join(' ')}\n`)
     xargsDepth++
-    let out: string
     try {
-      out = await execute(cmdStr, ctx.fs, {
-        signal: ctx.signal,
-        commands: ctx.commands,
-        env: ctx.env,
-      })
-    } catch (e) {
-      throw e instanceof TerminalError
-        ? e
-        : new TerminalError(`xargs: ${cmdName}: execution error: ${describeError(e)}`)
+      // The output is moved, not read: its bytes pass through.
+      ctx.stdout.writeBytes((await dispatchArgv(ctx, [cmdName, ...cmdArgs])).output)
     } finally {
       xargsDepth--
     }
-    ctx.stdout.write(out)
   }
 
   if (replace !== null) {
@@ -140,8 +125,4 @@ export const xargs: CommandHandler = async (ctx) => {
   } else {
     await runOne([...cmdBaseArgs, ...items])
   }
-}
-
-function describeError(e: unknown): string {
-  return describeFsError(e)
 }

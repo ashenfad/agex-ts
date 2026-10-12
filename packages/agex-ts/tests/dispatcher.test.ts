@@ -775,6 +775,37 @@ describe('emission dispatch — terminal', () => {
     expect(dec.decode(await (await agent.fs()).read('/out.txt'))).toBe('BEEP\n')
   })
 
+  it('gives a registered command text or bytes in, and either out', async () => {
+    const { agent } = await makeAgent([
+      r(
+        { type: 'fileWrite', path: '/in.txt', content: 'quiet\n', mode: 'write' },
+        { type: 'terminal', commands: 'shout < /in.txt > /out.txt; raw > /raw.dat' },
+        { type: 'ts', code: 'taskSuccess(null)' },
+      ),
+    ])
+    agent.terminal(
+      async (ctx) => {
+        ctx.stdout.write(ctx.stdin.text().toUpperCase())
+        ctx.stdout.writeBytes(Uint8Array.of(ctx.stdin.bytes.byteLength))
+        return undefined
+      },
+      { name: 'shout', description: 'Uppercase stdin, then its byte count as one byte.' },
+    )
+    agent.terminal(
+      async (ctx) => {
+        ctx.stdout.writeBytes(Uint8Array.of(0xff, 0x00, 0xfe))
+        return undefined
+      },
+      { name: 'raw', description: 'Emit three raw bytes.' },
+    )
+    await agent.task<undefined, null>({ description: 'Shout.' })(undefined)
+    const fs = await agent.fs()
+    expect(await fs.read('/out.txt')).toEqual(
+      Uint8Array.of(...new TextEncoder().encode('QUIET\n'), 6),
+    )
+    expect(await fs.read('/raw.dat')).toEqual(Uint8Array.of(0xff, 0x00, 0xfe))
+  })
+
   it('emits captured stdout as an OutputEvent', async () => {
     const { agent } = await makeAgent([
       r(

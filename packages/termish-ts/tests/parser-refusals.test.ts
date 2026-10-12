@@ -123,6 +123,16 @@ describe('comments', () => {
     expect(await execute('# only a comment\necho next', fs)).toBe('next\n')
   })
 
+  it('may mention command substitution', async () => {
+    expect(await execute('echo hi # $(pwd)', new MemoryFS())).toBe('hi\n')
+    expect(await execute('# "$(pwd)"\necho next', new MemoryFS())).toBe('next\n')
+  })
+
+  it('start after an operator, in the heredoc scanner too', async () => {
+    expect(await execute('echo hi;# <<EOF', new MemoryFS())).toBe('hi\n')
+    expect(await execute('echo hi &&# <<EOF', new MemoryFS())).toBe('hi\n')
+  })
+
   it('never start a heredoc', async () => {
     expect((await execute('echo hi # <<EOF not a heredoc', new MemoryFS())).trim()).toBe('hi')
   })

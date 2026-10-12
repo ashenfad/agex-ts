@@ -115,6 +115,35 @@ describe('a warning from a command that succeeded', () => {
   })
 })
 
+describe("a failing command's own output", () => {
+  it('goes to its output redirect, not the transcript', async () => {
+    await fs.write('/a', bytes('AAA\n'))
+    expect(await execute('cat /a /missing > /out; true', fs)).toBe(`${missing}\n`)
+    expect(text(await fs.read('/out'))).toBe('AAA\n')
+  })
+
+  it('appends with >>, and is discarded by /dev/null', async () => {
+    await fs.write('/a', bytes('AAA\n'))
+    await fs.write('/log', bytes('old\n'))
+    await execute('cat /a /missing >> /log; true', fs)
+    expect(text(await fs.read('/log'))).toBe('old\nAAA\n')
+    expect(await execute('cat /a /missing > /dev/null; true', fs)).toBe(`${missing}\n`)
+    expect(await fs.exists('/dev/null')).toBe(false)
+  })
+
+  it('goes to the transcript without a redirect', async () => {
+    await fs.write('/a', bytes('AAA\n'))
+    expect(await execute('cat /a /missing; true', fs)).toBe(`AAA\n${missing}\n`)
+  })
+
+  it('follows the redirect when stderr goes to a file too', async () => {
+    await fs.write('/a', bytes('AAA\n'))
+    expect(await execute('cat /a /missing > /out 2> /err; true', fs)).toBe('')
+    expect(text(await fs.read('/out'))).toBe('AAA\n')
+    expect(text(await fs.read('/err'))).toBe(`${missing}\n`)
+  })
+})
+
 describe('2> and 2>>', () => {
   it('capture the diagnostic', async () => {
     expect(await execute('cat /missing 2>/err.txt; echo ok', fs)).toBe('ok\n')

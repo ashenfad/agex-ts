@@ -30,6 +30,10 @@ import { maskQuotes, unmaskQuotes } from './quote-masker'
  *  greedily before the single-char check. */
 const OPERATOR_CHARS = new Set(['|', ';', '<', '>', '&'])
 
+/** What a word starts after, for the heredoc scanner's comment rule:
+ *  whitespace, or an operator character, as in the tokenizer. */
+const WORD_BOUNDARY = new Set([' ', '\t', '|', ';', '<', '>', '&'])
+
 /** Tokens that can never appear where a redirect target / fd is expected. */
 const NON_TARGET_TOKENS = new Set(['|', ';', '<', '<<', '>', '>>', '>&', '\n', '&&', '||'])
 
@@ -64,6 +68,28 @@ function rejectControlFlow(word: string): void {
   if (word === 'function') throw new ParseError(`function: ${FUNCTION_ADVICE}`)
 }
 
+/** Refuse `$(...)` in the tokens, rather than run it as mangled args,
+ *  or pass it through unexpanded inside double quotes. Checked after
+ *  tokenizing, so a comment that mentions it is never refused. Inside
+ *  single quotes it is a harmless literal, as in bash. */
+// `$(`, unless the `$` is escaped (`\$(` is a literal).
+const SUBSTITUTION = /(?<!\\)\$\(/
+
+function rejectCommandSubstitution(
+  tokens: readonly string[],
+  map: ReadonlyMap<string, string>,
+): void {
+  const live = tokens.join(' ')
+  const quoted = [...map].some(
+    ([key, original]) => original[0] === '"' && SUBSTITUTION.test(original) && live.includes(key),
+  )
+  if (SUBSTITUTION.test(live) || quoted) {
+    throw new ParseError(
+      "Command substitution '$(...)' is not supported; run the inner command separately",
+    )
+  }
+}
+
 interface HeredocEntry {
   readonly delimiter: string
   readonly body: string
@@ -83,15 +109,8 @@ export function toScript(text: string): Script {
   const extracted = extractHeredocs(text)
   const joined = handleLineContinuation(extracted.text)
   const { masked, map } = maskQuotes(joined)
-  // Command substitution is refused rather than tokenized into mangled
-  // args, or passed through unexpanded inside double quotes. Inside
-  // single quotes it is a harmless literal, as in bash.
-  if (masked.includes('$(') || [...map.values()].some((v) => v[0] === '"' && v.includes('$('))) {
-    throw new ParseError(
-      "Command substitution '$(...)' is not supported; run the inner command separately",
-    )
-  }
   const tokens = tokenize(masked)
+  rejectCommandSubstitution(tokens, map)
   return parseTokens(tokens, map, extracted.heredocs)
 }
 
@@ -126,7 +145,7 @@ function findHeredocOperators(
       char === '#' &&
       !inSingle &&
       !inDouble &&
-      (index === 0 || line[index - 1] === ' ' || line[index - 1] === '\t')
+      (index === 0 || WORD_BOUNDARY.has(line[index - 1] as string))
     ) {
       // A word-start `#` begins a comment, which the tokenizer drops; a
       // `<<` inside one must not start a heredoc.
@@ -347,7 +366,11 @@ function tokenize(text: string): string[] {
         break
       }
       if (ch === '\\' && i + 1 < n) {
-        word += text[i + 1]
+        // An escaped `$` or backslash keeps its backslash, so expansion
+        // reads `\$NAME` as a literal `$NAME`, and `\\$NAME` as a
+        // backslash before an expansion. Expansion drops the backslash.
+        const next = text[i + 1] as string
+        word += next === '$' || next === '\\' ? `\\${next}` : next
         i += 2
         continue
       }

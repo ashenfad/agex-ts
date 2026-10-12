@@ -92,6 +92,30 @@ export function loadsExact(raw: Uint8Array): unknown {
   return pyLoadsBytes(raw)
 }
 
+/** A record's value with integers kept exact (`bigint` past the safe
+ *  range) and floats as plain numbers: commit info, as callers read it. */
+export function loadsInfo(raw: Uint8Array): unknown {
+  return unwrapFloats(pyLoadsBytes(raw))
+}
+
+function unwrapFloats(value: unknown): unknown {
+  if (value instanceof PyFloat) return value.value
+  if (Array.isArray(value)) return value.map(unwrapFloats)
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(value)) {
+      Object.defineProperty(out, k, {
+        value: unwrapFloats(v),
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      })
+    }
+    return out
+  }
+  return value
+}
+
 // ---------------------------------------------------------------------------
 // Identity
 // ---------------------------------------------------------------------------

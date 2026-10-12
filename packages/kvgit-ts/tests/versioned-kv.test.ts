@@ -8,6 +8,7 @@ import {
   VersionedKV,
 } from '../src/index'
 import { Keyset } from '../src/keyset'
+import { PyFloat } from '../src/pyjson'
 import { BRANCH_HEAD, COMMIT_ROOT, loads } from '../src/versioned/layout'
 
 const enc = new TextEncoder()
@@ -52,6 +53,48 @@ describe('VersionedKV — open', () => {
     const otherBranch = (await main.createBranch('feature')) as VersionedKV
     expect(otherBranch.currentBranch).toBe('feature')
     expect(text((await otherBranch.get('k')) as Uint8Array)).toBe('main-v')
+  })
+
+  it("opens at the winner's head when another writer creates the branch first", async () => {
+    // The opener decides the branch is missing, then loses the create
+    // to a writer that makes it at a commit of its own.
+    class RacingMemory extends Memory {
+      beforeCreate: (() => Promise<void>) | null = null
+      override async casMany(
+        expected: ReadonlyMap<string, Uint8Array | null>,
+        writes: ReadonlyMap<string, Uint8Array>,
+        removes: Iterable<string> = [],
+      ): Promise<boolean> {
+        const fire = this.beforeCreate
+        if (fire !== null && writes.has(BRANCH_HEAD('dev'))) {
+          this.beforeCreate = null
+          await fire()
+        }
+        return super.casMany(expected, writes, removes)
+      }
+    }
+    const store = new RacingMemory()
+    const main = await VersionedKV.open(store)
+    await main.commit({ updates: new Map([['k', bytes('v')]]) })
+    store.beforeCreate = async () => {
+      await main.createBranch('dev')
+    }
+
+    const dev = await VersionedKV.open(store, { branch: 'dev' })
+    expect(dev.currentCommit).toBe(main.currentCommit)
+    expect(text((await dev.get('k')) as Uint8Array)).toBe('v')
+  })
+})
+
+describe('VersionedKV — commit info', () => {
+  it('reads back integers past the safe range exactly, and floats as numbers', async () => {
+    const vk = await VersionedKV.open(new Memory())
+    const big = 2n ** 64n + 1n
+    await vk.commit({
+      updates: new Map([['k', bytes('v')]]),
+      info: { big, whole: new PyFloat(2), half: 0.5, list: [new PyFloat(1.5), 3] },
+    })
+    expect(await vk.commitInfo()).toEqual({ big, whole: 2, half: 0.5, list: [1.5, 3] })
   })
 })
 

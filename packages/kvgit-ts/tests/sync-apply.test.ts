@@ -180,6 +180,17 @@ describe('applyWire — refusals', () => {
     await expect(applyWire(dst, altered)).rejects.toThrow(/integrity check failed/)
   })
 
+  it('refuses a commit whose parent generations were altered', async () => {
+    // The commit hash doesn't cover them, so only the parents' own
+    // records can catch it.
+    const { store: src, head } = await buildSource()
+    const wire = await collect(src, head)
+    const merge = wire.find((w) => w.parents.length > 1) as WireCommit
+    const altered = wire.map((w) => (w === merge ? { ...w, parentGens: [0, 0] } : w))
+
+    await expect(applyWire(new Memory(), altered)).rejects.toThrow(/parent generations/)
+  })
+
   it('refuses a root commit with content', async () => {
     const { store: src, head } = await buildSource()
     const wire = await collect(src, head)

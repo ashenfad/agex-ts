@@ -48,6 +48,7 @@ import {
   dumps,
   generationOf,
   loads,
+  loadsInfo,
   safeLoads,
 } from './layout'
 import type { MergeResolution } from './merge'
@@ -385,14 +386,29 @@ export class VersionedKV extends VersionedBase {
       } else if (!create) {
         throw new UnknownBranchError(branch, true)
       } else {
-        // A new branch starts at the empty root commit. Another opener
-        // may create it first; either way it now exists.
+        // A new branch starts at the empty root commit. Another writer
+        // may create it first, at any commit; then the handle opens at
+        // whatever head that writer gave it.
+        let created = true
         try {
           await createBranchHead(store, branch, ROOT_COMMIT, opts.now ?? wallClock)
         } catch (e) {
           if ((await store.get(BRANCH_HEAD(branch))) === null) throw e
+          created = false
         }
-        commitHash = ROOT_COMMIT
+        if (created) {
+          commitHash = ROOT_COMMIT
+        } else {
+          const winner = await resolveHead(store, branch, {
+            ...(opts.recoverFromCorruptHead !== undefined && {
+              recoverFromCorruptHead: opts.recoverFromCorruptHead,
+            }),
+          })
+          if (winner === null) {
+            throw new Error(`Branch '${branch}' HEAD is corrupt and unrecoverable`)
+          }
+          commitHash = winner
+        }
       }
     }
 
@@ -868,7 +884,7 @@ export class VersionedKV extends VersionedBase {
     const target = commitHash ?? this.currentCommitHash
     const raw = await this.store.get(INFO_KEY(target))
     if (raw === null) return null
-    return loads(raw) as CommitInfo
+    return loadsInfo(raw) as CommitInfo
   }
 
   // --- Recovery ---

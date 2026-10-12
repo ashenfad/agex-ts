@@ -31,6 +31,8 @@ import {
   BRANCH_HEAD,
   BRANCH_HEAD_PREV,
   COMMIT_ROOT,
+  PARENT_COMMIT,
+  PARENT_GENS,
   ROOT_COMMIT,
   SYNC_HEAD,
   blobKey,
@@ -38,6 +40,7 @@ import {
   commitHash,
   commitRecords,
   dumps,
+  generationOf,
   loads,
   safeLoads,
 } from '../versioned/layout'
@@ -80,6 +83,7 @@ export async function applyWire(
   let applied = 0
   let skipped = 0
   let head: string | null = null
+  const generations = new Map<string, number>()
 
   for await (const wc of commits) {
     head = wc.hash
@@ -119,6 +123,19 @@ export async function applyWire(
       )
     }
 
+    // The hash doesn't cover parent generations, so they are checked
+    // against the parents' own records: commits made on top of this one
+    // count from them.
+    const expectedGens =
+      wc.parents.length === 0
+        ? null
+        : await Promise.all(wc.parents.map((p) => generationAt(store, p, generations)))
+    if (dumpsText(wc.parentGens) !== dumpsText(expectedGens)) {
+      throw new Error(
+        `applyWire: parent generations ${dumpsText(wc.parentGens)} for ${wc.hash} do not match its parents' ${dumpsText(expectedGens)} — refusing commit`,
+      )
+    }
+
     // One batch per commit, as a commit is written: blobs, nodes, records.
     for (const [k, v] of newKs.pending) writes.set(k, v)
     const records = commitRecords({
@@ -147,6 +164,39 @@ export async function applyWire(
   }
 
   return { applied, skipped, head }
+}
+
+/** A stored commit's generation: 0 with no parents, else one more than
+ *  its highest parent's, as its recorded parent generations say. */
+async function generationAt(
+  store: KVStore,
+  commit: string,
+  cache: Map<string, number>,
+): Promise<number> {
+  const cached = cache.get(commit)
+  if (cached !== undefined) return cached
+  const parentsBytes = await store.get(PARENT_COMMIT(commit))
+  if (parentsBytes === null) {
+    throw new Error(
+      `applyWire: parent ${commit} is neither in the stream nor the store (stream must be parents-first)`,
+    )
+  }
+  const parents = loads(parentsBytes) as string[]
+  let gen = 0
+  if (parents.length > 0) {
+    const gensBytes = await store.get(PARENT_GENS(commit))
+    const gens = gensBytes === null ? null : safeLoads(gensBytes)
+    if (!Array.isArray(gens) || gens.length !== parents.length) {
+      throw new Error(`applyWire: commit ${commit} has no parent generations recorded`)
+    }
+    gen = generationOf(gens as number[])
+  }
+  cache.set(commit, gen)
+  return gen
+}
+
+function dumpsText(value: unknown): string {
+  return JSON.stringify(value ?? null)
 }
 
 /** A commit's keyset root; throws if the commit is absent, which in a

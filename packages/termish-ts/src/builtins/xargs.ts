@@ -18,6 +18,7 @@
 
 import type { CommandHandler } from '../context'
 import { TerminalError } from '../errors'
+import { describeFsError } from '../fs/errors'
 
 const MAX_DEPTH = 16
 let xargsDepth = 0
@@ -142,5 +143,5 @@ export const xargs: CommandHandler = async (ctx) => {
 }
 
 function describeError(e: unknown): string {
-  return e instanceof Error ? e.message : String(e)
+  return describeFsError(e)
 }

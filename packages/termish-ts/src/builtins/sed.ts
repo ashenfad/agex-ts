@@ -24,6 +24,7 @@
 
 import type { CommandHandler } from '../context'
 import { TerminalError } from '../errors'
+import { describeFsError } from '../fs/errors'
 import { parseArgs } from './_argparse'
 
 const decoder = new TextDecoder('utf-8', { fatal: false })
@@ -613,5 +614,5 @@ function splitLinesKeepEnds(text: string): string[] {
 }
 
 function describeError(e: unknown): string {
-  return e instanceof Error ? e.message : String(e)
+  return describeFsError(e)
 }

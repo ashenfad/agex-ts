@@ -12,6 +12,7 @@
 
 import type { CommandContext, CommandHandler } from '../context'
 import { TerminalError } from '../errors'
+import { describeFsError } from '../fs/errors'
 import { looksLikeBinary } from './_util'
 
 /** How many leading bytes to read for classification. tar's `ustar`
@@ -154,6 +155,5 @@ function decodeAsciiPrefix(bytes: Uint8Array, max: number): string {
 }
 
 function describeError(e: unknown): string {
-  if (e instanceof Error) return e.message
-  return String(e)
+  return describeFsError(e)
 }

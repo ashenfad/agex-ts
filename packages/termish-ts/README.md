@@ -23,6 +23,11 @@ A virtual terminal that runs inside your application. Parses shell text (`ls -la
 - **Variables:** `$NAME`, `${NAME}` and `$?`, from the `env` passed to
   `execute` and shared with commands as `ctx.env`. Single quotes keep
   them literal; a value with spaces is never split into words.
+- **Globbing as bash does it:** `*`, `?` and `[...]` match within one
+  path segment, dotfiles only for a pattern starting with a dot, `**`
+  across directories, a trailing `/` for directories only. Matches
+  keep the word's form (relative or absolute), and a word that matches
+  nothing stays as typed. `ls` orders its operands as GNU does.
 - **Comments:** an unquoted `#` at the start of a word.
 - **Refused, with advice:** loops, conditionals, `case`, function
   definitions and `$(...)` are parse errors that say what to use
@@ -35,6 +40,12 @@ indented for agent ergonomics. Here-strings (`<<<`) and tab-stripping heredocs
 (`<<-`) are not supported.
 
 ## Backends shipped in v1
+
+Every adapter throws `FsError` with a POSIX code (`ENOENT`, `EISDIR`,
+`ENOTDIR`, `EEXIST`, `ENOTEMPTY`), so builtins report the standard text
+(`cat: /x: No such file or directory`) whatever the filesystem. A host
+adapter should do the same; `describeFsError` also maps Node's codes.
+
 
 | Adapter | Sub-path | When to reach for it |
 |---|---|---|

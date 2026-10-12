@@ -10,6 +10,7 @@
 
 import type { CommandContext, CommandHandler } from '../context'
 import { TerminalError } from '../errors'
+import { describeFsError } from '../fs/errors'
 import { joinPath, basename as pathBasename, dirname as pathDirname, resolve } from '../fs/path'
 import type { FileInfo, FileSystem } from '../fs/protocol'
 import { parseArgs } from './_argparse'
@@ -80,133 +81,119 @@ export const ls: CommandHandler = async (ctx) => {
     },
     'ls',
   )
-  const paths = parsed.positional.length > 0 ? parsed.positional : ['.']
+  const flag = (name: string): boolean => parsed.flags[name] === true
+  const operands = parsed.positional.length > 0 ? parsed.positional : ['.']
   const fs = ctx.fs
 
-  // POSIX-style header policy: `dir:` headers only appear when more
-  // than one *directory* will be listed (or when files and dirs are
-  // mixed — files print first inline, then each dir gets a header).
-  // Single-target invocations and pure-file lists never get headers.
-  // Pre-classify so we know whether a header is needed before looping.
-  const classified: Array<{ path: string; kind: 'file' | 'dir' | 'missing' }> = []
-  for (const p of paths) {
-    if (await fs.isFile(p)) classified.push({ path: p, kind: 'file' })
-    else if (await fs.isDir(p)) classified.push({ path: p, kind: 'dir' })
-    else classified.push({ path: p, kind: 'missing' })
-  }
-  const dirCount = classified.filter((c) => c.kind === 'dir').length
-  const fileCount = classified.filter((c) => c.kind === 'file').length
-  const showHeaders = dirCount > 1 || (dirCount >= 1 && fileCount >= 1)
+  const sizeText = (size: number): string =>
+    flag('humanReadable') ? padLeft(humanSize(size), 6) : padLeft(`${size}`, 8)
+  const longLine = (type: string, size: number, modifiedAt: string, path: string): string =>
+    `${type}rw-r--r-- 1 agent agent ${sizeText(size)} ${formatLsTime(modifiedAt)} ${path}\n`
 
-  for (let i = 0; i < paths.length; i++) {
-    const path = paths[i] as string
-    const kind = classified[i]?.kind ?? 'missing'
-    if (showHeaders && kind === 'dir') ctx.stdout.write(`${path}:\n`)
-
-    try {
-      // -d + directory: list the directory itself, not its contents.
-      if (parsed.flags.directory === true && (await fs.isDir(path))) {
-        if (parsed.flags.long === true) {
-          const meta = await fs.stat(path)
-          const sz =
-            parsed.flags.humanReadable === true
-              ? padLeft(humanSize(meta.size), 6)
-              : padLeft(`${meta.size}`, 8)
-          const time = formatLsTime(meta.modifiedAt)
-          ctx.stdout.write(`drw-r--r-- 1 agent agent ${sz} ${time} ${path}\n`)
-        } else {
-          ctx.stdout.write(`${path}\n`)
-        }
-        maybeSeparator(ctx, classified, i)
-        continue
+  const listDir = async (path: string): Promise<void> => {
+    const recursive = flag('recursive')
+    if (flag('long') || flag('time') || flag('size') || flag('classify')) {
+      let items: FileInfo[] = await fs.listDetailed(path, { recursive })
+      if (!flag('all')) items = items.filter((it) => !pathBasename(it.path).startsWith('.'))
+      if (flag('size')) items = [...items].sort((a, b) => b.size - a.size)
+      else if (flag('time')) {
+        items = [...items].sort((a, b) => (b.modifiedAt ?? '').localeCompare(a.modifiedAt ?? ''))
       }
-
-      // If the path itself is a file, list just the file (matches `ls foo.txt`).
-      if (await fs.isFile(path)) {
-        if (parsed.flags.long === true) {
-          const meta = await fs.stat(path)
-          const sz =
-            parsed.flags.humanReadable === true
-              ? padLeft(humanSize(meta.size), 6)
-              : padLeft(`${meta.size}`, 8)
-          const time = formatLsTime(meta.modifiedAt)
-          ctx.stdout.write(`-rw-r--r-- 1 agent agent ${sz} ${time} ${path}\n`)
-        } else {
-          ctx.stdout.write(`${path}\n`)
-        }
-        maybeSeparator(ctx, classified, i)
-        continue
-      }
-
-      const needsDetailed =
-        parsed.flags.long === true ||
-        parsed.flags.time === true ||
-        parsed.flags.size === true ||
-        parsed.flags.classify === true
-
-      const recursive = parsed.flags.recursive === true
-      let items: FileInfo[]
-
-      if (needsDetailed) {
-        items = await fs.listDetailed(path, { recursive })
-        if (parsed.flags.all !== true) {
-          items = items.filter((it) => !pathBasename(it.path).startsWith('.'))
-        }
-        if (parsed.flags.size === true) {
-          items = [...items].sort((a, b) => b.size - a.size)
-        } else if (parsed.flags.time === true) {
-          items = [...items].sort((a, b) => (b.modifiedAt ?? '').localeCompare(a.modifiedAt ?? ''))
-        }
-        if (parsed.flags.reverse === true) items = [...items].reverse()
-
-        if (parsed.flags.long === true) {
-          for (const it of items) {
-            const typeChar = it.isDir ? 'd' : '-'
-            const sz =
-              parsed.flags.humanReadable === true
-                ? padLeft(humanSize(it.size), 6)
-                : padLeft(`${it.size}`, 8)
-            const time = formatLsTime(it.modifiedAt)
-            const suffix = parsed.flags.classify === true && it.isDir ? '/' : ''
-            ctx.stdout.write(
-              `${typeChar}rw-r--r-- 1 agent agent ${sz} ${time} ${it.path}${suffix}\n`,
-            )
-          }
-        } else {
-          const lines = items.map(
-            (it) => `${it.path}${parsed.flags.classify === true && it.isDir ? '/' : ''}`,
+      if (flag('reverse')) items = [...items].reverse()
+      const suffix = (it: FileInfo): string => (flag('classify') && it.isDir ? '/' : '')
+      if (flag('long')) {
+        for (const it of items) {
+          ctx.stdout.write(
+            longLine(it.isDir ? 'd' : '-', it.size, it.modifiedAt, `${it.path}${suffix(it)}`),
           )
-          if (lines.length > 0) ctx.stdout.write(`${lines.join('\n')}\n`)
         }
-      } else {
-        const names = await fs.list(path, { recursive })
-        let filtered = names.filter(
-          (p) => parsed.flags.all === true || !(pathBasename(p) || p).startsWith('.'),
-        )
-        if (parsed.flags.reverse === true) filtered = [...filtered].reverse()
-        if (filtered.length > 0) ctx.stdout.write(`${filtered.join('\n')}\n`)
+      } else if (items.length > 0) {
+        ctx.stdout.write(`${items.map((it) => `${it.path}${suffix(it)}`).join('\n')}\n`)
       }
+      return
+    }
+    let names = (await fs.list(path, { recursive })).filter(
+      (p) => flag('all') || !(pathBasename(p) || p).startsWith('.'),
+    )
+    if (flag('reverse')) names = [...names].reverse()
+    if (names.length > 0) ctx.stdout.write(`${names.join('\n')}\n`)
+  }
+
+  // GNU's order: a missing operand is reported and the rest are listed;
+  // file operands (and, with -d, directories as entries) come first, by
+  // name and with no header; then each directory, by name, under a
+  // `dir:` header whenever there is more than one operand, with a blank
+  // line before every group after the first.
+  const missing: string[] = []
+  const files: string[] = []
+  const dirs: string[] = []
+  for (const path of operands) {
+    try {
+      if (await fs.isDir(path)) (flag('directory') ? files : dirs).push(path)
+      else if (await fs.exists(path)) files.push(path)
+      else missing.push(path)
+    } catch {
+      missing.push(path)
+    }
+  }
+
+  // Operands in the order their entries would be: by name, or by size
+  // or time (largest and newest first) under -S and -t, reversed by -r.
+  const operandOrder = async (paths: string[]): Promise<string[]> => {
+    let ordered = [...paths].sort()
+    if (flag('size') || flag('time')) {
+      const keys = new Map<string, number | string>()
+      for (const p of ordered) {
+        try {
+          const meta = await fs.stat(p)
+          keys.set(p, flag('size') ? meta.size : (meta.modifiedAt ?? ''))
+        } catch {
+          keys.set(p, flag('size') ? 0 : '')
+        }
+      }
+      ordered = ordered.sort((a, b) => {
+        const ka = keys.get(a) as number | string
+        const kb = keys.get(b) as number | string
+        if (ka === kb) return 0
+        return ka < kb ? 1 : -1
+      })
+    }
+    return flag('reverse') ? ordered.reverse() : ordered
+  }
+
+  const orderedFiles = await operandOrder(files)
+  const orderedDirs = await operandOrder(dirs)
+  const errors = missing.map((p) => `ls: cannot access '${p}': No such file or directory`)
+  if (orderedFiles.length === 0 && orderedDirs.length === 0) {
+    throw new TerminalError(errors.join('\n'), { exitCode: 2 })
+  }
+
+  for (const path of orderedFiles) {
+    if (flag('long')) {
+      try {
+        const meta = await fs.stat(path)
+        ctx.stdout.write(longLine(meta.isDir ? 'd' : '-', meta.size, meta.modifiedAt, path))
+      } catch (e) {
+        throw new TerminalError(`ls: cannot access '${path}': ${describeError(e)}`)
+      }
+    } else {
+      ctx.stdout.write(`${path}\n`)
+    }
+  }
+  const headers = operands.length > 1
+  for (let k = 0; k < orderedDirs.length; k++) {
+    const path = orderedDirs[k] as string
+    if (orderedFiles.length > 0 || k > 0) ctx.stdout.write('\n')
+    if (headers) ctx.stdout.write(`${path}:\n`)
+    try {
+      await listDir(path)
     } catch (e) {
       throw new TerminalError(`ls: cannot access '${path}': ${describeError(e)}`)
     }
-
-    maybeSeparator(ctx, classified, i)
   }
-}
 
-/** Write a blank-line separator between this entry and the next *only*
- *  when both are directories (POSIX-ish: `ls dir1 dir2` puts a blank
- *  line between the two listings; consecutive file args print together
- *  without separators). */
-function maybeSeparator(
-  ctx: CommandContext,
-  classified: ReadonlyArray<{ kind: 'file' | 'dir' | 'missing' }>,
-  i: number,
-): void {
-  if (i >= classified.length - 1) return
-  const here = classified[i]?.kind
-  const next = classified[i + 1]?.kind
-  if (here === 'dir' && next === 'dir') ctx.stdout.write('\n')
+  if (errors.length > 0) return { exitCode: 2, stderr: `${errors.join('\n')}\n` }
+  return undefined
 }
 
 // ---------------------------------------------------------------------------
@@ -454,7 +441,7 @@ export const dirname: CommandHandler = async (ctx: CommandContext) => {
 // ---------------------------------------------------------------------------
 
 function describeError(e: unknown, contextPath?: string): string {
-  const msg = e instanceof Error ? e.message : String(e)
+  const msg = describeFsError(e)
   if (contextPath !== undefined && !msg.includes(contextPath)) {
     return `${contextPath}: ${msg}`
   }

@@ -28,10 +28,11 @@ import { BUILTINS } from './builtins/index'
 import { ByteStdin, ByteStdout, EMPTY, concat, decode, encode } from './bytes'
 import type { CommandContext, CommandHandler, CommandResult } from './context'
 import { TerminalError } from './errors'
+import { describeFsError } from './fs/errors'
 import { resolve } from './fs/path'
 import type { FileSystem } from './fs/protocol'
-import { glob } from './glob'
 import { toScript } from './parser'
+import { expand as expandPathname, hasMagic } from './pathglob'
 import { maskQuotes, unmaskAndUnquote } from './quote-masker'
 
 export interface ExecuteOptions {
@@ -439,7 +440,8 @@ function expandWord(word: string, env: Record<string, string>, lastExitCode: num
  * Expand variables, then glob. Variables come first, so `$?` never
  * reads as a glob `?`. A fully unquoted word that expands to nothing is
  * removed (`echo a $UNSET b` has two args, not three); one with an
- * unquoted `*` or `?` is globbed, and stays as typed if nothing matches.
+ * unquoted `*`, `?` or `[...]` is expanded as bash does (`./pathglob`),
+ * and stays as typed if nothing matches.
  */
 async function expandArgs(
   args: readonly string[],
@@ -453,9 +455,9 @@ async function expandArgs(
     const expanded = expandMasked(masked, map, env, lastExitCode)
     if (map.size === 0) {
       if (expanded === '' && arg !== '') continue
-      if (expanded.includes('*') || expanded.includes('?')) {
+      if (hasMagic(expanded)) {
         try {
-          const matches = await glob(expanded, fs)
+          const matches = await expandPathname(expanded, fs)
           out.push(...(matches.length > 0 ? matches : [expanded]))
         } catch {
           out.push(expanded)
@@ -482,6 +484,5 @@ function mergeCommands(commands: ExecuteOptions['commands']): ReadonlyMap<string
 }
 
 function describeError(e: unknown): string {
-  if (e instanceof Error) return e.message
-  return String(e)
+  return describeFsError(e)
 }

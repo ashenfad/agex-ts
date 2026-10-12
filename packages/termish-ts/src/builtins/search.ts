@@ -17,6 +17,7 @@
 
 import type { CommandContext, CommandHandler } from '../context'
 import { TerminalError } from '../errors'
+import { describeFsError } from '../fs/errors'
 import type { FileInfo, FileSystem } from '../fs/protocol'
 import { globMatch } from '../glob'
 import { parseArgs } from './_argparse'
@@ -794,5 +795,5 @@ export const find: CommandHandler = async (ctx: CommandContext) => {
 }
 
 function describeError(e: unknown): string {
-  return e instanceof Error ? e.message : String(e)
+  return describeFsError(e)
 }

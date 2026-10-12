@@ -14,6 +14,7 @@
  * `list` see them too.
  */
 
+import { FsError } from './errors'
 import { basename, dirname, joinPath, resolve } from './path'
 import type { FileInfo, FileMetadata, FileSystem } from './protocol'
 
@@ -41,7 +42,7 @@ export class MemoryFS implements FileSystem {
   async chdir(path: string): Promise<void> {
     const abs = resolve(path, this.#cwd)
     if (!this.#dirExists(abs)) {
-      throw new Error(`chdir: not a directory: ${path}`)
+      throw new FsError((await this.exists(path)) ? 'ENOTDIR' : 'ENOENT', path)
     }
     this.#cwd = abs
   }
@@ -52,8 +53,8 @@ export class MemoryFS implements FileSystem {
     const abs = resolve(path, this.#cwd)
     const v = this.#files.get(abs)
     if (v === undefined) {
-      if (this.#dirExists(abs)) throw new Error(`read: is a directory: ${path}`)
-      throw new Error(`read: no such file: ${path}`)
+      if (this.#dirExists(abs)) throw new FsError('EISDIR', path)
+      throw new FsError('ENOENT', path)
     }
     // Return a fresh view so callers can't mutate stored bytes.
     return new Uint8Array(v)
@@ -94,7 +95,7 @@ export class MemoryFS implements FileSystem {
         isDir: true,
       }
     }
-    throw new Error(`stat: no such file or directory: ${path}`)
+    throw new FsError('ENOENT', path)
   }
 
   // ---------- writes ----------
@@ -102,11 +103,11 @@ export class MemoryFS implements FileSystem {
   async write(path: string, content: Uint8Array, mode: 'w' | 'a' = 'w'): Promise<void> {
     const abs = resolve(path, this.#cwd)
     if (this.#dirExists(abs) && !this.#files.has(abs)) {
-      throw new Error(`write: is a directory: ${path}`)
+      throw new FsError('EISDIR', path)
     }
     const parent = dirname(abs)
     if (!this.#dirExists(parent)) {
-      throw new Error(`write: parent directory does not exist: ${parent}`)
+      throw new FsError('ENOENT', parent)
     }
 
     let next: Uint8Array
@@ -131,11 +132,11 @@ export class MemoryFS implements FileSystem {
   async mkdir(path: string, opts: { parents?: boolean; existOk?: boolean } = {}): Promise<void> {
     const abs = resolve(path, this.#cwd)
     if (this.#files.has(abs)) {
-      throw new Error(`mkdir: file exists at path: ${path}`)
+      throw new FsError('EEXIST', path)
     }
     if (this.#dirExists(abs)) {
       if (opts.existOk) return
-      throw new Error(`mkdir: directory exists: ${path}`)
+      throw new FsError('EEXIST', path)
     }
     if (opts.parents) {
       // Create all missing intermediate dirs.
@@ -148,7 +149,7 @@ export class MemoryFS implements FileSystem {
     } else {
       const parent = dirname(abs)
       if (!this.#dirExists(parent)) {
-        throw new Error(`mkdir: parent directory does not exist: ${parent}`)
+        throw new FsError('ENOENT', parent)
       }
       this.#addDir(abs)
     }
@@ -157,8 +158,8 @@ export class MemoryFS implements FileSystem {
   async remove(path: string): Promise<void> {
     const abs = resolve(path, this.#cwd)
     if (!this.#files.has(abs)) {
-      if (this.#dirExists(abs)) throw new Error(`remove: is a directory: ${path}`)
-      throw new Error(`remove: no such file: ${path}`)
+      if (this.#dirExists(abs)) throw new FsError('EISDIR', path)
+      throw new FsError('ENOENT', path)
     }
     this.#files.delete(abs)
     this.#fileMeta.delete(abs)
@@ -166,15 +167,15 @@ export class MemoryFS implements FileSystem {
 
   async rmdir(path: string): Promise<void> {
     const abs = resolve(path, this.#cwd)
-    if (abs === '/') throw new Error('rmdir: cannot remove root')
+    if (abs === '/') throw new FsError('EINVAL', path, 'Cannot remove the root')
     if (this.#files.has(abs)) {
-      throw new Error(`rmdir: not a directory: ${path}`)
+      throw new FsError('ENOTDIR', path)
     }
     if (!this.#dirExists(abs)) {
-      throw new Error(`rmdir: no such directory: ${path}`)
+      throw new FsError('ENOENT', path)
     }
     if (this.#dirHasChildren(abs)) {
-      throw new Error(`rmdir: directory not empty: ${path}`)
+      throw new FsError('ENOTEMPTY', path)
     }
     this.#explicitDirs.delete(abs)
     this.#dirMeta.delete(abs)
@@ -188,7 +189,7 @@ export class MemoryFS implements FileSystem {
     if (this.#files.has(absSrc)) {
       const dstParent = dirname(absDst)
       if (!this.#dirExists(dstParent)) {
-        throw new Error(`rename: parent directory does not exist: ${dstParent}`)
+        throw new FsError('ENOENT', dstParent)
       }
       const value = this.#files.get(absSrc) as Uint8Array
       const meta = this.#fileMeta.get(absSrc) as FileMeta
@@ -231,7 +232,7 @@ export class MemoryFS implements FileSystem {
       return
     }
 
-    throw new Error(`rename: no such file or directory: ${src}`)
+    throw new FsError('ENOENT', src)
   }
 
   // ---------- iteration ----------
@@ -239,7 +240,7 @@ export class MemoryFS implements FileSystem {
   async list(path = '.', opts: { recursive?: boolean } = {}): Promise<string[]> {
     const abs = resolve(path, this.#cwd)
     if (!this.#dirExists(abs)) {
-      throw new Error(`list: no such directory: ${path}`)
+      throw new FsError((await this.exists(path)) ? 'ENOTDIR' : 'ENOENT', path)
     }
     const prefix = abs === '/' ? '/' : `${abs}/`
     const direct = new Set<string>()

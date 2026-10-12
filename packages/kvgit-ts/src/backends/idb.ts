@@ -23,6 +23,7 @@
  */
 
 import type { KVStore } from '../types'
+import { bytesEqual, checkBatch } from './_batch'
 
 const DEFAULT_DB_NAME = 'kvgit'
 const DEFAULT_STORE_NAME = 'kv'
@@ -215,6 +216,48 @@ export class IndexedDB implements KVStore {
    * object store, so concurrent CAS calls (even from other workers
    * sharing the database) are safely linearized.
    */
+  /** Every read, the check and every write run in one readwrite
+   *  transaction, which IndexedDB linearizes against every other. */
+  async casMany(
+    expected: ReadonlyMap<string, Uint8Array | null>,
+    writes: ReadonlyMap<string, Uint8Array>,
+    removes: Iterable<string> = [],
+  ): Promise<boolean> {
+    const removeList = checkBatch(writes, removes)
+    const { store, tx } = this.#tx('readwrite')
+    return new Promise((resolve, reject) => {
+      let landed = false
+      const apply = (): void => {
+        landed = true
+        for (const [key, value] of writes) {
+          const req = store.put(value, key)
+          req.onerror = () => reject(req.error)
+        }
+        for (const key of removeList) {
+          const req = store.delete(key)
+          req.onerror = () => reject(req.error)
+        }
+      }
+      const checks = [...expected]
+      if (checks.length === 0) apply()
+      let pending = checks.length
+      let failed = false
+      for (const [key, value] of checks) {
+        const req = store.get(key)
+        req.onsuccess = () => {
+          const current = req.result === undefined ? null : (req.result as Uint8Array)
+          if (!bytesEqual(current, value)) failed = true
+          pending--
+          if (pending === 0 && !failed) apply()
+        }
+        req.onerror = () => reject(req.error)
+      }
+      tx.oncomplete = () => resolve(landed)
+      tx.onerror = () => reject(tx.error)
+      tx.onabort = () => reject(tx.error ?? new Error('IndexedDB transaction aborted'))
+    })
+  }
+
   async cas(key: string, value: Uint8Array, expected: Uint8Array | null): Promise<boolean> {
     const { store, tx } = this.#tx('readwrite')
     return new Promise((resolve, reject) => {
@@ -299,14 +342,6 @@ export class IndexedDB implements KVStore {
       tx.onabort = () => reject(tx.error ?? new Error('IndexedDB transaction aborted'))
     })
   }
-}
-
-function bytesEqual(a: Uint8Array | null, b: Uint8Array | null): boolean {
-  if (a === b) return true
-  if (a === null || b === null) return false
-  if (a.length !== b.length) return false
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
-  return true
 }
 
 /**

@@ -31,6 +31,7 @@
 import { createRequire } from 'node:module'
 import type { DatabaseSync as DatabaseSyncT, StatementSync } from 'node:sqlite'
 import type { KVStore } from '../types'
+import { bytesEqual, checkBatch } from './_batch'
 
 // Vite's 5.x dep optimizer doesn't recognize `node:sqlite` as a Node
 // built-in and strips the `node:` prefix, breaking resolution — even
@@ -190,6 +191,34 @@ export class Sqlite implements KVStore {
     // current value bytewise matches `expected`.
     const r = this.#casUpdateStmt.run(value, key, expected)
     return Number(r.changes) === 1
+  }
+
+  async casMany(
+    expected: ReadonlyMap<string, Uint8Array | null>,
+    writes: ReadonlyMap<string, Uint8Array>,
+    removes: Iterable<string> = [],
+  ): Promise<boolean> {
+    const removeList = checkBatch(writes, removes)
+    // BEGIN IMMEDIATE takes the write lock before the reads, so no other
+    // connection can change an expected key between check and write.
+    this.#db.exec('BEGIN IMMEDIATE')
+    try {
+      for (const [key, value] of expected) {
+        const row = this.#getStmt.get(key) as { value: Uint8Array } | undefined
+        const current = row === undefined ? null : row.value
+        if (!bytesEqual(current, value)) {
+          this.#db.exec('ROLLBACK')
+          return false
+        }
+      }
+      for (const [key, value] of writes) this.#setStmt.run(key, value)
+      for (const key of removeList) this.#removeStmt.run(key)
+      this.#db.exec('COMMIT')
+      return true
+    } catch (e) {
+      this.#db.exec('ROLLBACK')
+      throw e
+    }
   }
 
   // ---------- Iteration ----------

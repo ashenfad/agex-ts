@@ -12,43 +12,63 @@ A `Map<string, T>` with git-like history. Every `commit()` creates a checkpoint;
 
 The canonical type contracts live in [`src/types.ts`](./src/types.ts). For how @agex-ts/kvgit is used inside agex-ts, see [agex-ts's State & Sessions concepts doc](../../docs/concepts/state-and-sessions.md).
 
+## Storage format
+
+Stores use kvgit storage v4, the format Python kvgit 0.4 writes, byte
+for byte: a store either one writes, the other reads, and a commit
+either one makes gets the same hash in both. Blobs are keyed by the
+SHA-256 of their bytes (`kvgit:blob:<sha256>`), HAMT nodes by their
+entries, and a commit hash covers its parents, keyset root, time and
+info. Records are JSON as Python's `json.dumps` writes it, which
+[`src/pyjson.ts`](./src/pyjson.ts) reproduces.
+
+Two consequences for callers:
+
+- **Commit info is hashed as Python would write it.** JS has one
+  number type, so a whole number in `info` is written as an integer.
+  Wrap a value that must be a float in `PyFloat` (`new PyFloat(2)`
+  writes `2.0`).
+- **Commit times are seconds**, as a float. `VersionedKV.open` takes a
+  `now` option (seconds) for a deterministic clock; it defaults to the
+  wall clock.
+
+The golden test ([`tests/golden-v4.test.ts`](./tests/golden-v4.test.ts))
+replays a scripted history and compares every key and byte against
+what Python kvgit wrote for it
+([`scripts/golden-v4.py`](./scripts/golden-v4.py)).
+
 ## Garbage collection
 
 Resetting a branch, deleting one, or losing a CAS race leaves commits
-nothing points at. Two passes reclaim them, with different safety
-contracts:
+nothing points at. Two passes reclaim them. **Both require a quiescent
+store:** no other tab, worker, or process may write for the whole call.
 
-- **`vk.cleanOrphans({ minAge })` — safe to run any time, including
-  while other writers commit.** It walks every branch's ancestry to
+- **`vk.cleanOrphans({ minAge })`** walks every branch's ancestry to
   mark what's live, then finds every deletion candidate by walking an
-  orphaned commit's *own* keyset. It never scans a storage namespace.
-  Both classes it deletes are commit-scoped — blob keys are
-  `<commitHash>:<userKey>`, and HAMT leaves carry that pointer, so node
-  hashes never dedup across unrelated commits — which means a commit
-  landing mid-sweep is in no orphan's tree and cannot become a
-  candidate. `minAge` (default 1 hour) additionally protects commits
-  too young to be sure about; an in-flight writer's commit is often
-  unreachable for a moment before its CAS lands.
+  orphaned commit's *own* keyset, keeping anything a live commit or a
+  young orphan still reaches. It never scans a storage namespace.
+  `minAge` (default 1 hour) protects commits too young to be sure
+  about. Blobs and nodes are keyed by content, so a commit landing
+  mid-sweep that holds content an orphan also held can lose it; that
+  is why the pass needs a quiescent store, until a GC lease (sweeps
+  holding it, writers' batches conditional on it) makes it safe beside
+  writers.
 
-  It cannot reclaim HAMT nodes that *no* commit points at — an
-  interrupted write, a crash between the node write and its CAS,
-  damage from an older kvgit — because there is no orphan keyset to
-  find them through.
+  It cannot reclaim content that *no* commit points at — an
+  interrupted write, a crash between the node write and its CAS, the
+  blobs of an orphan whose keyset is unreadable — because there is no
+  orphan keyset to find them through.
 
-- **`vk.deepClean({ minAge })` — requires a quiescent store.** Same
-  sweep, plus a scan of the whole `kvgit:keyset:` namespace that
-  deletes any node not reachable from a live head or a young orphan.
-  That scan runs after the mark phase, so it will happily delete
-  artifacts written by a concurrent writer — including ones a live
-  branch HEAD has since come to depend on, leaving a head whose keyset
-  root is missing. No other tab, worker, or process may write for the
-  duration of the call. `minAge` does not protect you here: it governs
-  which commits are old enough to delete, not the namespace scan.
+- **`vk.deepClean({ minAge })`** is the same sweep, plus a scan of the
+  whole `kvgit:keyset:` and `kvgit:blob:` namespaces that deletes any
+  node or blob not reachable from a live head or a young orphan. That
+  scan runs after the mark phase, so it will delete anything a
+  concurrent writer wrote in between, leaving a live head whose keyset
+  root is missing. `minAge` governs which commits are old enough to
+  delete, not the namespace scan.
 
 Routine cleanup is `cleanOrphans`; schedule `deepClean` for maintenance
-windows. Neither pass reclaims blobs belonging to an orphan whose
-keyset is unreadable — nothing scans blobs by namespace, so a blob is
-only ever found through the keyset entry that points at it.
+windows.
 
 ## HEAD recovery
 
@@ -105,22 +125,13 @@ Two things persist a recovery:
   deleted-branch resurrection `deleteBranch` drops the backup to
   prevent.
 
-**The backup only ever names a commit HEAD really held.**
-`__branch_head_prev__` is written after a HEAD swap succeeds, never
-before. Written first it would land whether or not the swap did, so a
-writer losing a race would leave its own stale value as the branch's
-recovery target — and where that value came from a recovery tier, a
-commit that was never HEAD at all, which recovery would then graft
-onto the branch as a lineage it never had. It does **not** guarantee a
-backup exactly one commit back. The swap and the backup write are two
-steps, and anything that separates them — a crash, or simply losing
-the CPU while another writer completes both of its own — lets the
-older writer's backup land last, leaving HEAD two or more commits
-ahead of it. Recovery then skips whatever came between. That is the
-deliberate trade: recovering to an older real HEAD loses commits,
-recovering to a commit that was never HEAD loses the branch. No
-backend offers a CAS spanning two keys, so the two writes cannot be
-made one.
+**The backup is exactly the HEAD the swap replaced.** A HEAD swap
+writes `__branch_head__` and `__branch_head_prev__` in one atomic
+`casMany` (a compare-and-swap across keys, which every backend
+provides), conditional on HEAD still holding the value the writer
+read. A writer that loses the race writes neither, so the backup never
+names a commit HEAD did not hold, and no crash, concurrent writer or
+delete can land between the swap and the backup.
 
 ## Sync & remotes
 
@@ -134,32 +145,28 @@ this layer:
   Don't implement a remote by putting a slow store behind `KVStore`;
   implement the wire layer.
 - **The unit of transfer is the commit, in wire form** (`WireCommit`
-  in [`src/types.ts`](./src/types.ts)): parents, changed value bytes,
-  removals, carries, info. Produced by `walkDelta(store, { want, have })`
+  in [`src/types.ts`](./src/types.ts)): parents and their
+  generations, time, info, changed value bytes, removals. Produced by `walkDelta(store, { want, have })`
   ([`src/sync/walk.ts`](./src/sync/walk.ts)) — commits reachable from
   `want` but not `have`, parents-first. `have = ∅` is a full export
   (bundles are the degenerate case). Replayed by
   `applyWire(store, commits)` ([`src/sync/apply.ts`](./src/sync/apply.ts)),
   which recomputes every commit hash from the replayed state and
   refuses mismatches before writing.
-- **HAMT nodes never cross the wire.** Commit hashes cover parents,
-  the keyset pointer map, update bytes, and info — *not* HAMT node
-  bytes (see `contentHash` in
-  [`src/versioned/layout.ts`](./src/versioned/layout.ts)). Receivers
-  rebuild the HAMT locally; root hashes are local pointers and must
-  never be compared across stores.
-- **Carries are the subtle part.** Merge commits adopt keys from the
-  non-first parent *by pointer* (`<owning-commit>:<key>`), without
-  rewriting bytes — and the pointer map participates in the commit
-  hash. `WireCommit.carries` transports that provenance (plus the
-  carried entry's `size`/`createdAt`, so replay never consults a
-  parent keyset); a replayer that derived pointers from the first
-  parent instead would change the hash. Replay must reproduce hashes
-  exactly: recomputing `contentHash` over replayed state and comparing
-  is the sync layer's integrity check (see the fidelity tests in
-  [`tests/sync-walk.test.ts`](./tests/sync-walk.test.ts) and the
-  refusal tests in
-  [`tests/sync-apply.test.ts`](./tests/sync-apply.test.ts)).
+- **HAMT nodes never cross the wire.** A receiver rebuilds each
+  commit's keyset over its first parent's, keying each changed value's
+  blob by its bytes, so the rebuilt root is the sender's; it then
+  recomputes the commit hash from that root, the time and the info
+  (see `commitHash` in
+  [`src/versioned/layout.ts`](./src/versioned/layout.ts)) and refuses
+  a mismatch. A merge commit's delta lists every key that differs from
+  its first parent, the ones it took from the other side included, so
+  replay never consults a second parent. The one commit not checked
+  this way is the root commit, whose hash is fixed: it is checked by
+  its shape (no parents, no info, an empty keyset). See the fidelity
+  tests in [`tests/sync-walk.test.ts`](./tests/sync-walk.test.ts) and
+  the refusal tests in
+  [`tests/sync-apply.test.ts`](./tests/sync-apply.test.ts).
 - **Merge never crosses the wire either.** Remotes move objects and
   CAS refs; reconciliation always happens locally via the existing
   three-way machinery (`commit()` / merge fns). Remotes can therefore

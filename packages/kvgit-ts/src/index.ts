@@ -58,3 +58,5 @@ export {
   type StagedOptions,
 } from './staged'
 export { Namespaced, type NamespaceableStore } from './namespaced'
+export { PyFloat, pyDumps, pyLoads, type PyDumpsOptions } from './pyjson'
+export { ROOT_COMMIT, STORAGE_VERSION } from './versioned/layout'

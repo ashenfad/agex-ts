@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { Memory } from '../src/backends/memory'
-import { VersionedKV, type WireCommit, walkDelta } from '../src/index'
-import { blobPointer, contentHash, pendingPointer } from '../src/versioned/layout'
+import { VersionedKV, type WireCommit, applyWire, walkDelta } from '../src/index'
 
 const enc = new TextEncoder()
 const dec = new TextDecoder()
@@ -17,41 +16,13 @@ async function collect(store: Memory, want: string, have?: string[]): Promise<Wi
 }
 
 /**
- * Replay a wire stream's keyset pointer maps and recompute each commit
- * hash from scratch — the same reconstruction `applyWire` will do.
- * Proves WireCommit carries everything hash-identity depends on.
- *
- * `seed` maps already-known commits (the receiver's `have` frontier)
- * to their pointer maps.
+ * Replay a wire stream into a fresh store, which rebuilds each keyset
+ * and recomputes each commit hash from scratch. Proves WireCommit
+ * carries everything hash identity depends on.
  */
-async function verifyHashFidelity(
-  wire: WireCommit[],
-  seed: Map<string, Map<string, string>> = new Map(),
-): Promise<void> {
-  const pointerMaps = seed
-  for (const wc of wire) {
-    const firstParent = wc.parents[0]
-    const base =
-      firstParent !== undefined ? pointerMaps.get(firstParent) : new Map<string, string>()
-    if (base === undefined) {
-      throw new Error(`replay: first parent ${firstParent} not yet replayed`)
-    }
-    // Preview keyset: carried-forward pointers + explicit carries +
-    // pending placeholders for updates (exactly what contentHash saw
-    // at original commit creation).
-    const preview = new Map(base)
-    for (const key of wc.removals) preview.delete(key)
-    for (const [key, carry] of wc.carries) preview.set(key, blobPointer(carry.owner, key))
-    for (const key of wc.updates.keys()) preview.set(key, pendingPointer(key))
-
-    const recomputed = await contentHash(wc.parents, preview, wc.updates, wc.info)
-    expect(recomputed).toBe(wc.hash)
-
-    // Real pointer map: pending placeholders resolve to this commit.
-    const real = new Map(preview)
-    for (const key of wc.updates.keys()) real.set(key, blobPointer(wc.hash, key))
-    pointerMaps.set(wc.hash, real)
-  }
+async function verifyHashFidelity(wire: WireCommit[]): Promise<void> {
+  const result = await applyWire(new Memory(), wire)
+  expect(result.applied).toBe(wire.length)
 }
 
 describe('walkDelta — linear history', () => {
@@ -82,7 +53,6 @@ describe('walkDelta — linear history', () => {
     expect(w1.parents).toEqual([initial])
     expect([...w1.updates.keys()]).toEqual(['a'])
     expect(text(w1.updates.get('a') as Uint8Array)).toBe('1')
-    expect(w1.carries.size).toBe(0)
 
     expect([...w2.updates.keys()].sort()).toEqual(['a', 'b'])
     expect(text(w2.updates.get('a') as Uint8Array)).toBe('2')
@@ -90,7 +60,8 @@ describe('walkDelta — linear history', () => {
     expect(w3.updates.size).toBe(0)
     expect([...w3.removals]).toEqual(['b'])
     expect(w3.info).toEqual({ note: 'drop b' })
-    expect(w3.time).toBeGreaterThan(0)
+    expect(w3.time.value).toBeGreaterThan(0)
+    expect(w3.parentGens).toEqual([2])
 
     await verifyHashFidelity(wire)
   })
@@ -137,10 +108,10 @@ describe('walkDelta — linear history', () => {
   })
 })
 
-describe('walkDelta — merges and carries', () => {
+describe('walkDelta — merges', () => {
   /** Two writers on one branch with disjoint keys: writer B's commit
-   *  lands as a three-way merge whose keyset adopts B's key by pointer
-   *  (a carry), not by rewrite. */
+   *  lands as a three-way merge whose keyset takes B's key from B's
+   *  side. */
   async function divergeAndMerge(store: Memory): Promise<{
     head: string
     oursCommit: string
@@ -162,24 +133,20 @@ describe('walkDelta — merges and carries', () => {
     }
   }
 
-  it('classifies merge-adopted keys as carries with the owning commit', async () => {
+  it('sends a key the merge took from its second parent as an update', async () => {
     const store = new Memory()
     const { head, oursCommit, theirsCommit } = await divergeAndMerge(store)
 
     const wire = await collect(store, head)
     const merge = wire.find((w) => w.hash === head) as WireCommit
 
-    // parents[0] is "theirs" (won the race); kb arrives relative to it
-    // as a carry owned by the ours-side commit. ka matches parents[0]
-    // exactly, so it is neither update nor carry.
+    // parents[0] is "theirs" (won the race); kb differs from it, so it
+    // travels with its bytes. ka matches parents[0] exactly, so it
+    // doesn't travel at all.
     expect(merge.parents).toEqual([theirsCommit, oursCommit])
-    expect(merge.updates.size).toBe(0)
-    expect(merge.carries.size).toBe(1)
-    const carry = merge.carries.get('kb')
-    expect(carry?.owner).toBe(oursCommit)
-    expect(carry?.size).toBe(bytes('from-b').length)
-    expect(carry?.createdAt).toBeGreaterThan(0)
-    expect(merge.carries.has('ka')).toBe(false)
+    expect([...merge.updates.keys()]).toEqual(['kb'])
+    expect(text(merge.updates.get('kb') as Uint8Array)).toBe('from-b')
+    expect(merge.parentGens).toEqual([1, 1])
 
     await verifyHashFidelity(wire)
   })
@@ -203,7 +170,6 @@ describe('walkDelta — merges and carries', () => {
     const merge = wire.find((w) => w.hash === head) as WireCommit
     // Merged values are written at the merge commit itself.
     expect(text(merge.updates.get('k') as Uint8Array)).toBe('a+b')
-    expect(merge.carries.size).toBe(0)
 
     await verifyHashFidelity(wire)
   })
@@ -213,7 +179,7 @@ describe('walkDelta — merges and carries', () => {
     const { head, oursCommit, theirsCommit } = await divergeAndMerge(store)
 
     // Receiver has theirs (parents[0]) but not ours: the delta must
-    // include the ours-side commit (the carry's owner) and the merge.
+    // include the ours-side commit and the merge.
     const wire = await collect(store, head, [theirsCommit])
     expect(wire.map((w) => w.hash)).toEqual([oursCommit, head])
   })

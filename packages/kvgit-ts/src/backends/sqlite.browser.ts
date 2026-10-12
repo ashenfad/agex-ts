@@ -44,6 +44,13 @@ export class Sqlite implements KVStore {
   has(_key: string): Promise<boolean> {
     throw new Error('unreachable')
   }
+  casMany(
+    _expected: ReadonlyMap<string, Uint8Array | null>,
+    _writes: ReadonlyMap<string, Uint8Array>,
+    _removes?: Iterable<string>,
+  ): Promise<boolean> {
+    throw new Error('unreachable')
+  }
   getMany(_keys: Iterable<string>): Promise<Map<string, Uint8Array>> {
     throw new Error('unreachable')
   }

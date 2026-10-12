@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { Memory } from '../src/backends/memory'
 import { Keyset } from '../src/keyset'
 import { VersionedKV } from '../src/versioned/kv'
+import { blobKey } from '../src/versioned/layout'
 
 const enc = new TextEncoder()
 const bytes = (s: string): Uint8Array => enc.encode(s)
@@ -146,15 +147,14 @@ describe('cleanOrphans — minAge protects young orphans', () => {
     await vk.commit({ updates: new Map([['k', bytes('v')]]) })
     const beforeOrphan = vk.currentCommit
     await vk.commit({ updates: new Map([['young', bytes('young-data')]]) })
-    const youngCommit = vk.currentCommit
-    const youngBlobKey = `${youngCommit}:young`
+    const youngBlobKey = await blobKey(bytes('young-data'))
 
     // Sanity: the blob exists.
     expect(await store.get(youngBlobKey)).not.toBeNull()
 
     await vk.resetTo(beforeOrphan)
 
-    // Sweep with a long minAge so youngCommit is young.
+    // Sweep with a long minAge so the orphaned commit is young.
     await vk.cleanOrphans({ minAge: 60_000_000 })
 
     // Blob still there.

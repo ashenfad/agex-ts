@@ -7,10 +7,9 @@
  * `__branch_head_prev__<branch>` is the input to `resolveHead`'s
  * recovery fallback, so what it names decides what a damaged branch
  * recovers *to*. A value that was never in `__branch_head__<branch>`
- * hands the branch a lineage it never had. Note the guarantee is not
- * "exactly one commit back": the swap and the backup write are two
- * steps, and anything separating them lets an older writer's backup
- * land last (see the limitation pinned at the bottom of this file).
+ * hands the branch a lineage it never had. The swap and the backup are
+ * one atomic `casMany`, so the backup is exactly the HEAD the swap
+ * replaced: no writer, crash or delete can land between them.
  *
  * **Reading never writes.** Recovery on a read path is in-memory only.
  * Persisting it is either an explicit `repairHead` call or a side
@@ -71,8 +70,9 @@ const COMMIT_ROOT_PREFIX = COMMIT_ROOT('')
  *   after its writer has read HEAD, before it reaches its CAS.
  * - `armGet` fires after the *nth* read of a key has been served but
  *   before the caller sees it.
- * - `armSet` fires before a chosen key is written, so a writer can be
- *   paused mid-sequence while another completes.
+ * - `armSet` fires before a chosen key is written (by `set` or as part
+ *   of a `casMany`), so a writer can be paused mid-sequence while
+ *   another completes.
  */
 class HookStore extends Memory {
   private readonly history = new Map<string, string[]>()
@@ -148,6 +148,23 @@ class HookStore extends Memory {
   ): Promise<boolean> {
     const won = await super.cas(key, value, expected)
     if (won) this.record(key, value)
+    return won
+  }
+
+  override async casMany(
+    expected: ReadonlyMap<string, Uint8Array | null>,
+    writes: ReadonlyMap<string, Uint8Array>,
+    removes: Iterable<string> = [],
+  ): Promise<boolean> {
+    for (const key of writes.keys()) {
+      const fire = this.onSet.get(key)
+      if (fire !== undefined) {
+        this.onSet.delete(key)
+        await fire()
+      }
+    }
+    const won = await super.casMany(expected, writes, removes)
+    if (won) for (const [k, v] of writes) this.record(k, v)
     return won
   }
 }
@@ -250,13 +267,10 @@ describe('prev-HEAD names a commit HEAD really held', () => {
     ).toBe(history[history.length - 2])
   })
 
-  it('degrades to an older real HEAD when a crash separates the swap from the backup', async () => {
-    // Writing the backup after the CAS opens a window where HEAD has
-    // advanced but the backup has not. Recovery from that state lands
-    // on the *previous* previous HEAD — one commit further back than
-    // ideal, but a commit that really was HEAD, with real ancestry.
-    // That is the trade this ordering buys; `cas` takes a single key,
-    // so the pair cannot be made atomic.
+  it('leaves HEAD and its backup together when the process dies at the swap', async () => {
+    // The swap and the backup are one atomic write, so a crash at that
+    // point lands neither: HEAD and the backup still name the two
+    // commits they did before.
     const store = new HookStore()
     const vk = await VersionedKV.open(store)
     await vk.commit(one('a', '1'))
@@ -266,22 +280,17 @@ describe('prev-HEAD names a commit HEAD really held', () => {
 
     class Died extends Error {}
     store.armSet(BRANCH_HEAD_PREV('main'), async () => {
-      throw new Died('the process dies between the swap and the backup')
+      throw new Died('the process dies at the swap')
     })
     await expect(vk.commit(one('a', '3'))).rejects.toThrow(Died)
 
-    const third = await head(store)
-    expect(
-      [first, second],
-      'the swap should have landed before the crash — the backup write must not precede it',
-    ).not.toContain(third)
-    expect(await prevHead(store), 'the backup should still hold its pre-crash value').toBe(first)
+    expect(await head(store)).toBe(second)
+    expect(await prevHead(store)).toBe(first)
 
-    // HEAD is then damaged; recovery lands on a real, older HEAD.
+    // HEAD is then damaged; recovery lands one commit back.
     await store.set(BRANCH_HEAD('main'), CORRUPT)
     const recovered = await VersionedKV.open(store)
     expect(recovered.currentCommit).toBe(first)
-    expect(store.headHistory('main')).toContain(first)
   })
 })
 
@@ -424,54 +433,36 @@ describe('repairHead', () => {
   })
 })
 
-describe('limitation: the backup is not guaranteed to be one commit back', () => {
-  // This is not a regression guard. It pins what writing the backup
-  // after the swap does *not* buy, so the guarantee cannot be quietly
-  // re-widened: the swap and the backup write are two steps, and a
-  // writer that loses the CPU between them lets its older backup land
-  // after a newer one. The invariant that survives is the narrower one
-  // — the backup names a commit HEAD really held.
-  it('lets a paused winner clobber a newer backup', async () => {
+describe('the backup is one commit back', () => {
+  it('holds even when another writer lands just before the swap', async () => {
+    // A writer paused at its swap while another commits loses its CAS,
+    // merges, and swaps again. Whichever swap lands, the backup it
+    // writes is the HEAD it replaced.
     const store = new HookStore()
     const writer = await VersionedKV.open(store)
     await writer.commit(one('k', '1'))
-    const first = writer.currentCommit
 
-    let third: string | null = null
+    let other: string | null = null
     store.armSet(BRANCH_HEAD_PREV('main'), async () => {
-      const other = await VersionedKV.open(store)
-      await other.commit(one('k2', '3'))
-      third = other.currentCommit
+      const second = await VersionedKV.open(store)
+      await second.commit(one('k2', '3'))
+      other = second.currentCommit
     })
-    await writer.commit(one('k', '2'))
-    const second = writer.currentCommit
+    const result = await writer.commit(one('k', '2'))
+    expect(result.merged).toBe(true)
 
-    const currentHead = await head(store)
-    const prev = await prevHead(store)
+    expect(await head(store)).toBe(writer.currentCommit)
+    expect(await prevHead(store)).toBe(other)
     const history = store.headHistory('main')
-
-    expect(currentHead, 'the later writer should hold HEAD').toBe(third)
-    expect(prev, "this pins the limitation: the paused winner's backup landed last").not.toBe(
-      second,
-    )
-    expect(prev).toBe(first)
-
-    // The guarantee that does survive.
-    expect(history, `prev-HEAD ${String(prev)} was never HEAD`).toContain(prev)
-    expect(
-      history.indexOf(prev as string),
-      'the backup must name a commit older than HEAD, not a sibling',
-    ).toBeLessThan(history.indexOf(currentHead as string))
+    expect(history.slice(-2)).toEqual([other, writer.currentCommit])
   })
 })
 
 describe('an absent HEAD means the branch is gone, not damaged', () => {
-  it('a delayed backup write does not resurrect a deleted branch', async () => {
-    // Writing the backup after the CAS is right, but it opens a window:
-    // a writer descheduled between the two, resuming after a concurrent
-    // deleteBranch, recreates only `__branch_head_prev__`. Recovering a
-    // branch from a lone backup is the v0.3.1 failure class, reached
-    // from a new direction.
+  it('a writer swapping after a delete does not resurrect the branch', async () => {
+    // A writer paused at its swap while the branch is deleted must not
+    // bring the branch, or a lone backup of it, back. Its CAS expects
+    // the old HEAD, which is gone, so nothing is written.
     const store = new HookStore()
     const vk = await VersionedKV.open(store)
     await vk.commit(one('anchor', '1'))
@@ -481,17 +472,11 @@ describe('an absent HEAD means the branch is gone, not damaged', () => {
     store.armSet(BRANCH_HEAD_PREV('doomed'), async () => {
       await vk.deleteBranch('doomed')
     })
-    await doomed.commit(one('secret', 'classified-v2'))
+    await expect(doomed.commit(one('secret', 'classified-v2'))).rejects.toThrow(/has no HEAD/)
 
     expect(await store.get(BRANCH_HEAD('doomed')), 'the delete should have won').toBeNull()
-    expect(
-      await store.get(BRANCH_HEAD_PREV('doomed')),
-      'only meaningful while the delayed write recreates the backup — if that stops, the seam has drifted',
-    ).not.toBeNull()
-    expect(
-      await repairHead(store, 'doomed'),
-      "a backup outliving its branch resurrected it — the deleted branch's state is readable again",
-    ).toBeNull()
+    expect(await store.get(BRANCH_HEAD_PREV('doomed'))).toBeNull()
+    expect(await repairHead(store, 'doomed')).toBeNull()
     const recreated = (await vk.createBranch('doomed')) as VersionedKV
     expect(await recreated.get('secret'), 'the deleted branch was resurrected').toBeNull()
   })
@@ -517,9 +502,9 @@ describe('an absent HEAD means the branch is gone, not damaged', () => {
 
 describe('deleteBranch drops the backup with the branch', () => {
   it('leaves nothing for a same-named branch to recover onto', async () => {
-    // A backup left behind would be one half of a resurrection: see
-    // the delayed-backup suite below for the other half, and for why
-    // the prev-HEAD tier now requires `__branch_head__` to exist.
+    // A backup left behind would let a same-named branch recover onto
+    // the deleted one's history. The prev-HEAD tier also requires
+    // `__branch_head__` to exist, so a lone backup is never used.
     const store = new Memory()
     const vk = await VersionedKV.open(store)
     await vk.commit(one('a', '1'))

@@ -1,4 +1,5 @@
 import type { KVStore } from '../types'
+import { bytesEqual, checkBatch } from './_batch'
 
 /**
  * In-process KV store backed by a `Map`. Useful for tests, dev-mode
@@ -57,6 +58,20 @@ export class Memory implements KVStore {
     return true
   }
 
+  async casMany(
+    expected: ReadonlyMap<string, Uint8Array | null>,
+    writes: ReadonlyMap<string, Uint8Array>,
+    removes: Iterable<string> = [],
+  ): Promise<boolean> {
+    const removeList = checkBatch(writes, removes)
+    for (const [key, value] of expected) {
+      if (!bytesEqual(this.#data.get(key) ?? null, value)) return false
+    }
+    for (const [key, value] of writes) this.#data.set(key, value)
+    for (const key of removeList) this.#data.delete(key)
+    return true
+  }
+
   async *keys(prefix?: string): AsyncIterable<string> {
     if (prefix === undefined) {
       for (const k of this.#data.keys()) yield k
@@ -80,14 +95,4 @@ export class Memory implements KVStore {
   async clear(): Promise<void> {
     this.#data.clear()
   }
-}
-
-function bytesEqual(a: Uint8Array | null, b: Uint8Array | null): boolean {
-  if (a === b) return true
-  if (a === null || b === null) return false
-  if (a.length !== b.length) return false
-  for (let i = 0; i < a.length; i++) {
-    if (a[i] !== b[i]) return false
-  }
-  return true
 }

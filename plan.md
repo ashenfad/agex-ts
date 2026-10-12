@@ -174,30 +174,44 @@ tools and the studio's bridge.
   what must be live (shared state, multiplayer, fresh data), and its
   README lists every service it depends on.
 - **`curl` is a studio host command:** `-o`, `-L`, `-H`, `-X`, `-d`,
-  `-s`/`-f` and a size cap, writing into the world, and saying plainly
-  when CORS refused a request. It fetches data while building, and
-  tests the user's own services from the terminal (Supabase's REST API
-  with the anon key, say), as `ws-curl` tests a handler.
+  `-s`/`-f` and a size cap, writing into the world. A browser reports a
+  CORS refusal as the same network error as DNS, TLS or being offline,
+  so on a failure it retries with `mode: 'no-cors'`: if that gets an
+  (opaque) answer, the server is up and it names CORS as the likely
+  cause; otherwise it reports a network failure. It fetches data while
+  building, and tests the user's own services from the terminal
+  (Supabase's REST API with the anon key, say), as `ws-curl` tests a
+  handler.
 - **Live services get stand-ins.** The skills teach wrapping Supabase or
   peer-to-peer access in a small module with an in-memory fake, so
   module tests and `testApp` never touch a real project, as
   `agex_stand_in` does for tasks on the Python side.
-- **Variables and secrets.** The user gives the agent keys (a Supabase
-  URL and anon key, an API token) in the studio, never by pasting them
-  into chat. The world exposes them as shell variables (`$SUPABASE_URL`)
-  and to code, and termish expands them when a command runs, so a
-  command the model writes names the variable and never holds the
-  value. A secret's value:
-  - stays on the device, as the model key does: never in a commit, the
-    conversation, a published bundle, a gist or a sync;
-  - is redacted from tool results (shown as `$NAME`) if a command
-    prints it;
-  - is distinct from a plain variable, whose value may live in the
-    world's profile, as nontainer's `Profile.variables` do.
-
-  Open: how a value that is public by design (an anon key) reaches a
-  published app that needs it at run time, without the model copying it
-  into the page.
+- **Variables and secrets.** The user gives the agent keys in the
+  studio, never by pasting them into chat. There are two kinds, and
+  the user picks which when adding one:
+  - **A variable** is ordinary configuration, public by design: a
+    Supabase URL and anon key, a public API's base URL. It is a shell
+    variable (`$SUPABASE_URL`) and readable from code, lives in the
+    world's profile (as nontainer's `Profile.variables` do), and a
+    published app may embed it, which is how a page gets its anon key.
+  - **A secret** (an API token, a service key) never enters the world.
+    termish does not expand it and code cannot read it. Only a host
+    command that makes a request uses it, at the request: `curl`
+    substitutes `$NAME` in a header or URL, and code passes an opaque
+    handle (`secret('NAME')`) that the host's `fetch` accepts as a
+    header value. So the value never reaches a file, stdout, the
+    model or agent JS, and a command that prints or writes `$NAME`
+    gets the name, not the value.
+  - **A secret is bound to the origins it may be sent to** (the
+    project URL it came with), so `curl https://elsewhere -H "x:
+    $TOKEN"` is refused rather than leaking it, and only the user's
+    own service could echo it back.
+  - **A backstop, not a guarantee:** committing, publishing, syncing
+    and making a gist scan for each secret's exact value and refuse
+    if they find it. An encoded copy gets past the scan, which is
+    why the boundary above, not the scan, is what keeps secrets out.
+  - Secrets stay on the device, as the model key does: never in a
+    commit, the conversation, a published bundle, a gist or a sync.
 
 ## The foundation
 

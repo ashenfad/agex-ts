@@ -15,12 +15,15 @@
  * (`search.ts → interpreter.ts → BUILTINS → search.ts`).
  */
 
-import type { CommandContext, CommandHandler } from '../context'
+import { concat, encode } from '../bytes'
+import type { CommandContext, CommandHandler, CommandResult, Stdout } from '../context'
 import { TerminalError } from '../errors'
 import { describeFsError } from '../fs/errors'
 import type { FileInfo, FileSystem } from '../fs/protocol'
 import { globMatch } from '../glob'
 import { parseArgs } from './_argparse'
+import { dispatchArgv } from './_dispatch'
+import { breToJs } from './_regex'
 
 const decoder = new TextDecoder('utf-8', { fatal: false })
 
@@ -31,63 +34,6 @@ const decoder = new TextDecoder('utf-8', { fatal: false })
 /** Escape regex metacharacters for `-F` fixed-string mode. */
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
-
-/**
- * Convert BRE `\|` alternation into ERE `|`. Inside `[...]`, double
- * backslashes so JS `RegExp` treats them as literal (matches GNU
- * grep BRE, where `\` is literal inside a character class).
- *
- * Without this, agents who type `grep "a\|b"` (BRE alternation) get
- * a surprising literal-pipe match. With it, `grep "a\|b"` and
- * `grep -E "a|b"` are equivalent.
- */
-function breAlternationToEre(pattern: string): string {
-  let out = ''
-  let i = 0
-  let inClass = false
-  while (i < pattern.length) {
-    const ch = pattern[i] as string
-    if (inClass) {
-      if (ch === '\\') {
-        out += '\\\\'
-        i++
-      } else if (ch === ']') {
-        inClass = false
-        out += ch
-        i++
-      } else {
-        out += ch
-        i++
-      }
-    } else if (ch === '\\' && i + 1 < pattern.length) {
-      const next = pattern[i + 1] as string
-      if (next === '|') {
-        out += '|'
-        i += 2
-      } else {
-        out += pattern.slice(i, i + 2)
-        i += 2
-      }
-    } else if (ch === '[') {
-      inClass = true
-      out += '['
-      i++
-      if (pattern[i] === '^') {
-        out += '^'
-        i++
-      }
-      // `]` immediately after `[` or `[^` is a literal `]`
-      if (pattern[i] === ']') {
-        out += ']'
-        i++
-      }
-    } else {
-      out += ch
-      i++
-    }
-  }
-  return out
 }
 
 async function collectFiles(userDir: string, fs: FileSystem): Promise<string[]> {
@@ -143,7 +89,7 @@ export const grep: CommandHandler = async (ctx) => {
     files = [...parsed.positional]
   } else {
     if (parsed.positional.length === 0) {
-      throw new TerminalError('grep: no pattern given')
+      throw new TerminalError('grep: no pattern given', { exitCode: 2 })
     }
     patternsRaw = [parsed.positional[0] as string]
     files = parsed.positional.slice(1)
@@ -163,7 +109,7 @@ export const grep: CommandHandler = async (ctx) => {
     if (parsed.flags.fixed === true) {
       p = escapeRegex(p)
     } else if (parsed.flags.extended !== true) {
-      p = breAlternationToEre(p)
+      p = breToJs(p)
     }
     if (parsed.flags.word === true) p = `\\b${p}\\b`
     pieces.push(`(?:${p})`)
@@ -176,7 +122,7 @@ export const grep: CommandHandler = async (ctx) => {
     regex = new RegExp(combined, flagsStr)
     regexGlobal = new RegExp(combined, `${flagsStr}g`)
   } catch (e) {
-    throw new TerminalError(`grep: invalid regex: ${describeError(e)}`)
+    throw new TerminalError(`grep: invalid regex: ${describeError(e)}`, { exitCode: 2 })
   }
 
   const quiet = parsed.flags.quiet === true
@@ -291,8 +237,7 @@ export const grep: CommandHandler = async (ctx) => {
   // Resolve the file list.
   let filesToSearch: string[]
   if (files.length === 0 && parsed.flags.recursive !== true) {
-    processContent(ctx.stdin.text(), null)
-    return
+    return matched(processContent(ctx.stdin.text(), null) > 0)
   }
   if (files.length === 0) {
     filesToSearch = await collectFiles('.', ctx.fs)
@@ -328,13 +273,15 @@ export const grep: CommandHandler = async (ctx) => {
 
   const multipleFiles = filesToSearch.length > 1 || parsed.flags.recursive === true
 
+  let total = 0
+  let listed = 0
   for (const filepath of filesToSearch) {
     let content: string
     try {
       const bytes = await ctx.fs.read(filepath)
       content = decoder.decode(bytes)
     } catch (e) {
-      throw new TerminalError(`grep: ${filepath}: ${describeError(e)}`)
+      throw new TerminalError(`grep: ${filepath}: ${describeError(e)}`, { exitCode: 2 })
     }
     let label: string | null
     if (noFilename) label = null
@@ -343,8 +290,19 @@ export const grep: CommandHandler = async (ctx) => {
     else label = null
 
     const m = processContent(content, label)
-    if (filesWithoutMatch && m === 0) realStdout.write(`${filepath}\n`)
+    total += m
+    if (filesWithoutMatch && m === 0) {
+      realStdout.write(`${filepath}\n`)
+      listed++
+    }
   }
+  return matched(filesWithoutMatch ? listed > 0 : total > 0)
+}
+
+/** grep's status: 0 when it found what it looked for, 1, silently,
+ *  when it didn't. Errors exit 2. */
+function matched(found: boolean): CommandResult | undefined {
+  return found ? undefined : { exitCode: 1, stderr: '' }
 }
 
 function basename(p: string): string {
@@ -476,15 +434,13 @@ class DeletePred implements FindPredicate {
 class ExecPred implements FindPredicate {
   constructor(
     private readonly cmdTokens: readonly string[],
-    private readonly stdout: { write: (s: string) => void },
-    private readonly executor: (cmd: string, fs: FileSystem) => Promise<string>,
+    private readonly stdout: Stdout,
+    private readonly executor: Executor,
   ) {}
   async matches(item: FileInfo, fs: FileSystem): Promise<boolean> {
     const expanded = this.cmdTokens.map((t) => t.replaceAll('{}', item.path))
-    const cmdStr = shellJoin(expanded)
     try {
-      const output = await this.executor(cmdStr, fs)
-      if (output.length > 0) this.stdout.write(output)
+      this.stdout.writeBytes(await this.executor(expanded, fs))
     } catch {
       return false
     }
@@ -496,8 +452,8 @@ class ExecBatchPred implements FindPredicate {
   readonly collected: string[] = []
   constructor(
     private readonly cmdTokens: readonly string[],
-    private readonly stdout: { write: (s: string) => void },
-    private readonly executor: (cmd: string, fs: FileSystem) => Promise<string>,
+    private readonly stdout: Stdout,
+    private readonly executor: Executor,
   ) {}
   async matches(item: FileInfo): Promise<boolean> {
     this.collected.push(item.path)
@@ -510,10 +466,8 @@ class ExecBatchPred implements FindPredicate {
       if (t === '{}') expanded.push(...this.collected)
       else expanded.push(t)
     }
-    const cmdStr = shellJoin(expanded)
     try {
-      const output = await this.executor(cmdStr, fs)
-      if (output.length > 0) this.stdout.write(output)
+      this.stdout.writeBytes(await this.executor(expanded, fs))
     } catch {
       // best-effort; matches Python's silent swallow
     }
@@ -555,17 +509,6 @@ class TruePred implements FindPredicate {
   }
 }
 
-function shellJoin(tokens: readonly string[]): string {
-  return tokens
-    .map((t) => {
-      if (t.includes(' ') || t.includes('\t')) {
-        return `'${t.replaceAll("'", "'\\''")}'`
-      }
-      return t
-    })
-    .join(' ')
-}
-
 function hasAction(p: FindPredicate): boolean {
   if (p instanceof PrintPred || p instanceof DeletePred) return true
   if (p instanceof ExecPred || p instanceof ExecBatchPred) return true
@@ -585,9 +528,13 @@ async function finalizeBatch(p: FindPredicate, fs: FileSystem): Promise<void> {
   }
 }
 
+/** Runs an `-exec` command line (argv, never re-parsed) and returns
+ *  its output as bytes, with a warning on its stderr ahead of it. */
+type Executor = (argv: readonly string[], fs: FileSystem) => Promise<Uint8Array>
+
 interface ParseFindCtx {
-  stdout: { write: (s: string) => void }
-  executor: (cmd: string, fs: FileSystem) => Promise<string>
+  stdout: Stdout
+  executor: Executor
 }
 
 function parseFindPredicates(tokens: readonly string[], parseCtx: ParseFindCtx): FindPredicate {
@@ -749,13 +696,13 @@ export const find: CommandHandler = async (ctx: CommandContext) => {
     }
   }
 
-  // Dynamic import breaks the circular dep:
-  //   search.ts → interpreter.ts → builtins/index.ts → search.ts
-  // Pass ctx.commands so host-injected commands stay reachable from
-  // `find -exec`.
-  const executor = async (cmdStr: string, fs: FileSystem): Promise<string> => {
-    const { execute } = await import('../interpreter')
-    return execute(cmdStr, fs, { signal: ctx.signal, commands: ctx.commands, env: ctx.env })
+  // `-exec` runs its argv through the registry, host-injected commands
+  // included, and hands its output back as bytes, so a binary payload
+  // survives the trip through find unchanged.
+  const executor: Executor = async (argv, fs) => {
+    const { output, stderr } = await dispatchArgv(ctx, argv, fs)
+    if (!stderr) return output
+    return concat([encode(stderr.endsWith('\n') ? stderr : `${stderr}\n`), output])
   }
 
   const predicate = parseFindPredicates(predicateTokens, {

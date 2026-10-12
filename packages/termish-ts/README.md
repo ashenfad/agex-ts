@@ -29,6 +29,11 @@ A virtual terminal that runs inside your application. Parses shell text (`ls -la
   keep the word's form (relative or absolute), and a word that matches
   nothing stays as typed. `ls` orders its operands as GNU does.
 - **Comments:** an unquoted `#` at the start of a word.
+- **Conditionals:** `test` and `[` (file, string and integer tests,
+  `!`, `-a`, `-o`, parentheses), for branching with `&&` and `||`.
+- **GNU regexes:** `grep` and `sed` read POSIX BRE (`\+`, `\{n\}`,
+  `\(...\)`, `\|`) unless given `-E`; `grep` exits 1 when nothing
+  matches and 2 on an error.
 - **Refused, with advice:** loops, conditionals, `case`, function
   definitions and `$(...)` are parse errors that say what to use
   instead (xargs, `find -exec`, `&&` / `||`).

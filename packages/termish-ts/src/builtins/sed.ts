@@ -26,6 +26,7 @@ import type { CommandHandler } from '../context'
 import { TerminalError } from '../errors'
 import { describeFsError } from '../fs/errors'
 import { parseArgs } from './_argparse'
+import { breToJs } from './_regex'
 
 const decoder = new TextDecoder('utf-8', { fatal: false })
 const encoder = new TextEncoder()
@@ -134,7 +135,7 @@ function translateReplacement(repl: string): string {
   return out.join('')
 }
 
-function parseAddress(text: string, pos: number): [Address | null, number] {
+function parseAddress(text: string, pos: number, extended: boolean): [Address | null, number] {
   if (pos >= text.length) return [null, pos]
   const ch = text[pos] as string
 
@@ -148,7 +149,7 @@ function parseAddress(text: string, pos: number): [Address | null, number] {
     const [content, newPos] = scanDelimited(text, pos + 1, '/')
     let regex: RegExp
     try {
-      regex = new RegExp(content)
+      regex = new RegExp(extended ? content : breToJs(content))
     } catch (e) {
       throw new TerminalError(`sed: invalid regex in address: ${describeError(e)}`)
     }
@@ -157,7 +158,11 @@ function parseAddress(text: string, pos: number): [Address | null, number] {
   return [null, pos]
 }
 
-function parseSubstitution(text: string, pos: number): [RegExp, string, string, number] {
+function parseSubstitution(
+  text: string,
+  pos: number,
+  extended: boolean,
+): [RegExp, string, string, number] {
   if (pos >= text.length) throw new TerminalError("sed: unterminated 's' command")
   const delim = text[pos] as string
   if (/[a-zA-Z0-9]/.test(delim) || delim === '\\' || delim === '\n') {
@@ -180,24 +185,24 @@ function parseSubstitution(text: string, pos: number): [RegExp, string, string, 
     // Always set the `g` flag in the compiled regex when 'g' is requested
     // so JS replaceAll can use it; otherwise omit and use replace once.
     const jsFlags = (flags.includes('i') ? 'i' : '') + (flags.includes('g') ? 'g' : '')
-    regex = new RegExp(pattern, jsFlags)
+    regex = new RegExp(extended ? pattern : breToJs(pattern), jsFlags)
   } catch (e) {
     throw new TerminalError(`sed: invalid regex: ${describeError(e)}`)
   }
   return [regex, translateReplacement(rawRepl), flags, i]
 }
 
-function parseSingleCommand(rawText: string): SedCommand {
+function parseSingleCommand(rawText: string, extended: boolean): SedCommand {
   const text = rawText.trim()
   if (text.length === 0) throw new TerminalError('sed: empty command')
   let pos = 0
 
-  const [addr1, p1] = parseAddress(text, pos)
+  const [addr1, p1] = parseAddress(text, pos, extended)
   pos = p1
   let addr2: Address | null = null
   if (addr1 !== null && pos < text.length && text[pos] === ',') {
     pos++
-    ;[addr2, pos] = parseAddress(text, pos)
+    ;[addr2, pos] = parseAddress(text, pos, extended)
     if (addr2 === null) throw new TerminalError('sed: invalid address range')
   }
   const addressRange: AddressRange = {
@@ -212,7 +217,7 @@ function parseSingleCommand(rawText: string): SedCommand {
   let cmd: SedCommand
 
   if (cmdChar === 's') {
-    const [pattern, replacement, subFlags, newPos] = parseSubstitution(text, pos)
+    const [pattern, replacement, subFlags, newPos] = parseSubstitution(text, pos, extended)
     pos = newPos
     cmd = { address: addressRange, command: 's', pattern, replacement, subFlags }
   } else if (cmdChar === 'y') {
@@ -329,8 +334,9 @@ function splitScript(script: string): string[] {
   return parts
 }
 
-function parseSedScript(script: string): SedCommand[] {
-  return splitScript(script).map(parseSingleCommand)
+/** Parse a sed script. Its regexes are BRE unless `extended` (-E/-r). */
+function parseSedScript(script: string, extended: boolean): SedCommand[] {
+  return splitScript(script).map((c) => parseSingleCommand(c, extended))
 }
 
 // ---------------------------------------------------------------------------
@@ -528,7 +534,8 @@ export const sed: CommandHandler = async (ctx) => {
         quiet: { aliases: ['-n', '--quiet', '--silent'] },
         inPlace: { aliases: ['-i', '--in-place'] },
         expression: { aliases: ['-e', '--expression'], multi: true },
-        // -E/-r: extended regex; JS RegExp is ERE-flavored, so accept and ignore.
+        // -E/-r: extended regex, which JS RegExp reads as it is; without
+        // it, patterns are POSIX BRE.
         extended: { aliases: ['-E', '-r', '--regexp-extended'] },
       },
     },
@@ -551,7 +558,7 @@ export const sed: CommandHandler = async (ctx) => {
 
   const commands: SedCommand[] = []
   for (const expr of expressions) {
-    for (const c of parseSedScript(expr)) commands.push(c)
+    for (const c of parseSedScript(expr, parsed.flags.extended === true)) commands.push(c)
   }
   if (commands.length === 0) throw new TerminalError('sed: no expression given')
 

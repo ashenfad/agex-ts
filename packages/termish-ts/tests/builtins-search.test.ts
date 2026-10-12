@@ -16,9 +16,9 @@ describe('grep — basics', () => {
     expect(out).toBe('banana\n')
   })
 
-  it('returns empty when no match', async () => {
-    const out = await execute('echo apple | grep zzz', new MemoryFS())
-    expect(out).toBe('')
+  it('prints nothing and exits 1 when nothing matches', async () => {
+    const out = await execute('echo apple | grep zzz; echo $?', new MemoryFS())
+    expect(out).toBe('1\n')
   })
 
   it('reads a file', async () => {
@@ -166,8 +166,9 @@ describe('grep — multiple files / -r / -l / -L', () => {
 
   it('--exclude filters out by glob', async () => {
     const fs = await setup()
-    const out = await execute("grep -rl TODO /src --exclude='*.ts'", fs)
-    expect(out.trim()).toBe('') // all matches were .ts
+    // all matches were .ts, so nothing is left to match: exit 1
+    const out = await execute("grep -rl TODO /src --exclude='*.ts'; echo $?", fs)
+    expect(out).toBe('1\n')
   })
 })
 

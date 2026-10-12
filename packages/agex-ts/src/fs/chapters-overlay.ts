@@ -23,7 +23,7 @@
  * its backing map atomically.
  */
 
-import type { FileInfo, FileMetadata, FileSystem } from '@agex-ts/termish'
+import { type FileInfo, type FileMetadata, type FileSystem, FsError } from '@agex-ts/termish'
 import type { AgentEvent, ChapterEvent, Emission } from '../types'
 
 const enc = new TextEncoder()
@@ -64,8 +64,8 @@ export class ChaptersOverlay implements FileSystem {
     const norm = normalize(path)
     const bytes = this.#files.get(norm)
     if (bytes === undefined) {
-      if (this.#dirs.has(norm)) throw new Error(`read: is a directory: ${path}`)
-      throw new Error(`read: no such file: ${path}`)
+      if (this.#dirs.has(norm)) throw new FsError('EISDIR', path)
+      throw new FsError('ENOENT', path)
     }
     return new Uint8Array(bytes)
   }
@@ -92,32 +92,32 @@ export class ChaptersOverlay implements FileSystem {
     if (this.#dirs.has(norm)) {
       return { size: 0, createdAt: EPOCH_ISO, modifiedAt: EPOCH_ISO, isDir: true }
     }
-    throw new Error(`stat: no such file or directory: ${path}`)
+    throw new FsError('ENOENT', path)
   }
 
   // ---------- writes (read-only) ----------
 
-  async write(): Promise<void> {
-    throw new Error('ChaptersOverlay: write not supported (read-only overlay)')
+  async write(path: string): Promise<void> {
+    throw new FsError('EROFS', path)
   }
-  async mkdir(): Promise<void> {
-    throw new Error('ChaptersOverlay: mkdir not supported (read-only overlay)')
+  async mkdir(path: string): Promise<void> {
+    throw new FsError('EROFS', path)
   }
-  async remove(): Promise<void> {
-    throw new Error('ChaptersOverlay: remove not supported (read-only overlay)')
+  async remove(path: string): Promise<void> {
+    throw new FsError('EROFS', path)
   }
-  async rmdir(): Promise<void> {
-    throw new Error('ChaptersOverlay: rmdir not supported (read-only overlay)')
+  async rmdir(path: string): Promise<void> {
+    throw new FsError('EROFS', path)
   }
-  async rename(): Promise<void> {
-    throw new Error('ChaptersOverlay: rename not supported (read-only overlay)')
+  async rename(src: string): Promise<void> {
+    throw new FsError('EROFS', src)
   }
 
   // ---------- iteration ----------
 
   async list(path = '.', opts: { recursive?: boolean } = {}): Promise<string[]> {
     const norm = path === '.' ? '/' : normalize(path)
-    if (!this.#dirs.has(norm)) throw new Error(`list: no such directory: ${path}`)
+    if (!this.#dirs.has(norm)) throw new FsError('ENOENT', path)
     const prefix = norm === '/' ? '/' : `${norm}/`
     const direct = new Set<string>()
     const all = new Set<string>()

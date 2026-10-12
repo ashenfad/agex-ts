@@ -32,9 +32,10 @@ describe('SkillsOverlay — file map', () => {
 
   it('write methods throw on the read-only overlay', async () => {
     const o = new SkillsOverlay(skillsMap({ a: '#A' }))
-    await expect(o.write()).rejects.toThrow(/read-only/)
-    await expect(o.mkdir()).rejects.toThrow(/read-only/)
-    await expect(o.remove()).rejects.toThrow(/read-only/)
+    const readOnly = { code: 'EROFS', message: 'Read-only file system' }
+    await expect(o.write('/x')).rejects.toMatchObject(readOnly)
+    await expect(o.mkdir('/x')).rejects.toMatchObject(readOnly)
+    await expect(o.remove('/x')).rejects.toMatchObject(readOnly)
   })
 
   it('swap() refreshes the backing skills map', async () => {
@@ -42,7 +43,7 @@ describe('SkillsOverlay — file map', () => {
     expect(await o.list('/')).toEqual(['a'])
     o.swap(skillsMap({ b: '#B' }))
     expect(await o.list('/')).toEqual(['b'])
-    await expect(o.read('/a/SKILL.md')).rejects.toThrow(/no such file/)
+    await expect(o.read('/a/SKILL.md')).rejects.toMatchObject({ code: 'ENOENT' })
   })
 })
 

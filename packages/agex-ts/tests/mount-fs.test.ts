@@ -58,9 +58,10 @@ describe('MountFS — routing', () => {
     const backing = new MemoryFS()
     const fs = new MountFS(backing, [{ prefix: '/chapters', fs: makeOverlay() }])
     await fs.write('/blocker', enc.encode('x'))
-    await expect(fs.write('/blocker/child.txt', enc.encode('y'))).rejects.toThrow(
-      /file exists at path/,
-    )
+    await expect(fs.write('/blocker/child.txt', enc.encode('y'))).rejects.toMatchObject({
+      code: 'EEXIST',
+      message: 'File exists',
+    })
   })
 
   it('list() includes mount points as virtual subdirs of the parent', async () => {
@@ -204,17 +205,18 @@ describe('ChaptersOverlay — read-only file map (paths relative to mount root)'
 
   it('write methods throw clearly', async () => {
     const o = makeOverlay()
-    await expect(o.write()).rejects.toThrow(/read-only/)
-    await expect(o.mkdir()).rejects.toThrow(/read-only/)
-    await expect(o.remove()).rejects.toThrow(/read-only/)
-    await expect(o.rmdir()).rejects.toThrow(/read-only/)
-    await expect(o.rename()).rejects.toThrow(/read-only/)
+    const readOnly = { code: 'EROFS', message: 'Read-only file system' }
+    await expect(o.write('/x')).rejects.toMatchObject(readOnly)
+    await expect(o.mkdir('/x')).rejects.toMatchObject(readOnly)
+    await expect(o.remove('/x')).rejects.toMatchObject(readOnly)
+    await expect(o.rmdir('/x')).rejects.toMatchObject(readOnly)
+    await expect(o.rename('/x')).rejects.toMatchObject(readOnly)
   })
 
   it('swap() replaces the backing map atomically', async () => {
     const o = makeOverlay({ '/chapters/a/summary.md': 'old' })
     o.swap(new Map([['/chapters/b/summary.md', enc.encode('new')]]))
-    await expect(o.read('/chapters/a/summary.md')).rejects.toThrow(/no such file/)
+    await expect(o.read('/chapters/a/summary.md')).rejects.toMatchObject({ code: 'ENOENT' })
     expect(dec.decode(await o.read('/chapters/b/summary.md'))).toBe('new')
   })
 })

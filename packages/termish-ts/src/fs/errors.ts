@@ -8,7 +8,14 @@
  */
 
 /** The codes an adapter reports. */
-export type FsErrorCode = 'ENOENT' | 'EISDIR' | 'ENOTDIR' | 'EEXIST' | 'ENOTEMPTY' | 'EINVAL'
+export type FsErrorCode =
+  | 'ENOENT'
+  | 'EISDIR'
+  | 'ENOTDIR'
+  | 'EEXIST'
+  | 'ENOTEMPTY'
+  | 'EINVAL'
+  | 'EROFS'
 
 /** The standard text for each code, as `strerror` gives it. */
 export const FS_ERROR_TEXT: Readonly<Record<FsErrorCode, string>> = {
@@ -18,6 +25,7 @@ export const FS_ERROR_TEXT: Readonly<Record<FsErrorCode, string>> = {
   EEXIST: 'File exists',
   ENOTEMPTY: 'Directory not empty',
   EINVAL: 'Invalid argument',
+  EROFS: 'Read-only file system',
 }
 
 export class FsError extends Error {

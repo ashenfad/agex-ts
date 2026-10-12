@@ -62,3 +62,23 @@ describe('RealFS — sandbox semantics', () => {
     expect(got.find((e) => e.name === 'a')?.path).toBe('/d/a')
   })
 })
+
+describe('RealFS — globbing over symbolic links', () => {
+  it('never descends ** through a link to a directory, but still lists the link', async () => {
+    const root = await makeRoot()
+    await fsp.mkdir(nodePath.join(root, 'a', 'sub'), { recursive: true })
+    await fsp.writeFile(nodePath.join(root, 'a', 'sub', 'x.txt'), 'x')
+    await fsp.symlink('..', nodePath.join(root, 'a', 'up')) // a loop back to the root
+    const fs = new RealFS({ root })
+    expect(await fs.isSymlink('/a/up')).toBe(true)
+    expect(await fs.isSymlink('/a/sub')).toBe(false)
+    const { execute } = await import('../src/index')
+    expect((await execute('echo a/**', fs)).trim().split(' ')).toEqual([
+      'a/',
+      'a/sub',
+      'a/sub/x.txt',
+      'a/up',
+    ])
+    expect((await execute('echo a/**/*.txt', fs)).trim()).toBe('a/sub/x.txt')
+  })
+})

@@ -2,9 +2,16 @@
  * Command context + result + handler signature.
  *
  * Every builtin and every host-injected command receives a single
- * `CommandContext` argument: parsed args, stdin / stdout strings,
- * the filesystem, an env map (reserved), and an `AbortSignal` for
- * cooperative cancellation.
+ * `CommandContext` argument: parsed args, stdin and stdout, the
+ * filesystem, the environment, and an `AbortSignal` for cooperative
+ * cancellation.
+ *
+ * Pipes and redirects carry bytes. A handler reads its input as text
+ * (`stdin.text()`, UTF-8 with U+FFFD for undecodable bytes) or as bytes
+ * (`stdin.bytes`), and writes text (`stdout.write`, encoded UTF-8) or
+ * bytes (`stdout.writeBytes`), in any order. A handler that only moves
+ * content (copying stdin out, writing a file) should stay on bytes:
+ * decoding and re-encoding corrupts anything that is not valid UTF-8.
  *
  * Handlers return:
  * - `void` (or omitted return) for success with no stderr
@@ -14,18 +21,36 @@
 
 import type { FileSystem } from './fs/protocol'
 
+/** A command's input: what the previous pipeline stage wrote, or the
+ *  file or heredoc a redirect named. Empty for the first command. */
+export interface Stdin {
+  /** The input, byte for byte. */
+  readonly bytes: Uint8Array
+  /** The input decoded as UTF-8; undecodable bytes become U+FFFD. */
+  text(): string
+}
+
+/** A command's output. What is written goes to the next pipeline
+ *  stage, to a redirect's file, or to the transcript. */
+export interface Stdout {
+  /** Write text, encoded UTF-8. */
+  write(text: string): void
+  /** Write bytes, unchanged. */
+  writeBytes(data: Uint8Array): void
+}
+
 export interface CommandContext {
   /** Parsed arguments — does NOT include the command name. */
   readonly args: readonly string[]
-  /** Stdin: piped content from the previous pipeline stage, or
-   *  empty if this is the first command. */
-  readonly stdin: string
-  /** Write stdout here. Pipeline captures and forwards. */
-  readonly stdout: { write(s: string): void }
+  readonly stdin: Stdin
+  readonly stdout: Stdout
   /** The filesystem the command operates on. */
   readonly fs: FileSystem
-  /** Reserved for future env-var support; currently always empty. */
-  readonly env: Readonly<Record<string, string>>
+  /** Environment variables backing `$VAR` expansion. Shared across the
+   *  script's commands and with the caller's object passed as
+   *  `execute(..., { env })`, so a change is visible to later commands
+   *  and to the caller. */
+  readonly env: Record<string, string>
   /** Cooperative cancellation. Loop-heavy builtins (grep, find,
    *  xargs) check this at iteration boundaries. */
   readonly signal: AbortSignal
@@ -49,7 +74,8 @@ export interface CommandContext {
 export interface CommandResult {
   /** Non-zero signals failure. Default 0 (success). */
   readonly exitCode: number
-  /** Optional stderr text. */
+  /** Optional stderr text. On success it is a warning, shown in the
+   *  transcript; on failure it is the diagnostic. */
   readonly stderr: string
 }
 

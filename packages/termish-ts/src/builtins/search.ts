@@ -290,7 +290,7 @@ export const grep: CommandHandler = async (ctx) => {
   // Resolve the file list.
   let filesToSearch: string[]
   if (files.length === 0 && parsed.flags.recursive !== true) {
-    processContent(ctx.stdin, null)
+    processContent(ctx.stdin.text(), null)
     return
   }
   if (files.length === 0) {
@@ -754,7 +754,7 @@ export const find: CommandHandler = async (ctx: CommandContext) => {
   // `find -exec`.
   const executor = async (cmdStr: string, fs: FileSystem): Promise<string> => {
     const { execute } = await import('../interpreter')
-    return execute(cmdStr, fs, { signal: ctx.signal, commands: ctx.commands })
+    return execute(cmdStr, fs, { signal: ctx.signal, commands: ctx.commands, env: ctx.env })
   }
 
   const predicate = parseFindPredicates(predicateTokens, {

@@ -24,7 +24,6 @@ import { parseArgs } from './_argparse'
 import { type TarEntry, readTar, writeTar } from './_tar'
 
 const decoder = new TextDecoder('utf-8', { fatal: false })
-const latin1 = new TextDecoder('latin1')
 const encoder = new TextEncoder()
 
 // fflate is lazy-loaded so that importing @agex-ts/termish (and transitively
@@ -90,7 +89,7 @@ export const gzip: CommandHandler = async (ctx) => {
         throw new TerminalError(`gzip: ${path}: ${describeError(e)}`)
       }
       if (toStdout) {
-        ctx.stdout.write(decoder.decode(result))
+        ctx.stdout.writeBytes(result)
       } else {
         const outPath = path.slice(0, -3)
         if ((await ctx.fs.exists(outPath)) && !force) {
@@ -105,7 +104,7 @@ export const gzip: CommandHandler = async (ctx) => {
       }
       const result = gzipSync(content, { level: level as 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 })
       if (toStdout) {
-        ctx.stdout.write(latin1.decode(result))
+        ctx.stdout.writeBytes(result)
       } else {
         const outPath = `${path}.gz`
         if ((await ctx.fs.exists(outPath)) && !force) {

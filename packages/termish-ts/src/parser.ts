@@ -13,7 +13,12 @@
  * Ports termish-py's parser without depending on Python's `shlex` —
  * the tokenizer is hand-rolled but follows the same conventions:
  * whitespace splits words, the recognized operator set is fixed,
- * masked quote placeholders behave as single tokens.
+ * masked quote placeholders behave as single tokens, and an unquoted
+ * `#` at the start of a word begins a comment.
+ *
+ * Shell control flow, functions and command substitution are not
+ * implemented. They fail here, with one diagnostic that says what to
+ * do instead, rather than as several "command not found" lines.
  */
 
 import type { Command, Operator, Pipeline, Redirect, RedirectType, Script } from './ast'
@@ -27,6 +32,37 @@ const OPERATOR_CHARS = new Set(['|', ';', '<', '>', '&'])
 
 /** Tokens that can never appear where a redirect target / fd is expected. */
 const NON_TARGET_TOKENS = new Set(['|', ';', '<', '<<', '>', '>>', '>&', '\n', '&&', '||'])
+
+// Recognized only to refuse with one clear diagnostic: a `for` loop
+// would otherwise report `for`, `do` and `done` as three missing
+// commands. Openers and bare closers are equally unsupported.
+const LOOP_KEYWORDS = new Set(['for', 'while', 'until', 'do', 'done'])
+const CONDITIONAL_KEYWORDS = new Set(['if', 'then', 'elif', 'else', 'fi'])
+const CASE_KEYWORDS = new Set(['case', 'esac'])
+
+const FUNCTION_ADVICE =
+  "function definitions are not supported; inject reusable commands through execute()'s 'commands' option"
+
+/** Throw `ParseError` if `word` (masked, in command position) is a
+ *  control-flow keyword or `function`. Elsewhere these are ordinary
+ *  arguments (`echo for`, `grep -r done .`), and a quoted word never
+ *  reaches here as itself: it is an opaque placeholder. */
+function rejectControlFlow(word: string): void {
+  if (LOOP_KEYWORDS.has(word)) {
+    throw new ParseError(
+      `${word}: control flow is not supported; use xargs or find -exec for iteration`,
+    )
+  }
+  if (CONDITIONAL_KEYWORDS.has(word)) {
+    throw new ParseError(
+      `${word}: control flow is not supported; test with [ ... ] and branch with && and || instead`,
+    )
+  }
+  if (CASE_KEYWORDS.has(word)) {
+    throw new ParseError(`${word}: control flow is not supported`)
+  }
+  if (word === 'function') throw new ParseError(`function: ${FUNCTION_ADVICE}`)
+}
 
 interface HeredocEntry {
   readonly delimiter: string
@@ -47,6 +83,14 @@ export function toScript(text: string): Script {
   const extracted = extractHeredocs(text)
   const joined = handleLineContinuation(extracted.text)
   const { masked, map } = maskQuotes(joined)
+  // Command substitution is refused rather than tokenized into mangled
+  // args, or passed through unexpanded inside double quotes. Inside
+  // single quotes it is a harmless literal, as in bash.
+  if (masked.includes('$(') || [...map.values()].some((v) => v[0] === '"' && v.includes('$('))) {
+    throw new ParseError(
+      "Command substitution '$(...)' is not supported; run the inner command separately",
+    )
+  }
   const tokens = tokenize(masked)
   return parseTokens(tokens, map, extracted.heredocs)
 }
@@ -78,6 +122,15 @@ function findHeredocOperators(
       inSingle = !inSingle
     } else if (char === '"' && !inSingle) {
       inDouble = !inDouble
+    } else if (
+      char === '#' &&
+      !inSingle &&
+      !inDouble &&
+      (index === 0 || line[index - 1] === ' ' || line[index - 1] === '\t')
+    ) {
+      // A word-start `#` begins a comment, which the tokenizer drops; a
+      // `<<` inside one must not start a heredoc.
+      break
     } else if (
       char === '<' &&
       !inSingle &&
@@ -234,6 +287,13 @@ function tokenize(text: string): string[] {
       continue
     }
 
+    // A `#` at the start of a word begins a comment, to the end of the
+    // line. Inside a word (`a#b`) it is literal.
+    if (c === '#') {
+      while (i < n && text[i] !== '\n') i++
+      continue
+    }
+
     // FD-prefixed redirects (`2>`, `2>>`, `2>&1`) — must have NO
     // whitespace between the digit and the operator. Recognized at
     // word-start only so `echo 2 > file` keeps `2` as a regular arg.
@@ -325,6 +385,18 @@ function parseTokens(
 
   const flushCommand = (): void => {
     if (cmdName !== null) {
+      // `name() { ... }`: the parens follow the name as part of it
+      // (`greet()`), or as the next words (`greet ()`, `greet ( )`).
+      // `greet( )` tokenizes as `greet(` and `)`.
+      const parens =
+        cmdName.endsWith('()') ||
+        (cmdName.endsWith('(') && cmdArgs[0] === ')') ||
+        cmdArgs[0] === '()' ||
+        (cmdArgs[0] === '(' && cmdArgs[1] === ')')
+      if (parens) {
+        const name = cmdName.replace(/\(\)?$/, '')
+        throw new ParseError(`${name}(): ${FUNCTION_ADVICE}`)
+      }
       currentPipelineCmds.push({ name: cmdName, args: cmdArgs, redirects: cmdRedirects })
     }
     cmdName = null
@@ -367,6 +439,7 @@ function parseTokens(
       if (next === '|' || next === ';' || next === '\n' || next === '&&' || next === '||') {
         throw new ParseError(`Expected command after '|', got '${next}'`)
       }
+      rejectControlFlow(next)
       cmdName = unmask(next)
       continue
     }
@@ -400,11 +473,10 @@ function parseTokens(
       continue
     }
 
-    // FD-prefixed redirects emitted by the tokenizer when there's
-    // no whitespace between the digit and `>` (e.g. `2>file`,
-    // `2>>file`). Termish has no separate stderr stream, so these
-    // are vacuously discarded — but we still consume the filename
-    // so it doesn't leak into args.
+    // FD-prefixed redirects, emitted by the tokenizer when there's no
+    // whitespace between the digit and `>` (`2>file`, `2>>file`).
+    // fd 2 is stderr and fd 1 is stdout; termish has no other fds, so
+    // their redirects are discarded, filename and all.
     if (/^[0-9]>>?$/.test(token)) {
       if (i >= tokens.length) {
         throw new ParseError(`Expected filename after '${token}'`)
@@ -414,12 +486,20 @@ function parseTokens(
       if (NON_TARGET_TOKENS.has(target)) {
         throw new ParseError(`Expected filename after '${token}', got '${target}'`)
       }
+      const fd = token[0]
+      const append = token.endsWith('>>')
+      if (fd === '2') {
+        cmdRedirects.push({ type: append ? '2>>' : '2>', target: unmask(target) })
+      } else if (fd === '1') {
+        cmdRedirects.push({ type: append ? '>>' : '>', target: unmask(target) })
+      }
       continue
     }
 
     if (token === '>&') {
-      // bash-style fd merge (`>&1`); fd-prefixed forms like `2>&1`
-      // come pre-glued from the tokenizer (handled below).
+      // A bare fd merge (`>&1`) has nothing to merge: discarded.
+      // fd-prefixed forms like `2>&1` come pre-glued from the
+      // tokenizer (handled below).
       if (i >= tokens.length) {
         throw new ParseError("Expected fd after '>&'")
       }
@@ -431,12 +511,16 @@ function parseTokens(
       continue
     }
 
-    // Pre-glued fd merge `2>&1` from the tokenizer — vacuously discarded.
+    // Pre-glued fd merge from the tokenizer. `2>&1` merges stderr into
+    // stdout; the rest (`1>&2`, `2>&2`) have no separate stream to
+    // merge into, and are discarded.
     if (/^[0-9]>&[0-9]$/.test(token)) {
+      if (token === '2>&1') cmdRedirects.push({ type: '2>&1', target: '1' })
       continue
     }
 
     // Regular word: command name (first) or arg.
+    if (cmdName === null) rejectControlFlow(token)
     const word = unmask(token)
     if (cmdName === null) cmdName = word
     else cmdArgs.push(word)

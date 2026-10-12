@@ -4,6 +4,7 @@
  * Direct port of termish-py's `io.py`. Flag coverage matches.
  */
 
+import { splitLines } from '../bytes'
 import type { CommandContext, CommandHandler } from '../context'
 import { TerminalError } from '../errors'
 import { parseArgs } from './_argparse'
@@ -302,17 +303,24 @@ export const cat: CommandHandler = async (ctx) => {
   const showNumbers = parsed.flags.number === true
   const formatting = showEnds || showTabs || showNumbers
 
-  const format = (content: string): string =>
-    formatting ? formatCatContent(content, { showEnds, showTabs, showNumbers }) : content
+  // Content is copied out as bytes, unless a display flag asks for a
+  // rendering, which is a text view by definition.
+  const emit = (data: Uint8Array): void => {
+    if (formatting) {
+      ctx.stdout.write(formatCatContent(decoder.decode(data), { showEnds, showTabs, showNumbers }))
+    } else {
+      ctx.stdout.writeBytes(data)
+    }
+  }
 
   if (parsed.positional.length === 0) {
-    ctx.stdout.write(format(ctx.stdin))
+    emit(ctx.stdin.bytes)
     return
   }
 
   for (const path of parsed.positional) {
     if (path === '-') {
-      ctx.stdout.write(format(ctx.stdin))
+      emit(ctx.stdin.bytes)
       continue
     }
     if (ctx.signal.aborted) throw new TerminalError('cat: aborted')
@@ -331,7 +339,7 @@ export const cat: CommandHandler = async (ctx) => {
         `cat: ${path}: appears to be binary (${bytes.byteLength} bytes) — use 'xxd', 'hexdump', or 'head -c' for a controlled peek`,
       )
     }
-    ctx.stdout.write(format(decoder.decode(bytes)))
+    emit(bytes)
   }
 }
 
@@ -380,19 +388,16 @@ export const head: CommandHandler = async (ctx) => {
   const byteMode = bytesLimit > 0
   const limit = byteMode ? bytesLimit : linesLimit
 
-  const writeFromContent = (content: string): void => {
+  const writeFromContent = (content: Uint8Array): void => {
     if (byteMode) {
-      ctx.stdout.write(content.slice(0, limit))
+      ctx.stdout.writeBytes(content.subarray(0, limit))
       return
     }
-    const lines = splitLinesKeepEnds(content)
-    for (let i = 0; i < Math.min(limit, lines.length); i++) {
-      ctx.stdout.write(lines[i] as string)
-    }
+    for (const line of splitLines(content).slice(0, limit)) ctx.stdout.writeBytes(line)
   }
 
   if (parsed.positional.length === 0) {
-    writeFromContent(ctx.stdin)
+    writeFromContent(ctx.stdin.bytes)
     return
   }
 
@@ -400,8 +405,7 @@ export const head: CommandHandler = async (ctx) => {
     const path = parsed.positional[i] as string
     if (parsed.positional.length > 1) ctx.stdout.write(`==> ${path} <==\n`)
     try {
-      const bytes = await ctx.fs.read(path)
-      writeFromContent(decoder.decode(bytes))
+      writeFromContent(await ctx.fs.read(path))
     } catch (e) {
       throw new TerminalError(`head: cannot open '${path}': ${describeError(e)}`)
     }
@@ -433,9 +437,9 @@ export const tail: CommandHandler = async (ctx) => {
   const bytesLimit = parseIntegerFlag(parsed.flags.bytes, 0, 'tail', '-c')
   const byteMode = bytesLimit > 0
 
-  const writeFromContent = (content: string): void => {
+  const writeFromContent = (content: Uint8Array): void => {
     if (byteMode) {
-      ctx.stdout.write(content.slice(-bytesLimit))
+      ctx.stdout.writeBytes(content.subarray(Math.max(0, content.byteLength - bytesLimit)))
       return
     }
     const linesValue = (parsed.flags.lines as string | undefined) ?? '10'
@@ -444,13 +448,17 @@ export const tail: CommandHandler = async (ctx) => {
     if (Number.isNaN(limit) || limit < 0) {
       throw new TerminalError(`tail: invalid number of lines: '${linesValue}'`)
     }
-    const lines = splitLinesKeepEnds(content)
-    const selected = fromStart ? lines.slice(limit - 1) : lines.slice(-limit)
-    for (const line of selected) ctx.stdout.write(line)
+    const lines = splitLines(content)
+    const selected = fromStart
+      ? lines.slice(Math.max(0, limit - 1))
+      : limit === 0
+        ? []
+        : lines.slice(-limit)
+    for (const line of selected) ctx.stdout.writeBytes(line)
   }
 
   if (parsed.positional.length === 0) {
-    writeFromContent(ctx.stdin)
+    writeFromContent(ctx.stdin.bytes)
     return
   }
 
@@ -458,8 +466,7 @@ export const tail: CommandHandler = async (ctx) => {
     const path = parsed.positional[i] as string
     if (parsed.positional.length > 1) ctx.stdout.write(`==> ${path} <==\n`)
     try {
-      const bytes = await ctx.fs.read(path)
-      writeFromContent(decoder.decode(bytes))
+      writeFromContent(await ctx.fs.read(path))
     } catch (e) {
       throw new TerminalError(`tail: cannot open '${path}': ${describeError(e)}`)
     }
@@ -483,12 +490,12 @@ export const tee: CommandHandler = async (ctx) => {
     },
     'tee',
   )
-  const content = ctx.stdin
-  ctx.stdout.write(content)
+  const content = ctx.stdin.bytes
+  ctx.stdout.writeBytes(content)
   const mode = parsed.flags.append === true ? 'a' : 'w'
   for (const path of parsed.positional) {
     try {
-      await ctx.fs.write(path, encoder.encode(content), mode)
+      await ctx.fs.write(path, content, mode)
     } catch (e) {
       throw new TerminalError(`tee: ${path}: ${describeError(e)}`)
     }

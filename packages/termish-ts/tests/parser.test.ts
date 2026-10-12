@@ -111,18 +111,25 @@ describe('toScript — redirects', () => {
     expect(s.pipelines[0]?.commands[0]?.redirects).toEqual([{ type: '<', target: 'input.txt' }])
   })
 
-  it('discards 2> stderr redirects (no separate stderr stream)', () => {
+  it('parses 2> as a stderr redirect', () => {
     const s = toScript('grep foo file 2> /dev/null')
     const cmd = s.pipelines[0]?.commands[0]
-    expect(cmd?.args).toEqual(['foo', 'file']) // the literal "2" was popped
-    expect(cmd?.redirects).toEqual([]) // redirect itself discarded
+    expect(cmd?.args).toEqual(['foo', 'file'])
+    expect(cmd?.redirects).toEqual([{ type: '2>', target: '/dev/null' }])
   })
 
-  it('discards 2>&1 fd merge', () => {
+  it('parses 2>&1 as a merge of stderr into stdout', () => {
     const s = toScript('cmd arg 2>&1')
     const cmd = s.pipelines[0]?.commands[0]
     expect(cmd?.args).toEqual(['arg'])
-    expect(cmd?.redirects).toEqual([])
+    expect(cmd?.redirects).toEqual([{ type: '2>&1', target: '1' }])
+  })
+
+  it('parses 1> as a stdout redirect, and discards merges with nothing to merge', () => {
+    expect(toScript('echo hi 1>out').pipelines[0]?.commands[0]?.redirects).toEqual([
+      { type: '>', target: 'out' },
+    ])
+    expect(toScript('echo hi 1>&2').pipelines[0]?.commands[0]?.redirects).toEqual([])
   })
 
   it("treats '2' followed by space + '>' as a regular arg + redirect (not fd-2)", () => {
@@ -138,7 +145,7 @@ describe('toScript — redirects', () => {
     const s = toScript('grep foo file 2>>err.log')
     const cmd = s.pipelines[0]?.commands[0]
     expect(cmd?.args).toEqual(['foo', 'file'])
-    expect(cmd?.redirects).toEqual([])
+    expect(cmd?.redirects).toEqual([{ type: '2>>', target: 'err.log' }])
   })
 
   it('errors on > with no target', () => {

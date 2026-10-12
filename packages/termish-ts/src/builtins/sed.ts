@@ -562,7 +562,7 @@ export const sed: CommandHandler = async (ctx) => {
   const quiet = parsed.flags.quiet === true
 
   if (files.length === 0) {
-    const result = processContent(ctx.stdin, commands, quiet)
+    const result = processContent(ctx.stdin.text(), commands, quiet)
     ctx.stdout.write(result)
     return
   }

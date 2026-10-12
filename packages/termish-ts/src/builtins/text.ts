@@ -13,7 +13,6 @@ import { TerminalError } from '../errors'
 import { parseArgs } from './_argparse'
 
 const decoder = new TextDecoder('utf-8', { fatal: false })
-const encoder = new TextEncoder()
 
 // ---------------------------------------------------------------------------
 // wc
@@ -62,7 +61,9 @@ export const wc: CommandHandler = async (ctx) => {
   const totals: Counts = { lines: 0, words: 0, bytes: 0, maxLine: 0 }
   const results: Array<{ counts: Counts; name: string }> = []
 
-  const countContent = (content: string, name: string): void => {
+  // `size` is the content's size in bytes, counted before decoding, so
+  // undecodable bytes count as themselves.
+  const countContent = (content: string, name: string, size: number): void => {
     const lines = content.split('\n')
     // splitlines-equivalent for max line length (drop trailing empty
     // from a trailing newline, matching Python's behavior).
@@ -75,7 +76,7 @@ export const wc: CommandHandler = async (ctx) => {
       lines: countOccurrences(content, '\n'),
       words:
         content.trim().length === 0 ? 0 : content.split(/\s+/).filter((w) => w.length > 0).length,
-      bytes: encoder.encode(content).byteLength,
+      bytes: size,
       maxLine,
     }
     results.push({ counts, name })
@@ -86,12 +87,12 @@ export const wc: CommandHandler = async (ctx) => {
   }
 
   if (parsed.positional.length === 0) {
-    countContent(ctx.stdin, '')
+    countContent(ctx.stdin.text(), '', ctx.stdin.bytes.byteLength)
   } else {
     for (const path of parsed.positional) {
       try {
         const bytes = await ctx.fs.read(path)
-        countContent(decoder.decode(bytes), path)
+        countContent(decoder.decode(bytes), path, bytes.byteLength)
       } catch (e) {
         throw new TerminalError(`wc: ${path}: ${describeError(e)}`)
       }
@@ -162,7 +163,7 @@ export const sort: CommandHandler = async (ctx) => {
 
   const lines: string[] = []
   if (parsed.positional.length === 0) {
-    pushLines(ctx.stdin, lines)
+    pushLines(ctx.stdin.text(), lines)
   } else {
     for (const path of parsed.positional) {
       try {
@@ -292,7 +293,7 @@ export const uniq: CommandHandler = async (ctx) => {
 
   const lines: string[] = []
   if (parsed.positional.length === 0) {
-    pushLines(ctx.stdin, lines)
+    pushLines(ctx.stdin.text(), lines)
   } else {
     const path = parsed.positional[0] as string
     try {
@@ -403,7 +404,7 @@ export const cut: CommandHandler = async (ctx) => {
 
   const lines: string[] = []
   if (parsed.positional.length === 0) {
-    pushLines(ctx.stdin, lines)
+    pushLines(ctx.stdin.text(), lines)
   } else {
     for (const path of parsed.positional) {
       try {
@@ -524,7 +525,7 @@ export const tr: CommandHandler = async (ctx) => {
 
   let set1 = expandTrSet(positional[0] as string)
   const set2 = positional.length > 1 ? expandTrSet(positional[1] as string) : ''
-  const content = ctx.stdin
+  const content = ctx.stdin.text()
 
   if (complement) {
     const set1Chars = new Set(set1)

@@ -14,7 +14,7 @@
  * `list` see them too.
  */
 
-import { FsError } from './errors'
+import { FsError, missingParent } from './errors'
 import { basename, dirname, joinPath, resolve } from './path'
 import type { FileInfo, FileMetadata, FileSystem } from './protocol'
 
@@ -107,7 +107,7 @@ export class MemoryFS implements FileSystem {
     }
     const parent = dirname(abs)
     if (!this.#dirExists(parent)) {
-      throw new FsError('ENOENT', parent)
+      throw await missingParent(parent, this)
     }
 
     let next: Uint8Array
@@ -149,7 +149,7 @@ export class MemoryFS implements FileSystem {
     } else {
       const parent = dirname(abs)
       if (!this.#dirExists(parent)) {
-        throw new FsError('ENOENT', parent)
+        throw await missingParent(parent, this)
       }
       this.#addDir(abs)
     }
@@ -189,7 +189,7 @@ export class MemoryFS implements FileSystem {
     if (this.#files.has(absSrc)) {
       const dstParent = dirname(absDst)
       if (!this.#dirExists(dstParent)) {
-        throw new FsError('ENOENT', dstParent)
+        throw await missingParent(dstParent, this)
       }
       const value = this.#files.get(absSrc) as Uint8Array
       const meta = this.#fileMeta.get(absSrc) as FileMeta

@@ -27,7 +27,7 @@
 import type { Staged } from '@agex-ts/kvgit'
 import type { Decoder, Encoder } from '@agex-ts/kvgit'
 import superjson from 'superjson'
-import { FsError } from './errors'
+import { FsError, missingParent } from './errors'
 import { basename, dirname, joinPath, resolve } from './path'
 import type { FileInfo, FileMetadata, FileSystem } from './protocol'
 
@@ -228,7 +228,7 @@ export class KvgitFS implements FileSystem {
       throw new FsError('EISDIR', path)
     }
     if (!(await this.#dirExists(dirname(abs)))) {
-      throw new FsError('ENOENT', dirname(abs))
+      throw await missingParent(dirname(abs), this)
     }
     const now = new Date().toISOString()
     const existing = await this.#getFile(abs)
@@ -267,7 +267,7 @@ export class KvgitFS implements FileSystem {
       }
     } else {
       if (!(await this.#dirExists(dirname(abs)))) {
-        throw new FsError('ENOENT', dirname(abs))
+        throw await missingParent(dirname(abs), this)
       }
       this.#addDir(abs)
     }
@@ -305,7 +305,7 @@ export class KvgitFS implements FileSystem {
     const srcFile = await this.#getFile(absSrc)
     if (srcFile !== undefined) {
       if (!(await this.#dirExists(dirname(absDst)))) {
-        throw new FsError('ENOENT', dirname(absDst))
+        throw await missingParent(dirname(absDst), this)
       }
       this.#staged.delete(`f:${absSrc}`)
       this.#staged.set(`f:${absDst}`, srcFile)

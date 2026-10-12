@@ -19,6 +19,10 @@
  * A word that matches nothing gives an empty list; the caller keeps the
  * word as typed (`nullglob` off).
  *
+ * - `**` never descends through a symbolic link to a directory (when the
+ *   filesystem has `isSymlink`), as bash's globstar doesn't; the link
+ *   itself still matches.
+ *
  * It works through the filesystem's `list`, `isDir` and `exists`, so
  * every filesystem expands the same way.
  */
@@ -73,6 +77,17 @@ async function isDir(fs: FileSystem, path: string): Promise<boolean> {
   }
 }
 
+/** Whether `path` is a directory `**` may descend into: one that isn't
+ *  reached through a symbolic link. */
+async function descendable(fs: FileSystem, path: string): Promise<boolean> {
+  if (!(await isDir(fs, path))) return false
+  try {
+    return !(await fs.isSymlink?.(path))
+  } catch {
+    return false
+  }
+}
+
 async function exists(fs: FileSystem, path: string): Promise<boolean> {
   try {
     return await fs.exists(path)
@@ -87,7 +102,7 @@ async function everything(fs: FileSystem, base: string, found: Set<string>): Pro
     if (name.startsWith('.')) continue
     const path = join(base, name)
     found.add(path)
-    if (await isDir(fs, path)) await everything(fs, path, found)
+    if (await descendable(fs, path)) await everything(fs, path, found)
   }
 }
 
@@ -107,7 +122,9 @@ async function walk(
 ): Promise<void> {
   if (i === parts.length) {
     if (trailing) {
-      if (await isDir(fs, base)) found.add(base.endsWith('/') ? base : `${base}/`)
+      // A relative `**/` reaches here with no base at all: that is the
+      // working directory, which is never a match of its own.
+      if (base && (await isDir(fs, base))) found.add(base.endsWith('/') ? base : `${base}/`)
     } else if (base) {
       found.add(base)
     }
@@ -128,7 +145,7 @@ async function walk(
     for (const name of await names(fs, base)) {
       if (name.startsWith('.')) continue
       const path = join(base, name)
-      if (await isDir(fs, path)) await walk(fs, path, parts, i, trailing, found)
+      if (await descendable(fs, path)) await walk(fs, path, parts, i, trailing, found)
     }
     return
   }

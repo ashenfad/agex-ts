@@ -13,7 +13,7 @@
 
 import { promises as fsp } from 'node:fs'
 import * as nodePath from 'node:path/posix'
-import { FsError } from './errors'
+import { FsError, missingParent } from './errors'
 import { dirname, joinPath, resolve } from './path'
 import type { FileInfo, FileMetadata, FileSystem } from './protocol'
 
@@ -101,6 +101,15 @@ export class RealFS implements FileSystem {
     }
   }
 
+  async isSymlink(path: string): Promise<boolean> {
+    const real = this.#toReal(resolve(path, this.#cwd))
+    try {
+      return (await fsp.lstat(real)).isSymbolicLink()
+    } catch {
+      return false
+    }
+  }
+
   async stat(path: string): Promise<FileMetadata> {
     const real = this.#toReal(resolve(path, this.#cwd))
     let s: Awaited<ReturnType<typeof fsp.stat>>
@@ -123,15 +132,7 @@ export class RealFS implements FileSystem {
     const abs = resolve(path, this.#cwd)
     const real = this.#toReal(abs)
     // Match MemoryFS: error if parent doesn't exist (no implicit mkdir).
-    const parentReal = this.#toReal(dirname(abs))
-    try {
-      const s = await fsp.stat(parentReal)
-      if (!s.isDirectory()) {
-        throw new FsError('ENOENT', dirname(abs))
-      }
-    } catch {
-      throw new FsError('ENOENT', dirname(abs))
-    }
+    if (!(await this.isDir(dirname(abs)))) throw await missingParent(dirname(abs), this)
     // Match MemoryFS: error if path is a directory.
     try {
       const s = await fsp.stat(real)
@@ -158,15 +159,7 @@ export class RealFS implements FileSystem {
       // Doesn't exist yet — fine, fall through.
     }
     if (!opts.parents) {
-      const parentReal = this.#toReal(dirname(abs))
-      try {
-        const s = await fsp.stat(parentReal)
-        if (!s.isDirectory()) {
-          throw new FsError('ENOENT', dirname(abs))
-        }
-      } catch {
-        throw new FsError('ENOENT', dirname(abs))
-      }
+      if (!(await this.isDir(dirname(abs)))) throw await missingParent(dirname(abs), this)
     }
     await fsp.mkdir(real, { recursive: opts.parents === true })
   }
@@ -209,15 +202,7 @@ export class RealFS implements FileSystem {
       throw new FsError('ENOENT', src)
     }
     const dstParent = dirname(resolve(dst, this.#cwd))
-    try {
-      const s = await fsp.stat(this.#toReal(dstParent))
-      if (!s.isDirectory()) {
-        throw new FsError('ENOENT', dstParent)
-      }
-    } catch (e) {
-      if (e instanceof FsError) throw e
-      throw new FsError('ENOENT', dstParent)
-    }
+    if (!(await this.isDir(dstParent))) throw await missingParent(dstParent, this)
     await fsp.rename(realSrc, realDst)
   }
 

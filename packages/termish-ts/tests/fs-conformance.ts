@@ -261,6 +261,19 @@ export function runFsConformance(name: string, makeFs: FsFactory): void {
       })
     })
 
+    describe('a parent that is not a directory', () => {
+      it('is ENOTDIR when it is a file, ENOENT when it is missing', async () => {
+        const fs = await makeFs()
+        await fs.write('/file', bytes('x'))
+        await expect(fs.write('/file/child', bytes('y'))).rejects.toMatchObject({ code: 'ENOTDIR' })
+        await expect(fs.write('/file/a/b', bytes('y'))).rejects.toMatchObject({ code: 'ENOTDIR' })
+        await expect(fs.mkdir('/file/sub')).rejects.toMatchObject({ code: 'ENOTDIR' })
+        await expect(fs.rename('/file', '/file/moved')).rejects.toMatchObject({ code: 'ENOTDIR' })
+        await expect(fs.write('/nope/child', bytes('y'))).rejects.toMatchObject({ code: 'ENOENT' })
+        await expect(fs.mkdir('/nope/sub')).rejects.toMatchObject({ code: 'ENOENT' })
+      })
+    })
+
     describe('stat', () => {
       it('returns size + isDir for a file', async () => {
         const fs = await makeFs()

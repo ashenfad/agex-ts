@@ -42,6 +42,25 @@ export class FsError extends Error {
   }
 }
 
+/** The error for a path whose parent `parent` is not a directory:
+ *  `ENOTDIR` when the nearest ancestor that exists is a file, `ENOENT`
+ *  when a directory on the way is missing. `fs` answers for absolute
+ *  paths. */
+export async function missingParent(
+  parent: string,
+  fs: { exists(path: string): Promise<boolean>; isDir(path: string): Promise<boolean> },
+): Promise<FsError> {
+  let path = parent
+  for (;;) {
+    if (await fs.exists(path)) {
+      return new FsError((await fs.isDir(path)) ? 'ENOENT' : 'ENOTDIR', parent)
+    }
+    if (path === '/' || path === '') return new FsError('ENOENT', parent)
+    const cut = path.lastIndexOf('/')
+    path = cut <= 0 ? '/' : path.slice(0, cut)
+  }
+}
+
 /** An error as a builtin reports it: the standard text for an error
  *  with a known code (an `FsError`, or Node's), and its message
  *  otherwise. */

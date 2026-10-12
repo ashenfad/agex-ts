@@ -83,4 +83,10 @@ export interface FileSystem {
   list(path?: string, opts?: { recursive?: boolean }): Promise<string[]>
   /** Same as `list()` but with full metadata per entry. */
   listDetailed(path?: string, opts?: { recursive?: boolean }): Promise<FileInfo[]>
+
+  /** Whether `path` is a symbolic link. Optional: a filesystem without
+   *  links leaves it out. Globbing uses it so `**` never descends
+   *  through a link to a directory, as bash's globstar doesn't (a link
+   *  to an ancestor would otherwise recurse without end). */
+  isSymlink?(path: string): Promise<boolean>
 }

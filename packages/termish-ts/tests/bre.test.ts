@@ -74,6 +74,21 @@ describe('BRE', () => {
   })
 })
 
+describe('word boundaries', () => {
+  it('keep \\< to the start of a word and \\> to its end', async () => {
+    await fs.write('/w.txt', bytes('xfoo\nfoo\nfoox\n'))
+    expect(await execute("grep '\\<foo\\>' w.txt", fs)).toBe('foo\n')
+    expect(await execute("grep '\\<foo' w.txt", fs)).toBe('foo\nfoox\n')
+    expect(await execute("grep 'foo\\>' w.txt", fs)).toBe('xfoo\nfoo\n')
+    expect(await execute("grep '\\>foo' w.txt; echo $?", fs)).toBe('1\n')
+    expect(await execute("grep 'foo\\<' w.txt; echo $?", fs)).toBe('1\n')
+  })
+
+  it('translate to lookarounds', () => {
+    expect(breToJs('\\<a\\>')).toBe('\\b(?=\\w)a\\b(?<=\\w)')
+  })
+})
+
 describe("grep's exit status", () => {
   it('is 1 when nothing matches', async () => {
     expect(await execute('grep zzz f.txt; echo $?', fs)).toBe('1\n')

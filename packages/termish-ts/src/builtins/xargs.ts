@@ -99,12 +99,17 @@ export const xargs: CommandHandler = async (ctx) => {
     throw new TerminalError(`xargs: ${cmdName}: command not found`, { exitCode: 127 })
   }
 
+  // Warnings from commands that succeeded become xargs's own stderr:
+  // shown, as they are when the command runs directly, never piped on.
+  const warnings: string[] = []
   const runOne = async (cmdArgs: readonly string[]): Promise<void> => {
     if (verbose) ctx.stdout.write(`${cmdName} ${cmdArgs.join(' ')}\n`)
     xargsDepth++
     try {
+      const { output, stderr } = await dispatchArgv(ctx, [cmdName, ...cmdArgs])
+      if (stderr) warnings.push(stderr)
       // The output is moved, not read: its bytes pass through.
-      ctx.stdout.writeBytes((await dispatchArgv(ctx, [cmdName, ...cmdArgs])).output)
+      ctx.stdout.writeBytes(output)
     } finally {
       xargsDepth--
     }
@@ -125,4 +130,5 @@ export const xargs: CommandHandler = async (ctx) => {
   } else {
     await runOne([...cmdBaseArgs, ...items])
   }
+  return warnings.length > 0 ? { exitCode: 0, stderr: warnings.join('\n') } : undefined
 }

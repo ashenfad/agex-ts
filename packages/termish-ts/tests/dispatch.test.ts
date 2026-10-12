@@ -65,6 +65,24 @@ describe('find -exec', () => {
     )
   })
 
+  it("reports a failing command: a warning for ';', exit 1 for '+'", async () => {
+    await fs.write('/a.txt', bytes(''))
+    const fail: CommandHandler = async () => ({ exitCode: 3, stderr: 'fail: broke' })
+    expect(
+      await execute("find / -type f -exec fail '{}' ';'; echo st=$?", fs, { commands: { fail } }),
+    ).toBe('fail: broke\nst=0\n')
+    expect(
+      await execute("find / -type f -exec fail '{}' '+'; echo st=$?", fs, { commands: { fail } }),
+    ).toBe('fail: broke\nst=1\n')
+  })
+
+  it("keeps cat's binary guard for output that reaches the transcript", async () => {
+    await fs.write('/bin.dat', ALL_BYTES)
+    const out = await execute("find / -name bin.dat -exec cat '{}' ';'", fs)
+    expect(out).toMatch(/^cat: \/bin\.dat: appears to be binary/)
+    expect(out).not.toContain('\u0000')
+  })
+
   it('keeps bytes, one at a time and batched', async () => {
     await fs.mkdir('/d', { parents: true })
     await fs.write('/d/one.dat', ALL_BYTES)
@@ -100,6 +118,23 @@ describe('xargs', () => {
     await fs.write('/bin.dat', ALL_BYTES)
     await execute('echo bin.dat | xargs cat > copy.dat', fs)
     expect(await fs.read('/copy.dat')).toEqual(ALL_BYTES)
+  })
+
+  it("shows a command's warning, and never pipes it on", async () => {
+    const warn: CommandHandler = async (ctx) => {
+      ctx.stdout.write('out\n')
+      return { exitCode: 0, stderr: 'warning' }
+    }
+    expect(await execute('echo x | xargs warn', fs, { commands: { warn } })).toBe('warning\nout\n')
+    expect((await execute('echo x | xargs warn | wc -l', fs, { commands: { warn } })).trim()).toBe(
+      'warning\n1',
+    )
+  })
+
+  it("keeps cat's binary guard for output that reaches the transcript", async () => {
+    await fs.write('/bin.dat', ALL_BYTES)
+    const error = await execute('echo bin.dat | xargs cat', fs).catch((e: unknown) => e)
+    expect((error as Error).message).toMatch(/^cat: bin\.dat: appears to be binary/)
   })
 
   it('reports a missing command with 127', async () => {

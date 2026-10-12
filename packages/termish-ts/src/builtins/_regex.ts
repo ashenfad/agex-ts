@@ -27,7 +27,8 @@ const SWAPPED = '(){}|+?'
  * - `^` anchors only at those same starting points, and `$` only at the
  *   end of the pattern, of a group or of an alternative; anywhere else
  *   each is a literal character;
- * - `\<` and `\>` (GNU word boundaries) become `\b`;
+ * - `\<` and `\>` (GNU's start and end of a word) become `\b(?=\w)` and
+ *   `\b(?<=\w)`: a bare `\b` would match either edge;
  * - every other escape (`\1`-`\9`, `\.`, `\*`, `\w`) is kept as it is,
  *   since it means the same to `RegExp`.
  *
@@ -59,8 +60,11 @@ export function breToJs(pattern: string): string {
       if (SWAPPED.includes(next)) {
         out.push(next)
         atStart = next === '(' || next === '|'
-      } else if (next === '<' || next === '>') {
-        out.push('\\b')
+      } else if (next === '<') {
+        out.push('\\b(?=\\w)') // the start of a word
+        atStart = false
+      } else if (next === '>') {
+        out.push('\\b(?<=\\w)') // the end of a word
         atStart = false
       } else {
         out.push(`\\${next}`)

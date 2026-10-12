@@ -18,7 +18,7 @@ export interface Dispatched {
 }
 
 /** Run `argv` (`[name, ...args]`) with empty stdin, through `ctx`'s
- *  registry, environment and signal. Throws `TerminalError` when the
+ *  registry, environment, signal and output sink. Throws `TerminalError` when the
  *  command is missing (127), fails, or throws. */
 export async function dispatchArgv(
   ctx: CommandContext,
@@ -42,7 +42,9 @@ export async function dispatchArgv(
         env: ctx.env,
         signal: ctx.signal,
         commands: ctx.commands,
-        agentSink: false,
+        // Its output goes where the caller's does, so a guard that holds
+        // for the caller (cat refusing binary for the transcript) holds.
+        agentSink: ctx.agentSink,
       })) ?? undefined
   } catch (e) {
     if (e instanceof TerminalError) throw e

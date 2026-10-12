@@ -11,14 +11,13 @@
  * | `[abc]` | any character in the bracket set |
  * | `**` | any sequence of characters including `/` |
  *
- * Backends do not implement `glob()` themselves — this helper walks
- * the FS via `list()`. Trades some efficiency (always lists from the
- * longest non-glob prefix recursively) for simplicity and adapter
- * portability.
+ * `compileGlob` and `globMatch` match a pattern against a string
+ * (`find -name`, `grep --include`). `glob` expands a pattern against a
+ * filesystem, as the shell does.
  */
 
-import { joinPath, normalize, resolve } from './fs/path'
 import type { FileSystem } from './fs/protocol'
+import { expand, hasMagic } from './pathglob'
 
 /** Returns true if `pattern` contains any glob metacharacters. */
 export function hasGlobChars(pattern: string): boolean {
@@ -85,63 +84,16 @@ export function globMatch(pattern: string, path: string): boolean {
 }
 
 /**
- * Resolve a glob pattern against a `FileSystem`, returning matching
- * paths sorted lexicographically.
+ * Resolve a glob pattern against a `FileSystem`, as the shell expands
+ * an unquoted word (see `./pathglob`): segment by segment, `*` never
+ * crossing a `/`, dotfiles matched only by a segment starting with a
+ * dot, `**` for any depth, a trailing `/` for directories only. Matches
+ * are sorted and keep the pattern's form, relative or absolute.
  *
- * Patterns may be absolute (`/etc/**\/*.conf`) or relative (`*.ts`,
- * `src/lib/*.ts`). Relative patterns resolve against `fs.getcwd()`.
- *
- * If the pattern has no glob characters, returns `[pattern]` if the
- * path exists or `[]` otherwise — matches shell semantics.
+ * A pattern with no glob characters gives `[pattern]` if the path
+ * exists, and `[]` otherwise.
  */
 export async function glob(pattern: string, fs: FileSystem): Promise<string[]> {
-  if (!hasGlobChars(pattern)) {
-    return (await fs.exists(pattern)) ? [pattern] : []
-  }
-
-  const isAbsolute = pattern.startsWith('/')
-  const cwd = fs.getcwd()
-
-  // Find the longest leading prefix that has no glob metacharacters —
-  // listing only that subtree avoids walking the whole filesystem.
-  const segments = pattern.split('/')
-  const baseSegments: string[] = []
-  let firstGlobIdx = 0
-  for (; firstGlobIdx < segments.length; firstGlobIdx++) {
-    if (hasGlobChars(segments[firstGlobIdx] as string)) break
-    baseSegments.push(segments[firstGlobIdx] as string)
-  }
-  const baseRel = baseSegments.join('/')
-  const baseAbs = isAbsolute
-    ? normalize(baseRel.length > 0 ? baseRel : '/')
-    : resolve(baseRel.length > 0 ? baseRel : '.', cwd)
-  const relPattern = segments.slice(firstGlobIdx).join('/')
-
-  // Only recurse when the pattern actually crosses directory levels —
-  // either via `**` or via slashes. A single-segment pattern like
-  // `*.ts` is satisfied by listing the base dir's direct children,
-  // which avoids walking the whole subtree.
-  const needsRecursion = relPattern.includes('**') || relPattern.includes('/')
-  let entries: string[]
-  try {
-    entries = await fs.list(baseAbs, { recursive: needsRecursion })
-  } catch {
-    return []
-  }
-
-  const regex = compileGlob(relPattern)
-  const matches: string[] = []
-  for (const entry of entries) {
-    if (regex.test(entry)) {
-      // Reassemble in the same shape the user passed in: absolute
-      // patterns return absolute matches, relative patterns return
-      // base-relative matches.
-      if (isAbsolute) {
-        matches.push(joinPath(baseAbs, entry))
-      } else {
-        matches.push(baseRel.length > 0 ? joinPath(baseRel, entry) : entry)
-      }
-    }
-  }
-  return matches.sort()
+  if (!hasMagic(pattern)) return (await fs.exists(pattern)) ? [pattern] : []
+  return expand(pattern, fs)
 }

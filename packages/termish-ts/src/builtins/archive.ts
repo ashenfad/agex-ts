@@ -18,6 +18,7 @@
 
 import type { CommandHandler } from '../context'
 import { TerminalError } from '../errors'
+import { describeFsError } from '../fs/errors'
 import { basename, dirname, joinPath, normalize } from '../fs/path'
 import type { FileSystem } from '../fs/protocol'
 import { parseArgs } from './_argparse'
@@ -422,7 +423,7 @@ export const unzip: CommandHandler = async (ctx) => {
 }
 
 function describeError(e: unknown): string {
-  return e instanceof Error ? e.message : String(e)
+  return describeFsError(e)
 }
 
 // Force module load of encoder so it's not flagged as unused if all

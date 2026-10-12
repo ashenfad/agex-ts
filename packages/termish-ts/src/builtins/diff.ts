@@ -20,6 +20,7 @@
 
 import type { CommandHandler } from '../context'
 import { TerminalError } from '../errors'
+import { describeFsError } from '../fs/errors'
 import type { FileInfo, FileSystem } from '../fs/protocol'
 import { parseArgs } from './_argparse'
 
@@ -480,5 +481,5 @@ function numericFlag(raw: string | boolean | string[] | undefined, fallback: num
 }
 
 function describeError(e: unknown): string {
-  return e instanceof Error ? e.message : String(e)
+  return describeFsError(e)
 }

@@ -7,6 +7,7 @@
 import { splitLines } from '../bytes'
 import type { CommandContext, CommandHandler } from '../context'
 import { TerminalError } from '../errors'
+import { describeFsError } from '../fs/errors'
 import { parseArgs } from './_argparse'
 import { looksLikeBinary } from './_util'
 
@@ -560,5 +561,5 @@ function splitLinesKeepEnds(text: string): string[] {
 }
 
 function describeError(e: unknown): string {
-  return e instanceof Error ? e.message : String(e)
+  return describeFsError(e)
 }

@@ -242,6 +242,25 @@ export function runFsConformance(name: string, makeFs: FsFactory): void {
       })
     })
 
+    describe('error codes', () => {
+      // A builtin words its diagnostic by the code (`describeFsError`),
+      // so every adapter reports the POSIX one.
+      it('reports ENOENT, EISDIR, ENOTDIR, EEXIST and ENOTEMPTY', async () => {
+        const fs = await makeFs()
+        await fs.mkdir('/d/sub', { parents: true })
+        await fs.write('/f', bytes('x'))
+        await expect(fs.read('/nope')).rejects.toMatchObject({ code: 'ENOENT' })
+        await expect(fs.stat('/nope')).rejects.toMatchObject({ code: 'ENOENT' })
+        await expect(fs.remove('/nope')).rejects.toMatchObject({ code: 'ENOENT' })
+        await expect(fs.list('/nope')).rejects.toMatchObject({ code: 'ENOENT' })
+        await expect(fs.chdir('/nope')).rejects.toMatchObject({ code: 'ENOENT' })
+        await expect(fs.read('/d')).rejects.toMatchObject({ code: 'EISDIR' })
+        await expect(fs.chdir('/f')).rejects.toMatchObject({ code: 'ENOTDIR' })
+        await expect(fs.mkdir('/d')).rejects.toMatchObject({ code: 'EEXIST' })
+        await expect(fs.rmdir('/d')).rejects.toMatchObject({ code: 'ENOTEMPTY' })
+      })
+    })
+
     describe('stat', () => {
       it('returns size + isDir for a file', async () => {
         const fs = await makeFs()

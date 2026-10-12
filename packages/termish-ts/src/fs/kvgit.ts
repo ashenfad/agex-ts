@@ -27,6 +27,7 @@
 import type { Staged } from '@agex-ts/kvgit'
 import type { Decoder, Encoder } from '@agex-ts/kvgit'
 import superjson from 'superjson'
+import { FsError } from './errors'
 import { basename, dirname, joinPath, resolve } from './path'
 import type { FileInfo, FileMetadata, FileSystem } from './protocol'
 
@@ -167,7 +168,7 @@ export class KvgitFS implements FileSystem {
   async chdir(path: string): Promise<void> {
     const abs = resolve(path, this.#cwd)
     if (!(await this.#dirExists(abs))) {
-      throw new Error(`chdir: not a directory: ${path}`)
+      throw new FsError((await this.exists(path)) ? 'ENOTDIR' : 'ENOENT', path)
     }
     this.#cwd = abs
   }
@@ -178,8 +179,8 @@ export class KvgitFS implements FileSystem {
     const abs = resolve(path, this.#cwd)
     const rec = await this.#getFile(abs)
     if (rec === undefined) {
-      if (await this.#dirExists(abs)) throw new Error(`read: is a directory: ${path}`)
-      throw new Error(`read: no such file: ${path}`)
+      if (await this.#dirExists(abs)) throw new FsError('EISDIR', path)
+      throw new FsError('ENOENT', path)
     }
     return new Uint8Array(rec.content)
   }
@@ -216,7 +217,7 @@ export class KvgitFS implements FileSystem {
       const meta = dirRec ?? syntheticMeta()
       return { size: 0, createdAt: meta.createdAt, modifiedAt: meta.modifiedAt, isDir: true }
     }
-    throw new Error(`stat: no such file or directory: ${path}`)
+    throw new FsError('ENOENT', path)
   }
 
   // ---------- writes ----------
@@ -224,10 +225,10 @@ export class KvgitFS implements FileSystem {
   async write(path: string, content: Uint8Array, mode: 'w' | 'a' = 'w'): Promise<void> {
     const abs = resolve(path, this.#cwd)
     if ((await this.#dirExists(abs)) && (await this.#getFile(abs)) === undefined) {
-      throw new Error(`write: is a directory: ${path}`)
+      throw new FsError('EISDIR', path)
     }
     if (!(await this.#dirExists(dirname(abs)))) {
-      throw new Error(`write: parent directory does not exist: ${dirname(abs)}`)
+      throw new FsError('ENOENT', dirname(abs))
     }
     const now = new Date().toISOString()
     const existing = await this.#getFile(abs)
@@ -251,11 +252,11 @@ export class KvgitFS implements FileSystem {
   async mkdir(path: string, opts: { parents?: boolean; existOk?: boolean } = {}): Promise<void> {
     const abs = resolve(path, this.#cwd)
     if ((await this.#getFile(abs)) !== undefined) {
-      throw new Error(`mkdir: file exists at path: ${path}`)
+      throw new FsError('EEXIST', path)
     }
     if (await this.#dirExists(abs)) {
       if (opts.existOk) return
-      throw new Error(`mkdir: directory exists: ${path}`)
+      throw new FsError('EEXIST', path)
     }
     if (opts.parents) {
       const segments = abs.split('/').filter((s) => s !== '')
@@ -266,7 +267,7 @@ export class KvgitFS implements FileSystem {
       }
     } else {
       if (!(await this.#dirExists(dirname(abs)))) {
-        throw new Error(`mkdir: parent directory does not exist: ${dirname(abs)}`)
+        throw new FsError('ENOENT', dirname(abs))
       }
       this.#addDir(abs)
     }
@@ -275,23 +276,23 @@ export class KvgitFS implements FileSystem {
   async remove(path: string): Promise<void> {
     const abs = resolve(path, this.#cwd)
     if ((await this.#getFile(abs)) === undefined) {
-      if (await this.#dirExists(abs)) throw new Error(`remove: is a directory: ${path}`)
-      throw new Error(`remove: no such file: ${path}`)
+      if (await this.#dirExists(abs)) throw new FsError('EISDIR', path)
+      throw new FsError('ENOENT', path)
     }
     this.#staged.delete(`f:${abs}`)
   }
 
   async rmdir(path: string): Promise<void> {
     const abs = resolve(path, this.#cwd)
-    if (abs === '/') throw new Error('rmdir: cannot remove root')
+    if (abs === '/') throw new FsError('EINVAL', path, 'Cannot remove the root')
     if ((await this.#getFile(abs)) !== undefined) {
-      throw new Error(`rmdir: not a directory: ${path}`)
+      throw new FsError('ENOTDIR', path)
     }
     if (!(await this.#dirExists(abs))) {
-      throw new Error(`rmdir: no such directory: ${path}`)
+      throw new FsError('ENOENT', path)
     }
     if (await this.#dirHasChildren(abs)) {
-      throw new Error(`rmdir: directory not empty: ${path}`)
+      throw new FsError('ENOTEMPTY', path)
     }
     this.#staged.delete(`d:${abs}`)
   }
@@ -304,7 +305,7 @@ export class KvgitFS implements FileSystem {
     const srcFile = await this.#getFile(absSrc)
     if (srcFile !== undefined) {
       if (!(await this.#dirExists(dirname(absDst)))) {
-        throw new Error(`rename: parent directory does not exist: ${dirname(absDst)}`)
+        throw new FsError('ENOENT', dirname(absDst))
       }
       this.#staged.delete(`f:${absSrc}`)
       this.#staged.set(`f:${absDst}`, srcFile)
@@ -353,7 +354,7 @@ export class KvgitFS implements FileSystem {
       return
     }
 
-    throw new Error(`rename: no such file or directory: ${src}`)
+    throw new FsError('ENOENT', src)
   }
 
   // ---------- iteration ----------
@@ -361,7 +362,7 @@ export class KvgitFS implements FileSystem {
   async list(path = '.', opts: { recursive?: boolean } = {}): Promise<string[]> {
     const abs = resolve(path, this.#cwd)
     if (!(await this.#dirExists(abs))) {
-      throw new Error(`list: no such directory: ${path}`)
+      throw new FsError((await this.exists(path)) ? 'ENOTDIR' : 'ENOENT', path)
     }
     const prefix = abs === '/' ? '/' : `${abs}/`
     const direct = new Set<string>()

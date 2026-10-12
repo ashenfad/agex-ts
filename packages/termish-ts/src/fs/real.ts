@@ -13,6 +13,7 @@
 
 import { promises as fsp } from 'node:fs'
 import * as nodePath from 'node:path/posix'
+import { FsError } from './errors'
 import { dirname, joinPath, resolve } from './path'
 import type { FileInfo, FileMetadata, FileSystem } from './protocol'
 
@@ -49,9 +50,9 @@ export class RealFS implements FileSystem {
     try {
       stat = await fsp.stat(real)
     } catch {
-      throw new Error(`chdir: not a directory: ${path}`)
+      throw new FsError('ENOENT', path)
     }
-    if (!stat.isDirectory()) throw new Error(`chdir: not a directory: ${path}`)
+    if (!stat.isDirectory()) throw new FsError('ENOTDIR', path)
     this.#cwd = abs
   }
 
@@ -63,9 +64,9 @@ export class RealFS implements FileSystem {
     try {
       stat = await fsp.stat(real)
     } catch {
-      throw new Error(`read: no such file: ${path}`)
+      throw new FsError('ENOENT', path)
     }
-    if (stat.isDirectory()) throw new Error(`read: is a directory: ${path}`)
+    if (stat.isDirectory()) throw new FsError('EISDIR', path)
     const buf = await fsp.readFile(real)
     return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength)
   }
@@ -106,7 +107,7 @@ export class RealFS implements FileSystem {
     try {
       s = await fsp.stat(real)
     } catch {
-      throw new Error(`stat: no such file or directory: ${path}`)
+      throw new FsError('ENOENT', path)
     }
     return {
       size: s.isDirectory() ? 0 : s.size,
@@ -126,18 +127,18 @@ export class RealFS implements FileSystem {
     try {
       const s = await fsp.stat(parentReal)
       if (!s.isDirectory()) {
-        throw new Error(`write: parent directory does not exist: ${dirname(abs)}`)
+        throw new FsError('ENOENT', dirname(abs))
       }
     } catch {
-      throw new Error(`write: parent directory does not exist: ${dirname(abs)}`)
+      throw new FsError('ENOENT', dirname(abs))
     }
     // Match MemoryFS: error if path is a directory.
     try {
       const s = await fsp.stat(real)
-      if (s.isDirectory()) throw new Error(`write: is a directory: ${path}`)
+      if (s.isDirectory()) throw new FsError('EISDIR', path)
     } catch (e) {
       // Stat failure is fine — file just doesn't exist yet.
-      if (e instanceof Error && e.message.startsWith('write:')) throw e
+      if (e instanceof FsError) throw e
     }
     await fsp.writeFile(real, content, { flag: mode === 'a' ? 'a' : 'w' })
   }
@@ -147,13 +148,13 @@ export class RealFS implements FileSystem {
     const real = this.#toReal(abs)
     try {
       const s = await fsp.stat(real)
-      if (s.isFile()) throw new Error(`mkdir: file exists at path: ${path}`)
+      if (s.isFile()) throw new FsError('EEXIST', path)
       if (s.isDirectory()) {
         if (opts.existOk) return
-        throw new Error(`mkdir: directory exists: ${path}`)
+        throw new FsError('EEXIST', path)
       }
     } catch (e) {
-      if (e instanceof Error && e.message.startsWith('mkdir:')) throw e
+      if (e instanceof FsError) throw e
       // Doesn't exist yet — fine, fall through.
     }
     if (!opts.parents) {
@@ -161,10 +162,10 @@ export class RealFS implements FileSystem {
       try {
         const s = await fsp.stat(parentReal)
         if (!s.isDirectory()) {
-          throw new Error(`mkdir: parent directory does not exist: ${dirname(abs)}`)
+          throw new FsError('ENOENT', dirname(abs))
         }
       } catch {
-        throw new Error(`mkdir: parent directory does not exist: ${dirname(abs)}`)
+        throw new FsError('ENOENT', dirname(abs))
       }
     }
     await fsp.mkdir(real, { recursive: opts.parents === true })
@@ -176,25 +177,25 @@ export class RealFS implements FileSystem {
     try {
       s = await fsp.stat(real)
     } catch {
-      throw new Error(`remove: no such file: ${path}`)
+      throw new FsError('ENOENT', path)
     }
-    if (s.isDirectory()) throw new Error(`remove: is a directory: ${path}`)
+    if (s.isDirectory()) throw new FsError('EISDIR', path)
     await fsp.unlink(real)
   }
 
   async rmdir(path: string): Promise<void> {
     const abs = resolve(path, this.#cwd)
-    if (abs === '/') throw new Error('rmdir: cannot remove root')
+    if (abs === '/') throw new FsError('EINVAL', path, 'Cannot remove the root')
     const real = this.#toReal(abs)
     let s: Awaited<ReturnType<typeof fsp.stat>>
     try {
       s = await fsp.stat(real)
     } catch {
-      throw new Error(`rmdir: no such directory: ${path}`)
+      throw new FsError('ENOENT', path)
     }
-    if (!s.isDirectory()) throw new Error(`rmdir: not a directory: ${path}`)
+    if (!s.isDirectory()) throw new FsError('ENOTDIR', path)
     const entries = await fsp.readdir(real)
-    if (entries.length > 0) throw new Error(`rmdir: directory not empty: ${path}`)
+    if (entries.length > 0) throw new FsError('ENOTEMPTY', path)
     await fsp.rmdir(real)
   }
 
@@ -205,17 +206,17 @@ export class RealFS implements FileSystem {
     try {
       await fsp.stat(realSrc)
     } catch {
-      throw new Error(`rename: no such file or directory: ${src}`)
+      throw new FsError('ENOENT', src)
     }
     const dstParent = dirname(resolve(dst, this.#cwd))
     try {
       const s = await fsp.stat(this.#toReal(dstParent))
       if (!s.isDirectory()) {
-        throw new Error(`rename: parent directory does not exist: ${dstParent}`)
+        throw new FsError('ENOENT', dstParent)
       }
     } catch (e) {
-      if (e instanceof Error && e.message.startsWith('rename:')) throw e
-      throw new Error(`rename: parent directory does not exist: ${dstParent}`)
+      if (e instanceof FsError) throw e
+      throw new FsError('ENOENT', dstParent)
     }
     await fsp.rename(realSrc, realDst)
   }
@@ -229,9 +230,9 @@ export class RealFS implements FileSystem {
     try {
       stat = await fsp.stat(real)
     } catch {
-      throw new Error(`list: no such directory: ${path}`)
+      throw new FsError('ENOENT', path)
     }
-    if (!stat.isDirectory()) throw new Error(`list: not a directory: ${path}`)
+    if (!stat.isDirectory()) throw new FsError('ENOTDIR', path)
 
     const out: string[] = []
     if (opts.recursive) {

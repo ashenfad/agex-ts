@@ -1,6 +1,6 @@
 # agex-ts rebuild: plan
 
-Status: proposed, 2026-10-12. Nothing started.
+Status: under way, 2026-10-12. F1 (termish-ts) is next.
 
 The Python side was rebuilt as three layers: kvgit (versioned storage),
 nontainer (the world: workspace, kernel, turn, delegation) and agex (the
@@ -34,8 +34,13 @@ plan: compaction folds within a run, and delegation is redesigned.
   The world package runs the harness corpus; agex-ts runs the shape
   corpus. kvgit and termish get golden fixtures from Python the same
   way (kvgit-ts's `merge-golden.json` is the precedent).
-- **One step is one PR,** or a short stack. The user drives merges and
-  releases, through changesets.
+- **The rebuild lands on `rebuild`, not `main`.** Each step is a PR into
+  `rebuild`, so `main` stays the code agex-studio is built from. When
+  the rebuild is done, `main` fast-forwards to it.
+- **One step is one PR,** or a short stack, with a changeset. The user
+  drives merges and releases. A foundation package can release from
+  `rebuild` along the way: the studio's `^0.x` ranges keep it on the
+  old line.
 
 ## Decided
 
@@ -114,12 +119,9 @@ from 0.1.8 to 0.2.2 is missing.
 old agex stack (0.12 era) from micropip, on its own OPFS store. Its fate
 is a studio-phase decision (below).
 
-## To decide before the foundation
+## Decided for the foundation (2026-10-12)
 
-These shape the first PRs. Each has a recommendation.
-
-1. **kvgit-ts adopts Python's v4 format, byte for byte.** Recommended:
-   content-addressed blobs, the `kvgit/4` commit hash, second times, the
+1. **kvgit-ts adopts Python's v4 format, byte for byte:** content-addressed blobs, the `kvgit/4` commit hash, second times, the
    same entry fields. Breaking is free now, and it lets a session cross
    between TS and Python later (sync, a server, a device), with golden
    fixtures from Python pinning it. Two things need settling with it:
@@ -132,19 +134,18 @@ These shape the first PRs. Each has a recommendation.
      registered on both sides) is what makes a session portable.
 2. **kvgit-ts takes Python's 0.4 API,** async: `Repo`, `Worktree`,
    `Snapshot`, `Commit`, `repo.branches`/`repo.tags`, typed errors, and
-   merge policy. Recommended; every consumer is rewritten in later
-   phases anyway.
-3. **The world package's name.** `@agex-ts/world` is suggested, after
-   the design's vocabulary (world, kernel, loop, host). It is
-   nontainer's counterpart, but not a port of all of it: no dud,
-   Postgres, apps serving or isolation rungs.
-4. **How agent code reads files.** Today: an async API over RPC
-   (`await fs.readFile(...)`). Recommended: keep it. The alternatives
-   (a snapshot copied in, OPFS sync handles) cost more than an `await`,
-   which TS agent code writes anyway.
-5. **Commit granularity.** Recommended: nontainer's, a commit per
-   mutating call plus one at the turn's end, stamped with how the run
-   ended. Today the studio commits once per turn.
+   merge policy. Every consumer is rewritten in later phases anyway.
+3. **The world package is `@agex-ts/world`,** after the design's
+   vocabulary (world, kernel, loop, host). It is nontainer's
+   counterpart, but not a port of all of it: no dud, Postgres, apps
+   serving or isolation rungs.
+4. **Agent code keeps async file access** over RPC
+   (`await fs.readFile(...)`). The alternatives (a snapshot copied in,
+   OPFS sync handles) cost more than an `await`, which TS agent code
+   writes anyway.
+5. **Commits follow nontainer:** one per mutating call, plus one at the
+   turn's end stamped with how the run ended. Today the studio commits
+   once per turn.
 
 ## The foundation
 

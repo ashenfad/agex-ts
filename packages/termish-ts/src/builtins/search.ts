@@ -15,14 +15,13 @@
  * (`search.ts → interpreter.ts → BUILTINS → search.ts`).
  */
 
-import { concat, encode } from '../bytes'
 import type { CommandContext, CommandHandler, CommandResult, Stdout } from '../context'
 import { TerminalError } from '../errors'
 import { describeFsError } from '../fs/errors'
 import type { FileInfo, FileSystem } from '../fs/protocol'
 import { globMatch } from '../glob'
 import { parseArgs } from './_argparse'
-import { dispatchArgv } from './_dispatch'
+import { type Dispatched, dispatchArgv } from './_dispatch'
 import { breToJs } from './_regex'
 
 const decoder = new TextDecoder('utf-8', { fatal: false })
@@ -431,20 +430,47 @@ class DeletePred implements FindPredicate {
   }
 }
 
+/** What `-exec` commands said on stderr, for find to report: warnings
+ *  from commands that succeeded, the diagnostics of ones that failed,
+ *  and whether a `+` batch failed (which makes find exit 1, as GNU's
+ *  does; a failing `;` command only makes its test false). */
+interface ExecReport {
+  readonly stderr: string[]
+  batchFailed: boolean
+}
+
+/** Run `argv` for `-exec`, writing its output to `stdout` and what it
+ *  said on stderr to `report`; whether it succeeded. */
+async function runExec(
+  argv: readonly string[],
+  fs: FileSystem,
+  stdout: Stdout,
+  executor: Executor,
+  report: ExecReport,
+): Promise<boolean> {
+  try {
+    const { output, stderr } = await executor(argv, fs)
+    if (stderr) report.stderr.push(stderr)
+    stdout.writeBytes(output)
+    return true
+  } catch (e) {
+    if (!(e instanceof TerminalError)) throw e
+    const said = e.stderr === undefined ? e.message : e.stderr
+    if (said) report.stderr.push(said)
+    return false
+  }
+}
+
 class ExecPred implements FindPredicate {
   constructor(
     private readonly cmdTokens: readonly string[],
     private readonly stdout: Stdout,
     private readonly executor: Executor,
+    private readonly report: ExecReport,
   ) {}
   async matches(item: FileInfo, fs: FileSystem): Promise<boolean> {
     const expanded = this.cmdTokens.map((t) => t.replaceAll('{}', item.path))
-    try {
-      this.stdout.writeBytes(await this.executor(expanded, fs))
-    } catch {
-      return false
-    }
-    return true
+    return runExec(expanded, fs, this.stdout, this.executor, this.report)
   }
 }
 
@@ -454,6 +480,7 @@ class ExecBatchPred implements FindPredicate {
     private readonly cmdTokens: readonly string[],
     private readonly stdout: Stdout,
     private readonly executor: Executor,
+    private readonly report: ExecReport,
   ) {}
   async matches(item: FileInfo): Promise<boolean> {
     this.collected.push(item.path)
@@ -466,10 +493,8 @@ class ExecBatchPred implements FindPredicate {
       if (t === '{}') expanded.push(...this.collected)
       else expanded.push(t)
     }
-    try {
-      this.stdout.writeBytes(await this.executor(expanded, fs))
-    } catch {
-      // best-effort; matches Python's silent swallow
+    if (!(await runExec(expanded, fs, this.stdout, this.executor, this.report))) {
+      this.report.batchFailed = true
     }
   }
 }
@@ -528,13 +553,13 @@ async function finalizeBatch(p: FindPredicate, fs: FileSystem): Promise<void> {
   }
 }
 
-/** Runs an `-exec` command line (argv, never re-parsed) and returns
- *  its output as bytes, with a warning on its stderr ahead of it. */
-type Executor = (argv: readonly string[], fs: FileSystem) => Promise<Uint8Array>
+/** Runs an `-exec` command line (argv, never re-parsed). */
+type Executor = (argv: readonly string[], fs: FileSystem) => Promise<Dispatched>
 
 interface ParseFindCtx {
   stdout: Stdout
   executor: Executor
+  report: ExecReport
 }
 
 function parseFindPredicates(tokens: readonly string[], parseCtx: ParseFindCtx): FindPredicate {
@@ -613,8 +638,8 @@ function parseFindPredicates(tokens: readonly string[], parseCtx: ParseFindCtx):
       pos++ // skip ; or +
       if (cmdTokens.length === 0) throw new TerminalError('find: -exec requires a command')
       return batch
-        ? new ExecBatchPred(cmdTokens, parseCtx.stdout, parseCtx.executor)
-        : new ExecPred(cmdTokens, parseCtx.stdout, parseCtx.executor)
+        ? new ExecBatchPred(cmdTokens, parseCtx.stdout, parseCtx.executor, parseCtx.report)
+        : new ExecPred(cmdTokens, parseCtx.stdout, parseCtx.executor, parseCtx.report)
     }
     throw new TerminalError(`find: unknown predicate: ${tok}`)
   }
@@ -698,16 +723,15 @@ export const find: CommandHandler = async (ctx: CommandContext) => {
 
   // `-exec` runs its argv through the registry, host-injected commands
   // included, and hands its output back as bytes, so a binary payload
-  // survives the trip through find unchanged.
-  const executor: Executor = async (argv, fs) => {
-    const { output, stderr } = await dispatchArgv(ctx, argv, fs)
-    if (!stderr) return output
-    return concat([encode(stderr.endsWith('\n') ? stderr : `${stderr}\n`), output])
-  }
+  // survives the trip through find unchanged. What the commands say on
+  // stderr is find's own stderr: shown, never fed down a pipe.
+  const executor: Executor = (argv, fs) => dispatchArgv(ctx, argv, fs)
+  const report: ExecReport = { stderr: [], batchFailed: false }
 
   const predicate = parseFindPredicates(predicateTokens, {
     stdout: ctx.stdout,
     executor,
+    report,
   })
   const actionPresent = hasAction(predicate)
 
@@ -739,6 +763,8 @@ export const find: CommandHandler = async (ctx: CommandContext) => {
   }
 
   await finalizeBatch(predicate, ctx.fs)
+  if (report.stderr.length === 0 && !report.batchFailed) return undefined
+  return { exitCode: report.batchFailed ? 1 : 0, stderr: report.stderr.join('\n') }
 }
 
 function describeError(e: unknown): string {

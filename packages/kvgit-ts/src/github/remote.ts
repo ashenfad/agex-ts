@@ -38,21 +38,15 @@
  * `expectedOld` doesn't match the persisted state fails with a
  * "stale transport state" error; `rebuildTransportState(branch)`
  * recovers from remote sidecars alone.
- *
- * The local store also backstops merge carries: a carried key whose
- * owning commit predates the frontier needs its value's blob SHA for
- * the tree; the bytes live locally at `<owner>:<key>`, so the
- * transport hashes (and if needed re-uploads) from there.
  */
 
 import type { Remote, RemoteRef } from '../sync/remote'
 import type { KVStore, WireCommit } from '../types'
-import { PARENT_COMMIT, blobPointer, dumps, safeLoads } from '../versioned/layout'
+import { PARENT_COMMIT, dumps, safeLoads } from '../versioned/layout'
 import type { GithubClient, TreeEntry } from './client'
-import { gitBlobSha1 } from './git-hash'
 import { INLINE_LIMIT, INLINE_TREE_BUDGET, inlinable, inlineCost } from './inline'
 import { PathPlanner, SIDECAR_PATH, naturalPath, relocatedPath } from './paths'
-import { decodeSidecar, encodeSidecar, wireFromSidecar } from './sidecar'
+import { SIDECAR_FORMAT, decodeSidecar, encodeSidecar, wireFromSidecar } from './sidecar'
 
 export interface GithubRemoteOptions {
   /** Commit author/committer identity on the sync repo. */
@@ -330,10 +324,6 @@ export class GithubRemote implements Remote {
           const fold = new Map(base)
           for (const key of wire.removals) fold.delete(key)
           for (const [key, entry] of sidecar.updates) fold.set(key, entry.path)
-          for (const [key, carry] of sidecar.carries) {
-            if (carry.path === undefined) foldComplete = false
-            else fold.set(key, carry.path)
-          }
           pathMaps.set(wire.hash, fold)
         }
 
@@ -399,14 +389,6 @@ export class GithubRemote implements Remote {
       const fold = new Map(base)
       for (const key of sidecar.removals) fold.delete(key)
       for (const [key, entry] of sidecar.updates) fold.set(key, entry.path)
-      for (const [key, carry] of sidecar.carries) {
-        if (carry.path === undefined) {
-          throw new Error(
-            `rebuildTransportState: carry ${JSON.stringify(key)} at ${sidecar.hash.slice(0, 7)} lacks a path (pre-carry-path sidecar)`,
-          )
-        }
-        fold.set(key, carry.path)
-      }
       pathMaps.set(sidecar.hash, fold)
       if (sidecar.hash === want) tipTreeSha = meta.treeSha
     }
@@ -644,10 +626,6 @@ export class GithubRemote implements Remote {
       })
     }
 
-    // (owner kvgit hash, key) → uploaded blob git SHA, for carries
-    // whose owner is in this stream.
-    const uploadedBlobs = new Map<string, string>()
-
     let head: CommitRender | null = null
     let headHash: string | null = null
 
@@ -688,30 +666,19 @@ export class GithubRemote implements Remote {
       }
 
       // Updates: place bytes at planned paths, inline where we can.
+      // A merge commit lists every key that differs from its first
+      // parent, the ones it took from the other side included, so this
+      // covers them too.
       //
       // `content` on a tree entry makes GitHub write the blob as part
       // of the tree call, so the per-key POST disappears into a request
       // that was happening anyway — the difference between N + 3 and 2
-      // requests for a commit, against a budget of 500 an hour.
-      //
-      // The blob SHA still has to be recorded for later carries, and it
-      // comes from `gitBlobSha1` rather than a response body. That is
-      // not a new leap of faith: `#carryBlobSha` already references
-      // locally-derived SHAs in trees without asking GitHub to confirm
-      // them. Probing the live API showed inline content stored
-      // verbatim for every shape kvgit ships, so the two agree.
+      // requests for a commit, against a budget of 500 an hour. Git
+      // stores equal bytes once, so a value the other side of a merge
+      // already pushed costs request bytes, not storage.
       for (const key of [...wc.updates.keys()].sort()) {
         const bytes = wc.updates.get(key) as Uint8Array
-        uploadedBlobs.set(`${wc.hash}:${key}`, await gitBlobSha1(bytes))
         entries.push(await placeValue(planner.assign(key), bytes))
-      }
-
-      // Carries: same bytes as the owning commit's write — find the
-      // blob SHA without re-shipping when possible.
-      for (const key of [...wc.carries.keys()].sort()) {
-        const carry = wc.carries.get(key) as { owner: string }
-        const sha = await this.#carryBlobSha(carry.owner, key, uploadedBlobs)
-        entries.push({ path: planner.assign(key), mode: '100644', type: 'blob', sha })
       }
 
       // Removals: clear the key's slot in the parent's rendering.
@@ -736,11 +703,10 @@ export class GithubRemote implements Remote {
       for (const p of wc.parents) {
         parentShas.push(await this.#gitShaOf(p, renders))
       }
-      const date = isoSeconds(wc.time)
-      const title =
-        typeof wc.info?.title === 'string' ? wc.info.title : `kvgit ${wc.hash.slice(0, 7)}`
+      const date = isoSeconds(wc.time.value)
+      const title = commitTitle(wc)
       const gitSha = await this.client.createCommit({
-        message: `${title}\n\nKvgit-Hash: ${wc.hash}\nKvgit-Format: 1`,
+        message: `${title}\n\nKvgit-Hash: ${wc.hash}\nKvgit-Format: ${SIDECAR_FORMAT}`,
         tree: treeSha,
         parents: parentShas,
         author: { ...this.#author, date },
@@ -775,30 +741,6 @@ export class GithubRemote implements Remote {
       assignments: [...head.planner.entries()],
     })
     return true
-  }
-
-  /** Blob SHA for a carried key: in-stream uploads first, then a
-   *  local hash of the store's bytes (`<owner>:<key>` exists locally
-   *  on any device that can construct the merge). No upload needed —
-   *  an owner below the frontier was pushed previously, so its blob
-   *  is already on the remote, referenced from the owner commit's
-   *  tree (GC-safe). If that invariant were ever violated,
-   *  `createTree` rejects the dangling SHA with a 422 — loud, not
-   *  corrupting. */
-  async #carryBlobSha(
-    owner: string,
-    key: string,
-    uploadedBlobs: ReadonlyMap<string, string>,
-  ): Promise<string> {
-    const inStream = uploadedBlobs.get(`${owner}:${key}`)
-    if (inStream !== undefined) return inStream
-    const bytes = await this.#store.get(blobPointer(owner, key))
-    if (bytes === null) {
-      throw new Error(
-        `GithubRemote.push: carried blob ${owner.slice(0, 7)}:${key} not found locally`,
-      )
-    }
-    return gitBlobSha1(bytes)
   }
 
   /** git SHA for a kvgit parent: in-stream renders, then the trailer
@@ -852,10 +794,20 @@ function plannerView(planner: PathPlanner): ReadonlyMap<string, string> {
   return new Map(planner.entries())
 }
 
-/** Seconds-resolution ISO 8601 — millisecond fidelity for kvgit time
- *  lives in the sidecar; git dates only need determinism. */
-function isoSeconds(epochMs: number): string {
-  return new Date(epochMs).toISOString().replace(/\.\d{3}Z$/, 'Z')
+/** Seconds-resolution ISO 8601 from kvgit's time in seconds — the
+ *  exact time lives in the sidecar; git dates only need determinism. */
+function isoSeconds(seconds: number): string {
+  return new Date(Math.floor(seconds) * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z')
+}
+
+/** A commit's git message title: its info's `title` when it has one. */
+function commitTitle(wc: WireCommit): string {
+  const info = wc.info
+  if (info !== null && typeof info === 'object' && 'title' in info) {
+    const title = (info as { title: unknown }).title
+    if (typeof title === 'string') return title
+  }
+  return `kvgit ${wc.hash.slice(0, 7)}`
 }
 
 /** Parse a commit message's `Kvgit-Hash:` trailer (exported for the

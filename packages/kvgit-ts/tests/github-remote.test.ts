@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { Memory } from '../src/backends/memory'
-import { gitBlobSha1 } from '../src/github/git-hash'
 import { GithubClient, GithubRemote, kvgitHashFromMessage } from '../src/github/index'
 import { inlineCost } from '../src/github/inline'
+import { PyFloat } from '../src/pyjson'
 import type { WireCommit } from '../src/types'
 
 interface Scripted {
@@ -267,12 +267,11 @@ describe('GithubRemote.push request cost', () => {
     ({
       hash: KV_A,
       parents: [],
-      time: 1_700_000_000_000,
+      parentGens: null,
+      time: new PyFloat(1_700_000_000),
       info: null,
       updates: new Map(),
       removals: new Set(),
-      meta: new Map(),
-      carries: new Map(),
       ...over,
     }) as WireCommit
 
@@ -294,11 +293,6 @@ describe('GithubRemote.push request cost', () => {
           ['meta', enc.encode('{"title":"Session"}')],
           ['log/1', enc.encode('{"role":"user"}')],
           ['log/2', enc.encode('{"role":"assistant"}')],
-        ]),
-        meta: new Map([
-          ['meta', { createdAt: 1 }],
-          ['log/1', { createdAt: 2 }],
-          ['log/2', { createdAt: 3 }],
         ]),
       }),
     ])
@@ -329,10 +323,6 @@ describe('GithubRemote.push request cost', () => {
           ['text', enc.encode('inlinable')],
           ['image', png],
         ]),
-        meta: new Map([
-          ['text', { createdAt: 1 }],
-          ['image', { createdAt: 2 }],
-        ]),
       }),
     ])
     expect(ok).toBe(true)
@@ -348,45 +338,6 @@ describe('GithubRemote.push request cost', () => {
     expect(entryAt(treeCall, 'image')?.sha).toBe('b'.repeat(40))
     expect(entryAt(treeCall, 'image')?.content).toBeUndefined()
   })
-
-  it('records the locally-derived SHA so a later carry resolves', async () => {
-    // An inlined value's SHA never comes back from GitHub, so the local
-    // hash has to be right. It becomes observable one commit later: a
-    // carry references that SHA in its own tree, and if the hash were
-    // wrong the entry would point at a blob that does not exist.
-    const { remote, calls } = makeHarness([
-      { status: 404, body: { message: 'Not Found' } }, // getRef
-      { status: 201, body: { sha: 't1'.repeat(20) } }, // tree, commit 1
-      { status: 201, body: { sha: 'c1'.repeat(20) } }, // commit 1
-      { status: 201, body: { sha: 't2'.repeat(20) } }, // tree, commit 2
-      { status: 201, body: { sha: 'c2'.repeat(20) } }, // commit 2
-      { status: 201, body: {} }, // createRef
-    ])
-    const bytes = enc.encode('written once, carried after')
-    const ok = await remote.push('chat-x', null, KV_B, [
-      wire({
-        hash: KV_A,
-        updates: new Map([['k', bytes]]),
-        meta: new Map([['k', { createdAt: 1 }]]),
-      }),
-      wire({
-        hash: KV_B,
-        parents: [KV_A],
-        carries: new Map([['k', { owner: KV_A, size: bytes.length, createdAt: 1 }]]),
-      }),
-    ])
-    expect(ok).toBe(true)
-
-    // Two commits, no blob uploads: 1 + 2 + 2 + 1.
-    expect(calls.length).toBe(6)
-    expect(calls.filter((c) => c.url.includes('git/blobs'))).toEqual([])
-
-    const trees = calls.filter((c) => c.url.includes('git/trees'))
-    expect(entryAt(trees[0], 'k')?.content).toBe('written once, carried after')
-    // The carry cites the hash we computed locally for the inlined write.
-    expect(entryAt(trees[1], 'k')?.sha).toBe(await gitBlobSha1(bytes))
-    expect(entryAt(trees[1], 'k')?.content).toBeUndefined()
-  })
 })
 
 describe('GithubRemote.push inline budget', () => {
@@ -395,12 +346,11 @@ describe('GithubRemote.push inline budget', () => {
     ({
       hash: KV_A,
       parents: [],
-      time: 1_700_000_000_000,
+      parentGens: null,
+      time: new PyFloat(1_700_000_000),
       info: null,
       updates: new Map(),
       removals: new Set(),
-      meta: new Map(),
-      carries: new Map(),
       ...over,
     }) as WireCommit
 
@@ -418,7 +368,6 @@ describe('GithubRemote.push inline budget', () => {
 
   const updatesOf = (n: number, value: string): Partial<WireCommit> => ({
     updates: new Map(Array.from({ length: n }, (_, i) => [`k${i}`, enc.encode(value)])),
-    meta: new Map(Array.from({ length: n }, (_, i) => [`k${i}`, { createdAt: i }])),
   })
 
   it('falls back to blobs once the tree body budget is spent', async () => {

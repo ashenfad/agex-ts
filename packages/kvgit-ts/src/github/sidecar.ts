@@ -3,108 +3,84 @@
  *
  * Each git commit in a sync repo carries one sidecar blob — the
  * authoritative, kernel-agnostic record of the kvgit commit it
- * mirrors: identity (hash, parents, time, info) plus the DELTA
- * bookkeeping replay needs (update keys → tree paths + createdAt,
- * removals, carries). Update VALUE BYTES are not here — they're tree
- * blobs at the recorded paths; a fetcher combines sidecar + blobs
- * into a `WireCommit`.
+ * mirrors: identity (hash, parents, their generations, time, info)
+ * plus the DELTA replay needs (changed keys → tree paths, removals).
+ * Value BYTES are not here — they're tree blobs at the recorded paths;
+ * a fetcher combines sidecar + blobs into a `WireCommit`.
  *
  * Deltas, not snapshots (design decision D7): sidecar size tracks the
  * change, not the keyset, at the cost of full-history replay on
  * fresh-device fetch.
  *
- * Encoding is **byte-deterministic** (sorted record keys, sorted
- * removals, parents in significant order, no whitespace): the same
- * wire commit always produces the same sidecar bytes, so an
- * interrupted push that re-creates the blob gets the same git SHA —
- * resumability falls out of determinism, matching the
- * explicit-commit-dates property in `client.ts`.
+ * Encoding is **byte-deterministic** (fixed field order, sorted keys
+ * and removals, parents in significant order, compact JSON as Python's
+ * `json.dumps` writes it): the same wire commit always produces the
+ * same sidecar bytes, so an interrupted push that re-creates the blob
+ * gets the same git SHA. The time and info are written as recorded
+ * (floats as floats), so they re-encode to the bytes the commit hash
+ * covered.
  */
 
-import type { CommitInfo, WireCommit } from '../types'
+import { PyFloat, pyDumpsBytes, pyLoadsBytes } from '../pyjson'
+import type { WireCommit } from '../types'
 
-export const SIDECAR_FORMAT = 1
+export const SIDECAR_FORMAT = 2
 
-/** Sidecar fields minus update value bytes — what a fetcher learns
- *  before pulling blobs. */
+/** Sidecar fields minus value bytes — what a fetcher learns before
+ *  pulling blobs. */
 export interface DecodedSidecar {
-  /** Encoder discriminator (`'ts'` / `'py'`) — same caveat as
-   *  bundles: blob bytes are kernel-opaque. */
+  /** Encoder discriminator (`'ts'` / `'py'`): blob bytes are
+   *  kernel-opaque, as in bundles. */
   kernel: string
   hash: string
   parents: readonly string[]
-  time: number
-  info: CommitInfo | null
-  /** key → where the value blob lives in this commit's tree, plus
-   *  meta fidelity. */
-  updates: ReadonlyMap<string, { path: string; createdAt: number }>
+  parentGens: readonly number[] | null
+  time: PyFloat
+  info: unknown
+  /** Changed key → where its value blob lives in this commit's tree. */
+  updates: ReadonlyMap<string, { path: string }>
   removals: ReadonlySet<string>
-  /** `path` records where the carried key sits in THIS commit's tree
-   *  (assigned by the pusher's planner at the merge — not derivable
-   *  from the owner's sidecar, whose lineage may have placed the key
-   *  elsewhere). Replay ignores it; transport-state rebuild needs it. */
-  carries: ReadonlyMap<string, { owner: string; size: number; createdAt: number; path?: string }>
 }
 
-const _encoder = new TextEncoder()
-const _decoder = new TextDecoder()
-
 /**
- * Encode a wire commit's sidecar. `paths` must cover every update key
- * (the caller's `PathPlanner` assignments); anything missing throws —
- * a sidecar that can't locate its own blobs is unrecoverable later.
+ * Encode a wire commit's sidecar. `paths` must cover every changed key
+ * (the caller's `PathPlanner` assignments); anything missing throws — a
+ * sidecar that can't locate its own blobs is unrecoverable later.
  */
 export function encodeSidecar(
   wire: WireCommit,
   opts: { kernel: string; paths: ReadonlyMap<string, string> },
 ): Uint8Array {
-  const updates: Record<string, { path: string; createdAt: number }> = {}
+  const updates: Array<[string, { path: string }]> = []
   for (const key of [...wire.updates.keys()].sort()) {
     const path = opts.paths.get(key)
     if (path === undefined) {
       throw new Error(`encodeSidecar: no tree path assigned for update key ${JSON.stringify(key)}`)
     }
-    const createdAt = wire.meta.get(key)?.createdAt ?? wire.time
-    updates[key] = { path, createdAt }
+    updates.push([key, { path }])
   }
-
-  const carries: Record<string, { owner: string; size: number; createdAt: number; path?: string }> =
-    {}
-  for (const key of [...wire.carries.keys()].sort()) {
-    const carry = wire.carries.get(key) as { owner: string; size: number; createdAt: number }
-    const path = opts.paths.get(key)
-    carries[key] = {
-      owner: carry.owner,
-      size: carry.size,
-      createdAt: carry.createdAt,
-      ...(path !== undefined && { path }),
-    }
-  }
-
-  // Field order is fixed by construction; JSON.stringify preserves
-  // insertion order, giving byte-deterministic output.
-  return _encoder.encode(
-    JSON.stringify({
-      format: SIDECAR_FORMAT,
-      kernel: opts.kernel,
-      hash: wire.hash,
-      parents: wire.parents,
-      time: wire.time,
-      info: wire.info,
-      updates,
-      removals: [...wire.removals].sort(),
-      carries,
-    }),
+  return pyDumpsBytes(
+    new Map<string, unknown>([
+      ['format', SIDECAR_FORMAT],
+      ['kernel', opts.kernel],
+      ['hash', wire.hash],
+      ['parents', [...wire.parents]],
+      ['parentGens', wire.parentGens === null ? null : [...wire.parentGens]],
+      ['time', wire.time],
+      ['info', wire.info ?? null],
+      ['updates', new Map(updates)],
+      ['removals', [...wire.removals].sort()],
+    ]),
   )
 }
 
 /** Decode and validate a sidecar blob. Throws with a field-specific
- *  message on anything malformed — a bad sidecar means the commit
- *  (and everything after it) can't replay, so fail loudly. */
+ *  message on anything malformed — a bad sidecar means the commit (and
+ *  everything after it) can't replay, so fail loudly. */
 export function decodeSidecar(bytes: Uint8Array): DecodedSidecar {
   let raw: unknown
   try {
-    raw = JSON.parse(_decoder.decode(bytes))
+    raw = pyLoadsBytes(bytes)
   } catch {
     throw new Error('decodeSidecar: not valid JSON')
   }
@@ -118,70 +94,55 @@ export function decodeSidecar(bytes: Uint8Array): DecodedSidecar {
   }
   const kernel = expectString(obj, 'kernel')
   const hash = expectString(obj, 'hash')
-  const time = expectNumber(obj, 'time')
-  const info =
-    obj.info === null || obj.info === undefined ? null : (expectRecord(obj, 'info') as CommitInfo)
+  if (!(obj.time instanceof PyFloat)) throw new Error('decodeSidecar: time must be a float')
+  const time = obj.time
 
   if (!Array.isArray(obj.parents) || obj.parents.some((p) => typeof p !== 'string')) {
     throw new Error('decodeSidecar: parents must be a string array')
   }
   const parents = obj.parents as string[]
+  let parentGens: number[] | null = null
+  if (obj.parentGens !== null) {
+    if (
+      !Array.isArray(obj.parentGens) ||
+      obj.parentGens.some((g) => typeof g !== 'number' || !Number.isInteger(g))
+    ) {
+      throw new Error('decodeSidecar: parentGens must be an integer array or null')
+    }
+    parentGens = obj.parentGens as number[]
+  }
 
   if (!Array.isArray(obj.removals) || obj.removals.some((r) => typeof r !== 'string')) {
     throw new Error('decodeSidecar: removals must be a string array')
   }
   const removals = new Set(obj.removals as string[])
 
-  const updates = new Map<string, { path: string; createdAt: number }>()
+  const updates = new Map<string, { path: string }>()
   for (const [key, value] of Object.entries(expectRecord(obj, 'updates'))) {
     const entry = value as Record<string, unknown>
-    if (typeof entry?.path !== 'string' || typeof entry?.createdAt !== 'number') {
+    if (typeof entry?.path !== 'string') {
       throw new Error(`decodeSidecar: malformed update entry for ${JSON.stringify(key)}`)
     }
-    updates.set(key, { path: entry.path, createdAt: entry.createdAt })
+    updates.set(key, { path: entry.path })
   }
 
-  const carries = new Map<
-    string,
-    { owner: string; size: number; createdAt: number; path?: string }
-  >()
-  for (const [key, value] of Object.entries(expectRecord(obj, 'carries'))) {
-    const entry = value as Record<string, unknown>
-    if (
-      typeof entry?.owner !== 'string' ||
-      typeof entry?.size !== 'number' ||
-      typeof entry?.createdAt !== 'number' ||
-      (entry.path !== undefined && typeof entry.path !== 'string')
-    ) {
-      throw new Error(`decodeSidecar: malformed carry entry for ${JSON.stringify(key)}`)
-    }
-    carries.set(key, {
-      owner: entry.owner,
-      size: entry.size,
-      createdAt: entry.createdAt,
-      ...(typeof entry.path === 'string' && { path: entry.path }),
-    })
-  }
-
-  return { kernel, hash, parents, time, info, updates, removals, carries }
+  return { kernel, hash, parents, parentGens, time, info: obj.info ?? null, updates, removals }
 }
 
-/** Reassemble a `WireCommit` from a decoded sidecar plus the update
- *  value bytes fetched from the tree. Every update key must have its
- *  bytes; extras are rejected (they'd silently change the hash). */
+/** Reassemble a `WireCommit` from a decoded sidecar plus the value
+ *  bytes fetched from the tree. Every changed key must have its bytes;
+ *  extras are rejected (they'd silently change the hash). */
 export function wireFromSidecar(
   sidecar: DecodedSidecar,
   values: ReadonlyMap<string, Uint8Array>,
 ): WireCommit {
   const updates = new Map<string, Uint8Array>()
-  const meta = new Map<string, { createdAt: number }>()
-  for (const [key, entry] of sidecar.updates) {
+  for (const key of sidecar.updates.keys()) {
     const bytes = values.get(key)
     if (bytes === undefined) {
       throw new Error(`wireFromSidecar: missing value bytes for update key ${JSON.stringify(key)}`)
     }
     updates.set(key, bytes)
-    meta.set(key, { createdAt: entry.createdAt })
   }
   if (values.size !== sidecar.updates.size) {
     throw new Error(
@@ -191,24 +152,17 @@ export function wireFromSidecar(
   return {
     hash: sidecar.hash,
     parents: sidecar.parents,
+    parentGens: sidecar.parentGens,
     time: sidecar.time,
     info: sidecar.info,
     updates,
     removals: sidecar.removals,
-    meta,
-    carries: sidecar.carries,
   }
 }
 
 function expectString(obj: Record<string, unknown>, field: string): string {
   const value = obj[field]
   if (typeof value !== 'string') throw new Error(`decodeSidecar: ${field} must be a string`)
-  return value
-}
-
-function expectNumber(obj: Record<string, unknown>, field: string): number {
-  const value = obj[field]
-  if (typeof value !== 'number') throw new Error(`decodeSidecar: ${field} must be a number`)
   return value
 }
 

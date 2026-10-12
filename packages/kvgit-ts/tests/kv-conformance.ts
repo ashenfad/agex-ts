@@ -155,6 +155,62 @@ export function runConformance(name: string, makeStore: StoreFactory): void {
       })
     })
 
+    describe('casMany', () => {
+      const text = (b: Uint8Array | null) => (b === null ? null : new TextDecoder().decode(b))
+
+      it('lands every write and removal when every expectation holds', async () => {
+        const s = await makeStore()
+        await s.setMany([
+          ['head', bytes('h1')],
+          ['gone', bytes('x')],
+        ])
+        const ok = await s.casMany(
+          new Map([
+            ['head', bytes('h1')],
+            ['new', null],
+          ]),
+          new Map([
+            ['head', bytes('h2')],
+            ['prev', bytes('h1')],
+          ]),
+          ['gone'],
+        )
+        expect(ok).toBe(true)
+        expect(text(await s.get('head'))).toBe('h2')
+        expect(text(await s.get('prev'))).toBe('h1')
+        expect(await s.get('gone')).toBeNull()
+      })
+
+      it('changes nothing when one expectation fails', async () => {
+        const s = await makeStore()
+        await s.setMany([
+          ['head', bytes('h1')],
+          ['gone', bytes('x')],
+        ])
+        for (const expected of [
+          new Map([['head', bytes('other')]]),
+          new Map<string, Uint8Array | null>([['head', null]]),
+          new Map([['missing', bytes('x')]]),
+        ]) {
+          const ok = await s.casMany(expected, new Map([['head', bytes('h2')]]), ['gone'])
+          expect(ok).toBe(false)
+        }
+        expect(text(await s.get('head'))).toBe('h1')
+        expect(text(await s.get('gone'))).toBe('x')
+      })
+
+      it('lands unconditionally with nothing expected', async () => {
+        const s = await makeStore()
+        expect(await s.casMany(new Map(), new Map([['k', bytes('v')]]))).toBe(true)
+        expect(text(await s.get('k'))).toBe('v')
+      })
+
+      it('refuses a key both written and removed', async () => {
+        const s = await makeStore()
+        await expect(s.casMany(new Map(), new Map([['k', bytes('v')]]), ['k'])).rejects.toThrow()
+      })
+    })
+
     describe('iteration', () => {
       it('keys() yields all stored keys', async () => {
         const s = await makeStore()

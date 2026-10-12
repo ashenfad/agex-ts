@@ -3,8 +3,10 @@
  *
  * A persistent `string -> Uint8Array` map laid out in a `KVStore` so that
  * unchanged subtrees are shared across versions by hash equality. Each
- * node is JSON-serialized (sorted keys, no whitespace, base64-encoded
- * values inline in leaves) and stored under its SHA-256 hash. A HAMT is
+ * node is JSON-serialized as Python kvgit serializes it (`json.dumps`
+ * with sorted keys, no whitespace, ASCII escapes; base64-encoded values
+ * inline in leaves) and stored under its SHA-256 hash, so a HAMT either
+ * language builds has the same nodes and root. A HAMT is
  * identified by its root node hash; mutations produce a new root and a
  * set of pending node bytes that the caller persists (atomically, if
  * desired) by writing them through the underlying store.
@@ -14,6 +16,7 @@
  * adds blob-pointer + meta-entry semantics on top.
  */
 
+import { pyDumpsBytes } from './pyjson'
 import type { HamtDiff, KVStore } from './types'
 
 /** SHA-256 hex digest length. Bounds the maximum trie depth. */
@@ -35,18 +38,15 @@ type Node = LeafNode | BranchNode
 
 const EMPTY_LEAF: LeafNode = { items: {}, kind: 'leaf' }
 
-let _emptyHashPromise: Promise<string> | null = null
-
 /**
- * Hash of the canonical empty leaf. Computed lazily on first use and
- * cached. The empty leaf itself is never written to the store; reads
- * short-circuit on this hash.
+ * Hash of the canonical empty leaf, `{"items":{},"kind":"leaf"}`, the
+ * root of every empty HAMT. The empty leaf itself is never written to
+ * the store; reads short-circuit on this hash.
  */
+export const EMPTY_HASH = 'a01262f23a252767acf71bcd9d1ca8deca5fda1519228657ef7d44990698fd30'
+
 function emptyHash(): Promise<string> {
-  if (_emptyHashPromise === null) {
-    _emptyHashPromise = sha256Hex(nodeBytes(EMPTY_LEAF))
-  }
-  return _emptyHashPromise
+  return Promise.resolve(EMPTY_HASH)
 }
 
 // ---------------------------------------------------------------------------
@@ -57,31 +57,18 @@ const _encoder = new TextEncoder()
 const _decoder = new TextDecoder()
 
 /**
- * Serialize a node deterministically: keys sorted at every depth, no
- * whitespace. Two HAMTs with the same logical contents will produce
- * byte-for-byte identical node bytes — which is what makes content
- * addressing work.
+ * Serialize a node deterministically, as Python's `json.dumps(node,
+ * sort_keys=True, separators=(",", ":"))` does: keys sorted by code
+ * point, no whitespace, non-ASCII escaped. Two HAMTs with the same
+ * logical contents produce byte-for-byte identical nodes, which is what
+ * makes content addressing work, across languages too.
  */
 function nodeBytes(node: Node): Uint8Array {
-  return _encoder.encode(canonicalJson(node))
+  return pyDumpsBytes(node, { sortKeys: true })
 }
 
 function parseNode(bytes: Uint8Array): Node {
   return JSON.parse(_decoder.decode(bytes)) as Node
-}
-
-/** JSON serializer with sorted object keys and no whitespace. */
-function canonicalJson(value: unknown): string {
-  if (value === null || typeof value !== 'object') {
-    return JSON.stringify(value)
-  }
-  if (Array.isArray(value)) {
-    return `[${value.map(canonicalJson).join(',')}]`
-  }
-  const obj = value as Record<string, unknown>
-  const keys = Object.keys(obj).sort()
-  const parts = keys.map((k) => `${JSON.stringify(k)}:${canonicalJson(obj[k])}`)
-  return `{${parts.join(',')}}`
 }
 
 async function sha256Hex(data: Uint8Array): Promise<string> {

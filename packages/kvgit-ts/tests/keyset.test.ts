@@ -5,33 +5,28 @@ import type { KeysetEntry } from '../src/types'
 
 const enc = new TextDecoder()
 
-function entry(blob: string, size: number, createdAt: number): KeysetEntry {
-  return { blob, meta: { size, createdAt } }
+function entry(blob: string, size: number): KeysetEntry {
+  return { blob, meta: { size } }
 }
 
 describe('encodeEntry / decodeEntry', () => {
   it('round-trips a KeysetEntry', () => {
-    const e = entry('abc123:user_key', 42, 1700000000000)
+    const e = entry('abc123:user_key', 42)
     const decoded = decodeEntry(encodeEntry(e))
     expect(decoded).toEqual(e)
   })
 
   it('encoding is deterministic for the same logical entry', () => {
-    const a = encodeEntry(entry('blob', 10, 12345))
-    const b = encodeEntry(entry('blob', 10, 12345))
+    const a = encodeEntry(entry('blob', 10))
+    const b = encodeEntry(entry('blob', 10))
     expect(enc.decode(a)).toBe(enc.decode(b))
   })
 
-  it('encoding uses sorted meta keys regardless of construction order', () => {
-    // Even if we construct with a different field order, the JSON output
-    // sorts createdAt before size — required for hash determinism.
-    const e1 = encodeEntry({ blob: 'x', meta: { size: 1, createdAt: 2 } })
-    const e2 = encodeEntry({ blob: 'x', meta: { createdAt: 2, size: 1 } })
-    expect(enc.decode(e1)).toBe(enc.decode(e2))
-    expect(enc.decode(e1)).toContain('"createdAt"')
-    // createdAt must appear before size in the output bytes
-    const text = enc.decode(e1)
-    expect(text.indexOf('createdAt')).toBeLessThan(text.indexOf('size'))
+  it('encodes as Python kvgit writes an entry', () => {
+    expect(enc.decode(encodeEntry(entry('kvgit:blob:ab', 3)))).toBe('["kvgit:blob:ab",{"size":3}]')
+    const chunked = encodeEntry({ blob: 'x', meta: { size: 1, chunks: ['c1', 'c2'] } })
+    expect(enc.decode(chunked)).toBe('["x",{"size":1,"chunks":["c1","c2"]}]')
+    expect(decodeEntry(chunked)).toEqual({ blob: 'x', meta: { size: 1, chunks: ['c1', 'c2'] } })
   })
 })
 
@@ -57,7 +52,7 @@ describe('Keyset — round-trip', () => {
   it('stores and retrieves a KeysetEntry', async () => {
     const store = new Memory()
     const ks0 = await Keyset.empty(store)
-    const e = entry('commit1:k', 100, 1700000000000)
+    const e = entry('commit1:k', 100)
     const ks1 = await ks0.persist({ updates: [['k', e]] })
     expect(await ks1.get('k')).toEqual(e)
     expect(await ks1.getBlob('k')).toBe(e.blob)
@@ -70,7 +65,7 @@ describe('Keyset — round-trip', () => {
     const updates: Array<[string, KeysetEntry]> = []
     for (let i = 0; i < 20; i++) {
       const k = `k${i}`
-      const e = entry(`c${i}:${k}`, i, 1700000000000 + i)
+      const e = entry(`c${i}:${k}`, i)
       updates.push([k, e])
       entries.set(k, e)
     }
@@ -84,7 +79,7 @@ describe('Keyset — round-trip', () => {
   it('removes entries', async () => {
     const store = new Memory()
     let ks = await Keyset.empty(store)
-    ks = await ks.persist({ updates: [['k', entry('blob', 1, 1)]] })
+    ks = await ks.persist({ updates: [['k', entry('blob', 1)]] })
     ks = await ks.persist({ removals: ['k'] })
     expect(await ks.get('k')).toBeNull()
   })
@@ -94,7 +89,7 @@ describe('Keyset — uses a different storage prefix from raw HAMT', () => {
   it('stores HAMT nodes under kvgit:keyset:* by default', async () => {
     const store = new Memory()
     const ks = await Keyset.empty(store)
-    const ks1 = await ks.persist({ updates: [['k', entry('b', 1, 1)]] })
+    const ks1 = await ks.persist({ updates: [['k', entry('b', 1)]] })
     const allKeys: string[] = []
     for await (const k of store.keys()) allKeys.push(k)
     expect(allKeys.length).toBeGreaterThan(0)
@@ -109,7 +104,7 @@ describe('Keyset — walk', () => {
     let ks = await Keyset.empty(store, { bucketMax: 2 }) // force splits
     const updates: Array<[string, KeysetEntry]> = []
     for (let i = 0; i < 10; i++) {
-      updates.push([`k${i}`, entry(`c:${i}`, i, i)])
+      updates.push([`k${i}`, entry(`c:${i}`, i)])
     }
     ks = await ks.persist({ updates })
 
@@ -127,7 +122,7 @@ describe('Keyset — walk', () => {
     ks = await ks.persist({
       updates: Array.from({ length: 8 }, (_, i): [string, KeysetEntry] => [
         `k${i}`,
-        entry(`c:${i}`, i, i),
+        entry(`c:${i}`, i),
       ]),
     })
     const [, allNodes] = await ks.walk()
@@ -144,18 +139,18 @@ describe('Keyset — diff', () => {
     let a = await Keyset.empty(store)
     a = await a.persist({
       updates: [
-        ['k1', entry('c:1', 1, 100)],
-        ['k2', entry('c:2', 2, 200)],
-        ['k3', entry('c:3', 3, 300)],
+        ['k1', entry('c:1', 1)],
+        ['k2', entry('c:2', 2)],
+        ['k3', entry('c:3', 3)],
       ],
     })
 
     let b = await Keyset.empty(store)
     b = await b.persist({
       updates: [
-        ['k1', entry('c:1', 1, 100)], // unchanged
-        ['k2', entry('c:2-new', 22, 222)], // modified
-        ['k4', entry('c:4', 4, 400)], // added
+        ['k1', entry('c:1', 1)], // unchanged
+        ['k2', entry('c:2-new', 22)], // modified
+        ['k4', entry('c:4', 4)], // added
         // k3 removed
       ],
     })
@@ -165,18 +160,18 @@ describe('Keyset — diff', () => {
     expect([...d.removed.keys()]).toEqual(['k3'])
     expect([...d.modified.keys()]).toEqual(['k2'])
 
-    expect(d.added.get('k4')).toEqual(entry('c:4', 4, 400))
-    expect(d.removed.get('k3')).toEqual(entry('c:3', 3, 300))
+    expect(d.added.get('k4')).toEqual(entry('c:4', 4))
+    expect(d.removed.get('k3')).toEqual(entry('c:3', 3))
     const [oldK2, newK2] = d.modified.get('k2') as [KeysetEntry, KeysetEntry]
-    expect(oldK2).toEqual(entry('c:2', 2, 200))
-    expect(newK2).toEqual(entry('c:2-new', 22, 222))
+    expect(oldK2).toEqual(entry('c:2', 2))
+    expect(newK2).toEqual(entry('c:2-new', 22))
   })
 
   it('identical Keysets diff to empty', async () => {
     const store = new Memory()
     const updates: Array<[string, KeysetEntry]> = [
-      ['k1', entry('c:1', 1, 100)],
-      ['k2', entry('c:2', 2, 200)],
+      ['k1', entry('c:1', 1)],
+      ['k2', entry('c:2', 2)],
     ]
     const a = await (await Keyset.empty(store)).persist({ updates })
     const b = await (await Keyset.empty(store)).persist({ updates })
@@ -193,7 +188,7 @@ describe('Keyset — pending semantics', () => {
     const store = new Memory()
     const ks0 = await Keyset.empty(store)
     const ks1 = await ks0.updated({
-      updates: [['k', entry('blob', 1, 1)]],
+      updates: [['k', entry('blob', 1)]],
     })
     expect(ks1.pending.size).toBeGreaterThan(0)
     const before: string[] = []
@@ -205,18 +200,18 @@ describe('Keyset — pending semantics', () => {
     const after: string[] = []
     for await (const k of store.keys()) after.push(k)
     expect(after.length).toBeGreaterThan(0)
-    expect(await ks2.get('k')).toEqual(entry('blob', 1, 1))
+    expect(await ks2.get('k')).toEqual(entry('blob', 1))
   })
 })
 
 describe('Keyset — fromRoot', () => {
   it('reconstructs a Keyset from a known root hash', async () => {
     const store = new Memory()
-    const ks1 = await (await Keyset.empty(store)).persist({ updates: [['k', entry('blob', 1, 1)]] })
+    const ks1 = await (await Keyset.empty(store)).persist({ updates: [['k', entry('blob', 1)]] })
 
     // Fresh handle on the same data
     const ks2 = Keyset.fromRoot(store, ks1.root)
-    expect(await ks2.get('k')).toEqual(entry('blob', 1, 1))
+    expect(await ks2.get('k')).toEqual(entry('blob', 1))
     expect(ks2.root).toBe(ks1.root)
   })
 })

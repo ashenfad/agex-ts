@@ -9,6 +9,7 @@ import {
   setSyncHead,
   walkDelta,
 } from '../src/index'
+import { ROOT_COMMIT } from '../src/versioned/layout'
 
 const enc = new TextEncoder()
 const dec = new TextDecoder()
@@ -24,7 +25,8 @@ async function collect(store: Memory, want: string, have?: string[]): Promise<Wi
 }
 
 /** A small source store: linear commits plus a divergence merged back
- *  in (so the stream contains a multi-parent commit with a carry). */
+ *  in (so the stream contains a multi-parent commit that takes a key
+ *  from its second parent). */
 async function buildSource(): Promise<{ store: Memory; head: string; midpoint: string }> {
   const store = new Memory()
   const vk = await VersionedKV.open(store)
@@ -39,7 +41,7 @@ async function buildSource(): Promise<{ store: Memory; head: string; midpoint: s
   const midpoint = vk.currentCommit
 
   // Divergence: a second writer on a stale base forces a three-way
-  // merge with a carried key.
+  // merge that takes a key from the other side.
   const stale = await VersionedKV.open(store, { commitHash: midpoint })
   await vk.commit({ updates: new Map([['ka', bytes('from-a')]]) })
   const r = await stale.commit({ updates: new Map([['kb', bytes('from-b')]]) })
@@ -157,14 +159,35 @@ describe('applyWire — refusals', () => {
     expect(await dst.get(`__commit_root__${target.hash}`)).toBeNull()
   })
 
-  it('refuses a commit whose carry provenance was dropped', async () => {
+  it('refuses a merge that drops a key it took from its second parent', async () => {
     const { store: src, head } = await buildSource()
     const wire = await collect(src, head)
-    const merge = wire.find((w) => w.carries.size > 0) as WireCommit
-    const stripped = wire.map((w) => (w === merge ? { ...w, carries: new Map() } : w))
+    const merge = wire.find((w) => w.parents.length > 1) as WireCommit
+    expect(merge.updates.size).toBeGreaterThan(0)
+    const stripped = wire.map((w) => (w === merge ? { ...w, updates: new Map() } : w))
 
     const dst = new Memory()
     await expect(applyWire(dst, stripped)).rejects.toThrow(/integrity check failed/)
+  })
+
+  it('refuses a commit whose info was altered', async () => {
+    const { store: src, head } = await buildSource()
+    const wire = await collect(src, head)
+    const titled = wire.find((w) => w.info !== null) as WireCommit
+    const altered = wire.map((w) => (w === titled ? { ...w, info: { title: 'other' } } : w))
+
+    const dst = new Memory()
+    await expect(applyWire(dst, altered)).rejects.toThrow(/integrity check failed/)
+  })
+
+  it('refuses a root commit with content', async () => {
+    const { store: src, head } = await buildSource()
+    const wire = await collect(src, head)
+    expect(wire[0]?.hash).toBe(ROOT_COMMIT)
+    const root = wire[0] as WireCommit
+    const stuffed = [{ ...root, updates: new Map([['k', bytes('v')]]) }]
+
+    await expect(applyWire(new Memory(), stuffed)).rejects.toThrow(/integrity check failed/)
   })
 
   it('refuses out-of-order streams (child before parent)', async () => {

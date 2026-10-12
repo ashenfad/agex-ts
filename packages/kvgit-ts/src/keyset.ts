@@ -2,8 +2,8 @@
  * kvgit-specific wrapper around the generic HAMT.
  *
  * A `Keyset` is a content-addressable map from user keys to
- * `KeysetEntry` values, where each entry holds a versioned blob
- * pointer and per-key metadata. This is what `VersionedKV` (TBD)
+ * `KeysetEntry` values, where each entry holds a blob's storage key
+ * and per-key metadata. This is what `VersionedKV` (TBD)
  * uses to represent the state of a single commit.
  *
  * The wrapper is thin: encode/decode entries and delegate everything
@@ -12,38 +12,35 @@
  */
 
 import { Hamt, type HamtOptions } from './hamt'
+import { pyDumpsBytes } from './pyjson'
 import type { KVStore, KeysetDiff, KeysetEntry, MetaEntry } from './types'
 
-const _encoder = new TextEncoder()
 const _decoder = new TextDecoder()
 
 /**
- * Encode a `KeysetEntry` to bytes.
- *
- * Format: `[blob, {createdAt, size}]` as JSON, no whitespace.
- * Object-key order is alphabetical (`createdAt` then `size`) to keep
- * encodings byte-deterministic — same logical entry → same bytes →
- * same HAMT leaf hash.
+ * Encode a `KeysetEntry` to bytes, as Python kvgit's `encode_entry`
+ * does: `[blob, {"size": n}]`, with `"chunks"` after `size` only when
+ * there are chunks, compact and in that order (not sorted). Same entry,
+ * same bytes, same HAMT leaf hash.
  */
 export function encodeEntry(entry: KeysetEntry): Uint8Array {
-  // Construct meta object explicitly with sorted keys to make the
-  // canonical-form intent obvious; JSON.stringify preserves insertion
-  // order in modern engines, which lines up with alphabetical here.
-  const meta = { createdAt: entry.meta.createdAt, size: entry.meta.size }
-  const payload: [string, MetaEntry] = [entry.blob, meta]
-  return _encoder.encode(JSON.stringify(payload))
+  const meta: Record<string, unknown> = { size: entry.meta.size }
+  if (entry.meta.chunks !== undefined && entry.meta.chunks.length > 0) {
+    meta.chunks = [...entry.meta.chunks]
+  }
+  return pyDumpsBytes([entry.blob, meta])
 }
 
 export function decodeEntry(raw: Uint8Array): KeysetEntry {
-  const parsed = JSON.parse(_decoder.decode(raw)) as [string, MetaEntry]
-  const [blob, meta] = parsed
-  return {
-    blob,
-    meta: {
-      createdAt: meta.createdAt,
-      size: meta.size,
-    },
-  }
+  const [blob, meta] = JSON.parse(_decoder.decode(raw)) as [
+    string,
+    { size: number; chunks?: string[] },
+  ]
+  const out: MetaEntry =
+    meta.chunks !== undefined && meta.chunks.length > 0
+      ? { size: meta.size, chunks: meta.chunks }
+      : { size: meta.size }
+  return { blob, meta: out }
 }
 
 export interface KeysetOptions {

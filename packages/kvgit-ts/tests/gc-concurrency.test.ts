@@ -1,17 +1,15 @@
 /**
- * Concurrency and scoping guarantees of the orphan sweep.
+ * The orphan sweep, and how it behaves while another writer commits.
  *
- * `cleanOrphans` must be safe to run while another writer commits.
- * The property that buys that safety is *scoping*: every deletion
- * candidate is discovered by walking an orphan commit's own keyset,
- * never by scanning a namespace. A commit that lands after the mark
- * phase is in nobody's orphan tree, so nothing it wrote can end up on
- * the removal list.
- *
- * That argument only holds because blobs and HAMT nodes are
- * commit-scoped — see the "commit-scoping premise" block below, which
- * measures it rather than assuming it. `deepClean` deliberately breaks
- * the property (namespace scans) and is therefore quiescent-store only.
+ * Blobs and HAMT nodes are keyed by content, so equal content is
+ * stored once and shared by every commit that holds it, whatever
+ * history it came from (see "content addressing" below, which measures
+ * it). The sweep finds its deletion candidates by walking orphan
+ * commits' keysets and keeping whatever a live commit still reaches. A
+ * commit that lands mid-sweep with content of its own is never on the
+ * removal list; one that lands holding content an orphan also held can
+ * lose it (pinned under "limitation" below). So `cleanOrphans`, like
+ * `deepClean`, is for a quiescent store.
  */
 
 import { describe, expect, it } from 'vitest'
@@ -20,7 +18,7 @@ import { Keyset } from '../src/keyset'
 import { decodeEntry } from '../src/keyset'
 import type { KeysetEntry } from '../src/types'
 import { VersionedKV } from '../src/versioned/kv'
-import { COMMIT_ROOT, blobPointerOwner, loads } from '../src/versioned/layout'
+import { BLOB_PREFIX, COMMIT_ROOT, blobKey, loads } from '../src/versioned/layout'
 
 const enc = new TextEncoder()
 const dec = new TextDecoder()
@@ -75,7 +73,7 @@ async function landCommit(
   const writer = await VersionedKV.open(store)
   await writer.commit({ updates: new Map([[key, bytes(value)]]) })
   const commit = writer.currentCommit
-  return { commit, root: await rootOf(store, commit), blob: `${commit}:${key}` }
+  return { commit, root: await rootOf(store, commit), blob: await blobKey(bytes(value)) }
 }
 
 async function nodeKeys(store: Memory): Promise<Set<string>> {
@@ -84,13 +82,9 @@ async function nodeKeys(store: Memory): Promise<Set<string>> {
   return out
 }
 
-async function blobKeys(store: Memory, commits: Iterable<string>): Promise<Set<string>> {
-  const owners = new Set(commits)
+async function blobKeys(store: Memory): Promise<Set<string>> {
   const out = new Set<string>()
-  for await (const k of store.keys()) {
-    if (k.startsWith('__') || k.startsWith(Keyset.DEFAULT_PREFIX)) continue
-    if (owners.has(blobPointerOwner(k))) out.add(k)
-  }
+  for await (const k of store.keys(BLOB_PREFIX)) out.add(k)
   return out
 }
 
@@ -136,14 +130,13 @@ async function readTree(
 }
 
 // ---------------------------------------------------------------------------
-// Commit-scoping premise
+// Content addressing
 // ---------------------------------------------------------------------------
 
-describe('commit-scoping premise', () => {
-  it('two unrelated histories with identical final content share no nodes and no blobs', async () => {
+describe('content addressing', () => {
+  it('two unrelated histories with identical final content hold the same nodes and blobs', async () => {
     // Same logical end state ({x: 1, y: 2}), reached by different
-    // commit sequences in different stores. If either class deduped on
-    // content, these would collide.
+    // commit sequences in different stores.
     const storeA = new Memory()
     const a = await VersionedKV.open(storeA)
     await a.commit({ updates: new Map([['x', bytes('1')]]) })
@@ -154,56 +147,25 @@ describe('commit-scoping premise', () => {
     await b.commit({ updates: new Map([['y', bytes('2')]]) })
     await b.commit({ updates: new Map([['x', bytes('1')]]) })
 
-    expect(await a.get('x')).toEqual(await b.get('x'))
-    expect(await a.get('y')).toEqual(await b.get('y'))
-
-    const nodesA = await nodeKeys(storeA)
-    const nodesB = await nodeKeys(storeB)
-    expect(nodesA.size).toBeGreaterThan(0)
-    expect(nodesB.size).toBeGreaterThan(0)
-    const sharedNodes = [...nodesA].filter((k) => nodesB.has(k))
-    expect(sharedNodes, `HAMT nodes deduped across unrelated histories: ${sharedNodes}`).toEqual([])
-
-    const commitsA: string[] = []
-    for await (const c of a.history()) commitsA.push(c)
-    const commitsB: string[] = []
-    for await (const c of b.history()) commitsB.push(c)
-    const bA = await blobKeys(storeA, commitsA)
-    const bB = await blobKeys(storeB, commitsB)
-    expect(bA.size).toBeGreaterThan(0)
-    const sharedBlobs = [...bA].filter((k) => bB.has(k))
-    expect(sharedBlobs, `blob keys deduped across unrelated histories: ${sharedBlobs}`).toEqual([])
+    const rootA = await rootOf(storeA, a.currentCommit)
+    expect(await rootOf(storeB, b.currentCommit)).toBe(rootA)
+    expect(await blobKeys(storeA)).toEqual(await blobKeys(storeB))
+    expect((await readTree(storeA, rootA)).nodes).toEqual((await readTree(storeB, rootA)).nodes)
   })
 
-  it('every stored node transitively embeds a pointer owned by a commit in its own history', async () => {
-    // The structural reason the sweep can be scoped: a leaf payload is
-    // `[blobPointer, meta]` and a blob pointer is `<commitHash>:<key>`,
-    // so a node hash can only be shared between commits that share the
-    // ancestry that wrote the pointer. Branch nodes only name child
-    // hashes, so the property is transitive to the root.
+  it('stores a value written under two keys once', async () => {
     const store = new Memory()
     const vk = await VersionedKV.open(store)
-    for (let i = 0; i < 40; i++) {
-      await vk.commit({ updates: new Map([[`key${i}`, bytes(`v${i}`)]]) })
-    }
-    const history = new Set<string>()
-    for await (const c of vk.history()) history.add(c)
-
-    const { entries, nodes, missing } = await readTree(store, await rootOf(store, vk.currentCommit))
-    expect(missing.size).toBe(0)
-    expect(nodes.size).toBeGreaterThan(1)
-    expect(entries.size).toBe(40)
-    for (const [key, entry] of entries) {
-      const owner = blobPointerOwner(entry.blob)
-      expect(history.has(owner), `blob for '${key}' owned by ${owner}, outside this history`).toBe(
-        true,
-      )
-    }
-
-    // No node in the store belongs to two disjoint commits by accident:
-    // the whole node namespace here is reachable from this one history.
-    const all = await nodeKeys(store)
-    expect(all.size).toBeGreaterThan(0)
+    await vk.commit({
+      updates: new Map([
+        ['a', bytes('same')],
+        ['b', bytes('same')],
+      ]),
+    })
+    const { entries } = await readTree(store, await rootOf(store, vk.currentCommit))
+    expect(entries.get('a')?.blob).toBe(await blobKey(bytes('same')))
+    expect(entries.get('b')?.blob).toBe(entries.get('a')?.blob)
+    expect((await blobKeys(store)).size).toBe(1)
   })
 })
 
@@ -211,7 +173,7 @@ describe('commit-scoping premise', () => {
 // The race
 // ---------------------------------------------------------------------------
 
-describe('cleanOrphans — concurrent writers', () => {
+describe('cleanOrphans — a commit landing mid-sweep with content of its own', () => {
   /**
    * The hazardous window: the mark phase has finished, the
    * `__commit_root__` scan has finished, and the sweep is now
@@ -266,7 +228,7 @@ describe('cleanOrphans — concurrent writers', () => {
 
     // The orphan was still collected — the sweep did not become a no-op.
     expect(await store.get(COMMIT_ROOT(orphan))).toBeNull()
-    expect(await store.get(`${orphan}:garbage`)).toBeNull()
+    expect(await store.get(await blobKey(bytes('g')))).toBeNull()
   })
 
   it('keeps blobs written by a commit that lands mid-sweep', async () => {
@@ -320,6 +282,31 @@ describe('cleanOrphans — concurrent writers', () => {
 
     expect(await vk.cleanOrphans(SWEEP_ALL)).toBe(0)
     expect(await nodeKeys(store)).toEqual(before)
+  })
+})
+
+describe('limitation: a commit landing mid-sweep can lose content an orphan held', () => {
+  // This is not a regression guard. It pins why the sweep is for a
+  // quiescent store: the late commit writes the orphan's blob again,
+  // which is a no-op for bytes already there, and the sweep then
+  // deletes it from under the live HEAD.
+  it('sweeps a blob the late commit shares with the orphan', async () => {
+    const store = new HookedMemory()
+    const vk = await VersionedKV.open(store)
+    await vk.commit({ updates: new Map([['seed', bytes('s')]]) })
+    const keep = vk.currentCommit
+    await vk.commit({ updates: new Map([['garbage', bytes('shared')]]) })
+    const orphan = vk.currentCommit
+    await vk.resetTo(keep)
+
+    let lateBlob = ''
+    store.beforeGet.set(COMMIT_ROOT(orphan), async () => {
+      lateBlob = (await landCommit(store, 'late', 'shared')).blob
+    })
+    await vk.cleanOrphans(SWEEP_ALL)
+
+    expect(lateBlob).toBe(await blobKey(bytes('shared')))
+    expect(await store.get(lateBlob)).toBeNull()
   })
 })
 
@@ -466,14 +453,14 @@ describe('cleanOrphans — damaged orphans', () => {
     expect(await store.get(COMMIT_ROOT(orphan))).toBeNull()
     expect(await vk.get('seed')).toEqual(bytes('s'))
 
-    // Documented limitation, pinned here so it isn't rediscovered as a
-    // surprise: the orphan's blob is leaked permanently. Nothing scans
-    // blobs by namespace, so a blob is only ever found through the
-    // keyset that points at it — and that keyset is gone. `deepClean`
-    // does not help; it scans nodes, not blobs. This is exactly the
-    // state a namespace-scanning node sweep used to create on its own,
-    // which is why nodes and blobs are now collected in one walk.
-    expect(await store.get(`${orphan}:garbage`)).not.toBeNull()
+    // The orphan's blob is only ever found through the keyset that
+    // points at it, and that keyset is gone, so it survives until a
+    // deepClean scans the blob namespace.
+    const garbage = await blobKey(bytes('g'))
+    expect(await store.get(garbage)).not.toBeNull()
+    await vk.deepClean(SWEEP_ALL)
+    expect(await store.get(garbage)).toBeNull()
+    expect(await vk.get('seed')).toEqual(bytes('s'))
   })
 
   it('does not crash on an orphan whose root is corrupt', async () => {
@@ -506,7 +493,7 @@ describe('deepClean', () => {
     // crash between the node write and the CAS. No orphan commit points
     // at it, so no orphan keyset walk can find it.
     const stray = await (await Keyset.empty(store)).persist({
-      updates: [['stranded', { blob: 'deadbeef:stranded', meta: { size: 1, createdAt: 0 } }]],
+      updates: [['stranded', { blob: 'kvgit:blob:deadbeef', meta: { size: 1 } }]],
     })
     const strayKey = Keyset.DEFAULT_PREFIX + stray.root
     expect(await store.get(strayKey)).not.toBeNull()

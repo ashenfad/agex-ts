@@ -25,11 +25,13 @@
  * rewriting a full snapshot per commit.
  */
 
+import { EMPTY_HASH } from '../hamt'
 import { Keyset } from '../keyset'
 import type { CommitInfo, KVStore, KeysetEntry, MetaEntry, Versioned } from '../types'
 import { UnknownBranchError } from '../types'
 import { VersionedBase } from './base'
 import {
+  BLOB_PREFIX,
   BRANCH_HEAD,
   BRANCH_HEAD_PREFIX,
   BRANCH_HEAD_PREV,
@@ -37,12 +39,15 @@ import {
   COMMIT_TIME,
   INFO_KEY,
   PARENT_COMMIT,
-  blobPointer,
+  PARENT_GENS,
+  ROOT_COMMIT,
+  blobKey,
   checkStorageVersion,
-  contentHash,
+  commitHash,
+  commitRecords,
   dumps,
+  generationOf,
   loads,
-  pendingPointer,
   safeLoads,
 } from './layout'
 import type { MergeResolution } from './merge'
@@ -259,6 +264,49 @@ export interface VersionedKVOptions {
   create?: boolean
   /** Last resort for a corrupt HEAD with no usable backup (see `CorruptHeadRecoverer`). */
   recoverFromCorruptHead?: CorruptHeadRecoverer
+  /** The clock commits are stamped with, in seconds. Default: wall
+   *  time. A test pins it to replay a history byte for byte. */
+  now?: () => number
+}
+
+const wallClock = (): number => Date.now() / 1000
+
+/**
+ * Create branch `name` at commit `target`, in one conditional write:
+ * the head (expected absent), the root commit's records when `target`
+ * is the root commit and the store lacks it, and the removal of any
+ * stale backup left under the name by an earlier branch.
+ *
+ * @throws if the branch exists, or `target` is not in the store.
+ */
+async function createBranchHead(
+  store: KVStore,
+  name: string,
+  target: string,
+  now: () => number,
+): Promise<void> {
+  const branchKey = BRANCH_HEAD(name)
+  for (;;) {
+    const expected = new Map<string, Uint8Array | null>([[branchKey, null]])
+    const writes = new Map<string, Uint8Array>([[branchKey, dumps(target)]])
+    if ((await store.get(COMMIT_ROOT(target))) === null) {
+      if (target !== ROOT_COMMIT) throw new Error(`Commit '${target}' does not exist`)
+      // Minted with the head, and only if nobody minted it first.
+      expected.set(COMMIT_ROOT(ROOT_COMMIT), null)
+      const records = commitRecords({
+        commit: ROOT_COMMIT,
+        root: EMPTY_HASH,
+        parents: [],
+        parentGens: null,
+        created: now(),
+        info: null,
+      })
+      for (const [k, v] of records) writes.set(k, v)
+    }
+    if (await store.casMany(expected, writes, [BRANCH_HEAD_PREV(name)])) return
+    if ((await store.get(branchKey)) !== null) throw new Error(`Branch '${name}' already exists`)
+    // Another writer minted the root commit first: decide again.
+  }
 }
 
 interface SnapshotState {
@@ -279,6 +327,10 @@ export class VersionedKV extends VersionedBase {
   readonly store: KVStore
   private meta: Map<string, MetaEntry>
   private readonly recoverFromCorruptHead: CorruptHeadRecoverer | undefined
+  private readonly now: () => number
+  /** Generations of commits this handle has written or read. A
+   *  commit's generation never changes, so nothing here goes stale. */
+  private readonly generations = new Map<string, number>()
 
   private constructor(opts: {
     store: KVStore
@@ -287,12 +339,24 @@ export class VersionedKV extends VersionedBase {
     commitKeys: Map<string, string>
     meta: Map<string, MetaEntry>
     recoverFromCorruptHead: CorruptHeadRecoverer | undefined
+    now: () => number
   }) {
     super({ branch: opts.branch, commitHash: opts.commitHash })
     this.store = opts.store
     this.commitKeys = opts.commitKeys
     this.meta = opts.meta
     this.recoverFromCorruptHead = opts.recoverFromCorruptHead
+    this.now = opts.now
+  }
+
+  /** The options a handle derived from this one opens with. */
+  private inherited(): Pick<VersionedKVOptions, 'recoverFromCorruptHead' | 'now'> {
+    return {
+      now: this.now,
+      ...(this.recoverFromCorruptHead !== undefined && {
+        recoverFromCorruptHead: this.recoverFromCorruptHead,
+      }),
+    }
   }
 
   /**
@@ -321,15 +385,14 @@ export class VersionedKV extends VersionedBase {
       } else if (!create) {
         throw new UnknownBranchError(branch, true)
       } else {
-        // Create initial empty commit.
-        const initialHash = await contentHash([], new Map(), new Map(), null)
-        await store.setMany([
-          [COMMIT_ROOT(initialHash), dumps((await Keyset.empty(store)).root)],
-          [PARENT_COMMIT(initialHash), dumps([])],
-          [COMMIT_TIME(initialHash), dumps(Date.now())],
-          [BRANCH_HEAD(branch), dumps(initialHash)],
-        ])
-        commitHash = initialHash
+        // A new branch starts at the empty root commit. Another opener
+        // may create it first; either way it now exists.
+        try {
+          await createBranchHead(store, branch, ROOT_COMMIT, opts.now ?? wallClock)
+        } catch (e) {
+          if ((await store.get(BRANCH_HEAD(branch))) === null) throw e
+        }
+        commitHash = ROOT_COMMIT
       }
     }
 
@@ -341,6 +404,7 @@ export class VersionedKV extends VersionedBase {
       commitKeys,
       meta,
       recoverFromCorruptHead: opts.recoverFromCorruptHead,
+      now: opts.now ?? wallClock,
     })
   }
 
@@ -378,9 +442,7 @@ export class VersionedKV extends VersionedBase {
     const removals = opts.removals ?? new Set<string>()
     const info = opts.info ?? null
 
-    // Build new keyset by carrying forward, applying removals, then
-    // reserving slots for updates (real blob keys depend on the new
-    // commit hash, computed below).
+    // Carry forward, apply removals, then point each update at its blob.
     const newCommitKeys = new Map<string, string>()
     const newMeta = new Map<string, MetaEntry>()
     for (const [k, ptr] of this.commitKeys) {
@@ -390,54 +452,92 @@ export class VersionedKV extends VersionedBase {
       if (m !== undefined) newMeta.set(k, m)
     }
 
-    // Compute the new hash from a placeholder keyset that uses
-    // <pending:key> sentinels for new updates (real versioned keys
-    // depend on the hash itself, which we don't know yet).
-    const previewKeys = new Map(newCommitKeys)
-    for (const k of updates.keys()) previewKeys.set(k, pendingPointer(k))
-    const newHash = await contentHash([this.currentCommitHash], previewKeys, updates, info)
-
-    // Resolve real blob keys for the updates.
-    const blobWrites: Array<[string, Uint8Array]> = []
-    const now = Date.now()
-    for (const [key, value] of updates) {
-      const versionedKey = blobPointer(newHash, key)
-      blobWrites.push([versionedKey, value])
-      newCommitKeys.set(key, versionedKey)
-      const existing = newMeta.get(key)
-      const createdAt = existing !== undefined ? existing.createdAt : now
-      newMeta.set(key, { size: value.length, createdAt })
-    }
-
-    // Build the new keyset HAMT by applying changes over the parent's.
-    const parentRootBytes = await this.store.get(COMMIT_ROOT(this.currentCommitHash))
-    const parentRoot = parentRootBytes !== null ? (loads(parentRootBytes) as string) : null
-    const parentKs =
-      parentRoot !== null ? Keyset.fromRoot(this.store, parentRoot) : await Keyset.empty(this.store)
-
+    // Every blob is written, even one already stored: the key is its
+    // content, so the rewrite changes nothing but guarantees the batch
+    // holds everything its commit needs.
+    const writes = new Map<string, Uint8Array>()
     const keysetUpdates: Array<[string, KeysetEntry]> = []
-    for (const k of updates.keys()) {
-      const m = newMeta.get(k) as MetaEntry
-      keysetUpdates.push([k, { blob: newCommitKeys.get(k) as string, meta: m }])
+    for (const [key, value] of updates) {
+      const pointer = await blobKey(value)
+      writes.set(pointer, value)
+      newCommitKeys.set(key, pointer)
+      const meta: MetaEntry = { size: value.length }
+      newMeta.set(key, meta)
+      keysetUpdates.push([key, { blob: pointer, meta }])
     }
+
+    // Apply the changes to the parent's HAMT: structural sharing reuses
+    // every subtree the commit didn't touch.
+    const parentKs = Keyset.fromRoot(this.store, await this.rootOf(this.currentCommitHash))
     const newKs = await parentKs.updated({ updates: keysetUpdates, removals })
+    for (const [k, v] of newKs.pending) writes.set(k, v)
 
-    // Build the atomic write batch: blobs + HAMT pending + commit
-    // metadata. One setMany so a crash mid-write doesn't strand
-    // partial state visible to readers.
-    const writes: Array<[string, Uint8Array]> = [...blobWrites]
-    for (const [k, v] of newKs.pending) writes.push([k, v])
-    writes.push([COMMIT_ROOT(newHash), dumps(newKs.root)])
-    writes.push([PARENT_COMMIT(newHash), dumps([this.currentCommitHash])])
-    writes.push([COMMIT_TIME(newHash), dumps(Date.now())])
-    if (info !== null) writes.push([INFO_KEY(newHash), dumps(info)])
+    // The hash is computed last, over the parents, the root, the time
+    // and the info, so it names exactly one root.
+    const parents = [this.currentCommitHash]
+    const parentGens = await this.parentGenerations(parents)
+    const created = this.now()
+    const newHash = await commitHash(parents, newKs.root, created, info)
+    const records = commitRecords({
+      commit: newHash,
+      root: newKs.root,
+      parents,
+      parentGens,
+      created,
+      info,
+    })
+    for (const [k, v] of records) writes.set(k, v)
 
+    // One batch, so a crash mid-write doesn't strand a partial commit.
     await this.store.setMany(writes)
 
     this.commitKeys = newCommitKeys
     this.currentCommitHash = newHash
     this.meta = newMeta
+    this.generations.set(newHash, generationOf(parentGens))
     return newHash
+  }
+
+  /** A commit's keyset root, or the empty tree's for a commit with none. */
+  private async rootOf(commit: string): Promise<string> {
+    const raw = await this.store.get(COMMIT_ROOT(commit))
+    return raw === null ? EMPTY_HASH : (loads(raw) as string)
+  }
+
+  /** The generation of each of a new commit's parents. */
+  private async parentGenerations(parents: readonly string[]): Promise<number[]> {
+    const out: number[] = []
+    for (const parent of parents) {
+      let gen = this.generations.get(parent)
+      if (gen === undefined) {
+        gen = await this.generationFromStore(parent)
+        this.generations.set(parent, gen)
+      }
+      out.push(gen)
+    }
+    return out
+  }
+
+  /** A commit's generation, from its own records: 0 for a commit with no
+   *  parents, else one more than its highest parent's. */
+  private async generationFromStore(commit: string): Promise<number> {
+    const parents = await this.loadParents(commit)
+    if (parents.length === 0) return 0
+    const raw = await this.store.get(PARENT_GENS(commit))
+    const gens = raw === null ? null : safeLoads(raw)
+    if (
+      Array.isArray(gens) &&
+      gens.length === parents.length &&
+      gens.every((g) => Number.isInteger(g) && g >= 0)
+    ) {
+      return generationOf(gens as number[])
+    }
+    // A commit with no recorded generations: count from its parents.
+    let highest = 0
+    for (const parent of parents) {
+      highest = Math.max(highest, (await this.parentGenerations([parent]))[0] as number)
+    }
+    return highest + 1
   }
 
   protected async createMergeCommit(
@@ -449,134 +549,97 @@ export class VersionedKV extends VersionedBase {
     const mergedKeyset = new Map(resolution.mergedKeyset)
     const mergedValues = resolution.mergedValues
 
-    // Placeholder keys for newly-merged values (their real blob keys
-    // depend on the merge hash, which we compute from the placeholder
-    // form — same trick as createCommit).
-    const previewKeys = new Map(mergedKeyset)
-    for (const k of mergedValues.keys()) previewKeys.set(k, pendingPointer(k))
-    const mergeHash = await contentHash(parents, previewKeys, mergedValues, info)
-
-    // Resolve real blob keys for merged values.
-    const blobWrites: Array<[string, Uint8Array]> = []
+    // A value a merge function produced is a new blob, never chunked.
+    const writes = new Map<string, Uint8Array>()
     for (const [key, value] of mergedValues) {
-      const versionedKey = blobPointer(mergeHash, key)
-      blobWrites.push([versionedKey, value])
-      mergedKeyset.set(key, versionedKey)
+      const pointer = await blobKey(value)
+      writes.set(pointer, value)
+      mergedKeyset.set(key, pointer)
     }
 
-    // Build merged meta. Most keys' meta comes from our in-memory
-    // map; the only keys we need from "their" side are those that
-    // ended up in mergedKeyset, weren't merged-value-produced, and
-    // we don't already have meta for. That's typically a small set
-    // (keys "they" added that "we" didn't have). Look those up
-    // pointwise rather than walking the entire "their" keyset.
-    // NOTE: read theirs via `theirHead`, not `parents[0]` — the
-    // commit path orders parents [theirs, ours] but `mergeHeads`
-    // orders them [ours, theirs].
-    const theirRootBytes = await this.store.get(COMMIT_ROOT(theirHead))
-    const theirKs =
-      theirRootBytes !== null ? Keyset.fromRoot(this.store, loads(theirRootBytes) as string) : null
-
-    const now = Date.now()
+    // An entry carried from either side keeps its own metadata, which
+    // describes its blob. Most come from our in-memory map; the few
+    // only their side has are read pointwise from their keyset (via
+    // `theirHead`: the commit path orders parents [theirs, ours] but
+    // `mergeHeads` orders them [ours, theirs]).
+    const theirKs = Keyset.fromRoot(this.store, await this.rootOf(theirHead))
     const mergedMeta = new Map<string, MetaEntry>()
     for (const k of mergedKeyset.keys()) {
       if (mergedValues.has(k)) {
-        mergedMeta.set(k, { size: (mergedValues.get(k) as Uint8Array).length, createdAt: now })
-      } else if (this.meta.has(k)) {
+        mergedMeta.set(k, { size: (mergedValues.get(k) as Uint8Array).length })
+      } else if (this.meta.has(k) && this.commitKeys.get(k) === mergedKeyset.get(k)) {
         mergedMeta.set(k, this.meta.get(k) as MetaEntry)
-      } else if (theirKs !== null) {
+      } else {
         const theirEntry = await theirKs.get(k)
         if (theirEntry !== null) mergedMeta.set(k, theirEntry.meta)
+        else if (this.meta.has(k)) mergedMeta.set(k, this.meta.get(k) as MetaEntry)
       }
     }
 
-    // Apply on top of our parent's HAMT, computing the minimal
-    // updates and removals so structural sharing kicks in for
-    // unchanged subtrees.
-    const ourRootBytes = await this.store.get(COMMIT_ROOT(this.currentCommitHash))
-    const ourRoot = ourRootBytes !== null ? (loads(ourRootBytes) as string) : null
-    const parentKs =
-      ourRoot !== null ? Keyset.fromRoot(this.store, ourRoot) : await Keyset.empty(this.store)
-
+    // Apply only what changed on top of our HAMT, so structural sharing
+    // keeps every subtree the merge didn't touch.
     const keysetUpdates: Array<[string, KeysetEntry]> = []
     for (const [k, blob] of mergedKeyset) {
-      const newEntry: KeysetEntry = { blob, meta: mergedMeta.get(k) as MetaEntry }
-      const oldBlob = this.commitKeys.get(k)
-      const oldMeta = this.meta.get(k)
-      if (
-        oldBlob !== newEntry.blob ||
-        oldMeta?.size !== newEntry.meta.size ||
-        oldMeta?.createdAt !== newEntry.meta.createdAt
-      ) {
-        keysetUpdates.push([k, newEntry])
+      if (this.commitKeys.get(k) !== blob) {
+        keysetUpdates.push([k, { blob, meta: mergedMeta.get(k) as MetaEntry }])
       }
     }
     const keysetRemovals = new Set<string>()
     for (const k of this.commitKeys.keys()) {
       if (!mergedKeyset.has(k)) keysetRemovals.add(k)
     }
+    const ourKs = Keyset.fromRoot(this.store, await this.rootOf(this.currentCommitHash))
+    const newKs = await ourKs.updated({ updates: keysetUpdates, removals: keysetRemovals })
+    for (const [k, v] of newKs.pending) writes.set(k, v)
 
-    const newKs = await parentKs.updated({
-      updates: keysetUpdates,
-      removals: keysetRemovals,
+    const parentGens = await this.parentGenerations(parents)
+    const created = this.now()
+    const mergeHash = await commitHash(parents, newKs.root, created, info)
+    const records = commitRecords({
+      commit: mergeHash,
+      root: newKs.root,
+      parents,
+      parentGens,
+      created,
+      info,
     })
-
-    const writes: Array<[string, Uint8Array]> = [...blobWrites]
-    for (const [k, v] of newKs.pending) writes.push([k, v])
-    writes.push([COMMIT_ROOT(mergeHash), dumps(newKs.root)])
-    writes.push([PARENT_COMMIT(mergeHash), dumps(parents)])
-    writes.push([COMMIT_TIME(mergeHash), dumps(Date.now())])
-    if (info !== null) writes.push([INFO_KEY(mergeHash), dumps(info)])
+    for (const [k, v] of records) writes.set(k, v)
 
     await this.store.setMany(writes)
 
     this.commitKeys = mergedKeyset
     this.currentCommitHash = mergeHash
     this.meta = mergedMeta
+    this.generations.set(mergeHash, generationOf(parentGens))
     return mergeHash
   }
 
   /**
-   * Atomically advance the branch HEAD, then back up what it held.
+   * Publish `newHead` as this branch's HEAD if HEAD is `expected`.
    *
-   * The prev-HEAD backup is written **after** the swap succeeds, never
-   * before. Written first, it lands whether or not the CAS does, so a
-   * writer that loses the race still leaves its own stale `expected`
-   * as the branch's recovery target — clobbering the winner's backup,
-   * and, when `expected` came from a corrupt-HEAD recovery, naming a
-   * commit that was never HEAD at all. Writing it afterwards makes it
-   * always a value `__branch_head__` really held.
+   * One atomic write (`casMany`) moves HEAD and records `expected` as
+   * the prev-HEAD backup, so the backup always names the commit HEAD
+   * held immediately before: never a value a losing writer invented,
+   * and never more than one commit back.
    *
-   * What this does **not** buy is a backup that is always exactly one
-   * commit back. The swap and the backup write are two steps, and
-   * anything that separates them — a crash, or simply losing the CPU
-   * while another writer completes both of its own — lets the older
-   * writer's backup land last. HEAD then sits two or more commits
-   * ahead of a backup that is still a real former HEAD, and recovery
-   * skips whatever came between.
-   *
-   * So the guarantee is the narrower one: the backup always names a
-   * commit `__branch_head__` really held, never a commit invented by a
-   * losing writer. Recovery may lose more than one commit; it cannot
-   * graft on a lineage the branch never had. `KVStore.cas` takes a
-   * single key and no backend exposes a transaction spanning two, so
-   * HEAD and its backup cannot move in one step.
-   *
-   * A CAS that fails against a *damaged* HEAD is retried once behind
+   * A write that fails against a *damaged* HEAD is retried once behind
    * {@link healHead}, which repairs it atomically. That is the only
    * place a corrupt HEAD is written back, now that reads do not.
    */
   protected async casHead(expected: string, newHead: string): Promise<boolean> {
     const branchKey = BRANCH_HEAD(this.branch)
     const expectedBytes = dumps(expected)
-    const newBytes = dumps(newHead)
-
-    let won = await this.store.cas(branchKey, newBytes, expectedBytes)
-    if (!won && (await healHead(this.store, this.branch, expectedBytes))) {
-      won = await this.store.cas(branchKey, newBytes, expectedBytes)
-    }
-    if (won) await this.store.set(BRANCH_HEAD_PREV(this.branch), expectedBytes)
-    return won
+    const publish = (): Promise<boolean> =>
+      this.store.casMany(
+        new Map([[branchKey, expectedBytes]]),
+        new Map([
+          [branchKey, dumps(newHead)],
+          [BRANCH_HEAD_PREV(this.branch), expectedBytes],
+        ]),
+      )
+    if (await publish()) return true
+    if (!(await healHead(this.store, this.branch, expectedBytes))) return false
+    return publish()
   }
 
   protected async loadKeyset(commitHash: string): Promise<Map<string, string>> {
@@ -705,9 +768,7 @@ export class VersionedKV extends VersionedBase {
     return VersionedKV.open(this.store, {
       commitHash,
       branch: opts.branch ?? this.branch,
-      ...(this.recoverFromCorruptHead !== undefined && {
-        recoverFromCorruptHead: this.recoverFromCorruptHead,
-      }),
+      ...this.inherited(),
     })
   }
 
@@ -716,14 +777,11 @@ export class VersionedKV extends VersionedBase {
     if (opts.at !== undefined && (await this.store.get(COMMIT_ROOT(opts.at))) === null) {
       throw new Error(`Commit '${opts.at}' does not exist`)
     }
-    const ok = await this.store.cas(BRANCH_HEAD(name), dumps(target), null)
-    if (!ok) throw new Error(`Branch '${name}' already exists`)
+    await createBranchHead(this.store, name, target, this.now)
     return VersionedKV.open(this.store, {
       branch: name,
       commitHash: target,
-      ...(this.recoverFromCorruptHead !== undefined && {
-        recoverFromCorruptHead: this.recoverFromCorruptHead,
-      }),
+      ...this.inherited(),
     })
   }
 
@@ -844,26 +902,20 @@ export class VersionedKV extends VersionedBase {
    * is given the cumulative seen-set so subtrees shared via structural
    * sharing across commits are visited exactly once.
    *
-   * **Safe under concurrent writers.** Every deletion candidate is
-   * discovered by walking an orphan commit's own keyset — never by
-   * scanning a storage namespace. Both classes it deletes are
-   * commit-scoped: blob keys are `<commitHash>:<userKey>`, and a HAMT
-   * leaf payload is `[blobPointer, meta]`, so node hashes transitively
-   * embed a commit-scoped pointer and never dedup across unrelated
-   * commits. A commit that lands mid-sweep is therefore in no orphan's
-   * tree and cannot contribute a candidate. `store.keys()` is an async
-   * iterable here, so a namespace scan would interleave with the event
-   * loop and lose that race inside a single JS context — see
-   * `tests/gc-concurrency.test.ts`.
+   * **Run it on a quiescent store.** Every deletion candidate is
+   * discovered by walking an orphan commit's own keyset, and nothing
+   * reachable from a live head or a young orphan is deleted. But blobs
+   * and nodes are keyed by content (storage v4), so a writer committing
+   * during the sweep can reuse a blob or node an orphan held, and lose
+   * it. The GC lease that makes a sweep safe beside writers (writers'
+   * batches conditional on it, sweeps holding it) is not here yet; until
+   * it is, no other tab, worker or process may write for the whole call.
    *
    * **What it deliberately leaves.** HAMT nodes that no commit points
    * at — an interrupted write, a crash between the node write and the
    * CAS, damage from an older sweep — are unreachable from any orphan
-   * keyset, so nothing finds them. {@link deepClean} reclaims those, at
-   * the cost of requiring a quiescent store. Blobs belonging to an
-   * orphan whose keyset is unreadable are leaked permanently by either
-   * path: nothing scans blobs by namespace, so a blob is only ever
-   * found through the keyset that points at it.
+   * keyset, so nothing finds them, and neither are the blobs of an
+   * orphan whose keyset is unreadable. {@link deepClean} reclaims both.
    *
    * The `minAge` guard (default 1 hour) protects recently-created
    * commits from being swept. Within that window, an orphan commit's
@@ -883,12 +935,12 @@ export class VersionedKV extends VersionedBase {
    * concurrent writers.**
    *
    * Does everything {@link cleanOrphans} does, then additionally scans
-   * the whole `kvgit:keyset:` namespace and deletes any node not
-   * reachable from a live branch head or a young orphan. That scan is
-   * the only way to reclaim nodes no commit references any more —
-   * leftovers from an interrupted write, a crash between a write and
-   * its CAS, or historical damage — because no orphan keyset points at
-   * them.
+   * the whole `kvgit:keyset:` and `kvgit:blob:` namespaces and deletes
+   * any node or blob not reachable from a live branch head or a young
+   * orphan. That scan is the only way to reclaim content no commit
+   * references any more — leftovers from an interrupted write, a crash
+   * between a write and its CAS, or a damaged orphan's blobs — because
+   * no orphan keyset points at them.
    *
    * The scan runs after the mark phase, so it sees, and deletes,
    * anything written by a commit that landed in between — including a
@@ -911,7 +963,8 @@ export class VersionedKV extends VersionedBase {
 
   /** Shared mark-and-sweep behind `cleanOrphans` / `deepClean`. */
   private async sweep(minAge: number, deep: boolean): Promise<number> {
-    const cutoffTime = Date.now() - minAge
+    // Commit times are in seconds; minAge is in milliseconds.
+    const cutoffTime = this.now() - minAge / 1000
 
     const reachableCommits = new Set<string>()
     const reachableBlobs = new Set<string>()
@@ -990,10 +1043,10 @@ export class VersionedKV extends VersionedBase {
     const KEYSET_PREFIX = Keyset.DEFAULT_PREFIX
 
     // Every deletion candidate comes from walking an orphan's own
-    // keyset — never from a namespace scan. That is what makes the
-    // incremental path safe under concurrent writers: a commit that
-    // lands after the mark phase is in nobody's orphan tree, so
-    // nothing it wrote can end up on this list.
+    // keyset — never from a namespace scan — so content a commit
+    // landing mid-sweep wrote for itself is never on this list. Content
+    // it shares with an orphan can be, which is why the sweep is for a
+    // quiescent store.
     //
     // `skipNodes` starts as the reachable set (subtrees shared with a
     // live commit or a young orphan must not be touched, and are the
@@ -1022,31 +1075,32 @@ export class VersionedKV extends VersionedBase {
           // metadata below. Narrowing this would let one corrupt
           // keyset block GC for the whole store.
           //
-          // The cost is a permanent leak: the orphan's nodes survive
-          // until a `deepClean`, and its blobs survive forever —
-          // nothing scans blobs by namespace, and once the commit
-          // metadata is gone there is no keyset left to find them
-          // through. That is why nodes and blobs are collected in the
-          // same walk above rather than in separate passes.
+          // The cost is a leak: once the commit metadata is gone there
+          // is no keyset left to find the orphan's nodes and blobs
+          // through, so they survive until a `deepClean`.
         }
       }
       allRemovals.add(COMMIT_ROOT(orphan))
       allRemovals.add(PARENT_COMMIT(orphan))
+      allRemovals.add(PARENT_GENS(orphan))
       allRemovals.add(COMMIT_TIME(orphan))
       allRemovals.add(INFO_KEY(orphan))
     }
 
     if (deep) {
-      // Namespace scan: reclaims nodes no orphan keyset points at
-      // (interrupted writes, crashes between a write and its CAS,
-      // historical damage). Unsafe against a concurrent writer,
-      // because anything committed since the mark phase looks
+      // Namespace scans: reclaim nodes and blobs no orphan keyset
+      // points at (interrupted writes, crashes between a write and its
+      // CAS, a damaged orphan's content). Unsafe against a concurrent
+      // writer, because anything committed since the mark phase looks
       // unreferenced here. Quiescent stores only — see `deepClean`.
       for await (const k of this.store.keys(KEYSET_PREFIX)) {
         const nodeHash = k.slice(KEYSET_PREFIX.length)
         if (nodeHash.length > 0 && !reachableNodes.has(nodeHash)) {
           allRemovals.add(k)
         }
+      }
+      for await (const k of this.store.keys(BLOB_PREFIX)) {
+        if (!reachableBlobs.has(k)) allRemovals.add(k)
       }
     }
 

@@ -6,6 +6,8 @@
  * backends) live in sibling files and import from here.
  */
 
+import type { PyFloat } from './pyjson'
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -93,6 +95,20 @@ export interface KVStore {
    * Returns `true` if the swap succeeded.
    */
   cas(key: string, value: Uint8Array, expected: Uint8Array | null): Promise<boolean>
+  /**
+   * Apply `writes` and `removes` atomically, if and only if every key in
+   * `expected` currently holds its value (`null`: the key must be
+   * absent). Either every write and removal lands or none does, and no
+   * other writer's change lands between the check and the write. A key
+   * may be both expected and written; a key both written and removed is
+   * a caller error. Resolves `true` when the batch landed, `false` when
+   * an expectation failed (and nothing changed).
+   */
+  casMany(
+    expected: ReadonlyMap<string, Uint8Array | null>,
+    writes: ReadonlyMap<string, Uint8Array>,
+    removes?: Iterable<string>,
+  ): Promise<boolean>
 
   /**
    * Iterate keys, optionally restricted to a string prefix.
@@ -115,21 +131,24 @@ export interface KVStore {
 // ---------------------------------------------------------------------------
 
 /**
- * Per-key metadata stored in the HAMT alongside the blob pointer.
+ * Per-key metadata stored alongside a blob pointer in a keyset entry.
  *
- * `size` is the encoded blob length in bytes; `createdAt` is epoch
- * milliseconds at commit time.
+ * `size` is the blob's length in bytes. `chunks` lists the
+ * content-addressed chunks a chunked codec's blob refers to (Python
+ * kvgit's scientific codec writes them); absent for an opaque blob.
+ * Everything here follows from the blob's bytes, so equal content gives
+ * equal entries and equal HAMT nodes.
  */
 export interface MetaEntry {
   readonly size: number
-  readonly createdAt: number
+  readonly chunks?: readonly string[]
 }
 
 /**
  * One entry in the keyset HAMT: a pointer to the blob's storage
  * location plus its metadata.
  *
- * Blob pointers are versioned keys of the form `<commitHash>:<userKey>`.
+ * A blob pointer is the blob's storage key, `kvgit:blob:<sha256>`.
  */
 export interface KeysetEntry {
   readonly blob: string
@@ -312,16 +331,14 @@ export interface Versioned {
  * One kvgit commit in wire form — the unit of transfer between two
  * kvgit histories (sync remotes, bundles).
  *
- * A `WireCommit` carries exactly what a replayer needs to reproduce
- * the commit byte-identically: parents, the changed values, and the
- * provenance of carried pointers. It deliberately does NOT carry HAMT
- * nodes (rebuilt locally; commit hashes don't cover node bytes) or
- * blob pointers for updates (reconstructed as `<hash>:<key>` during
- * replay).
+ * A `WireCommit` carries what a replayer needs to reproduce the commit
+ * byte for byte: its parents, its records as stored, and the values
+ * whose entries differ from its first parent's. HAMT nodes never cross
+ * (they are rebuilt locally), and blob keys are derived from the bytes.
  *
- * Replay must reproduce `hash` exactly — recomputing `contentHash`
- * over the replayed state and comparing against `hash` is the
- * integrity check of the sync layer.
+ * Replay must reproduce `hash`: rebuilding the keyset from the first
+ * parent's and recomputing the commit hash is the sync layer's
+ * integrity check.
  */
 export interface WireCommit {
   /** kvgit commit hash (40-hex). */
@@ -329,37 +346,24 @@ export interface WireCommit {
   /** Parent hashes, order-significant (order participates in `hash`).
    *  For three-way merges, `parents[0]` is the head the merge landed
    *  on — the CAS winner for `commit()`, our own head for
-   *  `mergeHeads()` — and the sync delta (updates/removals/carries)
-   *  is always relative to it. See `VersionedBase`. */
+   *  `mergeHeads()` — and `updates`/`removals` are relative to it.
+   *  See `VersionedBase`. */
   readonly parents: readonly string[]
-  /** Wall time epoch ms (`__commit_time__`). Not part of `hash`. */
-  readonly time: number
-  /** Caller-supplied commit info (`__info__`), or null. */
-  readonly info: CommitInfo | null
-  /** Values written at this commit: key → value bytes. Their blob
-   *  pointers are `<hash>:<key>` by construction. */
+  /** Each parent's generation, as recorded (`__parent_gens__`); null
+   *  when the commit records none (the root commit). */
+  readonly parentGens: readonly number[] | null
+  /** Commit time in seconds (`__commit_time__`), as recorded: a
+   *  `PyFloat`, so it re-encodes to the bytes that were hashed. */
+  readonly time: PyFloat
+  /** Caller-supplied info (`__info__`) as recorded, floats as
+   *  `PyFloat`, or null. */
+  readonly info: unknown
+  /** Keys whose entry differs from `parents[0]`'s: key → value bytes.
+   *  A merge's entries adopted from another parent are here too; their
+   *  blob is the same bytes, so the same key. */
   readonly updates: ReadonlyMap<string, Uint8Array>
   /** Keys present in `parents[0]`'s keyset but absent here. */
   readonly removals: ReadonlySet<string>
-  /** Per-key metadata fidelity for `updates`: kvgit stamps `createdAt`
-   *  slightly before commit time, so replay can't derive it. Not part
-   *  of `hash` (display metadata), but carried for exactness. */
-  readonly meta: ReadonlyMap<string, { readonly createdAt: number }>
-  /**
-   * Keys whose pointer differs from `parents[0]`'s but was NOT written
-   * at this commit — adopted from another ancestor (merge carries from
-   * the non-first parent's side). The pointer is `<owner>:<key>`.
-   * Replay must reproduce these pointers exactly — `contentHash`
-   * covers the pointer map, so deriving them from `parents[0]` instead
-   * would change the hash. `size`/`createdAt` ride along so the
-   * replayer can rebuild the carried keyset entry without consulting
-   * any parent keyset (the carry's blob was written by an earlier
-   * commit, so its meta isn't derivable from this commit's wire form).
-   */
-  readonly carries: ReadonlyMap<
-    string,
-    { readonly owner: string; readonly size: number; readonly createdAt: number }
-  >
 }
 
 // ---------------------------------------------------------------------------

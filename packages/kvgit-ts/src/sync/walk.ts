@@ -9,7 +9,7 @@
  *   - sync fetch (served locally): `have` = the requester's heads
  *   - bundle export: `have` = ∅ (full history)
  *
- * Works directly on a `KVStore` using the v1 storage layout
+ * Works directly on a `KVStore` using the v4 storage layout
  * (`versioned/layout.ts`) rather than a `Versioned` instance — the
  * walk is a pure read over committed state and shouldn't be entangled
  * with a working tree's branch/HEAD bookkeeping.
@@ -20,14 +20,16 @@
  */
 
 import { Keyset } from '../keyset'
-import type { CommitInfo, KVStore, KeysetEntry, WireCommit } from '../types'
+import { PyFloat } from '../pyjson'
+import type { KVStore, KeysetEntry, WireCommit } from '../types'
 import {
   COMMIT_ROOT,
   COMMIT_TIME,
   INFO_KEY,
   PARENT_COMMIT,
-  blobPointerOwner,
+  PARENT_GENS,
   loads,
+  loadsExact,
   safeLoads,
 } from '../versioned/layout'
 
@@ -42,7 +44,8 @@ export interface WalkDeltaOptions {
 /** Loaded-per-commit record cache built during the reachability pass. */
 interface CommitRecord {
   parents: readonly string[]
-  time: number
+  /** As recorded, so it re-encodes to the bytes that were hashed. */
+  time: PyFloat
 }
 
 /**
@@ -97,8 +100,8 @@ export async function* walkDelta(
   }
 
   const byAge = (a: string, b: string): number => {
-    const ta = (missing.get(a) as CommitRecord).time
-    const tb = (missing.get(b) as CommitRecord).time
+    const ta = (missing.get(a) as CommitRecord).time.value
+    const tb = (missing.get(b) as CommitRecord).time.value
     if (ta !== tb) return ta - tb
     return a < b ? -1 : 1
   }
@@ -177,10 +180,10 @@ async function collectDelta(
       throw new Error(`walkDelta: commit record missing for ${current}`)
     }
     const timeRaw = await store.get(COMMIT_TIME(current))
-    const time = timeRaw !== null ? safeLoads(timeRaw) : null
+    const time = timeRaw !== null ? loadsExact(timeRaw) : null
     into.set(current, {
       parents,
-      time: typeof time === 'number' ? time : 0,
+      time: time instanceof PyFloat ? time : new PyFloat(typeof time === 'number' ? time : 0),
     })
     for (const p of parents) {
       if (!into.has(p) && !haveSet.has(p)) stack.push(p)
@@ -218,52 +221,42 @@ async function buildWireCommit(
 
   const diff = await parentKs.diff(commitKs)
 
-  const updates = new Map<string, Uint8Array>()
-  const removals = new Set<string>()
-  const meta = new Map<string, { readonly createdAt: number }>()
-  const carries = new Map<string, { owner: string; size: number; createdAt: number }>()
-
-  // added/modified relative to the first parent: written here (owner
-  // is this commit) → updates; otherwise adopted from another ancestor
-  // (the non-first parent's side of a merge) → carries.
+  // Every entry that differs from the first parent's travels with its
+  // bytes: written here, or adopted from a merge's other side, it is
+  // the same blob either way. One getMany for all of them.
   const changed: Array<readonly [string, KeysetEntry]> = []
   for (const [key, entry] of diff.added) changed.push([key, entry])
   for (const [key, [, entry]] of diff.modified) changed.push([key, entry])
-
-  // Partition by pointer ownership first, then batch-fetch the owned
-  // blobs in one getMany — one round trip instead of one per key on
-  // high-latency stores.
-  const owned: Array<readonly [string, string, number]> = []
   for (const [key, entry] of changed) {
-    const owner = blobPointerOwner(entry.blob)
-    if (owner === hash) owned.push([key, entry.blob, entry.meta.createdAt])
-    else carries.set(key, { owner, size: entry.meta.size, createdAt: entry.meta.createdAt })
-  }
-  if (owned.length > 0) {
-    const fetched = await store.getMany(owned.map(([, pointer]) => pointer))
-    for (const [key, pointer, createdAt] of owned) {
-      const bytes = fetched.get(pointer)
-      if (bytes === undefined) {
-        throw new Error(`walkDelta: blob missing for ${pointer}`)
-      }
-      updates.set(key, bytes)
-      meta.set(key, { createdAt })
+    if (entry.meta.chunks !== undefined) {
+      throw new Error(`walkDelta: '${key}' at ${hash} is chunked; chunked blobs don't transfer`)
     }
   }
-  for (const key of diff.removed.keys()) removals.add(key)
+  const updates = new Map<string, Uint8Array>()
+  if (changed.length > 0) {
+    const fetched = await store.getMany(changed.map(([, entry]) => entry.blob))
+    for (const [key, entry] of changed) {
+      const bytes = fetched.get(entry.blob)
+      if (bytes === undefined) throw new Error(`walkDelta: blob missing for ${entry.blob}`)
+      updates.set(key, bytes)
+    }
+  }
+  const removals = new Set(diff.removed.keys())
 
-  const infoRaw = await store.get(INFO_KEY(hash))
-  const info = infoRaw !== null ? (loads(infoRaw) as CommitInfo) : null
+  const [infoRaw, gensRaw] = await Promise.all([
+    store.get(INFO_KEY(hash)),
+    store.get(PARENT_GENS(hash)),
+  ])
+  const gens = gensRaw !== null ? safeLoads(gensRaw) : null
 
   return {
     hash,
     parents: rec.parents,
+    parentGens: Array.isArray(gens) ? (gens as number[]) : null,
     time: rec.time,
-    info,
+    info: infoRaw !== null ? loadsExact(infoRaw) : null,
     updates,
     removals,
-    meta,
-    carries,
   }
 }
 

@@ -40,7 +40,8 @@ describe('false', () => {
 describe('|| true idiom', () => {
   it('rescues a failing command', async () => {
     // The original failing transcript: `<cmd that may fail> || true`.
-    // Use a guaranteed-missing path to provoke the failure.
-    expect(await execute('cat /missing || true', new MemoryFS())).toBe('')
+    // Use a guaranteed-missing path to provoke the failure. The
+    // failure's diagnostic shows, as a terminal's stderr would.
+    expect(await execute('cat /missing || true', new MemoryFS())).toMatch(/^cat: \/missing: .*\n$/)
   })
 })

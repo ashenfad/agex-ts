@@ -73,7 +73,8 @@ describe('execute — operators', () => {
   it('runs the right side of || only on failure', async () => {
     const fs = new MemoryFS()
     const out = await execute('cat /nope || echo recovered', fs)
-    expect(out).toBe('recovered\n')
+    // The left side's diagnostic shows, then the right side runs.
+    expect(out).toMatch(/^cat: \/nope: .*\nrecovered\n$/)
   })
 
   it('does NOT run the right side of || when the left succeeds', async () => {

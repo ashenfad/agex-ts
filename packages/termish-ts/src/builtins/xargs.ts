@@ -92,7 +92,7 @@ export const xargs: CommandHandler = async (ctx) => {
 
   const { replace, maxArgs, nullDelim, verbose, cmdName, cmdBaseArgs } = parseXargsArgs(ctx.args)
 
-  const inputText = ctx.stdin
+  const inputText = ctx.stdin.text()
   if (inputText.trim().length === 0) return
 
   const items = nullDelim
@@ -109,7 +109,11 @@ export const xargs: CommandHandler = async (ctx) => {
     xargsDepth++
     let out: string
     try {
-      out = await execute(cmdStr, ctx.fs, { signal: ctx.signal, commands: ctx.commands })
+      out = await execute(cmdStr, ctx.fs, {
+        signal: ctx.signal,
+        commands: ctx.commands,
+        env: ctx.env,
+      })
     } catch (e) {
       throw e instanceof TerminalError
         ? e

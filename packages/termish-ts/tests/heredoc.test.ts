@@ -116,7 +116,7 @@ describe('heredoc execution', () => {
 
   it('delivers stdin to injected commands', async () => {
     const shout: CommandHandler = async (ctx) => {
-      ctx.stdout.write(ctx.stdin.toUpperCase())
+      ctx.stdout.write(ctx.stdin.text().toUpperCase())
     }
     const out = await execute('shout <<EOF\nquiet words\nEOF', new MemoryFS(), {
       commands: { shout },

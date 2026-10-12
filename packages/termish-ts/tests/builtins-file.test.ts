@@ -118,6 +118,8 @@ describe('file', () => {
   it('the agent post-download pattern (file FOO || true) survives a missing FOO', async () => {
     // This is the exact transcript that prompted the work — make sure
     // the combination works end to end.
-    expect(await execute('file /Electric_Vehicle.csv.gz || true', new MemoryFS())).toBe('')
+    expect(await execute('file /Electric_Vehicle.csv.gz || true', new MemoryFS())).toMatch(
+      /^file: \/Electric_Vehicle\.csv\.gz: .*\n$/,
+    )
   })
 })

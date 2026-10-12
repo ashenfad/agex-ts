@@ -153,14 +153,14 @@ Registers a custom command callable from the agent's `terminal_action` shell. Us
 ```ts
 agent.terminal(
   async (ctx) => {
-    const text = ctx.stdin.trim()
+    const text = ctx.stdin.text().trim()
     ctx.stdout.write(text.toUpperCase() + '\n')
   },
   { name: 'shout', description: 'Uppercase stdin.' },
 )
 ```
 
-The handler receives a `CommandContext` (args, stdin, stdout, fs, signal — see @agex-ts/termish). The library shape (registered fns and namespaces) stays primary; the terminal is for CLI-flavored tooling and `--help`-and-pipelines idioms.
+The handler receives a `CommandContext` (args, stdin, stdout, fs, env, signal — see @agex-ts/termish). Its input is `ctx.stdin.text()` or, byte for byte, `ctx.stdin.bytes`; it writes with `ctx.stdout.write(text)` or `ctx.stdout.writeBytes(data)`, and returns `{ exitCode, stderr }` to fail with a diagnostic. The library shape (registered fns and namespaces) stays primary; the terminal is for CLI-flavored tooling and `--help`-and-pipelines idioms.
 
 The `@agex-ts/git` package is a worked example of the skill+terminal pair: `registerGit(agent)` mounts a markdown skill at `/skills/git/SKILL.md` and registers a `git` terminal command that wraps an in-VFS git surface. See [Git](git.md).
 

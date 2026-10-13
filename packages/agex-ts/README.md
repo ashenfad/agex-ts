@@ -7,8 +7,8 @@ tasks, with code as the action space. The TypeScript counterpart of
 > **Status:** being rewritten on the `rebuild` branch, step by step (the
 > repo's `plan.md`, "Then agex-ts"). So far: the session loop, the run
 > record, the provider protocol with a scripted provider, any AI SDK
-> model as a provider, and agex's shape corpus (`agex-ts/conformance`).
-> Folding, delegation and tasks come next. The published 0.5.x is the
+> model as a provider, folding, and agex's shape corpus
+> (`agex-ts/conformance`). Delegation and tasks come next. The published 0.5.x is the
 > previous design, which this replaces.
 
 ## Sessions
@@ -37,6 +37,34 @@ chat.cancel('stopped by the user') // the turn ends cancelled, its work kept
   which the model is told to reply and further calls aren't run.
 - **The agent holds nothing:** a change of model or primer is a new
   `Agent` for the next turn, with the same workspace and inbox.
+
+## Folding
+
+```ts
+import { Policy } from 'agex-ts'
+
+const agent = new Agent({ model, compaction: new Policy(120_000) })
+```
+
+Past the budget, the conversation is folded into a summary in what the
+model is sent, within a run too, so a long task keeps going. The stored
+runs are never rewritten: the person still sees everything.
+
+- **The agent's own model writes the summary,** asked with nearly the
+  request it was about to send, which is mostly in the provider's
+  cache. A reply with no text falls back to a transcript with tool
+  output cut down.
+- **A fold covers everything before the run's latest step,** and never
+  falls between a tool call and its result. The run's opening message
+  is sent again after the summary.
+- **Each fold is recorded in the workspace** (`ws.compaction`) and
+  streamed as `Compacted`. A checkout before it takes it back, and a
+  full fork carries it.
+- **Summary calls count** against `maxSteps` and in the run's usage
+  (`Run.compaction`).
+
+Set the budget well above what no fold can take out (the system prompt,
+the tools, the opening message).
 
 ## Models
 

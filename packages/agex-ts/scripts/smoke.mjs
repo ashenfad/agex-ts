@@ -7,9 +7,10 @@
  * Each provider whose key is set runs two turns with thinking on: one
  * that writes a file through a tool (so the reply's reasoning and tool
  * calls go back to the provider within the turn), and one that asks
- * about it (so the stored run goes back across turns). Then one session
- * moves from the first provider to another mid-conversation, and one
- * turn is stopped mid-stream.
+ * about it (so the stored run goes back across turns); then a session
+ * whose second turn is over a small budget, so it folds the first. Then
+ * one session moves from the first provider to another
+ * mid-conversation, and one turn is stopped mid-stream.
  *
  * Keys come from the environment and are never printed:
  * ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, OPENROUTER_API_KEY.
@@ -24,7 +25,7 @@ import { createAnthropic } from '@ai-sdk/anthropic'
 import { createGoogleGenerativeAI } from '@ai-sdk/google'
 import { createOpenAI } from '@ai-sdk/openai'
 import { createOpenRouter } from '@openrouter/ai-sdk-provider'
-import { Agent, runUsage } from '../dist/index.js'
+import { Agent, Policy, runUsage } from '../dist/index.js'
 
 const env = process.env
 const PROVIDERS = {
@@ -93,6 +94,32 @@ for (const [key, model] of models) {
     console.log(
       `       parts ${[...new Set(parts)].join(',')}; usage in ${usage.inputTokens} out ${usage.outputTokens} cache ${usage.cacheReadTokens}/${usage.cacheWriteTokens}`,
     )
+  } catch (error) {
+    check('ran', false, String(error?.message ?? error))
+  }
+}
+
+for (const [key, model] of models) {
+  console.log(`${key}, folded`)
+  try {
+    const ws = await workspace()
+    const opening = await new Agent({ model, primer, settings })
+      .session(ws)
+      .say('Remember the code word PELICAN. Then list thirty fruits, one per line. No tools.')
+    check('first turn', opening.status === 'completed', said({ ...opening, text: '…' }))
+    // a budget just above the first request: the second turn's is over it
+    const [run] = await new Agent({ model }).session(ws).runs()
+    const first = run.messages.find((m) => m.role === 'assistant')?.usage?.inputTokens ?? 0
+    const session = new Agent({
+      model,
+      primer,
+      settings,
+      compaction: new Policy(first + 100),
+    }).session(ws)
+    const out = await session.say('What was the code word? Answer from memory, no tools.')
+    const folds = out.events.filter((e) => e.kind === 'Compacted').length
+    check('folds', folds > 0, `${folds} fold(s), budget ${first + 100}`)
+    check('remembers through the fold', /PELICAN/i.test(out.text), said(out))
   } catch (error) {
     check('ran', false, String(error?.message ?? error))
   }

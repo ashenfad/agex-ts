@@ -10,7 +10,9 @@
  *
  * Tool calls get ids of their own (`call_1`, `call_2`, …), as a
  * provider's would. A step's `input_tokens` is the reply's reported
- * input. A list that runs out replies with the runner's exhausted step,
+ * input; a step without one reports an estimate of the request (fifty,
+ * and a token a word, as pydantic-ai's `FunctionModel` reports under
+ * Python agex's), since a real provider always reports one. A list that runs out replies with the runner's exhausted step,
  * so a loop that asks once too often ends rather than hangs.
  */
 
@@ -24,6 +26,18 @@ import {
   aborted,
 } from './provider'
 import { type Message, type Part, newId } from './record'
+
+/** A request's size the way pydantic-ai's `FunctionModel` guesses it:
+ *  fifty, and a token a word. */
+function estimate(messages: readonly Message[]): number {
+  return (
+    50 +
+    texts(messages)
+      .join(' ')
+      .split(/[\s",.:]+/)
+      .filter((w) => w !== '').length
+  )
+}
 
 /** The model's name in a scripted reply. */
 export const SCRIPTED = 'scripted'
@@ -103,7 +117,7 @@ export class ScriptedProvider implements Provider {
         model: SCRIPTED,
         provider: SCRIPTED,
         usage: {
-          inputTokens: step.input_tokens,
+          inputTokens: step.input_tokens || estimate(messages),
           outputTokens: 0,
           cacheReadTokens: 0,
           cacheWriteTokens: 0,

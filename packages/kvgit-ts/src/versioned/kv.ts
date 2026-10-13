@@ -29,12 +29,13 @@ import {
   BranchExistsError,
   ConcurrencyError,
   CorruptHeadError,
+  GcBusy,
   UnknownBranchError,
   UnknownCommitError,
 } from '../errors'
 import { EMPTY_HASH } from '../hamt'
 import { Keyset } from '../keyset'
-import { compareCodePoints } from '../pyjson'
+import { PyFloat, compareCodePoints } from '../pyjson'
 import type {
   CommitInfo,
   ConflictDisposition,
@@ -53,11 +54,15 @@ import {
   BRANCH_HEAD_PREV,
   COMMIT_ROOT,
   COMMIT_TIME,
+  GC_LEASE_KEY,
   INFO_KEY,
+  IN_FLIGHT_KEY,
+  IN_FLIGHT_PREFIX,
   PARENT_COMMIT,
   PARENT_GENS,
   ROOT_COMMIT,
   TAG_BRANCH_PREFIX,
+  assertStorageVersion,
   blobKey,
   checkStorageVersion,
   commitHash,
@@ -68,6 +73,16 @@ import {
   loadsInfo,
   safeLoads,
 } from './layout'
+import {
+  GC_LEASE_TTL,
+  type HeldLease,
+  IN_FLIGHT_TTL,
+  acquireGcLease,
+  releaseGcLease,
+  sameBytes,
+  tryLand,
+  waitForGc,
+} from './lease'
 import type { Change, MergeResolution } from './merge'
 import { listBranches, rejectReservedBranch } from './refs'
 
@@ -216,17 +231,38 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
  * someone else repaired (or advanced) in the meantime is never
  * clobbered.
  */
-async function healHead(store: KVStore, branch: string, recovered: Uint8Array): Promise<boolean> {
+const wallClock = (): number => Date.now() / 1000
+
+async function healHead(
+  store: KVStore,
+  branch: string,
+  recovered: Uint8Array,
+  now: () => number = wallClock,
+): Promise<boolean> {
   const branchKey = BRANCH_HEAD(branch)
-  const raw = await store.get(branchKey)
-  if (raw === null || bytesEqual(raw, recovered)) return false
-  const commitHash = safeLoads(raw)
-  if (typeof commitHash === 'string' && (await store.get(COMMIT_ROOT(commitHash))) !== null) {
-    return false
+  // Installing a recovered HEAD makes a commit reachable that the store
+  // didn't claim a moment ago, so the checks and the write happen
+  // against one lease record, and a sweep in between sends the decision
+  // round again.
+  for (;;) {
+    const lease = await waitForGc(store, now)
+    const raw = await store.get(branchKey)
+    if (raw === null || bytesEqual(raw, recovered)) return false
+    const commitHash = safeLoads(raw)
+    if (typeof commitHash === 'string' && (await store.get(COMMIT_ROOT(commitHash))) !== null) {
+      return false
+    }
+    const landed = await tryLand(
+      store,
+      lease,
+      new Map([[branchKey, raw]]),
+      new Map([[branchKey, recovered]]),
+    )
+    if (landed === null) continue
+    if (!landed) return false
+    console.warn(`kvgit: branch '${branch}' corrupt HEAD replaced with recovered commit`)
+    return true
   }
-  if (!(await store.cas(branchKey, recovered, raw))) return false
-  console.warn(`kvgit: branch '${branch}' corrupt HEAD replaced with recovered commit`)
-  return true
 }
 
 /**
@@ -288,8 +324,6 @@ export interface VersionedKVOptions {
   now?: () => number
 }
 
-const wallClock = (): number => Date.now() / 1000
-
 /**
  * Create branch `name` at commit `target`, in one conditional write:
  * the head (expected absent), the root commit's records when `target`
@@ -307,7 +341,11 @@ export async function createBranchHead(
 ): Promise<void> {
   rejectReservedBranch(name)
   const branchKey = BRANCH_HEAD(name)
+  // "The commit is here" and "the head names it" are decided against
+  // one lease record: a sweep starting between the check and the write
+  // makes the write fail, and the check runs again.
   for (;;) {
+    const lease = await waitForGc(store, now)
     const expected = new Map<string, Uint8Array | null>([[branchKey, null]])
     const writes = new Map<string, Uint8Array>([[branchKey, dumps(target)]])
     if ((await store.get(COMMIT_ROOT(target))) === null) {
@@ -324,9 +362,13 @@ export async function createBranchHead(
       })
       for (const [k, v] of records) writes.set(k, v)
     }
-    if (await store.casMany(expected, writes, [BRANCH_HEAD_PREV(name)])) return
-    if ((await store.get(branchKey)) !== null) throw new BranchExistsError(name)
-    // Another writer minted the root commit first: decide again.
+    const landed = await tryLand(store, lease, expected, writes, [BRANCH_HEAD_PREV(name)])
+    if (landed === true) return
+    if (landed === false && (await store.get(branchKey)) !== null) {
+      throw new BranchExistsError(name)
+    }
+    // A sweep moved the lease, or another writer minted the root commit
+    // first: decide again.
   }
 }
 
@@ -637,20 +679,75 @@ export async function commitChanges(
   return changes
 }
 
+export interface GcOptions {
+  /** Seconds an unreachable commit is kept (default an hour): how long
+   *  abandoned work lingers. Any value is safe beside writers. */
+  minAge?: number
+  /** Also scan the node and blob namespaces for content no commit
+   *  references (crash leftovers). */
+  deep?: boolean
+  /** Wait out a sweep holding the lease (default true); false throws
+   *  `GcBusy` instead. */
+  wait?: boolean
+  /** Seconds this sweep's lease stays live: what it costs writers, at
+   *  most, if it dies holding it. */
+  leaseTtl?: number
+  now?: () => number
+}
+
 /**
- * Mark and sweep: reclaim every commit no branch or tag reaches and that
- * is older than `minAge` seconds, with whatever only it held. `deep`
- * also scans the node and blob namespaces for content no commit
- * references. Both need a quiescent store; see `VersionedKV.cleanOrphans`.
+ * Sweep what no live commit reaches; return how many commits went.
  *
- * @returns The number of commits removed.
+ * A commit is live if a branch head or a tag reaches it, if it is in
+ * flight (written, not yet published), or if it is younger than
+ * `minAge` seconds. Everything an orphan alone held goes with it: its
+ * records, blobs and HAMT nodes. `deep` adds a scan of the node and
+ * blob namespaces for content no commit references at all.
+ *
+ * Runs under the store's GC lease: no commit batch can land while it is
+ * held, and every commit written but not yet published carries an
+ * in-flight marker the sweep marks from, so this is safe beside
+ * concurrent writers at any `minAge`, 0 included.
+ *
+ * @throws GcBusy with `wait: false`, if another sweep holds the lease.
+ * @throws StorageVersionError for a store of another layout; nothing is
+ *   written to it, the lease included.
  */
-export async function sweepStore(
+export async function gcStore(store: KVStore, opts: GcOptions = {}): Promise<number> {
+  const now = opts.now ?? wallClock
+  const ttl = opts.leaseTtl ?? GC_LEASE_TTL
+  const wait = opts.wait ?? true
+  // Before the lease, so a store this code mustn't touch comes out of
+  // the call untouched.
+  await assertStorageVersion(store)
+  let held: HeldLease
+  for (;;) {
+    if (wait) await waitForGc(store, now)
+    try {
+      held = await acquireGcLease(store, ttl, now)
+      break
+    } catch (e) {
+      if (wait && e instanceof GcBusy) continue
+      throw e
+    }
+  }
+  try {
+    return await sweep(store, opts.minAge ?? 3600, opts.deep ?? false, now)
+  } finally {
+    await releaseGcLease(store, held, ttl, now)
+  }
+}
+
+/** The mark-and-sweep behind {@link gcStore}. The caller holds the
+ *  lease, so no commit batch lands while this runs. */
+async function sweep(
   store: KVStore,
-  opts: { minAge: number; deep: boolean; now: () => number },
+  minAge: number,
+  deep: boolean,
+  now: () => number,
 ): Promise<number> {
-  const { deep } = opts
-  const cutoffTime = opts.now() - opts.minAge
+  const at = now()
+  const cutoffTime = at - minAge
 
   const reachableCommits = new Set<string>()
   const reachableBlobs = new Set<string>()
@@ -670,10 +767,44 @@ export async function sweepStore(
     for (const node of newNodes) reachableNodes.add(node)
   }
 
-  // Mark phase: walk every branch's full ancestry. Prefix scan
-  // returns only branch-head pointers (prev backups don't match
-  // — see listBranches comment).
-  for await (const k of store.keys(BRANCH_HEAD_PREFIX)) {
+  const markFrom = async (tip: string): Promise<void> => {
+    // allParents follows merge commits' second parents too.
+    for await (const commit of walkHistory(tip, (h) => loadParents(store, h), {
+      allParents: true,
+    })) {
+      if (reachableCommits.has(commit)) continue
+      reachableCommits.add(commit)
+      await walkCommitForMarks(commit)
+    }
+  }
+
+  // In-flight markers first, branch heads second. Publishing a commit
+  // installs its head and drops its marker in one atomic write, so a
+  // commit published after its marker was read is under a head read
+  // later, and one published before has no marker to miss; read the
+  // other way round, a publish landing between the two reads would leave
+  // the commit under neither.
+  const staleMarkers: string[] = []
+  const markerKeys: string[] = []
+  for await (const k of store.keys(IN_FLIGHT_PREFIX)) markerKeys.push(k)
+  for (const k of markerKeys) {
+    const raw = await store.get(k)
+    const expires = raw === null ? null : safeLoads(raw)
+    if (typeof expires === 'number' && expires > at) {
+      await markFrom(k.slice(IN_FLIGHT_PREFIX.length))
+    } else {
+      // The writer never published or withdrew it; its commit is an
+      // ordinary orphan now, governed by minAge.
+      staleMarkers.push(k)
+    }
+  }
+
+  // Every root is a branch head, tags included: a tag is a head under
+  // the reserved `refs/tags/` name. Prefix scan returns only heads
+  // (prev backups don't match).
+  const headKeys: string[] = []
+  for await (const k of store.keys(BRANCH_HEAD_PREFIX)) headKeys.push(k)
+  for (const k of headKeys) {
     const branchName = k.slice(BRANCH_HEAD_PREFIX.length)
     // No `recoverFromCorruptHead` here, deliberately, even when this
     // handle carries one. GC must not decide reachability from a
@@ -688,15 +819,7 @@ export async function sweepStore(
     // what it points at. The inconsistency with the read paths is
     // the point, not an oversight.
     const branchHead = await resolveHead(store, branchName)
-    if (branchHead === null) continue
-    // Use allParents=true to follow merge commits' second parents too.
-    for await (const commit of walkHistory(branchHead, (h) => loadParents(store, h), {
-      allParents: true,
-    })) {
-      if (reachableCommits.has(commit)) continue
-      reachableCommits.add(commit)
-      await walkCommitForMarks(commit)
-    }
+    if (branchHead !== null) await markFrom(branchHead)
   }
 
   // Sweep phase: scan commit roots, partition into orphans (old enough
@@ -719,22 +842,23 @@ export async function sweepStore(
     }
   }
 
-  // Protect blobs/HAMT nodes referenced by young orphans — they may
-  // belong to in-flight writers whose CAS hasn't landed yet.
+  // Young orphans are kept whole, inside the minAge window abandoned
+  // work is given to linger, so everything they reference is marked too.
   for (const young of youngOrphanCommits) {
     await walkCommitForMarks(young)
   }
 
   // Collect everything to delete in one batch so the sweep is atomic
   // at the store level (defends against partial sweeps under crash).
-  const allRemovals = new Set<string>()
+  const allRemovals = new Set<string>(staleMarkers)
   const KEYSET_PREFIX = Keyset.DEFAULT_PREFIX
 
-  // Every deletion candidate comes from walking an orphan's own
-  // keyset — never from a namespace scan — so content a commit
-  // landing mid-sweep wrote for itself is never on this list. Content
-  // it shares with an orphan can be, which is why the sweep is for a
-  // quiescent store.
+  // Every deletion candidate on this path comes from walking an
+  // orphan's own keyset. Content is keyed by what it holds, so an
+  // orphan's blob or node may be the very key a live commit uses; the
+  // mark phase saw every live commit (published, in flight or young),
+  // so "unmarked" is what makes a key safe to take, and no batch can
+  // land to change that while the lease is held.
   //
   // `skipNodes` starts as the reachable set (subtrees shared with a
   // live commit or a young orphan must not be touched, and are the
@@ -778,9 +902,9 @@ export async function sweepStore(
   if (deep) {
     // Namespace scans: reclaim nodes and blobs no orphan keyset
     // points at (interrupted writes, crashes between a write and its
-    // CAS, a damaged orphan's content). Unsafe against a concurrent
-    // writer, because anything committed since the mark phase looks
-    // unreferenced here. Quiescent stores only — see `deepClean`.
+    // publish, a damaged orphan's content). Safe for the same reason
+    // the rest of the sweep is: no batch lands while the lease is held,
+    // so everything here was either marked or is garbage.
     for await (const k of store.keys(KEYSET_PREFIX)) {
       const nodeHash = k.slice(KEYSET_PREFIX.length)
       if (nodeHash.length > 0 && !reachableNodes.has(nodeHash)) {
@@ -831,6 +955,12 @@ export class VersionedKV extends VersionedBase {
   /** Generations of commits this handle has written or read. A
    *  commit's generation never changes, so nothing here goes stale. */
   private readonly generations = new Map<string, number>()
+  /** Commits this handle has written and not yet published, with the
+   *  bytes of each one's in-flight marker. */
+  private inFlight = new Map<string, Uint8Array>()
+  /** The lease record this handle's latest batch landed against: a
+   *  publish expecting it can't land while a sweep runs. */
+  private leaseSeen: Uint8Array | null = null
 
   private constructor(opts: {
     store: KVStore
@@ -942,11 +1072,42 @@ export class VersionedKV extends VersionedBase {
     }
   }
 
+  /**
+   * Restore in-memory state after a failed attempt. The attempt's
+   * commits are abandoned, so their in-flight markers are withdrawn and
+   * they become ordinary orphans. Best effort: a marker left behind
+   * lapses after `IN_FLIGHT_TTL`.
+   */
   protected restoreState(saved: unknown): void {
     const s = saved as SnapshotState
     this.currentCommitHash = s.currentCommit
     this.commitKeys = s.commitKeys
     this.meta = s.meta
+    if (this.inFlight.size > 0) {
+      const markers = [...this.inFlight.keys()].map(IN_FLIGHT_KEY)
+      this.inFlight = new Map()
+      this.store.removeMany(markers).catch(() => {})
+    }
+  }
+
+  /**
+   * Write a commit's batch, marked in flight, while no sweep runs. The
+   * batch is conditional on the lease record read after waiting any
+   * live sweep out, so it lands before a sweep starts or after one ends,
+   * never during; landing before is safe because the marker makes every
+   * later sweep treat the commit as live until it is published.
+   */
+  private async landBatch(commit: string, writes: Map<string, Uint8Array>): Promise<void> {
+    const marker = dumps(new PyFloat(this.now() + IN_FLIGHT_TTL))
+    writes.set(IN_FLIGHT_KEY(commit), marker)
+    for (;;) {
+      const lease = await waitForGc(this.store, this.now)
+      if (await this.store.casMany(new Map([[GC_LEASE_KEY, lease]]), writes)) {
+        this.inFlight.set(commit, marker)
+        this.leaseSeen = lease
+        return
+      }
+    }
   }
 
   protected async createCommit(opts: {
@@ -1005,7 +1166,7 @@ export class VersionedKV extends VersionedBase {
     for (const [k, v] of records) writes.set(k, v)
 
     // One batch, so a crash mid-write doesn't strand a partial commit.
-    await this.store.setMany(writes)
+    await this.landBatch(newHash, writes)
 
     this.commitKeys = newCommitKeys
     this.currentCommitHash = newHash
@@ -1104,7 +1265,7 @@ export class VersionedKV extends VersionedBase {
       info,
     })
     for (const [k, v] of records) writes.set(k, v)
-    await this.store.setMany(writes)
+    await this.landBatch(mergeHash, writes)
 
     this.commitKeys = mergedKeys
     this.currentCommitHash = mergeHash
@@ -1125,13 +1286,29 @@ export class VersionedKV extends VersionedBase {
   ): Promise<MergeResult> {
     const ourHead = this.currentCommitHash
     const carried = [...(await this.changes(ourHead, theirHead)).keys()].sort(compareCodePoints)
-    if ((await this.store.get(COMMIT_ROOT(theirHead))) === null) {
-      throw new UnknownCommitError(theirHead)
-    }
-    if (!(await this.casHead(ourHead, theirHead))) {
-      if ((await this.store.get(BRANCH_HEAD(this.branch))) === null) {
-        throw new UnknownBranchError(this.branch)
+    const branchKey = BRANCH_HEAD(this.branch)
+    const expected = dumps(ourHead)
+    const writes = new Map([
+      [branchKey, dumps(theirHead)],
+      [BRANCH_HEAD_PREV(this.branch), expected],
+    ])
+    // The existence check and the write are decided against one lease
+    // record, so a sweep can't take the commit between them.
+    let moved = false
+    for (;;) {
+      const lease = await waitForGc(this.store, this.now)
+      if ((await this.store.get(COMMIT_ROOT(theirHead))) === null) {
+        throw new UnknownCommitError(theirHead)
       }
+      const landed = await tryLand(this.store, lease, new Map([[branchKey, expected]]), writes)
+      if (landed === null) continue
+      if (landed) break
+      if ((await this.store.get(branchKey)) === null) throw new UnknownBranchError(this.branch)
+      if (await healHead(this.store, this.branch, expected, this.now)) continue
+      moved = true
+      break
+    }
+    if (moved) {
       if (onConflict === 'abandon') {
         return {
           merged: false,
@@ -1156,29 +1333,53 @@ export class VersionedKV extends VersionedBase {
   /**
    * Publish `newHead` as this branch's HEAD if HEAD is `expected`.
    *
-   * One atomic write (`casMany`) moves HEAD and records `expected` as
-   * the prev-HEAD backup, so the backup always names the commit HEAD
-   * held immediately before: never a value a losing writer invented,
-   * and never more than one commit back.
+   * One atomic write moves HEAD, records `expected` as the backup, and
+   * removes the in-flight markers of the commits being published, so
+   * the backup always names the commit HEAD held immediately before,
+   * and a published commit never keeps a marker, nor loses it before
+   * its head lands.
    *
-   * A write that fails against a *damaged* HEAD is retried once behind
-   * {@link healHead}, which repairs it atomically. That is the only
-   * place a corrupt HEAD is written back, now that reads do not.
+   * The write also expects the lease record, so it can't land while a
+   * sweep runs (a head installed under a sweep could name a commit the
+   * sweep is about to take); after a sweep it waits and tries again. And
+   * it expects each marker to hold the bytes this handle wrote: a marker
+   * only disappears early if it lapsed and a sweep reaped it, possibly
+   * with the commit, and then the publish fails rather than naming a
+   * commit that may be gone.
+   *
+   * A write that fails against a *damaged* HEAD is retried behind
+   * {@link healHead}, which repairs it atomically.
    */
   protected async casHead(expected: string, newHead: string): Promise<boolean> {
     const branchKey = BRANCH_HEAD(this.branch)
     const expectedBytes = dumps(expected)
-    const publish = (): Promise<boolean> =>
-      this.store.casMany(
-        new Map([[branchKey, expectedBytes]]),
-        new Map([
-          [branchKey, dumps(newHead)],
-          [BRANCH_HEAD_PREV(this.branch), expectedBytes],
-        ]),
-      )
-    if (await publish()) return true
-    if (!(await healHead(this.store, this.branch, expectedBytes))) return false
-    return publish()
+    const writes = new Map([
+      [branchKey, dumps(newHead)],
+      [BRANCH_HEAD_PREV(this.branch), expectedBytes],
+    ])
+    const markers = new Map([...this.inFlight].map(([c, m]) => [IN_FLIGHT_KEY(c), m] as const))
+    let lease = this.inFlight.size > 0 ? this.leaseSeen : await waitForGc(this.store, this.now)
+    for (;;) {
+      const expect = new Map<string, Uint8Array | null>([
+        [GC_LEASE_KEY, lease],
+        [branchKey, expectedBytes],
+        ...markers,
+      ])
+      if (await this.store.casMany(expect, writes, markers.keys())) break
+      if (!sameBytes(await this.store.get(GC_LEASE_KEY), lease)) {
+        // A sweep ran, or is running: wait it out and try again. A
+        // marker it reaped fails the next attempt on its own.
+        lease = await waitForGc(this.store, this.now)
+        continue
+      }
+      const present = await this.store.getMany(markers.keys())
+      for (const [key, marker] of markers) {
+        if (!sameBytes(present.get(key) ?? null, marker)) return false
+      }
+      if (!(await healHead(this.store, this.branch, expectedBytes, this.now))) return false
+    }
+    this.inFlight = new Map()
+    return true
   }
 
   protected async changes(commitA: string | null, commitB: string): Promise<Map<string, Change>> {
@@ -1295,18 +1496,24 @@ export class VersionedKV extends VersionedBase {
    */
   async resetTo(commitHash: string): Promise<boolean> {
     const branchKey = BRANCH_HEAD(this.branch)
+    // The existence check and the write are decided against one lease
+    // record: this either resets onto a commit that loads or reports it
+    // gone.
     for (;;) {
+      const lease = await waitForGc(this.store, this.now)
       if ((await this.store.get(COMMIT_ROOT(commitHash))) === null) return false
       const current = await this.store.get(branchKey)
       if (current === null) throw new UnknownBranchError(this.branch)
-      const landed = await this.store.casMany(
+      const landed = await tryLand(
+        this.store,
+        lease,
         new Map([[branchKey, current]]),
         new Map([
           [branchKey, dumps(commitHash)],
           [BRANCH_HEAD_PREV(this.branch), current],
         ]),
       )
-      if (landed) break
+      if (landed === true) break
     }
     await this.loadCommitInto(commitHash, true)
     return true
@@ -1359,78 +1566,45 @@ export class VersionedKV extends VersionedBase {
   // --- Orphan cleanup ---
 
   /**
-   * Remove orphaned commits — and the blobs and HAMT nodes they own —
-   * that are not reachable from any live branch HEAD.
+   * Reclaim commits no branch or tag reaches, with whatever only they
+   * held (blobs, HAMT nodes, records). Commits younger than `minAge`
+   * (milliseconds, default an hour) are kept: how long abandoned work
+   * lingers.
    *
-   * Mark phase walks every branch's full ancestry, accumulating
-   * reachable commits / blobs / HAMT node hashes. `Keyset.walk(skipNodes)`
-   * is given the cumulative seen-set so subtrees shared via structural
-   * sharing across commits are visited exactly once.
+   * Safe beside concurrent writers: the sweep runs under the store's GC
+   * lease, no commit batch lands while it is held, and a commit written
+   * but not yet published is marked in flight, so nothing a writer is
+   * using is taken. A sweep already running is waited out.
    *
-   * **Run it on a quiescent store.** Every deletion candidate is
-   * discovered by walking an orphan commit's own keyset, and nothing
-   * reachable from a live head or a young orphan is deleted. But blobs
-   * and nodes are keyed by content (storage v4), so a writer committing
-   * during the sweep can reuse a blob or node an orphan held, and lose
-   * it. The GC lease that makes a sweep safe beside writers (writers'
-   * batches conditional on it, sweeps holding it) is not here yet; until
-   * it is, no other tab, worker or process may write for the whole call.
+   * It doesn't reclaim content no commit points at (an interrupted
+   * write, a crash between a batch and its publish, the blobs of an
+   * orphan whose keyset is unreadable); {@link deepClean} does.
    *
-   * **What it deliberately leaves.** HAMT nodes that no commit points
-   * at — an interrupted write, a crash between the node write and the
-   * CAS, damage from an older sweep — are unreachable from any orphan
-   * keyset, so nothing finds them, and neither are the blobs of an
-   * orphan whose keyset is unreadable. {@link deepClean} reclaims both.
-   *
-   * The `minAge` guard (default 1 hour) protects recently-created
-   * commits from being swept. Within that window, an orphan commit's
-   * blobs and nodes are marked reachable too — they may belong to an
-   * in-flight writer whose CAS hasn't landed yet.
-   *
-   * @param opts.minAge Milliseconds. Commits younger than this are
-   *   protected from sweep, even if currently unreachable. Default: 1 hour.
    * @returns Number of orphaned commits removed.
    */
   async cleanOrphans(opts: { minAge?: number } = {}): Promise<number> {
-    return this.sweep(opts.minAge ?? 3_600_000, false)
+    return gcStore(this.store, { minAge: (opts.minAge ?? 3_600_000) / 1000, now: this.now })
   }
 
   /**
-   * Orphan sweep plus a full unreferenced-node scan. **Unsafe against
-   * concurrent writers.**
-   *
-   * Does everything {@link cleanOrphans} does, then additionally scans
-   * the whole `kvgit:keyset:` and `kvgit:blob:` namespaces and deletes
-   * any node or blob not reachable from a live branch head or a young
-   * orphan. That scan is the only way to reclaim content no commit
-   * references any more — leftovers from an interrupted write, a crash
-   * between a write and its CAS, or a damaged orphan's blobs — because
-   * no orphan keyset points at them.
-   *
-   * The scan runs after the mark phase, so it sees, and deletes,
-   * anything written by a commit that landed in between — including a
-   * commit that has since become a live branch HEAD, leaving a live
-   * head whose keyset root is missing. Run it only on a quiescent
-   * store: no other tab, worker, or process writing, for the whole
-   * call. `minAge` does not protect you here; it governs commit
-   * deletion, not the namespace scan.
-   *
-   * Use {@link cleanOrphans} for routine cleanup; schedule this one for
-   * maintenance windows.
+   * {@link cleanOrphans} plus a scan of the whole `kvgit:keyset:` and
+   * `kvgit:blob:` namespaces, deleting any node or blob no live, in
+   * flight or young commit reaches: the only way to reclaim content no
+   * commit references any more. Runs under the same lease, so it too is
+   * safe beside writers; a sweep already running makes it throw
+   * `GcBusy` rather than wait.
    *
    * @param opts.minAge Milliseconds. Commits younger than this are
    *   protected from sweep, even if currently unreachable. Default: 1 hour.
    * @returns Number of orphaned commits removed.
    */
   async deepClean(opts: { minAge?: number } = {}): Promise<number> {
-    return this.sweep(opts.minAge ?? 3_600_000, true)
-  }
-
-  /** Shared mark-and-sweep behind `cleanOrphans` / `deepClean`. */
-  private async sweep(minAge: number, deep: boolean): Promise<number> {
-    // minAge is in milliseconds here, and in seconds (as commit times
-    // are) below.
-    return sweepStore(this.store, { minAge: minAge / 1000, deep, now: this.now })
+    return gcStore(this.store, {
+      minAge: (opts.minAge ?? 3_600_000) / 1000,
+      deep: true,
+      wait: false,
+      now: this.now,
+    })
   }
 
   // --- Internal ---

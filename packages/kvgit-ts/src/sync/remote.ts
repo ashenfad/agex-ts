@@ -25,7 +25,7 @@ import {
   dumps,
   readBranchHead,
 } from '../versioned/layout'
-import { applyWire } from './apply'
+import { applyWire, publishHead } from './apply'
 import { walkDelta } from './walk'
 
 /** One remote branch pointer. */
@@ -96,13 +96,12 @@ export class MemoryRemote implements Remote {
     newHead: string,
     commits: AsyncIterable<WireCommit> | Iterable<WireCommit>,
   ): Promise<boolean> {
-    await applyWire(this.store, commits)
+    const applied = await applyWire(this.store, commits)
     // The stream must have delivered (or the store already held) the
     // commit the ref is about to point at.
     if ((await this.store.get(COMMIT_ROOT(newHead))) === null) {
       throw new Error(`MemoryRemote: pushed head ${newHead} not present after apply`)
     }
-    const expected = expectedOld === null ? null : dumps(expectedOld)
-    return this.store.cas(BRANCH_HEAD(branch), dumps(newHead), expected)
+    return publishHead(this.store, branch, expectedOld, newHead, { inFlight: applied.inFlight })
   }
 }

@@ -122,3 +122,13 @@ export class CorruptHeadError extends KvgitError {
 export class StorageVersionError extends KvgitError {
   override readonly name: string = 'StorageVersionError'
 }
+
+/**
+ * A sweep couldn't take the store's GC lease because another sweep
+ * holds an unexpired one. `gc({ wait: false })` throws it; by default
+ * `gc` waits instead. The lease carries an expiry, so a holder that
+ * dies without releasing it blocks nothing past that point.
+ */
+export class GcBusy extends KvgitError {
+  override readonly name: string = 'GcBusy'
+}

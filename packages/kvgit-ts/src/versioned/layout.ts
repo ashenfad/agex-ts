@@ -16,6 +16,8 @@
  *   `__commit_time__<commit>`        — wall time, in seconds (a float)
  *   `__info__<commit>`               — optional caller-supplied info
  *   `__tag_info__<tag>`              — a tag's creation time and info
+ *   `__gc_lease__`                   — the lease a sweep runs under
+ *   `__inflight__<commit>`           — a written, not yet published commit
  *   `kvgit:keyset:<node_hash>`       — HAMT node bytes (via Keyset)
  *   `kvgit:blob:<sha256>`            — blob bytes, keyed by content
  *
@@ -47,6 +49,16 @@ export const INFO_KEY = (commit: string): string => `__info__${commit}`
 export const TAG_INFO_KEY = (tag: string): string => `__tag_info__${tag}`
 export const BRANCH_HEAD_PREFIX = '__branch_head__'
 export const BLOB_PREFIX = 'kvgit:blob:'
+
+/** The store-wide lease every sweep runs under:
+ *  `{"owner": <opaque id>, "expires": <seconds>}`. Absent, unreadable
+ *  or expired all mean "no live lease". */
+export const GC_LEASE_KEY = '__gc_lease__'
+
+/** Marker for a commit whose batch has landed but whose head has not:
+ *  its value is the time (seconds) the protection lapses. */
+export const IN_FLIGHT_KEY = (commit: string): string => `__inflight__${commit}`
+export const IN_FLIGHT_PREFIX = '__inflight__'
 
 /**
  * The reserved branch-name prefix a tag's commit pointer lives under: a
@@ -227,6 +239,27 @@ export async function readBranchHead(store: KVStore, branch: string): Promise<st
  * rejected, a fresh store is stamped, and a store with branch heads but
  * no sentinel is an older format and is rejected.
  */
+/** Refuse a store of another storage layout, without writing to it
+ *  (a fresh store is left unstamped). */
+export async function assertStorageVersion(store: KVStore): Promise<void> {
+  const raw = await store.get(STORAGE_VERSION_KEY)
+  if (raw !== null) {
+    const version = safeLoads(raw)
+    if (version !== STORAGE_VERSION) {
+      throw new StorageVersionError(
+        `Store has kvgit storage version ${JSON.stringify(version)}, ` +
+          `this code supports ${STORAGE_VERSION}. Use a fresh store.`,
+      )
+    }
+    return
+  }
+  for await (const _k of store.keys(BRANCH_HEAD_PREFIX)) {
+    throw new StorageVersionError(
+      `Store appears to use an older kvgit storage format. This version requires storage v${STORAGE_VERSION}. Use a fresh store.`,
+    )
+  }
+}
+
 export async function checkStorageVersion(store: KVStore): Promise<void> {
   const raw = await store.get(STORAGE_VERSION_KEY)
   if (raw !== null) {

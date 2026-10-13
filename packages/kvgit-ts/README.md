@@ -102,36 +102,36 @@ what Python kvgit wrote for it
 
 ## Garbage collection
 
-Resetting a branch, deleting one, or losing a CAS race leaves commits
-nothing points at. Two passes reclaim them. **Both require a quiescent
-store:** no other tab, worker, or process may write for the whole call.
+Resetting a branch, deleting one, or losing a race leaves commits
+nothing points at. `repo.gc({ minAge, deep })` (or `vk.cleanOrphans` /
+`vk.deepClean` on an engine handle) reclaims them, with everything only
+they held: records, blobs and HAMT nodes.
 
-- **`vk.cleanOrphans({ minAge })`** walks every branch's ancestry to
-  mark what's live, then finds every deletion candidate by walking an
-  orphaned commit's *own* keyset, keeping anything a live commit or a
-  young orphan still reaches. It never scans a storage namespace.
-  `minAge` (default 1 hour) protects commits too young to be sure
-  about. Blobs and nodes are keyed by content, so a commit landing
-  mid-sweep that holds content an orphan also held can lose it; that
-  is why the pass needs a quiescent store, until a GC lease (sweeps
-  holding it, writers' batches conditional on it) makes it safe beside
-  writers.
+**It is safe beside concurrent writers,** as in Python kvgit:
 
-  It cannot reclaim content that *no* commit points at — an
-  interrupted write, a crash between the node write and its CAS, the
-  blobs of an orphan whose keyset is unreadable — because there is no
-  orphan keyset to find them through.
+- A sweep runs under the store's GC lease (`__gc_lease__`, a record
+  with an owner and an expiry). Every write that adds something a sweep
+  must see (a commit's batch, a head, a tag, a synced commit) is
+  conditional on the lease record its writer read after waiting any
+  live sweep out, so it lands before a sweep starts or after it ends,
+  never during. A writer that starts mid-sweep waits, and then lands
+  intact, even holding content an orphan held.
+- A commit's batch carries an in-flight marker (`__inflight__<commit>`)
+  that the write publishing its head removes, so a sweep that starts
+  between the two keeps it. A marker lapses after ten minutes, which is
+  what eventually releases the commit of a writer that died before
+  publishing.
+- `minAge` (seconds for `repo.gc`, default an hour) is policy only: how
+  long abandoned work lingers. Any value is safe, 0 included.
+- The lease expires (`leaseTtl`, default ten minutes), so a sweep that
+  dies holding it delays writers by the rest of its term and no longer.
+  A second sweep waits for the first, or with `wait: false` throws
+  `GcBusy` (`deepClean` doesn't wait).
 
-- **`vk.deepClean({ minAge })`** is the same sweep, plus a scan of the
-  whole `kvgit:keyset:` and `kvgit:blob:` namespaces that deletes any
-  node or blob not reachable from a live head or a young orphan. That
-  scan runs after the mark phase, so it will delete anything a
-  concurrent writer wrote in between, leaving a live head whose keyset
-  root is missing. `minAge` governs which commits are old enough to
-  delete, not the namespace scan.
-
-Routine cleanup is `cleanOrphans`; schedule `deepClean` for maintenance
-windows.
+`deep` also scans the `kvgit:keyset:` and `kvgit:blob:` namespaces for
+content no commit references at all: leftovers from an interrupted
+write, or the blobs of an orphan whose keyset is unreadable, which no
+orphan keyset points at.
 
 ## HEAD recovery
 

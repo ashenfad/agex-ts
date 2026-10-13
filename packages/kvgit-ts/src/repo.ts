@@ -23,14 +23,15 @@ import type { CommitInfo, DiffResult, KVStore } from './types'
 import { walkHistory } from './versioned/helpers'
 import {
   type CorruptHeadRecoverer,
+  type GcOptions,
   VersionedKV,
   createBranchHead,
   deleteBranchHead,
+  gcStore,
   loadParents,
   mergeBase,
   repairHead,
   resolveHead,
-  sweepStore,
 } from './versioned/kv'
 import {
   BRANCH_HEAD,
@@ -274,20 +275,16 @@ export class Repo<V = Uint8Array> {
   // --- Maintenance ---
 
   /**
-   * Reclaim what no branch or tag reaches; return how many commits were
-   * removed. Orphans younger than `minAge` seconds (default an hour)
-   * are kept. `deep` also scans for content no commit references (crash
-   * leftovers).
-   *
-   * Needs a quiescent store: no other tab, worker or process may write
-   * for the whole call (see `VersionedKV.cleanOrphans`).
+   * Reclaim what no branch, tag or in-flight commit reaches; return how
+   * many commits were removed. Orphans younger than `minAge` seconds
+   * (default an hour) are kept: how long abandoned work lingers, and any
+   * value is safe beside writers. `deep` also scans for content no
+   * commit references (crash leftovers). A sweep already running is
+   * waited out, or with `wait: false` throws `GcBusy`; writers wait
+   * while a sweep runs.
    */
-  async gc(opts: { minAge?: number; deep?: boolean } = {}): Promise<number> {
-    return sweepStore(this.store, {
-      minAge: opts.minAge ?? 3600,
-      deep: opts.deep ?? false,
-      now: this.now,
-    })
+  async gc(opts: Omit<GcOptions, 'now'> = {}): Promise<number> {
+    return gcStore(this.store, { ...opts, now: this.now })
   }
 
   // --- Internal ---

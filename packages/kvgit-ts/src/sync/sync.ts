@@ -36,7 +36,7 @@ import {
   readBranchHead,
   safeLoads,
 } from '../versioned/layout'
-import { applyWire, getSyncHead, setSyncHead } from './apply'
+import { applyWire, getSyncHead, publishHead, setSyncHead } from './apply'
 import type { Remote } from './remote'
 import { walkDelta } from './walk'
 
@@ -125,21 +125,20 @@ export async function pullBranch(
     throw new Error(`pullBranch: fetched head ${remoteHead} not present after apply`)
   }
 
+  const publish = { inFlight: applied.inFlight }
   if (localHead === null) {
-    const ok = await store.cas(BRANCH_HEAD(branch), dumps(remoteHead), null)
+    const ok = await publishHead(store, branch, null, remoteHead, publish)
     if (!ok) return result('diverged', applied.applied) // local creation race
     await setSyncHead(store, branch, remoteHead)
     return { ...result('created', applied.applied), localHead: remoteHead }
   }
 
   if (await isAncestor(store, localHead, remoteHead)) {
-    // Fast-forward, with the same prev-HEAD backup discipline as
-    // VersionedKV's casHead: the backup lands only after the swap
-    // does, so a pull that loses the race to a local writer cannot
-    // leave its own stale value as the branch's recovery target.
-    const ok = await store.cas(BRANCH_HEAD(branch), dumps(remoteHead), dumps(localHead))
+    // Fast-forward: HEAD and its backup in one conditional write, as
+    // VersionedKV's casHead does, so a pull that loses the race to a
+    // local writer changes nothing.
+    const ok = await publishHead(store, branch, localHead, remoteHead, publish)
     if (!ok) return result('diverged', applied.applied) // local writer race
-    await store.set(BRANCH_HEAD_PREV(branch), dumps(localHead))
     await setSyncHead(store, branch, remoteHead)
     return { ...result('fast-forwarded', applied.applied), localHead: remoteHead }
   }

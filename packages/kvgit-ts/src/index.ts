@@ -37,6 +37,7 @@ export {
 export { walkDelta, type WalkDeltaOptions } from './sync/walk'
 export {
   applyWire,
+  publishHead,
   clearSyncHead,
   getSyncHead,
   setSyncHead,
@@ -85,3 +86,5 @@ export {
 } from './worktree'
 export { mergeBase } from './versioned/kv'
 export type { TagInfo } from './versioned/refs'
+export { type GcOptions, gcStore } from './versioned/kv'
+export { GC_LEASE_TTL, IN_FLIGHT_TTL } from './versioned/lease'

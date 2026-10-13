@@ -30,7 +30,8 @@ export interface HostObjectSurface {
 }
 
 /** A module from the world's files, compiled for the worker: the body
- *  of `async (__exports, __modules, __registered, __load) => …`. */
+ *  of `async (__exports, __modules, __registered, __load) => …`, which
+ *  returns the module's exports. */
 export interface CompiledModule {
   readonly path: string
   readonly body: string

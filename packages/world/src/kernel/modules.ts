@@ -98,33 +98,34 @@ export async function prepareCode(
   async function walk(importPath: string, baseDir: string): Promise<void> {
     const resolved = resolveVfsPath(importPath, baseDir)
     if (compiled.has(resolved)) return
-    if (inFlight.has(resolved)) {
-      throw new Error(
-        `cyclic import: '${resolved}' is already being loaded; move what the two share into a third module`,
-      )
-    }
-    inFlight.add(resolved)
-
+    // A module is the file found, however it was spelled: `./dep` and
+    // `./dep.ts` are one module, evaluated once.
     const sourcePath = await findFile(resolved, fs)
-    const raw = new TextDecoder('utf-8', { fatal: false }).decode(await fs.read(sourcePath))
-    const stripped = await transform(raw)
-
-    // A module's own imports load first, so its lookups find them.
-    const dirOfHelper = dirname(sourcePath)
-    for (const sub of parseImports(stripped)) {
-      if (!isWorldPath(sub.path)) continue
-      await walk(sub.path, dirOfHelper)
-    }
-
-    modules.push({ path: resolved, body: compileHelperBody(stripped, sourcePath, dirOfHelper) })
-    compiled.add(resolved)
-    // Reachable by its full name too, for a module that imports it
-    // with the extension.
-    if (sourcePath !== resolved && !compiled.has(sourcePath)) {
-      modules.push({ path: sourcePath, body: aliasBody(resolved, sourcePath) })
+    if (!compiled.has(sourcePath)) {
+      if (inFlight.has(sourcePath)) {
+        throw new Error(
+          `cyclic import: '${sourcePath}' is already being loaded; move what the two share into a third module`,
+        )
+      }
+      inFlight.add(sourcePath)
+      const raw = new TextDecoder('utf-8', { fatal: false }).decode(await fs.read(sourcePath))
+      const stripped = await transform(raw)
+      // A module's own imports load first, so its lookups find them.
+      const dirOfHelper = dirname(sourcePath)
+      for (const sub of parseImports(stripped)) {
+        if (isWorldPath(sub.path)) await walk(sub.path, dirOfHelper)
+      }
+      modules.push({
+        path: sourcePath,
+        body: compileHelperBody(stripped, sourcePath, dirOfHelper),
+      })
       compiled.add(sourcePath)
+      inFlight.delete(sourcePath)
     }
-    inFlight.delete(resolved)
+    if (resolved !== sourcePath) {
+      modules.push({ path: resolved, body: aliasBody(sourcePath) })
+      compiled.add(resolved)
+    }
   }
 
   for (const imp of imports) {
@@ -149,12 +150,11 @@ export async function prepareCode(
   return { code: out, modules }
 }
 
-/** Body for a module's second name (`/lib/util` and `/lib/util.ts`):
- *  it copies the exports the first one already has, since modules are
- *  evaluated in order. */
-function aliasBody(primaryPath: string, aliasPath: string): string {
-  void aliasPath
-  return `Object.assign(__exports, __modules[${JSON.stringify(primaryPath)}]); return __exports;\n`
+/** Body for another spelling of a module (`/lib/util` for
+ *  `/lib/util.ts`): the module's own exports object, which modules
+ *  evaluated in order have already filled. */
+function aliasBody(primaryPath: string): string {
+  return `return __modules[${JSON.stringify(primaryPath)}];\n`
 }
 
 // ---------------------------------------------------------------------------
@@ -210,6 +210,14 @@ function compileHelperBody(stripped: string, sourcePath: string, dirOfHelper: st
  *  scan for plain `export` declarations so the parser doesn't trip
  *  on the re-export's `export` keyword first. */
 function rewriteHelperReexports(code: string, dirOfHelper: string): string {
+  // Where a re-export reads from: a world module, the host objects, or
+  // a package or URL loaded as an import of it would be.
+  const source = (path: string): string =>
+    isWorldPath(path)
+      ? `__modules[${JSON.stringify(resolveVfsPath(path, dirOfHelper))}]`
+      : REGISTERED.has(path)
+        ? `__registered[${JSON.stringify(path)}]`
+        : `(await __load(${JSON.stringify(path)}))`
   let out = code
   // export { a, b as c } from '/path'
   // Uses lookbehind (?<=^|[\n;]) so the boundary char is NOT
@@ -220,8 +228,7 @@ function rewriteHelperReexports(code: string, dirOfHelper: string): string {
   out = out.replace(
     /(?<=^|[\n;])[ \t]*export\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"][ \t]*;?/gm,
     (_m, inside: string, path: string) => {
-      const resolved = isWorldPath(path) ? resolveVfsPath(path, dirOfHelper) : path
-      const key = JSON.stringify(resolved)
+      const from = source(path)
       const lines: string[] = []
       for (const part of inside.split(',')) {
         const t = part.trim()
@@ -230,7 +237,7 @@ function rewriteHelperReexports(code: string, dirOfHelper: string): string {
         const sourceName = aliased !== null ? (aliased[1] as string) : t
         const exportName = aliased !== null ? (aliased[2] as string) : t
         lines.push(
-          `__exports[${JSON.stringify(exportName)}] = __modules[${key}][${JSON.stringify(sourceName)}];`,
+          `__exports[${JSON.stringify(exportName)}] = ${from}[${JSON.stringify(sourceName)}];`,
         )
       }
       return lines.join('\n')
@@ -241,18 +248,12 @@ function rewriteHelperReexports(code: string, dirOfHelper: string): string {
   // pattern so the more specific match wins.
   out = out.replace(
     /(?<=^|[\n;])[ \t]*export\s*\*\s+as\s+([A-Za-z_$][\w$]*)\s+from\s*['"]([^'"]+)['"][ \t]*;?/gm,
-    (_m, name: string, path: string) => {
-      const resolved = isWorldPath(path) ? resolveVfsPath(path, dirOfHelper) : path
-      return `__exports[${JSON.stringify(name)}] = __modules[${JSON.stringify(resolved)}];`
-    },
+    (_m, name: string, path: string) => `__exports[${JSON.stringify(name)}] = ${source(path)};`,
   )
   // export * from '/path' — copy all exports onto __exports
   out = out.replace(
     /(?<=^|[\n;])[ \t]*export\s*\*\s*from\s*['"]([^'"]+)['"][ \t]*;?/gm,
-    (_m, path: string) => {
-      const resolved = isWorldPath(path) ? resolveVfsPath(path, dirOfHelper) : path
-      return `Object.assign(__exports, __modules[${JSON.stringify(resolved)}]);`
-    },
+    (_m, path: string) => `Object.assign(__exports, ${source(path)});`,
   )
   return out
 }
@@ -319,7 +320,8 @@ function rewriteHelperExports(code: string): { code: string; exportNames: string
       if (aliased !== null) {
         const local = aliased[1] as string
         const exported = aliased[2] as string
-        if (!exportNames.includes(exported)) exportNames.push(exported)
+        // Assigned here from its local name: `exported` names no local
+        // binding, so the trailing block mustn't assign it.
         lines.push(`__exports[${JSON.stringify(exported)}] = ${local};`)
       } else if (/^[A-Za-z_$][\w$]*$/.test(t)) {
         if (!exportNames.includes(t)) exportNames.push(t)
@@ -481,7 +483,7 @@ export function parseImports(source: string): ImportStatement[] {
   const out: ImportStatement[] = []
   const masked = maskTemplatesAndComments(source)
   const importRe =
-    /^[ \t]*import\b((?:[\s\S](?!^[ \t]*(?:import|export)\b))*?)['"]([^'"]+)['"][ \t]*;?[ \t]*$/gm
+    /(?<=^|;)[ \t]*import\b((?:[\s\S](?!^[ \t]*(?:import|export)\b))*?)['"]([^'"]+)['"][ \t]*(?:;|$)/gm
   for (const m of masked.matchAll(importRe)) {
     const start = m.index ?? 0
     const end = start + m[0].length
@@ -496,7 +498,7 @@ export function parseImports(source: string): ImportStatement[] {
     })
   }
   const reexportRe =
-    /^[ \t]*export\b((?:[\s\S](?!^[ \t]*(?:import|export)\b))*?)\bfrom\b[\s]*['"]([^'"]+)['"][ \t]*;?[ \t]*$/gm
+    /(?<=^|;)[ \t]*export\b((?:[\s\S](?!^[ \t]*(?:import|export)\b))*?)\bfrom\b[\s]*['"]([^'"]+)['"][ \t]*(?:;|$)/gm
   for (const m of masked.matchAll(reexportRe)) {
     const start = m.index ?? 0
     const end = start + m[0].length

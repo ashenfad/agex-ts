@@ -5,11 +5,12 @@
  * stored once and shared by every commit that holds it, whatever
  * history it came from (see "content addressing" below, which measures
  * it). The sweep finds its deletion candidates by walking orphan
- * commits' keysets and keeping whatever a live commit still reaches. A
- * commit that lands mid-sweep with content of its own is never on the
- * removal list; one that lands holding content an orphan also held can
- * lose it (pinned under "limitation" below). So `cleanOrphans`, like
- * `deepClean`, is for a quiescent store.
+ * commits' keysets and keeping whatever a live commit still reaches.
+ *
+ * It runs under the store's GC lease, so a commit that starts while it
+ * runs waits for it and lands afterwards, intact, even holding content
+ * an orphan held: the sweep can't delete what the commit then writes.
+ * The lease mechanics themselves are tested in gc-lease.test.ts.
  */
 
 import { describe, expect, it } from 'vitest'
@@ -173,105 +174,70 @@ describe('content addressing', () => {
 // The race
 // ---------------------------------------------------------------------------
 
-describe('cleanOrphans — a commit landing mid-sweep with content of its own', () => {
+describe('cleanOrphans — a commit starting mid-sweep', () => {
   /**
-   * The hazardous window: the mark phase has finished, the
-   * `__commit_root__` scan has finished, and the sweep is now
-   * collecting what to delete. A commit that lands here was never
-   * marked and is not in the orphan list — so a sweep that finds its
-   * deletion candidates by scanning a namespace will delete the
-   * artifacts of a commit that is, by then, the live branch HEAD.
-   *
-   * Seam: the first `get` of the orphan's `__commit_root__`, which is
-   * the first read of the orphan-collection loop.
+   * The seam is the first `get` of the orphan's `__commit_root__`, the
+   * first read of the orphan-collection loop: the mark phase is done
+   * and the sweep is collecting what to delete. A commit started here
+   * waits for the sweep's lease and lands after it.
    */
-  it('keeps HAMT nodes written by a commit that lands mid-sweep', async () => {
+  async function sweepWithLateCommit(lateValue: string, orphanValue: string) {
     const store = new HookedMemory()
     const vk = await VersionedKV.open(store)
     await vk.commit({ updates: new Map([['seed', bytes('s')]]) })
     const keep = vk.currentCommit
-    await vk.commit({ updates: new Map([['garbage', bytes('g')]]) })
+    await vk.commit({ updates: new Map([['garbage', bytes(orphanValue)]]) })
     const orphan = vk.currentCommit
     await vk.resetTo(keep)
 
-    let lateCommit = ''
-    let lateRoot = ''
+    let late: Promise<{ commit: string; root: string; blob: string }> | null = null
+    let landedDuringSweep = false
     store.beforeGet.set(COMMIT_ROOT(orphan), async () => {
-      const landed = await landCommit(store, 'late', 'landed')
-      lateCommit = landed.commit
-      lateRoot = landed.root
+      late = landCommit(store, 'late', lateValue).then((r) => {
+        landedDuringSweep = !sweepDone
+        return r
+      })
     })
-
+    let sweepDone = false
     const removed = await vk.cleanOrphans(SWEEP_ALL)
+    sweepDone = true
+    expect(late, 'seam never fired').not.toBeNull()
+    const landed = await (late as unknown as Promise<{
+      commit: string
+      root: string
+      blob: string
+    }>)
+    return { store, orphan, removed, landed, landedDuringSweep }
+  }
 
-    // The seam fired where we think it did.
-    expect(lateCommit, 'seam never fired — the orphan loop did not read the orphan root').not.toBe(
-      '',
+  it('waits for the sweep, then lands with its nodes and blobs intact', async () => {
+    const { store, orphan, removed, landed, landedDuringSweep } = await sweepWithLateCommit(
+      'landed',
+      'g',
     )
+    expect(landedDuringSweep, 'the commit landed while the sweep held the lease').toBe(false)
     expect(removed).toBe(1)
     const headRaw = await store.get('__branch_head__main')
-    expect(headRaw === null ? null : (loads(headRaw) as string)).toBe(lateCommit)
-    expect(await store.get(COMMIT_ROOT(lateCommit))).not.toBeNull()
+    expect(headRaw === null ? null : (loads(headRaw) as string)).toBe(landed.commit)
 
-    // ...and the keyset that live HEAD points at is intact.
-    const { missing, entries } = await readTree(store, lateRoot)
-    expect(
-      [...missing],
-      `live HEAD ${lateCommit} of branch 'main' has keyset root ${lateRoot}, but the sweep deleted HAMT node(s) it needs`,
-    ).toEqual([])
+    const { missing, entries } = await readTree(store, landed.root)
+    expect([...missing]).toEqual([])
     expect([...entries.keys()].sort()).toEqual(['late', 'seed'])
+    expect(await store.get(landed.blob)).not.toBeNull()
 
-    const reopened = await VersionedKV.open(store)
-    expect(reopened.currentCommit).toBe(lateCommit)
-    expect(await reopened.get('late')).toEqual(bytes('landed'))
-    expect(await reopened.get('seed')).toEqual(bytes('s'))
-
-    // The orphan was still collected — the sweep did not become a no-op.
+    // The orphan was still collected.
     expect(await store.get(COMMIT_ROOT(orphan))).toBeNull()
     expect(await store.get(await blobKey(bytes('g')))).toBeNull()
   })
 
-  it('keeps blobs written by a commit that lands mid-sweep', async () => {
-    const store = new HookedMemory()
-    const vk = await VersionedKV.open(store)
-    await vk.commit({ updates: new Map([['seed', bytes('s')]]) })
-    const keep = vk.currentCommit
-    await vk.commit({ updates: new Map([['garbage', bytes('g')]]) })
-    const orphan = vk.currentCommit
-    await vk.resetTo(keep)
-
-    let lateBlob = ''
-    store.beforeGet.set(COMMIT_ROOT(orphan), async () => {
-      lateBlob = (await landCommit(store, 'late', 'landed')).blob
-    })
-
-    await vk.cleanOrphans(SWEEP_ALL)
-
-    expect(lateBlob).not.toBe('')
-    expect(await store.get(lateBlob), `blob ${lateBlob} of the live HEAD was swept`).not.toBeNull()
-  })
-
-  // Controls. These isolate *why* the cases above are the dangerous
-  // ones: it is the mark-phase ordering, not GC deleting things.
-
-  it('control: a commit landing before the mark phase is marked and survives', async () => {
-    const store = new HookedMemory()
-    const vk = await VersionedKV.open(store)
-    await vk.commit({ updates: new Map([['seed', bytes('s')]]) })
-    const keep = vk.currentCommit
-    await vk.commit({ updates: new Map([['garbage', bytes('g')]]) })
-    await vk.resetTo(keep)
-
-    // Seam at the branch-head scan that opens the mark phase, so the
-    // commit is on main before marking begins.
-    let earlyRoot = ''
-    store.beforeScan.set('__branch_head__', async () => {
-      earlyRoot = (await landCommit(store, 'early', 'landed')).root
-    })
-
-    await vk.cleanOrphans(SWEEP_ALL)
-    expect(earlyRoot).not.toBe('')
-    expect([...(await readTree(store, earlyRoot)).missing]).toEqual([])
+  it('keeps content the late commit shares with the orphan it swept', async () => {
+    // The sweep deletes the orphan's blob, then the waiting commit lands
+    // and writes it again: the live head never names a missing blob.
+    const { store, landed } = await sweepWithLateCommit('shared', 'shared')
+    expect(landed.blob).toBe(await blobKey(bytes('shared')))
+    expect(await store.get(landed.blob)).not.toBeNull()
+    const reopened = await VersionedKV.open(store)
+    expect(await reopened.get('late')).toEqual(bytes('shared'))
   })
 
   it('control: a sweep that finds no orphans deletes nothing', async () => {
@@ -282,31 +248,6 @@ describe('cleanOrphans — a commit landing mid-sweep with content of its own', 
 
     expect(await vk.cleanOrphans(SWEEP_ALL)).toBe(0)
     expect(await nodeKeys(store)).toEqual(before)
-  })
-})
-
-describe('limitation: a commit landing mid-sweep can lose content an orphan held', () => {
-  // This is not a regression guard. It pins why the sweep is for a
-  // quiescent store: the late commit writes the orphan's blob again,
-  // which is a no-op for bytes already there, and the sweep then
-  // deletes it from under the live HEAD.
-  it('sweeps a blob the late commit shares with the orphan', async () => {
-    const store = new HookedMemory()
-    const vk = await VersionedKV.open(store)
-    await vk.commit({ updates: new Map([['seed', bytes('s')]]) })
-    const keep = vk.currentCommit
-    await vk.commit({ updates: new Map([['garbage', bytes('shared')]]) })
-    const orphan = vk.currentCommit
-    await vk.resetTo(keep)
-
-    let lateBlob = ''
-    store.beforeGet.set(COMMIT_ROOT(orphan), async () => {
-      lateBlob = (await landCommit(store, 'late', 'shared')).blob
-    })
-    await vk.cleanOrphans(SWEEP_ALL)
-
-    expect(lateBlob).toBe(await blobKey(bytes('shared')))
-    expect(await store.get(lateBlob)).toBeNull()
   })
 })
 

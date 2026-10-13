@@ -26,11 +26,14 @@
 
 import { EMPTY_HASH } from '../hamt'
 import { Keyset } from '../keyset'
+import { PyFloat } from '../pyjson'
 import type { KVStore, KeysetEntry, WireCommit } from '../types'
 import {
   BRANCH_HEAD,
   BRANCH_HEAD_PREV,
   COMMIT_ROOT,
+  GC_LEASE_KEY,
+  IN_FLIGHT_KEY,
   PARENT_COMMIT,
   PARENT_GENS,
   ROOT_COMMIT,
@@ -44,8 +47,12 @@ import {
   loads,
   safeLoads,
 } from '../versioned/layout'
+import { IN_FLIGHT_TTL, tryLand, waitForGc } from '../versioned/lease'
 
 export interface ApplyWireOptions {
+  /** The clock in-flight markers are stamped with, in seconds. Default:
+   *  wall time. */
+  now?: () => number
   /**
    * Create this branch pointing at the stream's final commit. Fails if
    * the branch already exists (import semantics — fast-forwarding an
@@ -63,6 +70,12 @@ export interface ApplyWireResult {
   /** The last commit in the stream (the transfer's `want`), or null
    *  for an empty stream. */
   head: string | null
+  /** Commits written by this call and not yet under a head: each is
+   *  marked in flight, so a sweep keeps it until the head that names it
+   *  lands. Pass them to {@link publishHead}, which drops the markers in
+   *  the same write; ones never published lapse. Empty when
+   *  `createBranch` published them. */
+  inFlight: readonly string[]
 }
 
 /**
@@ -79,6 +92,8 @@ export async function applyWire(
   opts: ApplyWireOptions = {},
 ): Promise<ApplyWireResult> {
   await checkStorageVersion(store)
+  const now = opts.now ?? wallClock
+  const inFlight: string[] = []
 
   let applied = 0
   let skipped = 0
@@ -147,24 +162,67 @@ export async function applyWire(
       info: wc.info ?? null,
     })
     for (const [k, v] of records) writes.set(k, v)
-    await store.setMany(writes)
+    // Marked in flight and landed while no sweep runs: a commit no head
+    // names yet must not be swept before one does.
+    writes.set(IN_FLIGHT_KEY(wc.hash), dumps(new PyFloat(now() + IN_FLIGHT_TTL)))
+    for (;;) {
+      const lease = await waitForGc(store, now)
+      if (await store.casMany(new Map([[GC_LEASE_KEY, lease]]), writes)) break
+    }
+    inFlight.push(wc.hash)
     applied++
   }
 
   if (opts.createBranch !== undefined && head !== null) {
-    const branchKey = BRANCH_HEAD(opts.createBranch)
-    const ok = await store.casMany(
-      new Map([[branchKey, null]]),
-      new Map([[branchKey, dumps(head)]]),
-      [BRANCH_HEAD_PREV(opts.createBranch)],
-    )
-    if (!ok) {
+    if (!(await publishHead(store, opts.createBranch, null, head, { inFlight, now }))) {
       throw new Error(`applyWire: branch '${opts.createBranch}' already exists`)
     }
+    return { applied, skipped, head, inFlight: [] }
   }
 
-  return { applied, skipped, head }
+  return { applied, skipped, head, inFlight }
 }
+
+/**
+ * Move `branch` from `expected` (null: create it) to `newHead`, with
+ * the backup, while no sweep runs, dropping the in-flight markers of
+ * the commits this publishes in the same write.
+ *
+ * @returns false if the branch isn't at `expected` (or exists, for a
+ *   create).
+ */
+export async function publishHead(
+  store: KVStore,
+  branch: string,
+  expected: string | null,
+  newHead: string,
+  opts: { inFlight?: readonly string[]; now?: () => number } = {},
+): Promise<boolean> {
+  const now = opts.now ?? wallClock
+  const branchKey = BRANCH_HEAD(branch)
+  const expectedBytes = expected === null ? null : dumps(expected)
+  const writes = new Map([[branchKey, dumps(newHead)]])
+  const removes = (opts.inFlight ?? []).map(IN_FLIGHT_KEY)
+  if (expectedBytes === null) removes.push(BRANCH_HEAD_PREV(branch))
+  else writes.set(BRANCH_HEAD_PREV(branch), expectedBytes)
+  for (;;) {
+    const lease = await waitForGc(store, now)
+    // The head must name a commit that is here when it lands.
+    if ((await store.get(COMMIT_ROOT(newHead))) === null) {
+      throw new Error(`publishHead: commit ${newHead} is not in the store`)
+    }
+    const landed = await tryLand(
+      store,
+      lease,
+      new Map([[branchKey, expectedBytes]]),
+      writes,
+      removes,
+    )
+    if (landed !== null) return landed
+  }
+}
+
+const wallClock = (): number => Date.now() / 1000
 
 /** A stored commit's generation: 0 with no parents, else one more than
  *  its highest parent's, as its recorded parent generations say. */

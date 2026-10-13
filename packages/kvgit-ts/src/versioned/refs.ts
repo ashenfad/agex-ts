@@ -22,6 +22,7 @@ import {
   loadsInfo,
   safeLoads,
 } from './layout'
+import { tryLand, waitForGc } from './lease'
 
 /** What a store records about one tag. */
 export interface TagInfo {
@@ -145,23 +146,34 @@ export async function createTag(
   // throws without leaving a tag behind.
   const info = opts.info ?? null
   dumps(info)
-  if ((await store.get(COMMIT_ROOT(commit))) === null) throw new UnknownCommitError(commit)
   const head = tagHead(name)
-  const record = dumps(
-    new Map<string, unknown>([
-      ['time', new PyFloat(opts.now())],
-      ['info', info],
-    ]),
-  )
-  const landed = await store.casMany(
-    new Map([[head, null]]),
-    new Map([
-      [head, dumps(commit)],
-      [TAG_INFO_KEY(name), record],
-    ]),
-    [BRANCH_HEAD_PREV(TAG_BRANCH_PREFIX + name)],
-  )
-  if (!landed) throw new TagExistsError(name)
+  // A tag is a GC root, so it mustn't be planted under a sweep that has
+  // already decided what is reachable, and the existence check must
+  // still hold when it lands: both are decided against one lease record.
+  for (;;) {
+    const lease = await waitForGc(store, opts.now)
+    if ((await store.get(COMMIT_ROOT(commit))) === null) throw new UnknownCommitError(commit)
+    // Built after the wait, so its time is when the tag lands.
+    const record = dumps(
+      new Map<string, unknown>([
+        ['time', new PyFloat(opts.now())],
+        ['info', info],
+      ]),
+    )
+    const landed = await tryLand(
+      store,
+      lease,
+      new Map([[head, null]]),
+      new Map([
+        [head, dumps(commit)],
+        [TAG_INFO_KEY(name), record],
+      ]),
+      [BRANCH_HEAD_PREV(TAG_BRANCH_PREFIX + name)],
+    )
+    if (landed === null) continue
+    if (!landed) throw new TagExistsError(name)
+    return
+  }
 }
 
 /**

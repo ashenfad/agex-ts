@@ -12,6 +12,7 @@ export {
   BranchExistsError,
   ConcurrencyError,
   CorruptHeadError,
+  GcBusy,
   KvgitError,
   MergeConflict,
   StorageVersionError,

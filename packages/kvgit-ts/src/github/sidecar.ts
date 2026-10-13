@@ -4,7 +4,10 @@
  * Each git commit in a sync repo carries one sidecar blob — the
  * authoritative, kernel-agnostic record of the kvgit commit it
  * mirrors: identity (hash, parents, their generations, time, info)
- * plus the DELTA replay needs (changed keys → tree paths, removals).
+ * plus the DELTA replay needs (changed keys → tree paths and blob
+ * hashes, removals). The blob hash (the SHA-256 kvgit keys a value by)
+ * lets a fetcher take a value it already holds from its own store
+ * instead of downloading it.
  * Value BYTES are not here — they're tree blobs at the recorded paths;
  * a fetcher combines sidecar + blobs into a `WireCommit`.
  *
@@ -37,8 +40,9 @@ export interface DecodedSidecar {
   parentGens: readonly number[] | null
   time: PyFloat
   info: unknown
-  /** Changed key → where its value blob lives in this commit's tree. */
-  updates: ReadonlyMap<string, { path: string }>
+  /** Changed key → where its value blob lives in this commit's tree,
+   *  and the value's SHA-256 (hex) when the sidecar records it. */
+  updates: ReadonlyMap<string, { path: string; blob?: string }>
   removals: ReadonlySet<string>
 }
 
@@ -46,18 +50,27 @@ export interface DecodedSidecar {
  * Encode a wire commit's sidecar. `paths` must cover every changed key
  * (the caller's `PathPlanner` assignments); anything missing throws — a
  * sidecar that can't locate its own blobs is unrecoverable later.
+ * `blobs` gives each changed key's value hash (SHA-256 hex), recorded
+ * so a fetcher can skip values it already has.
  */
 export function encodeSidecar(
   wire: WireCommit,
-  opts: { kernel: string; paths: ReadonlyMap<string, string> },
+  opts: {
+    kernel: string
+    paths: ReadonlyMap<string, string>
+    blobs?: ReadonlyMap<string, string>
+  },
 ): Uint8Array {
-  const updates: Array<[string, { path: string }]> = []
+  const updates: Array<[string, Map<string, string>]> = []
   for (const key of [...wire.updates.keys()].sort()) {
     const path = opts.paths.get(key)
     if (path === undefined) {
       throw new Error(`encodeSidecar: no tree path assigned for update key ${JSON.stringify(key)}`)
     }
-    updates.push([key, { path }])
+    const entry = new Map([['path', path]])
+    const blob = opts.blobs?.get(key)
+    if (blob !== undefined) entry.set('blob', blob)
+    updates.push([key, entry])
   }
   return pyDumpsBytes(
     new Map<string, unknown>([
@@ -117,13 +130,19 @@ export function decodeSidecar(bytes: Uint8Array): DecodedSidecar {
   }
   const removals = new Set(obj.removals as string[])
 
-  const updates = new Map<string, { path: string }>()
+  const updates = new Map<string, { path: string; blob?: string }>()
   for (const [key, value] of Object.entries(expectRecord(obj, 'updates'))) {
     const entry = value as Record<string, unknown>
     if (typeof entry?.path !== 'string') {
       throw new Error(`decodeSidecar: malformed update entry for ${JSON.stringify(key)}`)
     }
-    updates.set(key, { path: entry.path })
+    if (entry.blob === undefined) {
+      updates.set(key, { path: entry.path })
+    } else if (typeof entry.blob === 'string' && /^[0-9a-f]{64}$/.test(entry.blob)) {
+      updates.set(key, { path: entry.path, blob: entry.blob })
+    } else {
+      throw new Error(`decodeSidecar: malformed blob hash for ${JSON.stringify(key)}`)
+    }
   }
 
   return { kernel, hash, parents, parentGens, time, info: obj.info ?? null, updates, removals }

@@ -12,6 +12,10 @@ allowBuilds:
   # one-time setup message and is otherwise inert; allow it to clear
   # pnpm's "ignored builds" gate.
   msw: true
+  # Disabled: cbor-x's optional native decoder. cbor-x falls back to
+  # its pure-JS path (the one browsers use), so nothing is compiled at
+  # install.
+  cbor-extract: false
   # Disabled: we invoke `simple-git-hooks` explicitly from the root
   # `postinstall` script, so the package's own opt-in install script
   # would just duplicate that work.

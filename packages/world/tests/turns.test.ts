@@ -1,6 +1,7 @@
 import { Memory } from '@agex-ts/kvgit/backends/memory'
 import { describe, expect, it } from 'vitest'
 import {
+  CommitConflictError,
   HarnessMismatchError,
   ReadOnlyError,
   Store,
@@ -118,6 +119,25 @@ describe('a turn', () => {
       { tool: 'turn', runs: { r: 'completed' } },
     ])
     await ws.close()
+  })
+
+  it('is released when its commit conflicts, leaving the stored run pending', async () => {
+    const store = await Store.open(new Memory())
+    const a = await store.open('s')
+    const b = await store.open('s')
+    const lost = await b.turn('r2', { harness: 'h' })
+    await (await a.turn('r1', { harness: 'h' })).end('completed', { body: 'one' })
+    await expect(lost.end('completed', { body: 'two' })).rejects.toThrow(CommitConflictError)
+    expect(lost.status).toBe('completed')
+    expect(lost.commit).toBeNull()
+    expect(b.currentTurn).toBeNull()
+    expect(b.uncommitted).toBe(true)
+    await b.refresh()
+    await (await b.turn('r2', { harness: 'h' })).end('completed', { body: 'two' })
+    expect((await b.conversation.index())?.runs).toEqual(['r1', 'r2'])
+    expect((await infos(b)).at(-1)).toEqual({ tool: 'turn', runs: { r2: 'completed' } })
+    await a.close()
+    await b.close()
   })
 
   it('is refused on a frozen workspace', async () => {

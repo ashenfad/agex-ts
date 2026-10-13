@@ -5,7 +5,16 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { SCENARIOS, applies, check, runScenario } from '../src/conformance/index'
+import {
+  type Clock,
+  EXHAUSTED,
+  type ModelStep,
+  SCENARIOS,
+  applies,
+  check,
+  runScenario,
+} from '../src/conformance/index'
+import type { Workspace } from '../src/index'
 import { referenceHarness } from './reference-harness'
 
 const covered = SCENARIOS.filter(
@@ -55,5 +64,27 @@ describe('the checks', () => {
     if (scenario === undefined) throw new Error('missing scenario')
     const failures = check(scenario, await runScenario(scenario, forgetful))
     expect([...failures.keys()].sort()).toEqual(['commits', 'runs'])
+  })
+
+  it('catch a harness that stops after its tools, without the last reply', async () => {
+    const hasty = {
+      ...referenceHarness,
+      open(ws: Workspace, clock: Clock) {
+        let stop = false
+        const early = {
+          next(sent?: readonly string[]): ModelStep {
+            if (stop) return { ...EXHAUSTED, text: '' }
+            const step = clock.next(sent)
+            stop = step.tool_calls.length > 0
+            return step
+          },
+        }
+        return referenceHarness.open(ws, early as Clock)
+      },
+    }
+    const scenario = SCENARIOS.find((s) => s.name === 'a-full-fork-carries-the-conversation')
+    if (scenario === undefined) throw new Error('missing scenario')
+    const failures = check(scenario, await runScenario(scenario, hasty))
+    expect([...failures.keys()]).toEqual(['turn1.script'])
   })
 })

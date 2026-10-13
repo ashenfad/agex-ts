@@ -20,6 +20,7 @@
 import {
   HarnessMismatchError,
   Inbox,
+  type Policy,
   type RunStatus,
   type Tool,
   type ToolOptions,
@@ -32,6 +33,7 @@ import {
 } from '@agex-ts/world'
 import type { LanguageModelV4 } from '@ai-sdk/provider'
 import { AiSdkProvider, isLanguageModel } from './ai-sdk'
+import { prepare } from './compaction'
 import { type Provider, type Settings, type ToolSpec, toolSpec } from './provider'
 import {
   type Image,
@@ -40,6 +42,7 @@ import {
   type ToolCall,
   type ToolResult,
   type Usage,
+  addUsage,
   dumpRun,
   loadRun,
   messageText,
@@ -129,6 +132,10 @@ export interface AgentOptions {
    *  reply, each call past it is answered without running, and a reply
    *  that calls a tool after the model was told fails the run. */
   readonly maxToolCalls?: number | null
+  /** When to fold the conversation into a summary, within a run too
+   *  (see `compaction.ts`); without one, nothing is folded, though a
+   *  fold already recorded is still sent. */
+  readonly compaction?: Policy | null
 }
 
 /** A loop over a model. It holds no state: a change of model or primer
@@ -139,6 +146,7 @@ export class Agent {
   readonly settings: Settings
   readonly maxSteps: number
   readonly maxToolCalls: number | null
+  readonly compaction: Policy | null
 
   constructor(opts: AgentOptions) {
     this.provider = isLanguageModel(opts.model) ? new AiSdkProvider(opts.model) : opts.model
@@ -146,6 +154,7 @@ export class Agent {
     this.settings = opts.settings ?? {}
     this.maxSteps = opts.maxSteps ?? MAX_STEPS
     this.maxToolCalls = opts.maxToolCalls ?? null
+    this.compaction = opts.compaction ?? null
   }
 
   toString(): string {
@@ -343,7 +352,10 @@ export class Session {
     let started: number
     let messages: Message[]
     let compaction: Usage | null = null
-    let earlier: Message[]
+    // the summary calls this run made, a resumed run's before it stopped
+    // among them
+    let summaries = 0
+    let earlier: (readonly Message[])[]
     const runs = await this.runs()
     if (opts.resume === true) {
       const prior = await this.#lastInterrupted()
@@ -351,7 +363,8 @@ export class Session {
       started = prior.startedAt ?? Date.now()
       messages = [...prior.messages]
       compaction = prior.compaction ?? null
-      earlier = runs.slice(0, -1).flatMap((r) => r.messages)
+      summaries = prior.compactionCalls ?? 0
+      earlier = runs.slice(0, -1).map((r) => r.messages)
     } else {
       runId = newId()
       started = Date.now()
@@ -359,7 +372,7 @@ export class Session {
         opts.wake === true
           ? []
           : [{ id: newId(), role: 'user', parts: [{ kind: 'text', text: opts.prompt ?? '' }] }]
-      earlier = runs.flatMap((r) => r.messages)
+      earlier = runs.map((r) => r.messages)
     }
     const system = await this.#system()
     let status: RunStatus = 'completed'
@@ -390,9 +403,10 @@ export class Session {
           parts: [{ kind: 'text', text: opening ?? WOKEN }],
         })
       }
-      // every model call counts against maxSteps; a resumed run's replies
-      // were calls of this run, made before it stopped
-      let made = messages.filter((m) => m.role === 'assistant').length
+      // every model call counts against maxSteps, summaries too; a
+      // resumed run's replies and summaries were calls of this run, made
+      // before it stopped
+      let made = messages.filter((m) => m.role === 'assistant').length + summaries
       const limit = this.agent.maxToolCalls
       let spent = messages.reduce(
         (n, m) => n + m.parts.filter((p) => p.kind === 'tool_call').length,
@@ -406,10 +420,26 @@ export class Session {
         checkCancel()
         let reply: Message | null = null
         inRequest = true
-        const request = [system, ...earlier, ...messages].map((m) =>
-          this.#vision ? m : withoutImages(m),
-        )
-        made += 1
+        const sendable = (m: Message) => (this.#vision ? m : withoutImages(m))
+        const prepared = await prepare({
+          ws: this.ws,
+          policy: this.agent.compaction,
+          provider: this.agent.provider,
+          specs: this.#specs,
+          settings: this.agent.settings,
+          system,
+          earlier: earlier.map((run) => run.map(sendable)),
+          current: messages.map(sendable),
+          emit: push,
+          spare: this.agent.maxSteps - made - 1,
+          signal,
+        })
+        made += prepared.calls + 1
+        summaries += prepared.calls
+        if (prepared.usage !== null) {
+          compaction = compaction === null ? prepared.usage : addUsage(compaction, prepared.usage)
+        }
+        const request = prepared.messages
         const afterNotice = told
         for await (const event of this.agent.provider.stream(
           request,
@@ -425,6 +455,7 @@ export class Session {
         }
         inRequest = false
         if (reply === null) throw new Error("the provider's stream ended without a reply")
+        if (prepared.fold !== null) reply = { ...reply, fold: prepared.fold }
         messages.push(reply)
         if (reply.usage) {
           push({
@@ -553,6 +584,7 @@ export class Session {
           startedAt: started,
           endedAt: Date.now(),
           compaction,
+          ...(summaries > 0 && { compactionCalls: summaries }),
         }
         await turn.end(status, { body: dumpRun(run), ...(message !== null && { message }) })
       }

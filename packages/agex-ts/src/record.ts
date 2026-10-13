@@ -148,8 +148,8 @@ export function messageText(message: Message): string {
 /**
  * One run: the messages a turn exchanged with the model, in order, and
  * how it ended (null while it runs). Times are milliseconds since the
- * epoch. `compaction` is what the run's summary calls cost, which no
- * message records.
+ * epoch. `compaction` is what the run's summary calls cost, and
+ * `compactionCalls` how many it made, which no message records.
  */
 export interface Run {
   readonly format: number
@@ -159,6 +159,7 @@ export interface Run {
   readonly startedAt?: number | null
   readonly endedAt?: number | null
   readonly compaction?: Usage | null
+  readonly compactionCalls?: number | null
 }
 
 /** What a run's model calls cost, summed: its replies' and its summary
@@ -292,6 +293,7 @@ export function loadRun(data: unknown): Run {
     startedAt: optNum(r.startedAt, '.startedAt'),
     endedAt: optNum(r.endedAt, '.endedAt'),
     compaction: usage(r.compaction, '.compaction'),
+    compactionCalls: optNum(r.compactionCalls, '.compactionCalls'),
   }
 }
 

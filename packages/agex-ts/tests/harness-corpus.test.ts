@@ -1,7 +1,7 @@
 /**
  * nontainer's harness corpus, run against agex-ts's session loop: every
- * scenario its capabilities cover passes. Compaction (tier 4) and
- * delegation (tier 5) come with folding and the sessions tool.
+ * scenario its capabilities cover passes. Delegation (tier 5) comes
+ * with the sessions tool.
  */
 
 import { SCENARIOS, applies, check, runScenario } from '@agex-ts/world/conformance'
@@ -11,7 +11,7 @@ import { agexHarness } from '../src/conformance/index'
 const covered = SCENARIOS.filter((s) => applies(s, agexHarness))
 
 describe("nontainer's harness corpus on agex-ts", () => {
-  it('covers tiers 0 to 3', () => {
+  it('covers tiers 0 to 4', () => {
     expect(covered.map((s) => s.name)).toEqual([
       'a-turn-that-writes-a-file',
       'a-cancel-after-a-tool-keeps-the-run',
@@ -19,11 +19,17 @@ describe("nontainer's harness corpus on agex-ts", () => {
       'a-provider-error-interrupts-and-resume-continues',
       'a-reply-alone-completes',
       'a-checkout-rewinds-the-conversation-with-the-files',
+      'a-fresh-fork-drops-the-folds',
       'a-fresh-fork-starts-without-the-conversation',
       'a-full-fork-carries-the-conversation',
+      'a-full-fork-carries-the-folds',
+      'a-rewind-takes-back-its-folds',
       'a-cancel-settles-what-was-delivered',
       'a-note-after-the-last-tool-waits-for-the-next-turn',
       'a-note-rides-the-next-tool-result-once',
+      'a-fold-stays-in-force-without-another-summary',
+      'a-request-over-budget-folds-the-earlier-turns',
+      'a-second-fold-takes-in-the-first',
     ])
   })
 

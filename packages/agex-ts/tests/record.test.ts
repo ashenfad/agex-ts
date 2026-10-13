@@ -60,6 +60,7 @@ const run: Run = {
   startedAt: 1,
   endedAt: 2,
   compaction: { inputTokens: 5, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
+  compactionCalls: 1,
 }
 
 describe('the run record', () => {

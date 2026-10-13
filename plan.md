@@ -749,6 +749,17 @@ search) is left out of the record. Caching is `extra`'s for now
 
 **Exit:** tier 4.
 
+Done 2026-10-13: `new Agent({ compaction: new Policy(budget) })`, and
+every scenario of tiers 0 to 4 passes on `agexHarness`; Python's
+`test_compaction.py` is ported, and the smoke script folds a session on
+each real provider. The splice applies a fold to its range, the summary
+where the range began (a test records a chapter by hand). A run records
+its summary calls (`Run.compactionCalls`), and a resume counts them.
+The scripted provider now reports an estimate of the request for a step
+that gives no `input_tokens`, as Python's does through pydantic-ai: a
+real provider always reports one, and a fold is measured from the
+latest reply's.
+
 **A5. Delegation.** `agent.session(ws, { sessions: true })` offers the
 `sessions` tool over the workspace's helper:
 - **The helper is the workspace's, not the agent's.** The session uses

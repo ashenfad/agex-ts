@@ -112,6 +112,12 @@ export class AttachFS implements FileSystem {
     )
   }
 
+  /** Drop every mount, moving nothing: for a session that is closing. */
+  clear(): void {
+    this.#mounts = []
+    this.#cwd = null
+  }
+
   async detach(at: string): Promise<void> {
     this.#mounts = this.#mounts.filter(([p]) => p !== at)
     // Standing inside it, there's nowhere to go back to: home.
@@ -219,28 +225,39 @@ export class AttachFS implements FileSystem {
   async listDetailed(path = '.', opts: { recursive?: boolean } = {}): Promise<FileInfo[]> {
     const abs = this.#abs(path)
     const r = this.#route(abs)
-    if (r.at !== null) {
-      const prefix = path.replace(/\/$/, '')
-      const infos = await r.fs.listDetailed(r.path, opts)
-      return infos.map((info) => ({
-        ...info,
-        path: `${prefix}${info.path === '/' ? '' : info.path}`,
-      }))
-    }
-    const infos = await r.fs.listDetailed(path, opts)
     const prefix = path === '/' ? '' : path.replace(/\/$/, '')
+    if (r.at !== null) return this.#mounted(prefix, r.fs, r.path, opts)
+    const infos = await r.fs.listDetailed(path, opts)
     for (const name of this.#pointsIn(abs)) {
-      if (infos.some((i) => i.name === name)) continue
-      infos.push({
-        name,
-        path: `${prefix}/${name}`,
-        size: 0,
-        createdAt: EPOCH,
-        modifiedAt: EPOCH,
-        isDir: true,
-      })
+      if (!infos.some((i) => i.name === name)) {
+        infos.push({
+          name,
+          path: `${prefix}/${name}`,
+          size: 0,
+          createdAt: EPOCH,
+          modifiedAt: EPOCH,
+          isDir: true,
+        })
+      }
+      if (opts.recursive === true) {
+        const mounted = this.#route(abs === '/' ? `/${name}` : `${abs}/${name}`)
+        infos.push(...(await this.#mounted(`${prefix}/${name}`, mounted.fs, '/', opts)))
+      }
     }
     return infos.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+  }
+
+  /** A mount's entries under `inside` (a path in the mount), named from
+   *  `spelled`, the caller's spelling of that directory. */
+  async #mounted(
+    spelled: string,
+    fs: FileSystem,
+    inside: string,
+    opts: { recursive?: boolean },
+  ): Promise<FileInfo[]> {
+    const cut = inside === '/' ? 0 : inside.length
+    const infos = await fs.listDetailed(inside, opts)
+    return infos.map((info) => ({ ...info, path: `${spelled}${info.path.slice(cut)}` }))
   }
 
   async write(path: string, content: Uint8Array, mode?: 'w' | 'a'): Promise<void> {

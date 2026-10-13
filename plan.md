@@ -621,6 +621,33 @@ from the browser for:
 **Exit:** a yes or no per provider. Where it's no, that provider keeps
 a small `fetch` client of its own behind the same protocol.
 
+**Done 2026-10-13: yes for all four** (agex-studio branch
+`spike/ai-sdk-providers`, `spike/FINDINGS.md`, with `ai` 7.0 and the
+4.x providers):
+- **From the browser:** each works with the key in the page, streams,
+  stops mid-stream on an abort signal, and takes a custom `fetch` and
+  headers. Direct Anthropic needs
+  `anthropic-dangerous-direct-browser-access`, and a custom header must
+  pass the provider's CORS allow-list (OpenRouter's `HTTP-Referer` and
+  `X-Title` do; an invented one doesn't).
+- **Reasoning survives a tool call** through JSON, as a stored record
+  carries it: Anthropic's signed reasoning, OpenAI's encrypted reasoning
+  (`store: false`), Gemini's signature on the tool call, OpenRouter's
+  `reasoning_details`. Each rides on the part's provider metadata.
+- **The prompt cache hits** for Anthropic, OpenAI and Anthropic through
+  OpenRouter. Gemini's implicit cache barely hits, through the SDK or a
+  plain `fetch` alike.
+- **The cost is the bundle** (gzipped): 14 KB for today's two clients,
+  309 KB for the `ai` core and all four providers, 251 KB for the four
+  without the core, and 117 KB for OpenRouter's alone. zod is 90 KB of
+  each.
+
+**Decided:** the AI SDK's providers, driven directly through the
+provider spec (`LanguageModelV4.doStream`), without the `ai` core, as
+Python agex drives pydantic-ai's `direct`. agex-ts owns its loop, so the
+core would only add weight (its gateway among it); the spike drove all
+five routes this way, a tool call's round trip included.
+
 **A1. The clean slate and the record.**
 - The old agex-ts sources and the sibling packages come out.
 - **The run record** (`record.ts`) mirrors `agex.record` field for
@@ -652,8 +679,16 @@ a small `fetch` client of its own behind the same protocol.
 world's runner.
 
 **A3. Real providers.**
-- The AI SDK provider, mapping the run record to and from its messages
-  at the edge, per A0's verdicts.
+- **One adapter for any AI SDK model:** `new Agent({ model })` takes a
+  `LanguageModelV4` (what `createAnthropic(...)('claude-...')` returns)
+  and drives its `doStream`, mapping the run record to the spec's prompt
+  and its stream back into the record at the edge. agex-ts depends on
+  `@ai-sdk/provider` (the types) alone; the embedder installs and
+  imports the provider it uses, so the studio can load the chosen one
+  lazily and ship only that.
+- **Provider metadata is kept** on the record's reasoning and tool-call
+  parts (its `details`), and sent back as each part's provider options:
+  what carries every provider's signatures.
 - Settings: `thinking` as an effort, `maxTokens`, `temperature`, and
   `extra` passed through, cache controls among it.
 - Transient errors: overloaded and rate-limited requests interrupt a
@@ -758,9 +793,9 @@ script, keyed by the developer, not CI).
    pinned to an agex commit and synced at each step. A later 0.14 that
    moves the shape shows up as a corpus diff to port, as nontainer's
    changes did for the world.
-5. **The provider layer follows A0's verdicts.**
-   The fallback keeps today's `fetch` clients' transport behind the new
-   protocol, rewritten against the run record.
+5. **The provider layer is the AI SDK's providers, without its core**
+   (A0's verdict): every provider passed, and `doStream` directly keeps
+   the loop agex-ts's own.
 
 ### What the studio needs, and where it comes from
 

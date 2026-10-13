@@ -376,6 +376,17 @@ describe('attachments', () => {
     await ws.close()
   })
 
+  it('may cover an empty directory, not a full one', async () => {
+    const store = await fresh()
+    const ws = await seeded(store, { 'full/a.txt': 'mine\n' })
+    await reviewer(store)
+    await ws.terminal('mkdir empty')
+    await ws.files.attach('reviewer', 'empty')
+    expect(await ws.files.readText('empty/review.md')).toBe('looks fine\n')
+    await expect(ws.files.attach('reviewer', 'full')).rejects.toThrow('a path of this session')
+    await ws.close()
+  })
+
   it("don't travel to a fork", async () => {
     const store = await fresh()
     const ws = await seeded(store, { 'a.txt': 'mine\n' })

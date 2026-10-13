@@ -1396,8 +1396,14 @@ export class Workspace {
     if (this.#attached.has(point)) {
       throw new WorldError(`'${point}' is already taken by an attachment; detach it first`)
     }
-    if (await this.#fs.exists(point)) {
-      throw new WorldError(`'${point}' is a path of this session: attach somewhere new`)
+    // A new or empty directory: the mount covers it, and nothing in it.
+    if (
+      (await this.#fs.exists(point)) &&
+      (!(await this.#fs.isDir(point)) || (await this.#fs.list(point)).length > 0)
+    ) {
+      throw new WorldError(
+        `'${point}' is a path of this session: attach somewhere new, or at an empty directory`,
+      )
     }
     const from = await this.#resolveAny(ref)
     const root = normalize(opts.root ?? this.root)

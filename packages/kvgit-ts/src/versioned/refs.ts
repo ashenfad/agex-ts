@@ -180,10 +180,12 @@ export async function createTag(
  * Delete a tag: its head, any backup of it, and its record. A commit
  * the tag alone kept alive becomes collectable.
  *
- * The removal is conditional on the head it read. If the tag changed
- * in between (deleted and made again, since a tag never moves), the
- * tag this call saw is already gone and the one there now is someone
- * else's, so nothing is removed.
+ * The removal is conditional on the head and the record it read. If
+ * the tag changed in between (deleted and made again, since a tag never
+ * moves), the tag this call saw is already gone and the one there now
+ * is someone else's, so nothing is removed. The record is what tells a
+ * tag made again at the *same* commit apart: it carries the time the
+ * new one landed. A tag with no record is compared by its head alone.
  *
  * @throws UnknownTagError if there is no such tag.
  * @throws ConcurrencyError if the tag changed while being deleted.
@@ -191,13 +193,18 @@ export async function createTag(
 export async function deleteTag(store: KVStore, name: string): Promise<void> {
   validateTagName(name)
   const head = tagHead(name)
-  const current = await store.get(head)
-  if (current === null) throw new UnknownTagError(name)
-  const removed = await store.casMany(new Map([[head, current]]), new Map(), [
-    head,
-    BRANCH_HEAD_PREV(TAG_BRANCH_PREFIX + name),
-    TAG_INFO_KEY(name),
-  ])
+  const info = TAG_INFO_KEY(name)
+  const found = await store.getMany([head, info])
+  const current = found.get(head)
+  if (current === undefined) throw new UnknownTagError(name)
+  const removed = await store.casMany(
+    new Map([
+      [head, current],
+      [info, found.get(info) ?? null],
+    ]),
+    new Map(),
+    [head, BRANCH_HEAD_PREV(TAG_BRANCH_PREFIX + name), info],
+  )
   if (!removed) {
     throw new ConcurrencyError(`Tag '${name}' changed while being deleted; nothing was removed`)
   }

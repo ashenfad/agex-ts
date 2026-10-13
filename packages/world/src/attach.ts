@@ -1,0 +1,277 @@
+/**
+ * Attachments: another session's tree, frozen at a commit, mounted
+ * read-only inside this one (`ws.files.attach`). For reading someone
+ * else's work in place (a delegate's branch, before deciding whether to
+ * merge it) without copying it in. Not versioned, not carried by a
+ * fork, gone when the session closes.
+ *
+ * {@link AttachFS} is always the filesystem the agent and the host see,
+ * transparent while nothing is attached, so an attachment made later
+ * reaches the shell and the kernel through the object they already
+ * hold. It keeps the working directory: standing inside an attachment
+ * doesn't move the session's own (stored) one.
+ */
+
+import { type FileInfo, type FileMetadata, type FileSystem, FsError } from '@agex-ts/termish'
+import { basename, normalize, resolve } from './path'
+
+const EPOCH = new Date(0).toISOString()
+
+/**
+ * One directory of a filesystem shown as the root: what an attachment
+ * mounts, the source's workspace root, so a file it calls `auth.py`
+ * reads as `<at>/auth.py`. Reads only.
+ */
+export class SubtreeFS implements FileSystem {
+  readonly #fs: FileSystem
+  readonly #prefix: string
+
+  constructor(fs: FileSystem, prefix: string) {
+    this.#fs = fs
+    this.#prefix = normalize(prefix)
+  }
+
+  #under(path: string): string {
+    const rel = normalize(resolve(path, '/')).replace(/^\/+/, '')
+    return rel === '' ? this.#prefix : normalize(`${this.#prefix}/${rel}`)
+  }
+
+  #out(path: string): string {
+    if (path === this.#prefix) return '/'
+    return path.startsWith(`${this.#prefix}/`) ? path.slice(this.#prefix.length) : path
+  }
+
+  getcwd(): string {
+    return '/'
+  }
+  async chdir(path: string): Promise<void> {
+    if (!(await this.isDir(path))) throw new FsError('ENOENT', path)
+  }
+  read(path: string): Promise<Uint8Array> {
+    return this.#fs.read(this.#under(path))
+  }
+  exists(path: string): Promise<boolean> {
+    return this.#fs.exists(this.#under(path))
+  }
+  isFile(path: string): Promise<boolean> {
+    return this.#fs.isFile(this.#under(path))
+  }
+  isDir(path: string): Promise<boolean> {
+    return this.#fs.isDir(this.#under(path))
+  }
+  stat(path: string): Promise<FileMetadata> {
+    return this.#fs.stat(this.#under(path))
+  }
+  list(path = '/', opts?: { recursive?: boolean }): Promise<string[]> {
+    return this.#fs.list(this.#under(path), opts)
+  }
+  async listDetailed(path = '/', opts?: { recursive?: boolean }): Promise<FileInfo[]> {
+    const infos = await this.#fs.listDetailed(this.#under(path), opts)
+    return infos.map((info) => ({ ...info, path: this.#out(info.path) }))
+  }
+  async write(path: string): Promise<void> {
+    throw new FsError('EROFS', path)
+  }
+  async mkdir(path: string): Promise<void> {
+    throw new FsError('EROFS', path)
+  }
+  async remove(path: string): Promise<void> {
+    throw new FsError('EROFS', path)
+  }
+  async rmdir(path: string): Promise<void> {
+    throw new FsError('EROFS', path)
+  }
+  async rename(src: string): Promise<void> {
+    throw new FsError('EROFS', src)
+  }
+}
+
+/** The session's filesystem, with whatever is attached mounted in it. */
+export class AttachFS implements FileSystem {
+  readonly #base: FileSystem
+  readonly #home: string
+  /** Mount point → its filesystem, longest first. */
+  #mounts: [string, FileSystem][] = []
+  /** The working directory while it is inside an attachment. */
+  #cwd: string | null = null
+
+  /** `home` is where the cwd lands when the attachment it was in goes. */
+  constructor(base: FileSystem, home: string) {
+    this.#base = base
+    this.#home = home
+  }
+
+  /** The mount points. */
+  get points(): string[] {
+    return this.#mounts.map(([at]) => at)
+  }
+
+  attach(at: string, fs: FileSystem): void {
+    this.#mounts = [...this.#mounts, [at, fs] as [string, FileSystem]].sort(
+      (a, b) => b[0].length - a[0].length,
+    )
+  }
+
+  async detach(at: string): Promise<void> {
+    this.#mounts = this.#mounts.filter(([p]) => p !== at)
+    // Standing inside it, there's nowhere to go back to: home.
+    if (this.#cwd !== null && this.#route(this.#cwd).at === null) {
+      this.#cwd = null
+      await this.#base.chdir(this.#home)
+    }
+  }
+
+  #abs(path: string): string {
+    return normalize(resolve(path, this.getcwd()))
+  }
+
+  /** Where an absolute path goes: a mount and the path inside it, or the
+   *  session's own filesystem. */
+  #route(abs: string): { at: string | null; fs: FileSystem; path: string } {
+    for (const [at, fs] of this.#mounts) {
+      if (abs === at) return { at, fs, path: '/' }
+      if (abs.startsWith(`${at}/`)) return { at, fs, path: abs.slice(at.length) }
+    }
+    return { at: null, fs: this.#base, path: abs }
+  }
+
+  /** Where `path` goes. To the session's own filesystem it goes as the
+   *  caller spelled it while the cwd is the session's, so errors name
+   *  it the same way. */
+  #to(path: string) {
+    const r = this.#route(this.#abs(path))
+    return r.at === null && this.#cwd === null ? { ...r, path } : r
+  }
+
+  /** The mount points directly inside directory `abs`. */
+  #pointsIn(abs: string): string[] {
+    const prefix = abs === '/' ? '/' : `${abs}/`
+    return this.#mounts
+      .map(([at]) => at)
+      .filter((at) => at.startsWith(prefix) && !at.slice(prefix.length).includes('/'))
+      .map((at) => basename(at))
+  }
+
+  #readOnly(path: string, at: string): FsError {
+    return new FsError('EROFS', path, `'${path}' is in a read-only attachment (${at})`)
+  }
+
+  getcwd(): string {
+    return this.#cwd ?? this.#base.getcwd()
+  }
+
+  async chdir(path: string): Promise<void> {
+    const abs = this.#abs(path)
+    const r = this.#route(abs)
+    if (r.at === null) {
+      await this.#base.chdir(this.#cwd === null ? path : abs)
+      this.#cwd = null
+      return
+    }
+    if (!(await r.fs.isDir(r.path))) throw new FsError('ENOENT', path)
+    this.#cwd = abs
+  }
+
+  async read(path: string): Promise<Uint8Array> {
+    const r = this.#to(path)
+    return r.fs.read(r.path)
+  }
+
+  async exists(path: string): Promise<boolean> {
+    const r = this.#to(path)
+    return r.fs.exists(r.path)
+  }
+
+  async isFile(path: string): Promise<boolean> {
+    const r = this.#to(path)
+    return r.fs.isFile(r.path)
+  }
+
+  async isDir(path: string): Promise<boolean> {
+    const r = this.#to(path)
+    return r.fs.isDir(r.path)
+  }
+
+  async stat(path: string): Promise<FileMetadata> {
+    const r = this.#to(path)
+    return r.fs.stat(r.path)
+  }
+
+  async list(path = '.', opts: { recursive?: boolean } = {}): Promise<string[]> {
+    const abs = this.#abs(path)
+    const r = this.#route(abs)
+    const own = await r.fs.list(r.path, opts)
+    if (r.at !== null) return own
+    const points = this.#pointsIn(abs)
+    if (points.length === 0) return own
+    const extra = new Set(own)
+    for (const name of points) extra.add(name)
+    if (opts.recursive === true) {
+      for (const name of points) {
+        const at = abs === '/' ? `/${name}` : `${abs}/${name}`
+        const mounted = this.#route(at)
+        for (const e of await mounted.fs.list('/', opts)) extra.add(`${name}/${e}`)
+      }
+    }
+    return [...extra].sort()
+  }
+
+  async listDetailed(path = '.', opts: { recursive?: boolean } = {}): Promise<FileInfo[]> {
+    const abs = this.#abs(path)
+    const r = this.#route(abs)
+    if (r.at !== null) {
+      const prefix = path.replace(/\/$/, '')
+      const infos = await r.fs.listDetailed(r.path, opts)
+      return infos.map((info) => ({
+        ...info,
+        path: `${prefix}${info.path === '/' ? '' : info.path}`,
+      }))
+    }
+    const infos = await r.fs.listDetailed(path, opts)
+    const prefix = path === '/' ? '' : path.replace(/\/$/, '')
+    for (const name of this.#pointsIn(abs)) {
+      if (infos.some((i) => i.name === name)) continue
+      infos.push({
+        name,
+        path: `${prefix}/${name}`,
+        size: 0,
+        createdAt: EPOCH,
+        modifiedAt: EPOCH,
+        isDir: true,
+      })
+    }
+    return infos.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+  }
+
+  async write(path: string, content: Uint8Array, mode?: 'w' | 'a'): Promise<void> {
+    const r = this.#to(path)
+    if (r.at !== null) throw this.#readOnly(path, r.at)
+    return this.#base.write(r.path, content, mode)
+  }
+
+  async mkdir(path: string, opts?: { parents?: boolean; existOk?: boolean }): Promise<void> {
+    const r = this.#to(path)
+    if (r.at !== null) throw this.#readOnly(path, r.at)
+    return this.#base.mkdir(r.path, opts)
+  }
+
+  async remove(path: string): Promise<void> {
+    const r = this.#to(path)
+    if (r.at !== null) throw this.#readOnly(path, r.at)
+    return this.#base.remove(r.path)
+  }
+
+  async rmdir(path: string): Promise<void> {
+    const r = this.#to(path)
+    if (r.at !== null) throw this.#readOnly(path, r.at)
+    return this.#base.rmdir(r.path)
+  }
+
+  async rename(src: string, dst: string): Promise<void> {
+    const a = this.#to(src)
+    const b = this.#to(dst)
+    if (a.at !== null) throw this.#readOnly(src, a.at)
+    if (b.at !== null) throw this.#readOnly(dst, b.at)
+    return this.#base.rename(a.path, b.path)
+  }
+}

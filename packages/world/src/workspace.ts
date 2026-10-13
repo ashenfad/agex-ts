@@ -12,6 +12,7 @@ import {
 } from '@agex-ts/kvgit'
 import {
   type CommandHandler,
+  type FileSystem,
   FsError,
   ParseError,
   TerminalError,
@@ -31,6 +32,7 @@ import {
   parseBlob,
   virtualParents,
 } from './agentgit'
+import { AttachFS, SubtreeFS } from './attach'
 import { WorkspaceCache } from './cache'
 import {
   WorkspaceConversation,
@@ -49,6 +51,7 @@ import {
   WorldError,
 } from './errors'
 import { type KeyReader, WorldFS } from './fs'
+import { Patterns, whyIgnored } from './ignore'
 import { DEFAULT_MAX_OBSERVATION, Kernel } from './kernel/kernel'
 import type { Image, SerializedError } from './kernel/messages'
 import {
@@ -58,11 +61,12 @@ import {
   FILE_PREFIX,
   META_PREFIX,
   fileKey,
+  isFileRecord,
   metaKey,
 } from './layout'
 import { staleRecords, threeWay, threeWayRules } from './merging'
 import { checkSessionName, checkTagName } from './names'
-import { dirname, resolve, within } from './path'
+import { dirname, normalize, resolve, within } from './path'
 import {
   type HostCall,
   type HostEntry,
@@ -75,6 +79,7 @@ import { Queue } from './queue'
 import { Secrets } from './secrets'
 import type { Store } from './store'
 import { Turn, TurnInProgressError, type TurnOptions, statusOf } from './turns'
+import { VIEW_KEY, ViewFS, encodeView, normalizeView, parseView } from './views'
 
 /** How a workspace is opened. */
 export interface WorkspaceOptions {
@@ -89,6 +94,10 @@ export interface WorkspaceOptions {
   /** What the host grants the session: host objects, variables,
    *  secrets, and how code runs. */
   readonly profile?: Profile
+  /** Paths that are never the session's work (`.gitignore` patterns,
+   *  relative to the root): ws-git, diffs and merges leave them out.
+   *  Anything outside the root is never work either. Forks inherit it. */
+  readonly ignore?: string | readonly string[]
 }
 
 /** A workspace's settings, filled in; a fork's child gets its parent's. */
@@ -97,6 +106,7 @@ export interface WorkspaceSettings {
   readonly autocommit: boolean
   readonly cache: boolean
   readonly profile: Profile
+  readonly ignore: readonly string[]
 }
 
 /** What a fork's child starts with: everything (`'full'`), or the
@@ -109,6 +119,12 @@ export interface ForkOptions {
    *  of this session) instead of the current one. */
   readonly at?: string
   readonly inherit?: Inherit
+  /** Narrow the child's view to these paths (directories or files,
+   *  absolute or relative to the root): its branch holds everything,
+   *  its files show only these, and what it creates. `[]` is an empty
+   *  view, forked from the last commit without committing what's
+   *  pending. Left out, the child sees the whole tree. */
+  readonly paths?: readonly string[]
 }
 
 /** The files two commits differ in, as absolute paths, sorted. A file
@@ -118,6 +134,14 @@ export interface WorkspaceDiff {
   readonly added: readonly string[]
   readonly removed: readonly string[]
   readonly modified: readonly string[]
+  /** What the session the diff ends at was given, when it's a narrowed
+   *  fork; empty otherwise. */
+  readonly seed: readonly string[]
+  /** The changed paths inside the seed (all of them, with no seed). */
+  readonly inSeed: readonly string[]
+  /** The changed paths outside it: what a narrowed delegate touched
+   *  beyond what it was given. */
+  readonly elsewhere: readonly string[]
 }
 
 export interface WriteOutcome {
@@ -198,6 +222,17 @@ interface Inner {
   commitPending(info: CommitInfo): Promise<string | null>
   expand(ref: string): Promise<string>
   frozenView(commit: string): Promise<Workspace>
+  attach(ref: string, at: string, opts: AttachOptions): Promise<string>
+  detach(at: string): Promise<void>
+  attachments(): Record<string, string>
+}
+
+export interface AttachOptions {
+  /** The source's root, for a session from elsewhere (default this
+   *  session's). */
+  readonly root?: string
+  /** An attachment is read-only; `false` is refused. */
+  readonly readonly?: boolean
 }
 
 const enc = new TextEncoder()
@@ -242,7 +277,14 @@ export class Workspace {
   readonly #settings: WorkspaceSettings
   readonly #wt: Worktree<unknown> | null
   readonly #frozenAt: string | null
+  /** The session's own files, unnarrowed: the workspace's verbs. */
   readonly #fs: WorldFS
+  /** A narrowed session's view over them (live sessions). */
+  readonly #view: ViewFS | null
+  /** What the agent and the host see: the view, and attachments. */
+  readonly #top: AttachFS
+  readonly #attached = new Map<string, { ref: string; ws: Workspace }>()
+  readonly #patterns: Patterns
   readonly #cache: WorkspaceCache | null
   readonly #queue = new Queue()
   readonly #hostObjects: Map<string, HostEntry>
@@ -277,6 +319,15 @@ export class Workspace {
     this.#frozenAt = 'snapshot' in source ? source.snapshot.commit : null
     const open = () => !this.#closed
     this.#fs = new WorldFS(reader, { persistCwd: true, writable: open })
+    const wt = this.#wt
+    this.#view =
+      wt === null
+        ? null
+        : new ViewFS(this.#fs, settings.root, (record) =>
+            wt.set(VIEW_KEY, encodeView(record.paths, record.seed)),
+          )
+    this.#top = new AttachFS(this.#view ?? this.#fs, settings.root)
+    this.#patterns = new Patterns(settings.ignore)
     this.#cache = settings.cache ? new WorkspaceCache(reader, open) : null
 
     const inner: Inner = {
@@ -286,8 +337,11 @@ export class Workspace {
       commitPending: (info) => this.#commitPending(info),
       expand: (ref) => this.#expand(ref),
       frozenView: (commit) => Workspace._frozen(store, session, settings, commit),
+      attach: (ref, at, opts) => this.#attach(ref, at, opts),
+      detach: (at) => this.#detach(at),
+      attachments: () => Object.fromEntries([...this.#attached].map(([at, { ref }]) => [at, ref])),
     }
-    this.files = new WorkspaceFiles(inner, this.#fs, (info) => this.autoCommit(info))
+    this.files = new WorkspaceFiles(inner, this.#top, (info) => this.autoCommit(info))
     this.tags = new WorkspaceTags(inner)
     this.conversation = new WorkspaceConversation(reader)
     this.index = new WorkspaceIndex({
@@ -307,6 +361,8 @@ export class Workspace {
       moved: async () => {
         await this.#loadCwd()
       },
+      sees: (path) => this.#view?.sees(path) ?? true,
+      whyIgnored: (path) => whyIgnored(path, this.root, this.#patterns),
     })
     this.#secrets = new Secrets(settings.profile.secrets)
     this.#hostObjects = makeHostObjects(settings.profile, this, { secrets: this.#secrets })
@@ -325,6 +381,7 @@ export class Workspace {
   ): Promise<Workspace> {
     const ws = new Workspace(store, session, settings, { wt })
     await ws.#init()
+    ws.#view?.setView(parseView(await wt.get(VIEW_KEY)))
     return ws
   }
 
@@ -372,6 +429,17 @@ export class Workspace {
    *  inherits. */
   get settings(): WorkspaceSettings {
     return { ...this.#settings, autocommit: this.autocommit }
+  }
+
+  /** The session's ignore patterns. */
+  get ignore(): readonly string[] {
+    return this.#patterns.source
+  }
+
+  /** A narrowed session's view (what it sees now), or null for the
+   *  whole tree. */
+  get view(): readonly string[] | null {
+    return this.#view?.view ?? null
   }
 
   /**
@@ -441,7 +509,7 @@ export class Workspace {
       const active = this.#queue.active
       const call: HostCall = { ws: this.#asPartOf(() => active) }
       const out = await this.#kernelFor().run(code, {
-        fs: this.#fs,
+        fs: this.#top,
         cache: this.#cache,
         env: this.#settings.profile.variables ?? {},
         secrets: this.#secrets.names(),
@@ -568,7 +636,7 @@ export class Workspace {
       let stderr = ''
       let exitCode = 0
       try {
-        stdout = await execute(command, this.#fs, {
+        stdout = await execute(command, this.#top, {
           commands: this.#commands,
           env: shellEnv(this.#settings.profile),
           signal: controller.signal,
@@ -672,16 +740,77 @@ export class Workspace {
    *  them; `b` defaults to the current commit). */
   async diff(a: string, b?: string): Promise<WorkspaceDiff> {
     const [from, to] = await Promise.all([
-      this.#expand(a),
-      b === undefined ? this.head : this.#expand(b),
+      this.#resolveAny(a),
+      b === undefined ? { commit: this.head } : this.#resolveAny(b),
     ])
-    const d = await this.store.repo.diff(from, to)
+    const repo = this.store.repo
+    const d = await repo.diff(from.commit, to.commit)
+    // Paths that are never work don't count as changes.
     const paths = (keys: ReadonlySet<string>) =>
       [...keys]
         .filter((k) => k.startsWith(FILE_PREFIX))
         .map((k) => k.slice(FILE_PREFIX.length))
+        .filter((p) => whyIgnored(p, this.root, this.#patterns) === null)
         .sort()
-    return { added: paths(d.added), removed: paths(d.removed), modified: paths(d.modified) }
+    const added = paths(d.added)
+    const removed = paths(d.removed)
+    const modified = paths(d.modified)
+    const seed =
+      parseView(await (await repo.snapshot({ commit: to.commit })).get(VIEW_KEY))?.seed ?? []
+    const all = [...added, ...removed, ...modified].sort()
+    const inSeed =
+      seed.length === 0 ? all : all.filter((p) => seed.some((entry) => within(p, entry)))
+    return {
+      added,
+      removed,
+      modified,
+      seed: [...seed],
+      inSeed,
+      elsewhere: all.filter((p) => !inSeed.includes(p)),
+    }
+  }
+
+  /**
+   * A ref from anywhere in the store, as a commit and the name to record
+   * it by: this session's own (a hash, a prefix, a tag), `session@commit`,
+   * a store tag, another session by name (its agent's last commit, or
+   * its latest if it never used ws-git, as a merge reads it), or a whole
+   * commit id.
+   */
+  async #resolveAny(ref: string): Promise<{ commit: string; label: string }> {
+    const repo = this.store.repo
+    const at = ref.lastIndexOf('@')
+    if (at > 0) {
+      const session = ref.slice(0, at)
+      const rest = ref.slice(at + 1)
+      if (!(await this.store.exists(session))) throw new UnknownSessionError(session)
+      const commit =
+        session === this.session ? await this.#expand(rest) : await this.#expandIn(session, rest)
+      return { commit, label: `${session}@${commit}` }
+    }
+    try {
+      const commit = await this.#expand(ref)
+      return { commit, label: `${this.session}@${commit}` }
+    } catch (e) {
+      if (!(e instanceof UnknownRefError)) throw e
+    }
+    if (!ref.startsWith('@') && (await repo.tags.has(`@store/${ref}`))) {
+      return { commit: await repo.tags.get(`@store/${ref}`), label: ref }
+    }
+    if (ref !== this.session && (await this.store.exists(ref))) {
+      const head = await repo.branches.get(ref)
+      const commit = (await this.index.sourceState(ref, head)).commit
+      return { commit, label: `${ref}@${commit}` }
+    }
+    if (/^[0-9a-f]{40}$/.test(ref)) {
+      try {
+        await repo.getCommit(ref)
+        return { commit: ref, label: ref }
+      } catch {
+        // falls through to the refusal
+      }
+    }
+    throw new UnknownRefError(ref)
   }
 
   /**
@@ -703,18 +832,24 @@ export class Workspace {
    * back. Pending changes are dropped. Returns the commit that holds
    * the restored state; when nothing differs, the current one.
    *
-   * With `paths`, only those files and directories (and everything
-   * under them) are taken from `ref`, on top of the pending changes,
-   * and committed: a path `ref` doesn't have is removed.
+   * With `paths`, only those are taken, on top of the pending changes,
+   * and committed (`{tool: 'checkout', target, takenFrom, paths,
+   * removed}`), as git's `restore --source`: `ref` may then be any
+   * ref the store holds (another session's commit, a session by name at
+   * its agent's last commit, a store tag). A path naming a file takes
+   * that file; one naming a directory mirrors it, so a file this side
+   * holds there and `ref` doesn't is removed. Ignored files are left
+   * alone in a directory, but taken when named. A narrowed session's
+   * view applies: a take that would change a path it can't see is
+   * refused whole, before anything changes.
    */
   async checkout(ref: string, opts: { paths?: readonly string[] } = {}): Promise<string> {
     return this.#run('checkout', async (wt) => {
-      const target = await this.#expand(ref)
       if (opts.paths !== undefined) {
-        const paths = opts.paths.map((p) => resolve(p, this.root))
-        return this.#take(wt, target, paths)
+        const paths = opts.paths.map((p) => normalize(resolve(p, this.root)))
+        return this.#take(wt, await this.#resolveAny(ref), paths)
       }
-      return this.#restore(wt, target)
+      return this.#restore(wt, await this.#expand(ref))
     })
   }
 
@@ -731,10 +866,14 @@ export class Workspace {
     return this.#run('fork', async (wt) => {
       checkSessionName(name)
       const inherit = opts.inherit ?? 'full'
+      const paths = opts.paths === undefined ? null : normalizeView(opts.paths, this.root)
       if (await this.store.exists(name)) throw new SessionExistsError(name)
       let at: string
       if (opts.at !== undefined) {
         at = await this.#expand(opts.at)
+      } else if (paths !== null && paths.length === 0) {
+        // An empty view needs none of what's pending here.
+        at = wt.head
       } else {
         await this.#commitPending({ tool: 'fork', child: name, inherit })
         at = wt.head
@@ -746,7 +885,7 @@ export class Workspace {
         throw e
       }
       const child = await this.store.open(name, this.settings)
-      await child.#seedFork(this.session, inherit)
+      await child.#seedFork(this.session, inherit, paths)
       return child
     })
   }
@@ -795,7 +934,9 @@ export class Workspace {
       }
       const before = wt.head
       const base = await repo.mergeBase(before, from.commit)
-      const rules = await threeWayRules(repo, { base, ours: before, theirs: from.commit })
+      const rules = await threeWayRules(repo, { base, ours: before, theirs: from.commit }, (p) =>
+        this.#ignored(p),
+      )
       const outcome = await threeWay(
         repo,
         { base, before, theirs: from.commit },
@@ -939,7 +1080,9 @@ export class Workspace {
     const before = wt.head
     const base = change.base ?? ROOT_COMMIT
     const theirs = change.theirs ?? ROOT_COMMIT
-    const rules = await threeWayRules(repo, { base: change.base, ours: before, theirs })
+    const rules = await threeWayRules(repo, { base: change.base, ours: before, theirs }, (p) =>
+      this.#ignored(p),
+    )
     const outcome = await threeWay(repo, { base: change.base, before, theirs }, () =>
       wt.apply(base, theirs, {
         ...rules,
@@ -960,6 +1103,13 @@ export class Workspace {
     return outcome
   }
 
+  /** Whether `path` is never work: outside the root, or ignored. A
+   *  directory's own record follows the files: only the root's way
+   *  down counts as work. */
+  #ignored(path: string): boolean {
+    return whyIgnored(path, this.root, this.#patterns) !== null && !within(this.root, path)
+  }
+
   #requireNothingPending(wt: Worktree<unknown>, verb: string): void {
     if (wt.status().clean) return
     throw new WorldError(
@@ -975,6 +1125,9 @@ export class Workspace {
       this.#wt?.discard()
       this.#closed = true
     })
+    // Attachments go with the session.
+    for (const { ws } of this.#attached.values()) await ws.close()
+    this.#attached.clear()
   }
 
   // ---------- internals ----------
@@ -1136,40 +1289,129 @@ export class Workspace {
     throw new WorldError(`checkout of ${target}: other commits kept landing; try again`)
   }
 
-  async #take(wt: Worktree<unknown>, target: string, paths: readonly string[]): Promise<string> {
-    const snapshot = await this.store.repo.snapshot({ commit: target })
-    const under = (key: string): boolean => {
-      const path = key.startsWith(FILE_PREFIX)
-        ? key.slice(FILE_PREFIX.length)
-        : key.startsWith(META_PREFIX)
-          ? key.slice(META_PREFIX.length)
-          : null
-      return path !== null && paths.some((p) => within(path, p))
+  async #take(
+    wt: Worktree<unknown>,
+    from: { commit: string; label: string },
+    named: readonly string[],
+  ): Promise<string> {
+    const snapshot = await this.store.repo.snapshot({ commit: from.commit })
+    const filesOf = async (keys: Promise<string[]>) =>
+      new Set(
+        (await keys)
+          .filter((k) => k.startsWith(FILE_PREFIX))
+          .map((k) => k.slice(FILE_PREFIX.length)),
+      )
+    const [ours, theirs] = await Promise.all([filesOf(wt.keys()), filesOf(snapshot.keys())])
+    const work = (p: string) => whyIgnored(p, this.root, this.#patterns) === null
+    const take = new Set<string>()
+    const drop = new Set<string>()
+    for (const path of named) {
+      if (theirs.has(path)) {
+        take.add(path)
+        continue
+      }
+      const under = (p: string) => within(p, path) && p !== path
+      const inside = [...theirs].filter(under)
+      if (inside.length === 0 && !isFileRecord(await snapshot.get(metaKey(path)))) {
+        throw new UnknownRefError(from.label, `holds nothing at '${path}'`)
+      }
+      for (const p of inside) if (work(p)) take.add(p)
+      for (const p of ours) if (under(p) && !theirs.has(p) && work(p)) drop.add(p)
     }
-    const keys = new Set([...(await wt.keys()), ...(await snapshot.keys())].filter(under))
-    // A taken path's directories come along when this side lacks them.
-    for (const p of paths) {
-      for (let dir = dirname(p); dir !== '/'; dir = dirname(dir)) keys.add(metaKey(dir))
-    }
-    const [ours, theirs] = await Promise.all([wt.getMany(keys), snapshot.getMany(keys)])
-    for (const key of keys) {
-      const want = theirs.get(key)
-      const have = ours.get(key)
-      if (want === undefined) {
-        if (have !== undefined && under(key)) await wt.delete(key)
-      } else if (have === undefined || (under(key) && !sameValue(have, want))) {
-        wt.set(key, want)
+    // The view is asked first: a take is one change, done whole or not.
+    if (this.#view !== null) {
+      for (const p of take) {
+        const refused = await this.#view.refused(p, 'write')
+        if (refused !== null) throw refused
+      }
+      for (const p of drop) {
+        const refused = await this.#view.refused(p, 'remove')
+        if (refused !== null) throw refused
       }
     }
-    const commit = await this.#commitPending({ tool: 'checkout', target, paths: [...paths] })
+    const keys = [...take].flatMap((p) => [fileKey(p), metaKey(p)])
+    for (const p of [...take, ...named]) {
+      for (let dir = dirname(p); dir !== '/'; dir = dirname(dir)) keys.push(metaKey(dir))
+    }
+    // A named directory's own records come along, and those under it.
+    for (const path of named) {
+      for (const k of await snapshot.keys()) {
+        if (k.startsWith(META_PREFIX) && within(k.slice(META_PREFIX.length), path)) keys.push(k)
+      }
+    }
+    const [mine, wanted] = await Promise.all([wt.getMany(keys), snapshot.getMany(keys)])
+    for (const key of new Set(keys)) {
+      const want = wanted.get(key)
+      const have = mine.get(key)
+      if (want === undefined) continue
+      const isFile = key.startsWith(FILE_PREFIX) || take.has(key.slice(META_PREFIX.length))
+      // Besides the files taken, only directories come along.
+      if (!isFile && !(isFileRecord(want) && want.isDir)) continue
+      if (have === undefined || (isFile && !sameValue(have, want))) wt.set(key, want)
+    }
+    for (const p of drop) {
+      await wt.delete(fileKey(p))
+      await wt.delete(metaKey(p))
+    }
+    for (const p of take) this.#view?.include(p)
+    const info: CommitInfo = {
+      tool: 'checkout',
+      target: from.commit,
+      takenFrom: from.label,
+      paths: [...take].sort(),
+      ...(drop.size > 0 && { removed: [...drop].sort() }),
+    }
+    const commit = await this.#commitPending(info)
     await this.#loadCwd()
     return commit ?? wt.head
   }
 
-  async #seedFork(parent: string, inherit: Inherit): Promise<void> {
+  // ---------- attachments ----------
+
+  async #attach(ref: string, at: string, opts: AttachOptions): Promise<string> {
+    if (opts.readonly === false) {
+      throw new WorldError(
+        'an attachment is a frozen state, and accepts no writes: readonly: false is refused',
+      )
+    }
+    this.#checkOpen()
+    const point = normalize(resolve(at, this.root))
+    if (this.#attached.has(point)) {
+      throw new WorldError(`'${point}' is already taken by an attachment; detach it first`)
+    }
+    if (await this.#fs.exists(point)) {
+      throw new WorldError(`'${point}' is a path of this session: attach somewhere new`)
+    }
+    const from = await this.#resolveAny(ref)
+    const root = normalize(opts.root ?? this.root)
+    const frozen = await this.store._frozenView(from.label, from.commit, { root })
+    this.#top.attach(point, new SubtreeFS(frozen.files.fs, root))
+    this.#attached.set(point, { ref: from.label, ws: frozen })
+    return from.label
+  }
+
+  async #detach(at: string): Promise<void> {
+    const point = normalize(resolve(at, this.root))
+    const found = this.#attached.get(point)
+    if (found === undefined) throw new WorldError(`nothing attached at '${point}'`)
+    this.#attached.delete(point)
+    await this.#top.detach(point)
+    await found.ws.close()
+  }
+
+  async #seedFork(
+    parent: string,
+    inherit: Inherit,
+    paths: readonly string[] | null,
+  ): Promise<void> {
     await this.#run('fork', async (wt) => {
       if (inherit === 'fresh') await wipeConversation(wt)
       else await rebindConversation(wt, this.session, parent)
+      // A view is the child's own: one given the whole tree doesn't
+      // inherit its parent's.
+      if (paths !== null) wt.set(VIEW_KEY, encodeView(paths))
+      else if ((await wt.get(VIEW_KEY)) !== undefined) await wt.delete(VIEW_KEY)
+      this.#view?.setView(paths === null ? null : { paths, seed: paths })
       // A fresh ws-git state, recording where the fork starts: what its
       // work is measured against until its first commit.
       wt.set(BLOB_KEY, forkBlob(wt.head))
@@ -1193,19 +1435,47 @@ function sameValue(a: unknown, b: unknown): boolean {
  */
 export class WorkspaceFiles {
   readonly #inner: Inner
-  readonly #fs: WorldFS
+  readonly #fs: FileSystem
   readonly #autoCommit: (info: CommitInfo) => Promise<string | null>
 
   /** @internal Made by the workspace. */
-  constructor(inner: Inner, fs: WorldFS, autoCommit: (info: CommitInfo) => Promise<string | null>) {
+  constructor(
+    inner: Inner,
+    fs: FileSystem,
+    autoCommit: (info: CommitInfo) => Promise<string | null>,
+  ) {
     this.#inner = inner
     this.#fs = fs
     this.#autoCommit = autoCommit
   }
 
-  /** The session's filesystem, with its working directory. */
-  get fs(): WorldFS {
+  /** The session's filesystem, with its working directory: narrowed to
+   *  a fork's view, with whatever is attached mounted in it. */
+  get fs(): FileSystem {
     return this.#fs
+  }
+
+  /**
+   * Mount another session's tree, frozen at a commit, read-only at
+   * `at` (absolute, or relative to the root): a session by name (at its
+   * agent's last commit), `session@commit`, or a store tag. Its
+   * workspace root lands at `at`, so its `auth.py` reads as
+   * `<at>/auth.py`; `root` names another root, for a session from
+   * elsewhere. Not versioned, not carried by a fork, gone when the
+   * session closes. Returns the ref it attached, as `session@commit`.
+   */
+  attach(ref: string, at: string, opts: AttachOptions = {}): Promise<string> {
+    return this.#inner.attach(ref, at, opts)
+  }
+
+  /** Unmount what `attach` mounted at `at`. */
+  detach(at: string): Promise<void> {
+    return this.#inner.detach(at)
+  }
+
+  /** What's attached: mount point → ref. */
+  attachments(): Record<string, string> {
+    return this.#inner.attachments()
   }
 
   /** A file's bytes, or `size` bytes of it from `offset`. */

@@ -10,9 +10,9 @@
  * finish first, so a stopped run's writes are all there to commit.
  */
 
+import type { FileSystem } from '@agex-ts/termish'
 import tsBlankSpace from 'ts-blank-space'
 import type { WorkspaceCache } from '../cache'
-import type { WorldFS } from '../fs'
 import {
   type CodeSettings,
   type HostCall,
@@ -49,7 +49,7 @@ export interface KernelOutput {
 
 /** What a run reaches on the host. */
 export interface RunContext {
-  readonly fs: WorldFS
+  readonly fs: FileSystem
   readonly cache: WorkspaceCache | null
   readonly env: Readonly<Record<string, string>>
   /** The secrets' names, never their values. */

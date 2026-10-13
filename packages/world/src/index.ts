@@ -18,6 +18,9 @@ export {
   virtualParents,
 } from './agentgit'
 export { WorkspaceCache } from './cache'
+export { AttachFS, SubtreeFS } from './attach'
+export { Patterns, isIgnored, whyIgnored } from './ignore'
+export { ViewFS, type ViewRecord, normalizeView } from './views'
 export {
   CommitConflictError,
   InvalidNameError,
@@ -36,6 +39,7 @@ export {
   FILE_PREFIX,
   type FileRecord,
   GIT_KEY,
+  VIEW_KEY,
   META_PREFIX,
   fileKey,
   metaKey,
@@ -44,6 +48,7 @@ export { SESSION_ID_RE } from './names'
 export { Queue } from './queue'
 export { DEFAULT_MIN_AGE, Store, type StoreOptions, StoreTags } from './store'
 export {
+  type AttachOptions,
   type CodeResult,
   type EditOutcome,
   type TerminalResult,

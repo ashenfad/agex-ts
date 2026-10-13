@@ -14,6 +14,7 @@
  * | `__conversation__/…` | the conversation (written by the turn) |
  * | `__compaction__/…` | compaction's record (written by the turn) |
  * | `__ws_git__` | the agent's git: its index, head, merge and tags |
+ * | `__ws_view__` | a narrowed fork's view: what it sees, and was given |
  *
  * A file's content and its metadata are separate keys, so content that
  * doesn't change (a rename, a touch) keeps its stored blob. A
@@ -31,6 +32,8 @@ export const CONVERSATION_PREFIX = '__conversation__/'
 export const COMPACTION_PREFIX = '__compaction__/'
 /** The agent's git (see `ws.index`). */
 export const GIT_KEY = '__ws_git__'
+/** A narrowed session's view (see `ViewFS`). */
+export const VIEW_KEY = '__ws_view__'
 
 /** The content key of the file at absolute path `abs`. */
 export const fileKey = (abs: string): string => `${FILE_PREFIX}${abs}`
@@ -86,6 +89,8 @@ export const WORLD_MERGE_FNS: ReadonlyMap<string, MergeRule<unknown>> = new Map<
   [CWD_KEY, keepOurCwd],
   // Two writers of one session's index: the committing one's stands.
   [GIT_KEY, MergeChoice.OURS],
+  // A view describes the session reading it.
+  [VIEW_KEY, MergeChoice.OURS],
 ])
 export const WORLD_MERGE_PREFIXES: ReadonlyMap<string, MergeRule<unknown>> = new Map([
   [META_PREFIX, mergeFileRecords],

@@ -40,6 +40,7 @@ import {
   FILE_PREFIX,
   type FileRecord,
   META_PREFIX,
+  VIEW_KEY,
   fileKey,
   isFileRecord,
 } from './layout'
@@ -107,6 +108,7 @@ function marked(base: unknown, ours: unknown, theirs: unknown): boolean {
 export async function threeWayRules(
   repo: Repo<unknown>,
   sides: { base: string | null; ours: string; theirs: string },
+  ignored: (path: string) => boolean = () => false,
 ): Promise<{
   mergeFns: Map<string, MergeRule<unknown>>
   mergePrefixes: Map<string, MergeRule<unknown>>
@@ -134,7 +136,18 @@ export async function threeWayRules(
   const mergeFns = new Map<string, MergeRule<unknown>>([
     [CWD_KEY, MergeChoice.OURS],
     [BLOB_KEY, MergeChoice.OURS],
+    [VIEW_KEY, MergeChoice.OURS],
   ])
+  // A path that is never work keeps this side's copy, whatever the
+  // other side did to it.
+  for (const key of new Set([...oursChanged, ...theirsChanged])) {
+    const path = key.startsWith(FILE_PREFIX)
+      ? key.slice(FILE_PREFIX.length)
+      : key.startsWith(META_PREFIX)
+        ? key.slice(META_PREFIX.length)
+        : null
+    if (path !== null && ignored(path)) mergeFns.set(key, MergeChoice.OURS)
+  }
   // A directory record the other side removed stays while ours has
   // files under it: they'd be left without one.
   const goneDirs = [...theirs.removed].filter((k) => k.startsWith(META_PREFIX))

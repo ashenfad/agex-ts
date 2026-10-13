@@ -16,6 +16,7 @@ export type FsErrorCode =
   | 'ENOTEMPTY'
   | 'EINVAL'
   | 'EROFS'
+  | 'EACCES'
 
 /** The standard text for each code, as `strerror` gives it. */
 export const FS_ERROR_TEXT: Readonly<Record<FsErrorCode, string>> = {
@@ -26,6 +27,7 @@ export const FS_ERROR_TEXT: Readonly<Record<FsErrorCode, string>> = {
   ENOTEMPTY: 'Directory not empty',
   EINVAL: 'Invalid argument',
   EROFS: 'Read-only file system',
+  EACCES: 'Permission denied',
 }
 
 export class FsError extends Error {

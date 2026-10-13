@@ -1,7 +1,6 @@
 /**
  * nontainer's harness corpus, run against the reference harness on the
- * world: every scenario its capabilities cover passes, delegation's
- * included. Compaction (tier 4) comes with its record.
+ * world: every scenario, tiers 0 to 5, passes.
  */
 
 import { describe, expect, it } from 'vitest'
@@ -9,38 +8,29 @@ import {
   type Clock,
   EXHAUSTED,
   type ModelStep,
+  type OpenOptions,
   SCENARIOS,
+  type Scenario,
   applies,
   check,
   runScenario,
 } from '../src/conformance/index'
-import { Inbox, type Workspace } from '../src/index'
-import { referenceHarness } from './reference-harness'
+import { Inbox, type TurnEvent, type Workspace, summaryMessage } from '../src/index'
+import { type Message, ReferenceSession, referenceHarness } from './reference-harness'
 
-const covered = SCENARIOS.filter(
-  (s) => applies(s, referenceHarness) && s.tiers.every((t) => t !== 4),
-)
+const covered = SCENARIOS.filter((s) => applies(s, referenceHarness))
+
+function byName(name: string): Scenario {
+  const scenario = SCENARIOS.find((s) => s.name === name)
+  if (scenario === undefined) throw new Error(`no scenario ${name}`)
+  return scenario
+}
 
 describe("nontainer's harness corpus on the world", () => {
-  it('holds the scenarios, tiers 0 to 5', () => {
+  it('holds the scenarios, tiers 0 to 5, and covers every one', () => {
     expect(SCENARIOS).toHaveLength(21)
-    expect(covered.map((s) => s.name)).toEqual([
-      'a-turn-that-writes-a-file',
-      'a-cancel-after-a-tool-keeps-the-run',
-      'a-failure-keeps-the-run-with-a-closing-note',
-      'a-provider-error-interrupts-and-resume-continues',
-      'a-reply-alone-completes',
-      'a-checkout-rewinds-the-conversation-with-the-files',
-      'a-fresh-fork-starts-without-the-conversation',
-      'a-full-fork-carries-the-conversation',
-      'a-cancel-settles-what-was-delivered',
-      'a-note-after-the-last-tool-waits-for-the-next-turn',
-      'a-note-rides-the-next-tool-result-once',
-      'a-delegate-hears-from-its-own-delegate-before-answering',
-      'a-delegate-out-of-wakes-names-who-it-did-not-hear-from',
-      'a-delegates-answer-is-delivered-once-on-the-next-tool-result',
-      'a-note-left-for-a-delegate-is-read-before-it-answers',
-    ])
+    expect(new Set(SCENARIOS.flatMap((s) => s.tiers))).toEqual(new Set([0, 1, 2, 3, 4, 5]))
+    expect(covered).toEqual(SCENARIOS)
   })
 
   for (const scenario of covered) {
@@ -117,5 +107,65 @@ describe('the checks', () => {
     if (scenario === undefined) throw new Error('missing scenario')
     const failures = check(scenario, await runScenario(scenario, hasty))
     expect([...failures.keys()]).toEqual(['turn1.script'])
+  })
+
+  it('catch a harness that stores a fold’s summary', async () => {
+    class Storing extends ReferenceSession {
+      protected override async request(current: Message[], events: TurnEvent[]) {
+        const request = await super.request(current, events)
+        current.push(...request.filter((m) => m.summary === true && !current.includes(m)))
+        return request
+      }
+    }
+    const storing = {
+      ...referenceHarness,
+      async open(ws: Workspace, clock: Clock, opts?: OpenOptions) {
+        return new Storing(ws, clock, opts)
+      },
+    }
+    const scenario = byName('a-request-over-budget-folds-the-earlier-turns')
+    expect(check(scenario, await runScenario(scenario, storing)).has('summary')).toBe(true)
+  })
+
+  it("can't check a fold when the harness passes nothing it sent", async () => {
+    const silent = {
+      ...referenceHarness,
+      open(ws: Workspace, clock: Clock, opts?: OpenOptions) {
+        const quiet = { next: () => clock.next() }
+        return referenceHarness.open(ws, quiet as Clock, opts)
+      },
+    }
+    const scenario = byName('a-request-over-budget-folds-the-earlier-turns')
+    const failures = check(scenario, await runScenario(scenario, silent))
+    expect([...failures.keys()].sort()).toEqual(['turn1.folded', 'turn2.folded'])
+    expect(failures.get('turn2.folded')).toMatch(/didn't pass/)
+  })
+
+  it('catch a harness that sends a stale summary', async () => {
+    class Stale extends ReferenceSession {
+      readonly #ws: Workspace
+      constructor(ws: Workspace, clock: Clock, opts?: OpenOptions) {
+        super(ws, clock, opts)
+        this.#ws = ws
+      }
+      protected override async spliced(earlier: Message[]) {
+        const recorded = await this.#ws.compaction.folds()
+        const first = recorded[0]
+        if (recorded.length < 2 || first === undefined) return super.spliced(earlier)
+        const end = earlier.findIndex((m) => m.id === first.through)
+        const stale: Message = { role: 'user', text: summaryMessage(first.summary), summary: true }
+        return [stale, ...earlier.slice(end + 1)]
+      }
+    }
+    const stale = {
+      ...referenceHarness,
+      async open(ws: Workspace, clock: Clock, opts?: OpenOptions) {
+        return new Stale(ws, clock, opts)
+      },
+    }
+    const scenario = byName('a-second-fold-takes-in-the-first')
+    const failures = check(scenario, await runScenario(scenario, stale))
+    expect([...failures.keys()]).toEqual(['turn3.folded'])
+    expect(failures.get('turn3.folded')).toMatch(/fold in force/)
   })
 })

@@ -196,3 +196,21 @@ export {
   sessionsTool,
   untilSettled,
 } from './sessions'
+export {
+  ACK,
+  FOLD_PREFIX,
+  type Fold,
+  type FoldInput,
+  type Item,
+  MARK as COMPACTION_MARK,
+  Policy,
+  WorkspaceCompaction,
+  chunks,
+  estimateTokens,
+  inForce,
+  isOurs,
+  reduce,
+  summaryMessage,
+  summaryRequest,
+  transcript,
+} from './compaction'

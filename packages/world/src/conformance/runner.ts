@@ -11,12 +11,13 @@
 
 import type { CommitInfo } from '@agex-ts/kvgit'
 import { Memory } from '@agex-ts/kvgit/backends/memory'
+import type { Fold } from '../compaction'
 import type { Inbox } from '../inbox'
 import type { Sessions } from '../sessions'
 import { Store } from '../store'
 import type { TurnEvent } from '../turns'
 import type { Workspace } from '../workspace'
-import type { EventStep, ModelStep, Scenario, Step } from './scenario'
+import type { EventStep, ModelStep, Scenario, Step, TurnAct } from './scenario'
 
 /** A stored run as the corpus checks it, in the harness's judgment. */
 export interface RunView {
@@ -51,6 +52,9 @@ export interface HarnessSession {
 
 /** What a session is opened with beside its workspace and clock. */
 export interface OpenOptions {
+  /** With `compaction`, for a scenario that sets one: the token budget
+   *  past which the session folds earlier turns. */
+  readonly budget?: number
   /** With `delegation`, for a scenario with delegates: the helper the
    *  session's `sessions` tool asks through, and whose answers its
    *  turns deliver. */
@@ -166,6 +170,19 @@ export interface Observation {
   /** Every delegate asked, at any depth, by the name it was asked
    *  under. */
   readonly delegates: Readonly<Record<string, DelegateView>>
+  /** Per turn, what its last model request carried, as the harness
+   *  passed it to the clock (null: it passed nothing). */
+  readonly sent: readonly (readonly string[] | null)[]
+  /** The folds the final workspace records, oldest first. */
+  readonly folds: readonly Fold[]
+  /** A fold's summary found in the stored conversation, which must
+   *  never hold one; null when none was. */
+  readonly storedSummary: string | null
+  /** Every fold summary recorded along the way, a rewind's included. */
+  readonly summaries: readonly string[]
+  /** Per turn, the summary of the fold in force as it ended (the
+   *  latest recorded then), or null. */
+  readonly inForce: readonly (string | null)[]
 }
 
 /** Whether a scenario applies to a harness: it needs nothing more than
@@ -198,7 +215,10 @@ export async function runScenario(
   let helper: Sessions | null = null
   const openSession = (on: Workspace) => {
     helper = delegates?.helper(on) ?? null
-    return harness.open(on, clock, helper === null ? {} : { sessions: helper })
+    return harness.open(on, clock, {
+      ...(helper !== null && { sessions: helper }),
+      ...(scenario.budget !== null && { budget: scenario.budget }),
+    })
   }
   let session = await openSession(ws)
   clock.onEvent((event) => {
@@ -212,6 +232,10 @@ export async function runScenario(
   const turns: TurnEvent[][] = []
   const unused: number[] = []
   const endedAt: string[] = []
+  const sent: (readonly string[] | null)[] = []
+  const summaries: string[] = []
+  const inForce: (string | null)[] = []
+  let storedSummary: string | null = null
   try {
     for (const act of scenario.acts) {
       if (act.kind === 'turn') {
@@ -219,6 +243,12 @@ export async function runScenario(
         turns.push(act.resume ? await session.resume() : await session.turn(act.prompt))
         unused.push(clock.left)
         endedAt.push(ws.head)
+        sent.push(clock.sent)
+        storedSummary ??= await summaryStored(ws)
+        const recorded = await ws.compaction.folds()
+        for (const fold of recorded)
+          if (!summaries.includes(fold.summary)) summaries.push(fold.summary)
+        inForce.push(recorded.at(-1)?.summary ?? null)
       } else if (act.kind === 'checkout') {
         await ws.checkout(endedAt[act.after_turn - 1] as string)
       } else {
@@ -257,6 +287,11 @@ export async function runScenario(
         delivered: session.inbox.delivered().length,
       },
       exhausted: clock.exhausted || delegatesRanOut,
+      sent,
+      folds: await ws.compaction.folds(),
+      storedSummary,
+      summaries,
+      inForce,
       delegates: delegated,
     }
   } finally {
@@ -268,6 +303,49 @@ export async function runScenario(
       await ws.close()
     }
   }
+}
+
+/** A summary of one of `ws`'s folds that its stored conversation holds,
+ *  whatever format the harness stores runs in; null when it holds none,
+ *  as it never should. */
+async function summaryStored(ws: Workspace): Promise<string | null> {
+  const summaries = (await ws.compaction.folds()).map((f) => f.summary).filter((s) => s !== '')
+  if (summaries.length === 0) return null
+  const stored = [
+    await ws.conversation.index(),
+    await ws.conversation.record(),
+    ...(await ws.conversation.runs()).values(),
+  ].map((v) => JSON.stringify(v ?? null))
+  for (const summary of summaries) {
+    const quoted = JSON.stringify(summary).slice(1, -1)
+    if (stored.some((text) => text.includes(quoted))) return summary
+  }
+  return null
+}
+
+/** What's wrong with whether a turn's last request was folded: a folded
+ *  one carries the summary of the fold in force and no other, in place
+ *  of the first turn; one that isn't carries no summary. */
+function foldProblem(
+  want: boolean,
+  sent: readonly string[] | null,
+  summaries: readonly string[],
+  current: string | null,
+  first: string,
+): string | null {
+  if (sent === null) return "the harness didn't pass the clock what it sent"
+  const text = sent.join('\n')
+  const carried = summaries.filter((s) => s !== '' && text.includes(s))
+  if (!want) return carried.length > 0 ? "its last request carried a fold's summary" : null
+  if (current === null) return 'no fold is recorded to be in force'
+  if (!carried.includes(current)) {
+    return "its last request didn't carry the summary of the fold in force"
+  }
+  if (carried.length > 1) return "its last request carried another fold's summary too"
+  if (first !== '' && text.includes(first)) {
+    return `its last request still carried the first turn (${JSON.stringify(first)})`
+  }
+  return null
 }
 
 /** A run's events as the corpus names them: `Usage` dropped, runs of
@@ -296,10 +374,21 @@ export function check(scenario: Scenario, seen: Observation): Map<string, string
   const want = scenario.expect
   const show = (v: unknown) => JSON.stringify(v)
 
+  const firstPrompt = scenario.acts.find((a): a is TurnAct => a.kind === 'turn')?.prompt ?? ''
   want.turns.forEach((turn, i) => {
     const events = seen.turns[i]
     const n = i + 1
     if (events === undefined) return
+    if (turn.folded !== null) {
+      const problem = foldProblem(
+        turn.folded,
+        seen.sent[i] ?? null,
+        seen.summaries,
+        seen.inForce[i] ?? null,
+        firstPrompt,
+      )
+      if (problem !== null) failures.set(`turn${n}.folded`, problem)
+    }
     const starts = events.filter((e) => e.kind === 'RunStarted').length
     const ends = events.filter((e) => e.kind === 'RunEnded').length
     if (
@@ -402,6 +491,19 @@ export function check(scenario: Scenario, seen: Observation): Map<string, string
         `it answered with ${got.unused} step(s) of its script unused`,
       )
     }
+  }
+  if (want.folds !== null) {
+    const got = seen.folds.map((f) => [f.runs, f.first !== null])
+    const expected = want.folds.map((f) => [f.runs, f.ranged])
+    if (show(got) !== show(expected)) {
+      failures.set('folds', `(runs, ranged) ${show(got)} != ${show(expected)}`)
+    }
+  }
+  if (seen.storedSummary !== null) {
+    failures.set(
+      'summary',
+      `the stored conversation holds a fold's summary: ${show(seen.storedSummary.slice(0, 80))}`,
+    )
   }
   if (seen.exhausted)
     failures.set('script', 'the harness asked the model more than the script holds')

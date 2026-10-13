@@ -16,10 +16,12 @@ import {
   CorpusDelegates,
   type Harness,
   type HarnessSession,
+  type OpenOptions,
   type RunView,
 } from '../src/conformance/index'
 import {
   Inbox,
+  Policy,
   type RunStatus,
   type Sessions,
   type Tool,
@@ -28,29 +30,41 @@ import {
   type Workspace,
   answerNotes,
   deliveredNote,
+  summaryMessage,
+  summaryRequest,
   worldTools,
 } from '../src/index'
 
-interface Message {
+export interface Message {
   readonly role: 'user' | 'assistant' | 'tool' | 'note'
   readonly text: string
+  /** The request size the provider reported for an assistant reply. */
+  readonly tokens?: number
+  /** An earlier run's message: its id, to anchor a fold. */
+  readonly id?: string
+  /** The summary a fold put in place of the turns it covers. */
+  readonly summary?: boolean
 }
 
 const HARNESS = 'reference'
 
-class ReferenceSession implements HarnessSession {
+export class ReferenceSession implements HarnessSession {
   readonly inbox = new Inbox()
   readonly #ws: Workspace
   readonly #clock: Clock
   readonly #tools: Map<string, Tool>
   readonly #sessions: Sessions | undefined
+  readonly #budget: number | undefined
   #cancelled = false
   #interrupted: string | null = null
+  #runId: string | null = null
 
-  constructor(ws: Workspace, clock: Clock, sessions?: Sessions) {
+  constructor(ws: Workspace, clock: Clock, opts: OpenOptions = {}) {
+    const { sessions, budget } = opts
     this.#ws = ws
     this.#clock = clock
     this.#sessions = sessions
+    this.#budget = budget
     this.#tools = new Map(
       worldTools(ws, sessions === undefined ? {} : { sessions }).map((t) => [t.name, t]),
     )
@@ -117,13 +131,15 @@ class ReferenceSession implements HarnessSession {
 
   async #run(turn: Turn, messages: Message[]): Promise<TurnEvent[]> {
     const runId = turn.runId as string
+    this.#runId = runId
     const events: TurnEvent[] = [{ kind: 'RunStarted', runId }]
     this.#cancelled = false
     let status: RunStatus = 'completed'
     let message: string | null = null
     let calls = 0
     for (;;) {
-      const step = await this.#clock.next(messages.map((m) => m.text))
+      const request = await this.request(messages, events)
+      const step = await this.#clock.next(request.map((m) => m.text))
       if (this.#cancelled) {
         status = 'cancelled'
         message = 'stopped'
@@ -137,7 +153,7 @@ class ReferenceSession implements HarnessSession {
       if (step.thinking !== '') events.push({ kind: 'ThinkingDelta', text: step.thinking })
       if (step.text !== '') {
         events.push({ kind: 'TextDelta', text: step.text })
-        messages.push({ role: 'assistant', text: step.text })
+        messages.push({ role: 'assistant', text: step.text, tokens: step.input_tokens })
       }
       if (step.tool_calls.length === 0) break
       for (const call of step.tool_calls) {
@@ -168,13 +184,62 @@ class ReferenceSession implements HarnessSession {
     events.push({ kind: 'RunEnded', status, message })
     return events
   }
+
+  // -- compaction: the reference's own folding, on the world's record --
+
+  /** The earlier runs' messages, each with an id to anchor a fold. */
+  protected async earlier(): Promise<Message[]> {
+    const index = await this.#ws.conversation.index()
+    if (index === null) return []
+    const bodies = await this.#ws.conversation.runs()
+    return index.runs
+      .filter((id) => id !== this.#runId)
+      .flatMap((id) =>
+        ((bodies.get(id) as { messages: Message[] } | undefined)?.messages ?? []).map((m, i) => ({
+          ...m,
+          id: `${id}:${i}`,
+        })),
+      )
+  }
+
+  protected async spliced(earlier: Message[]): Promise<Message[]> {
+    const fold = await this.#ws.compaction.inForce(earlier.map((m) => m.id as string))
+    if (fold === null) return earlier
+    const end = earlier.findIndex((m) => m.id === fold.through)
+    return [
+      { role: 'user', text: summaryMessage(fold.summary), summary: true },
+      ...earlier.slice(end + 1),
+    ]
+  }
+
+  /** What the model is sent: the earlier turns with the fold in force
+   *  spliced in, then the run in progress. Over budget, every earlier
+   *  turn is folded first, the model writing the summary. */
+  protected async request(current: Message[], events: TurnEvent[]): Promise<Message[]> {
+    const earlier = await this.earlier()
+    if (this.#budget === undefined) return [...earlier, ...current]
+    let view = await this.spliced(earlier)
+    const reported = [...view, ...current].filter((m) => (m.tokens ?? 0) > 0)
+    const size = reported.at(-1)?.tokens ?? 0
+    const unfolded = view.filter((m) => m.summary !== true)
+    if (new Policy(this.#budget).due(size) && unfolded.length > 0) {
+      const texts = [...view, ...current].map((m) => m.text)
+      const step = await this.#clock.next([...texts, summaryRequest()])
+      const through = earlier.at(-1)?.id as string
+      const runs = earlier.filter((m) => m.role === 'user').length
+      await this.#ws.compaction.record({ through, summary: step.text, runs, tokensBefore: size })
+      events.push({ kind: 'Compacted', through, runs })
+      view = await this.spliced(earlier)
+    }
+    return [...view, ...current]
+  }
 }
 
 export const referenceHarness: Harness = {
   name: HARNESS,
-  capabilities: new Set(['resume', 'keeps-aborted-runs', 'delegation']),
+  capabilities: new Set(['resume', 'keeps-aborted-runs', 'compaction', 'delegation']),
   async open(ws, clock, opts = {}) {
-    return new ReferenceSession(ws, clock, opts.sessions)
+    return new ReferenceSession(ws, clock, opts)
   },
   delegation(store, scenario) {
     return new CorpusDelegates(this, store, scenario)

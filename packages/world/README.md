@@ -7,8 +7,8 @@ counterpart of [nontainer](https://github.com/ashenfad/nontainer)'s
 store and workspace, with the same semantics and its own storage
 layout.
 
-> **Status:** Pre-alpha, on the agex-ts `rebuild` branch. Compaction's
-> record comes next.
+> **Status:** Pre-alpha, on the agex-ts `rebuild` branch, and complete
+> as a world: the agex-ts loop is rebuilt on it next.
 
 ## Use
 
@@ -288,6 +288,33 @@ from), the harness's record, and a body per run, read back with
 `ws.conversation`. So a checkout rewinds it with the files, a full fork
 carries it (as the child's), and a fresh fork starts without it.
 
+## Compaction's record
+
+Past a token budget, a loop replaces the earlier turns, in what the
+model is sent, by one summary. The stored conversation is never
+rewritten. The world keeps the record of each fold, under
+`__compaction__/`, so it goes where the conversation goes: a rewind
+takes back the folds made after it, a full fork carries them, a fresh
+fork starts without them, and a merge never brings another session's.
+
+```ts
+const folds = await ws.compaction.folds() // oldest first
+const fold = await ws.compaction.inForce(messageIds) // null: send everything
+await ws.compaction.record({ through: lastFoldedId, summary, runs: 4 }) // lands with the turn
+```
+
+- **The anchor:** a fold names the last message it covers by its id in
+  the loop's history. It's in force only while that message is in the
+  history; otherwise an earlier fold whose anchor is, or none.
+- **The loop's choices:** when to fold, what a fold covers, what it
+  splices into a request and how the summary is written. The helpers
+  are there to use or not: `Policy(budget, window)`, `summaryRequest()`,
+  `summaryMessage(summary)` and `ACK` for the pair spliced in its place,
+  `reduce`, `transcript` and `chunks` for a history too large to
+  summarise in one request, `estimateTokens`, and `COMPACTION_MARK` /
+  `isOurs` for the ids of inserted messages.
+- **The event:** a new fold is streamed as `Compacted`.
+
 ## The agent's git
 
 `ws.index` is the agent's own git over the session: an index it fills
@@ -434,7 +461,7 @@ through a scripted model, and `check` says how it differs from what the
 scenario expects (including a turn that leaves script steps unused:
 a harness that stops early). A harness declares its capabilities, and the
 scenarios it covers apply. The package's own reference harness passes
-every scenario of tiers 0 to 3 and 5; with `delegation`, a harness hands
+every scenario, tiers 0 to 5; with `delegation`, a harness hands
 the runner a `CorpusDelegates`, which runs each delegate as a session of
 that harness through `untilSettled`.
 

@@ -375,6 +375,33 @@ describe('Tags', () => {
     expect((await repo.tags.info('v1')).info).toEqual({ note: 'replacement' })
   })
 
+  it('a stale delete does not take a tag made again at the same commit', async () => {
+    const store = new DeleteRaceMemory()
+    const { repo, tick } = await jsonRepo(store)
+    const wt = await repo.worktree('main', { create: true })
+    wt.set('k', 1)
+    const commit = (await wt.commit()).commit as string
+    await repo.tags.create('v1', commit, { info: { note: 'first' } })
+
+    store.beforeRemoving(BRANCH_HEAD('refs/tags/v1'), async () => {
+      await repo.tags.delete('v1')
+      tick() // the new record carries the time it landed
+      await repo.tags.create('v1', commit, { info: { note: 'second' } })
+    })
+    await expect(repo.tags.delete('v1')).rejects.toThrow(ConcurrencyError)
+    expect(await repo.tags.get('v1')).toBe(commit)
+    expect((await repo.tags.info('v1')).info).toEqual({ note: 'second' })
+  })
+
+  it('still deletes a tag whose record is missing', async () => {
+    const { repo, store } = await jsonRepo()
+    await repo.branches.create('main') // mints the root commit
+    await repo.tags.create('v1', ROOT_COMMIT)
+    await store.remove('__tag_info__v1')
+    await repo.tags.delete('v1')
+    expect(await repo.tags.has('v1')).toBe(false)
+  })
+
   it('keeps a tagged commit alive through gc after its branch is gone', async () => {
     const { repo, tick } = await jsonRepo()
     await repo.branches.create('dev')

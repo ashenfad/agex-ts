@@ -375,7 +375,10 @@ export async function createBranchHead(
  * The removal is conditional on the head it read. If the branch moved
  * or was made again in between, nothing is removed: a delete decided
  * on one head must not take a newer one with it. Read it again and
- * retry if the newer head should go too.
+ * retry if the newer head should go too. A branch deleted and made
+ * again at the *same* commit is indistinguishable, so the stale delete
+ * removes it, as git's `update-ref -d <ref> <old-oid>` would; the state
+ * it names is the one the delete saw.
  *
  * @throws UnknownBranchError if there is no such branch.
  * @throws ConcurrencyError if the branch changed while being deleted.

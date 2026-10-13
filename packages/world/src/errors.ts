@@ -32,8 +32,10 @@ export class UnknownRefError extends WorldError {
   constructor(
     readonly ref: string,
     reason = 'names no commit of this session',
+    /** The whole message, where `reason` doesn't say it. */
+    message?: string,
   ) {
-    super(`'${ref}' ${reason}`)
+    super(message ?? `'${ref}' ${reason}`)
   }
 }
 

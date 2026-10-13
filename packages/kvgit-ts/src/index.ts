@@ -34,6 +34,7 @@ export {
   type TextBytesMergeFn,
   type TextMergeOptions,
 } from './merges'
+export { type Opcode, type OpcodeTag, SequenceMatcher } from './sequenceMatcher'
 export { walkDelta, type WalkDeltaOptions } from './sync/walk'
 export {
   applyWire,

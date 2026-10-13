@@ -2,7 +2,8 @@
 /**
  * Copy nontainer's harness corpus (its exported JSON, and the schemas)
  * into src/conformance/, from a nontainer checkout's origin/main, and
- * regenerate the corpus index.
+ * regenerate the corpus index. Its ws-git script corpus goes to
+ * tests/wsgit-corpus/, for the ws-git port's own test.
  *
  * Usage: node scripts/sync-corpus.mjs PATH/TO/nontainer [ref]
  */
@@ -62,3 +63,18 @@ writeFileSync(
   ].join('\n'),
 )
 console.log(`synced ${files.length} scenarios from nontainer ${commit}`)
+
+// The ws-git scripts, recorded by nontainer: what the TS port must print.
+const scripts = join(here, '..', '..', 'tests', 'wsgit-corpus')
+rmSync(scripts, { recursive: true, force: true })
+mkdirSync(scripts)
+for (const path of git('ls-tree', '--name-only', `${ref}:nontainer/conformance/wsgit/json/`).split(
+  '\n',
+)) {
+  if (path.endsWith('.json')) {
+    writeFileSync(
+      join(scripts, path),
+      git('show', `${ref}:nontainer/conformance/wsgit/json/${path}`),
+    )
+  }
+}

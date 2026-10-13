@@ -26,6 +26,7 @@ import {
   PICK_TOOL,
   REVERT_TOOL,
   WorkspaceIndex,
+  changeBase,
   forkBlob,
   isAgentCommit,
   isBookkeepingCommit,
@@ -76,6 +77,7 @@ import {
   shellEnv,
 } from './profile'
 import { Queue } from './queue'
+import { repr } from './repr'
 import { Secrets } from './secrets'
 import type { Store } from './store'
 import { Turn, TurnInProgressError, type TurnOptions, statusOf } from './turns'
@@ -795,7 +797,8 @@ export class Workspace {
       if (!(e instanceof UnknownRefError)) throw e
     }
     if (!ref.startsWith('@') && (await repo.tags.has(`@store/${ref}`))) {
-      return { commit: await repo.tags.get(`@store/${ref}`), label: ref }
+      const commit = await repo.tags.get(`@store/${ref}`)
+      return { commit, label: `@store/tag/${ref}@${commit}` }
     }
     if (ref !== this.session && (await this.store.exists(ref))) {
       const head = await repo.branches.get(ref)
@@ -870,7 +873,8 @@ export class Workspace {
       if (await this.store.exists(name)) throw new SessionExistsError(name)
       let at: string
       if (opts.at !== undefined) {
-        at = await this.#expand(opts.at)
+        // The agent's own bookmarks name its commits too.
+        at = (await this.index.tags.get(opts.at)) ?? (await this.#expand(opts.at))
       } else if (paths !== null && paths.length === 0) {
         // An empty view needs none of what's pending here.
         at = wt.head
@@ -1038,12 +1042,8 @@ export class Workspace {
   /** The commit one commit's change is measured from: its parent in
    *  the agent's graph for an agent commit (or where its session was
    *  forked, for its first; or nothing), else its first parent. */
-  async #changeBase(entry: Commit): Promise<string | null> {
-    if (!isAgentCommit(entry.info)) return entry.parents[0] ?? null
-    const parent = virtualParents(entry.info)[0]
-    if (parent !== undefined) return parent
-    const snapshot = await this.store.repo.snapshot({ commit: entry.hash })
-    return parseBlob(await snapshot.get(BLOB_KEY)).base
+  #changeBase(entry: Commit): Promise<string | null> {
+    return changeBase(this.store, entry)
   }
 
   /** A commit `session`'s history holds, by id or a prefix of one. */
@@ -1182,11 +1182,18 @@ export class Workspace {
       })
     const files = wrap(this.files)
     const tags = wrap(this.tags)
+    const indexTags = wrap(this.index.tags)
+    const index = new Proxy(wrap(this.index), {
+      get(t, prop) {
+        return prop === 'tags' ? indexTags : Reflect.get(t, prop)
+      },
+    })
     const ws = this
     return new Proxy(this, {
       get(t, prop) {
         if (prop === 'files') return files
         if (prop === 'tags') return tags
+        if (prop === 'index') return index
         const value = Reflect.get(t, prop, t)
         if (typeof value !== 'function') return value
         return (...args: unknown[]) => within(() => value.apply(ws, args))
@@ -1319,7 +1326,11 @@ export class Workspace {
       const under = (p: string) => within(p, path) && p !== path
       const inside = [...theirs].filter(under)
       if (inside.length === 0 && !isFileRecord(await snapshot.get(metaKey(path)))) {
-        throw new UnknownRefError(from.label, `holds nothing at '${path}'`)
+        throw new UnknownRefError(
+          from.label,
+          '',
+          `nothing at ${repr(path)} in ${from.label} — a take makes a path match the ref, and that ref holds no such file or directory.`,
+        )
       }
       for (const p of inside) if (work(p)) take.add(p)
       for (const p of ours) if (under(p) && !theirs.has(p) && work(p)) drop.add(p)

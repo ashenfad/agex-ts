@@ -80,7 +80,7 @@ export function normalizeView(paths: readonly string[] | string, root: string): 
     const abs = normalize(resolve(entry.trim(), root))
     if (abs === '/') {
       throw new InvalidNameError(
-        `'${entry}' names the whole filesystem, which is not a view: leave paths out for the whole tree, or name the workspace root ('${root}') to see all of it as a seed`,
+        `'${entry}' names the whole filesystem, which is not a view — leave paths out for the whole tree, or name the workspace root ('${root}') to see all of it as a seed`,
       )
     }
     out.add(abs)

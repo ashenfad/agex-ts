@@ -219,7 +219,6 @@ export {
   type SkillFiles,
   type SkillSource,
   frontmatter,
-  installSkill,
   skillCatalog,
   skillName,
   skillsRoot,

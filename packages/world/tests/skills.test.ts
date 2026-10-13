@@ -1,6 +1,6 @@
 /**
- * Skills, after nontainer's: installed ones are workspace files, the
- * profile's are mounted read-only beside them, and the catalog lists
+ * Skills, after nontainer's: the profile's are mounted read-only, an
+ * agent's own are files it writes beside them, and the catalog lists
  * both for the tool text.
  */
 
@@ -10,7 +10,6 @@ import {
   Store,
   type Workspace,
   frontmatter,
-  installSkill,
   skillCatalog,
   skillName,
   toolInstructions,
@@ -61,27 +60,12 @@ describe('frontmatter', () => {
   })
 })
 
-describe('installed skills', () => {
-  it('are workspace files, committed as the framework writing', async () => {
-    const ws = await open()
-    expect(await installSkill(ws, NUMBERS)).toBe('numbers')
-    expect(await installSkill(ws, MEDIA)).toBe('media')
-    expect(await ws.files.readText('/workspace/skills/numbers/SKILL.md')).toBe(NUMBERS)
-    expect(await ws.files.readText('/workspace/skills/media/helpers/make.ts')).toMatch(/make/)
-    expect((await ws.log())[0]?.info).toMatchObject({ tool: 'skill', skill: 'media' })
-    expect(ws.uncommitted).toBe(false)
-    // installing again overwrites
-    await installSkill(ws, NUMBERS.replace('twice', 'three times'))
-    expect(await ws.files.readText('/workspace/skills/numbers/SKILL.md')).toMatch(/three times/)
-    await ws.close()
-  })
-})
-
 describe('mounted skills', () => {
-  it("are read-only, beside installed ones, and no commit's", async () => {
+  it("are read-only, beside the agent's own, and no commit's", async () => {
     const ws = await open({ skills: [NUMBERS, MEDIA] })
     expect(ws.mountedSkills).toEqual(['media', 'numbers'])
-    await installSkill(ws, { name: 'mine', files: { 'SKILL.md': '# mine\n' } })
+    // the agent writes a skill of its own: ordinary files
+    await ws.terminal('mkdir -p skills/mine && echo "# mine" > skills/mine/SKILL.md')
     const head = ws.head
     expect((await ws.terminal('cat /workspace/skills/numbers/SKILL.md')).stdout).toBe(NUMBERS)
     expect((await ws.terminal('ls /workspace/skills')).stdout).toBe('media\nmine\nnumbers\n')
@@ -91,7 +75,7 @@ describe('mounted skills', () => {
     const write = await ws.terminal('echo no > /workspace/skills/numbers/SKILL.md')
     expect(write.exitCode).not.toBe(0)
     expect(write.stderr).toMatch(/read-only/)
-    await expect(installSkill(ws, NUMBERS)).rejects.toThrow(/mounted read-only/)
+    expect((await ws.terminal('rm -r /workspace/skills/numbers')).exitCode).not.toBe(0)
     // not the session's files: no commit holds them, and ws-git sees none
     const changed = await ws.diff(head)
     expect([...changed.added, ...changed.modified].filter((p) => p.includes('/skills/'))).toEqual(
@@ -101,13 +85,12 @@ describe('mounted skills', () => {
     expect(await snapshot.get(`${FILE_PREFIX}/workspace/skills/numbers/SKILL.md`)).toBeUndefined()
     expect(await snapshot.get(`${FILE_PREFIX}/workspace/skills/mine/SKILL.md`)).toBeDefined()
     expect(ws.uncommitted).toBe(false)
-    // ws-git sees the installed skill (the framework's commit, not the
-    // agent's), and never a mounted one
+    // ws-git sees the agent's own skill as its work, and never a mounted one
     expect((await ws.index.status()).unstaged).toEqual(['/workspace/skills/mine/SKILL.md'])
     await ws.close()
   })
 
-  it('stand alone, before any skill is installed', async () => {
+  it('stand alone, before the agent writes one of its own', async () => {
     const ws = await open({ skills: [NUMBERS] })
     expect(await ws.files.fs.isDir('/workspace/skills')).toBe(true)
     expect((await ws.files.fs.stat('/workspace/skills')).isDir).toBe(true)
@@ -144,12 +127,12 @@ describe('mounted skills', () => {
 })
 
 describe('the catalog', () => {
-  it('lists every skill, installed or mounted, for the tool text', async () => {
+  it("lists every skill, mounted or the agent's own, for the tool text", async () => {
     const ws = await open({ skills: [MEDIA] })
     expect(await skillCatalog(ws)).toMatch(
       /^\n\nSkills — packaged guidance under \/workspace\/skills/,
     )
-    await installSkill(ws, NUMBERS)
+    await ws.files.write('skills/numbers/SKILL.md', NUMBERS)
     const catalog = await skillCatalog(ws)
     expect(catalog).toContain(
       '- media: Making images and sound\n- numbers: Doing arithmetic with care\n',

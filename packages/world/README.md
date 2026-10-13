@@ -408,24 +408,25 @@ Packaged instructions, as Claude Code lays them out:
 `description`), and any files beside it.
 
 ```ts
-await installSkill(ws, skillMarkdown) // or {name, files: {'SKILL.md': …, 'helpers/x.ts': …}}
-const ws = await store.open('alice', { profile: { skills: [starter] } }) // mounted read-only
+const skills = [starterMarkdown, { name: 'media', files: { 'SKILL.md': md, 'helpers/make.ts': ts } }]
+const ws = await store.open('alice', { profile: { skills } }) // mounted read-only
 await toolInstructions(ws) // the pacing notes, then one line per skill
 ```
 
-- **Installed** skills are ordinary workspace files, committed as
-  `{tool: 'skill', skill}`: they version, fork and rewind with the rest,
-  and an agent may improve them.
-- **Mounted** skills (the profile's `skills`) are the embedder's: each
-  is mounted read-only at `<root>/skills/<name>` on every open, forks
-  included. Not being the session's files, ws-git never sees them and no
-  commit carries them; an install of one's name is refused.
+- **The embedder's skills are mounted** (the profile's `skills`): each
+  read-only at `<root>/skills/<name>` on every open, forks included. Not
+  being the session's files, ws-git never sees them and no commit
+  carries them.
+- **An agent's own skills are files it writes** there, beside the
+  mounted ones, and they're its work like any other files. There's no
+  installing a skill as session files: a copy the framework committed
+  would read in ws-git as work the agent never did.
 - **Discovery** is the tool text's: `skillCatalog(ws)` lists every
   skill's name and description, and `toolInstructions` carries it. The
   shell and code read the rest as files.
 
-A directory that holds only mount points (`<root>/skills` before any
-skill is installed, or `/reviews` under an attachment at
+A directory that holds only mount points (`<root>/skills` before the
+agent writes one of its own, or `/reviews` under an attachment at
 `/reviews/alice`) reads as a directory: it lists, and the shell can
 enter it.
 

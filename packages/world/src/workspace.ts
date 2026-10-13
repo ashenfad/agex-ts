@@ -18,6 +18,19 @@ import {
   describeFsError,
   execute,
 } from '@agex-ts/termish'
+import {
+  BLOB_KEY,
+  MERGE_TOOL,
+  type MergeOutcome,
+  PICK_TOOL,
+  REVERT_TOOL,
+  WorkspaceIndex,
+  forkBlob,
+  isAgentCommit,
+  isBookkeepingCommit,
+  parseBlob,
+  virtualParents,
+} from './agentgit'
 import { WorkspaceCache } from './cache'
 import {
   WorkspaceConversation,
@@ -32,6 +45,7 @@ import {
   ReadOnlyError,
   SessionExistsError,
   UnknownRefError,
+  UnknownSessionError,
   WorldError,
 } from './errors'
 import { type KeyReader, WorldFS } from './fs'
@@ -46,6 +60,7 @@ import {
   fileKey,
   metaKey,
 } from './layout'
+import { staleRecords, threeWay, threeWayRules } from './merging'
 import { checkSessionName, checkTagName } from './names'
 import { dirname, resolve, within } from './path'
 import {
@@ -221,6 +236,8 @@ export class Workspace {
   readonly tags: WorkspaceTags
   /** The conversation stored in the session (see `Turn`). */
   readonly conversation: WorkspaceConversation
+  /** The agent's own git over the session (see `WorkspaceIndex`). */
+  readonly index: WorkspaceIndex
 
   readonly #settings: WorkspaceSettings
   readonly #wt: Worktree<unknown> | null
@@ -273,6 +290,24 @@ export class Workspace {
     this.files = new WorkspaceFiles(inner, this.#fs, (info) => this.autoCommit(info))
     this.tags = new WorkspaceTags(inner)
     this.conversation = new WorkspaceConversation(reader)
+    this.index = new WorkspaceIndex({
+      session,
+      store,
+      root: settings.root,
+      fs: this.#fs,
+      view: () => {
+        const status = this.#wt?.status()
+        return {
+          reader,
+          head: this.head,
+          pending: new Set(status === undefined ? [] : [...status.updated, ...status.removed]),
+        }
+      },
+      run: (op, fn) => this.#run(op, fn),
+      moved: async () => {
+        await this.#loadCwd()
+      },
+    })
     this.#secrets = new Secrets(settings.profile.secrets)
     this.#hostObjects = makeHostObjects(settings.profile, this, { secrets: this.#secrets })
     this.#commands = makeCommands(settings.profile, {
@@ -573,9 +608,18 @@ export class Workspace {
    * Returns the new commit, or the current one when nothing was
    * pending.
    *
+   * The `tool` names `ws-git` and `ws-git.*` are reserved: they're what
+   * marks the agent's own commits and its git's bookkeeping.
+   *
    * @throws CommitConflictError if a concurrent commit conflicts.
    */
   async commit(info: CommitInfo = { tool: 'commit' }): Promise<string> {
+    const tool = info.tool
+    if (typeof tool === 'string' && (tool === 'ws-git' || tool.startsWith('ws-git.'))) {
+      throw new WorldError(
+        `the tool '${tool}' is reserved: ws-git's commits are made by ws.index (and ws.merge, ws.revert, ws.cherryPick)`,
+      )
+    }
     return this.#run('commit', async (wt) => (await this.#commitPending(info)) ?? wt.head)
   }
 
@@ -596,14 +640,30 @@ export class Workspace {
     })
   }
 
-  /** The session's commits, newest first, along the line made on the
-   *  session itself (first parents), back to its first. */
-  async log(opts: { limit?: number } = {}): Promise<Commit[]> {
+  /**
+   * The session's commits, newest first, along the line made on the
+   * session itself (first parents), back to its first. `kind` says
+   * whose: `'work'` (the default) is everything but the agent's git's
+   * own bookkeeping, which nobody performed; `'agent'` the agent's own
+   * commits; `'all'` the history as kept. `limit` counts what comes
+   * back.
+   */
+  async log(opts: { limit?: number; kind?: 'work' | 'agent' | 'all' } = {}): Promise<Commit[]> {
+    const kind = opts.kind ?? 'work'
+    if (!['work', 'agent', 'all'].includes(kind)) {
+      throw new TypeError(
+        `unknown log kind '${String(kind)}': 'work' (the default: everything but ws-git bookkeeping), 'agent' (the agent's own commits) or 'all' (the history as kept)`,
+      )
+    }
     const out: Commit[] = []
+    if (opts.limit !== undefined && opts.limit <= 0) return out
     const start = this.#wt === null ? { commit: this.head } : { branch: this.session }
     for await (const c of this.store.repo.log(start, { firstParent: true })) {
-      if (c.hash === ROOT_COMMIT || out.length === opts.limit) break
+      if (c.hash === ROOT_COMMIT) break
+      if (kind === 'work' && isBookkeepingCommit(c.info)) continue
+      if (kind === 'agent' && !isAgentCommit(c.info)) continue
       out.push(c)
+      if (out.length === opts.limit) break
     }
     return out
   }
@@ -689,6 +749,226 @@ export class Workspace {
       await child.#seedFork(this.session, inherit)
       return child
     })
+  }
+
+  // ---------- bringing work across ----------
+
+  /**
+   * Merge another session's committed work into this one; returns what
+   * came of it.
+   *
+   * A merge takes only what has been committed, on both sides: this
+   * session must have nothing pending and no ws-git work its agent
+   * hasn't committed, and `source` is merged at its agent's last
+   * commit (or its latest, if it never used ws-git), refused while its
+   * agent has work past that commit or a merge of its own outstanding.
+   * Nothing is merged here while a merge of this session's own is
+   * outstanding.
+   *
+   * It brings files, and nothing else: the cache, the conversation and
+   * the agent's git stay this session's. Lines both sides changed land
+   * with conflict markers in the merge commit, reported in
+   * `conflicts`, and stay outstanding until the markers are gone (or
+   * `ws.index.abortMerge()`). Something no rule settles (a file one
+   * side made a directory) isn't merged at all: `merged` is false.
+   */
+  async merge(source: string): Promise<MergeOutcome> {
+    return this.#run('merge', async (wt) => {
+      if (source === this.session) throw new WorldError('cannot merge a session into itself')
+      if (!(await this.store.exists(source))) throw new UnknownSessionError(source)
+      this.#requireNothingPending(wt, 'merge')
+      await this.index.requireClean('merge')
+      await this.index.requireUnmerged('merge')
+      const repo = this.store.repo
+      const agentHead = await this.index.head()
+      const from = await this.index.sourceState(source, await repo.branches.get(source))
+      if (from.uncommitted.length > 0) {
+        throw new WorldError(
+          `uncommitted ws-git work on '${source}': ${from.uncommitted.length} path(s) differ from that session's last ws-git commit, and a merge takes only what has been committed. Land it there (ws-git commit -m ... in that session) or drop it (ws-git checkout <its last commit>), then merge.`,
+        )
+      }
+      if (from.marked.length > 0) {
+        const shown = from.marked.slice(0, 3).join(', ') + (from.marked.length > 3 ? ', ...' : '')
+        throw new WorldError(
+          `'${source}' has an unresolved merge from ${from.mergeSource}: ${from.marked.length} path(s) still carry conflict markers (${shown}). A merge of it would bring the markers here as file content. Resolve them there (edit, then ws-git commit in that session) or abort it (ws-git merge --abort in that session), then merge.`,
+        )
+      }
+      const before = wt.head
+      const rules = await threeWayRules(repo, {
+        base: await repo.mergeBase(before, from.commit),
+        ours: before,
+        theirs: from.commit,
+      })
+      const outcome = await threeWay(
+        repo,
+        before,
+        from.commit,
+        () =>
+          wt.merge(
+            { commit: from.commit },
+            {
+              ...rules,
+              fastForward: false,
+              info: {
+                tool: MERGE_TOOL,
+                source,
+                virtualParents: agentHead === null ? [] : [agentHead],
+              },
+            },
+          ),
+        { held: true },
+      )
+      if (outcome.merged && outcome.commit !== before) {
+        const commit = outcome.commit as string
+        const fixes = await staleRecords(repo, commit, outcome.autoMerged.concat(outcome.conflicts))
+        await this.index.recordMerge(wt, source, commit, outcome.conflicts, fixes)
+      }
+      await this.#loadCwd()
+      return outcome
+    })
+  }
+
+  /**
+   * Undo one commit's change as a new commit; the commit stays where it
+   * is. What's undone is the change it made, so work since, in other
+   * files or elsewhere in the same one, stands. An agent commit's
+   * change is measured from its parent in the agent's graph (or, for
+   * its first, from where its session was forked, or from nothing); a
+   * merge goes back to ours. Overlapping work lands as conflict
+   * markers, as a merge's does. `merged` false with no conflicts:
+   * there was nothing to undo.
+   */
+  async revert(commit: string): Promise<MergeOutcome> {
+    return this.#run('revert', async (wt) => {
+      const target = await this.store.repo.getCommit(await this.#expand(commit))
+      const subject = target.info?.message
+      return this.#applyChange(wt, {
+        base: target.hash,
+        theirs: await this.#changeBase(target),
+        source: `${this.session}@${target.hash.slice(0, 7)}`,
+        verb: 'revert',
+        info: {
+          tool: REVERT_TOOL,
+          message:
+            typeof subject === 'string' && subject !== ''
+              ? `Revert "${subject}"`
+              : `Revert ${target.hash.slice(0, 7)}`,
+          reverted: target.hash,
+        },
+      })
+    })
+  }
+
+  /**
+   * Apply one commit's change from another session, as a new commit
+   * here: `ref` is `session@commit` (a short id will do). The change is
+   * what that commit made over the one before it in its own graph, so
+   * a delegate's commit brings its own work and nothing it inherited.
+   * Where it came from is recorded, but its history doesn't become
+   * this session's. To bring everything a session committed, merge it.
+   */
+  async cherryPick(ref: string): Promise<MergeOutcome> {
+    return this.#run('cherry-pick', async (wt) => {
+      const at = ref.lastIndexOf('@')
+      if (at <= 0) {
+        throw new WorldError(
+          `'${ref}' names no commit: a cherry-pick takes one, spelled 'session@commit' (ws-git log <session> lists them). To bring everything '${ref}' has committed, merge it.`,
+        )
+      }
+      const session = ref.slice(0, at)
+      if (!(await this.store.exists(session))) throw new UnknownSessionError(session)
+      const target = await this.store.repo.getCommit(
+        await this.#expandIn(session, ref.slice(at + 1)),
+      )
+      const message = target.info?.message
+      return this.#applyChange(wt, {
+        base: await this.#changeBase(target),
+        theirs: target.hash,
+        source: `${session}@${target.hash.slice(0, 7)}`,
+        verb: 'cherry-pick',
+        info: {
+          tool: PICK_TOOL,
+          message:
+            typeof message === 'string' && message !== ''
+              ? message
+              : `Pick ${target.hash.slice(0, 7)}`,
+          pickedFrom: `${session}@${target.hash}`,
+        },
+      })
+    })
+  }
+
+  /** The commit one commit's change is measured from: its parent in
+   *  the agent's graph for an agent commit (or where its session was
+   *  forked, for its first; or nothing), else its first parent. */
+  async #changeBase(entry: Commit): Promise<string | null> {
+    if (!isAgentCommit(entry.info)) return entry.parents[0] ?? null
+    const parent = virtualParents(entry.info)[0]
+    if (parent !== undefined) return parent
+    const snapshot = await this.store.repo.snapshot({ commit: entry.hash })
+    return parseBlob(await snapshot.get(BLOB_KEY)).base
+  }
+
+  /** A commit `session`'s history holds, by id or a prefix of one. */
+  async #expandIn(session: string, prefix: string): Promise<string> {
+    if (/^[0-9a-f]{7,}$/.test(prefix)) {
+      const found = new Set<string>()
+      for await (const c of this.store.repo.log({ branch: session })) {
+        if (c.hash.startsWith(prefix)) found.add(c.hash)
+      }
+      if (found.size === 1) return [...found][0] as string
+      if (found.size > 1) throw new UnknownRefError(`${session}@${prefix}`, 'names several commits')
+    }
+    throw new UnknownRefError(
+      `${session}@${prefix}`,
+      `names no commit of session '${session}' (ws-git log ${session} lists them)`,
+    )
+  }
+
+  async #applyChange(
+    wt: Worktree<unknown>,
+    change: {
+      base: string | null
+      theirs: string | null
+      source: string
+      verb: string
+      info: CommitInfo
+    },
+  ): Promise<MergeOutcome> {
+    this.#requireNothingPending(wt, change.verb)
+    await this.index.requireClean(change.verb)
+    await this.index.requireUnmerged(change.verb)
+    const agentHead = await this.index.head()
+    const repo = this.store.repo
+    const before = wt.head
+    const base = change.base ?? ROOT_COMMIT
+    const theirs = change.theirs ?? ROOT_COMMIT
+    const rules = await threeWayRules(repo, { base: change.base, ours: before, theirs })
+    const outcome = await threeWay(repo, before, theirs, () =>
+      wt.apply(base, theirs, {
+        ...rules,
+        info: {
+          appliedFrom: change.theirs,
+          appliedBase: change.base,
+          ...change.info,
+          virtualParents: agentHead === null ? [] : [agentHead],
+        },
+      }),
+    )
+    if (outcome.merged) {
+      const commit = outcome.commit as string
+      const fixes = await staleRecords(repo, commit, outcome.autoMerged.concat(outcome.conflicts))
+      await this.index.recordMerge(wt, change.source, commit, outcome.conflicts, fixes)
+      await this.#loadCwd()
+    }
+    return outcome
+  }
+
+  #requireNothingPending(wt: Worktree<unknown>, verb: string): void {
+    if (wt.status().clean) return
+    throw new WorldError(
+      `uncommitted changes on this session; a ${verb} needs a clean tree to land against: ws.commit() them, or ws.discard() them, then ${verb}`,
+    )
   }
 
   /** Stop: queued calls finish first; later ones throw, and the
@@ -894,6 +1174,9 @@ export class Workspace {
     await this.#run('fork', async (wt) => {
       if (inherit === 'fresh') await wipeConversation(wt)
       else await rebindConversation(wt, this.session, parent)
+      // A fresh ws-git state, recording where the fork starts: what its
+      // work is measured against until its first commit.
+      wt.set(BLOB_KEY, forkBlob(wt.head))
       await this.#commitPending({ tool: 'fork', parent, inherit })
     })
   }

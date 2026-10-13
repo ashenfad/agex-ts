@@ -50,12 +50,24 @@ export {
 } from './profile'
 export type { Image, SerializedError } from './kernel/messages'
 export { DEFAULT_MAX_OBSERVATION, DEFAULT_TIMEOUT, MAX_IMAGES } from './kernel/kernel'
-export { DEFAULT_CURL_MAX_BYTES, DEFAULT_CURL_TIMEOUT, type CurlOptions, curlCommand } from './curl'
+export { type CurlOptions, curlCommand } from './curl'
+export { type HttpOptions, httpHost } from './http'
+export {
+  DEFAULT_MAX_BYTES,
+  DEFAULT_NET_TIMEOUT,
+  NetError,
+  type NetOptions,
+  type NetRequest,
+  type NetResponse,
+  request,
+} from './net'
+export { SecretOriginError, Secrets, type SecretSpec, secretRef } from './secrets'
 export { EditError, type EditMode, type EditResult, applyEdit, findSimilarLines } from './editing'
 export {
   type CommandFactory,
   type CommandWorld,
   type HostCommand,
+  type HostWorld,
   commandFactory,
 } from './profile'
 export {

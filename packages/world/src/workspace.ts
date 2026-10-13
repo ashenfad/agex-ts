@@ -43,6 +43,7 @@ import { checkSessionName, checkTagName } from './names'
 import { dirname, resolve, within } from './path'
 import { type HostCall, type Profile, makeCommands, makeHostObjects, shellEnv } from './profile'
 import { Queue } from './queue'
+import { Secrets } from './secrets'
 import type { Store } from './store'
 
 /** How a workspace is opened. */
@@ -214,6 +215,10 @@ export class Workspace {
   readonly #commands: Map<string, CommandHandler>
   /** Stops the shell script running, while one is. */
   #shell: AbortController | null = null
+  /** The call a shell script runs in, while one does: the commands'
+   *  workspace is part of it. */
+  #shellCall: symbol | null = null
+  readonly #secrets: Secrets
   #kernel: Kernel | null = null
   /** The call a host method made through its `HostCall` is part of,
    *  set while that method's workspace call starts. */
@@ -248,8 +253,12 @@ export class Workspace {
     }
     this.files = new WorkspaceFiles(inner, this.#fs, (info) => this.autoCommit(info))
     this.tags = new WorkspaceTags(inner)
-    this.#hostObjects = makeHostObjects(settings.profile, this)
-    this.#commands = makeCommands(settings.profile, this)
+    this.#secrets = new Secrets(settings.profile.secrets)
+    this.#hostObjects = makeHostObjects(settings.profile, this, { secrets: this.#secrets })
+    this.#commands = makeCommands(settings.profile, {
+      ws: this.#asPartOf(() => this.#shellCall),
+      secrets: this.#secrets,
+    })
   }
 
   /** @internal Opens a session's tip; used by `Store.open`. */
@@ -374,11 +383,13 @@ export class Workspace {
   async runCode(code: string): Promise<CodeResult> {
     return this.#queue.run(async () => {
       this.#checkOpen()
-      const call: HostCall = { ws: this.#asPartOf(this.#queue.active as symbol) }
+      const active = this.#queue.active
+      const call: HostCall = { ws: this.#asPartOf(() => active) }
       const out = await this.#kernelFor().run(code, {
         fs: this.#fs,
         cache: this.#cache,
         env: this.#settings.profile.variables ?? {},
+        secrets: this.#secrets.names(),
         hostObjects: this.#hostObjects,
         call,
         settings: this.#settings.profile.code ?? {},
@@ -421,6 +432,7 @@ export class Workspace {
       this.#checkOpen()
       const controller = new AbortController()
       this.#shell = controller
+      this.#shellCall = this.#queue.active
       let stdout = ''
       let stderr = ''
       let exitCode = 0
@@ -443,6 +455,7 @@ export class Workspace {
         }
       } finally {
         this.#shell = null
+        this.#shellCall = null
       }
       const limit = this.#settings.profile.code?.maxObservation ?? DEFAULT_MAX_OBSERVATION
       const cut = stdout.length > limit || stderr.length > limit
@@ -619,13 +632,14 @@ export class Workspace {
 
   /**
    * This workspace, with every call it starts made part of the call
-   * `token`: run at once, not queued behind it. Its `files` and `tags`
-   * too.
+   * `token()` names when it starts: run at once, not queued behind it.
+   * Its `files` and `tags` too. When `token()` is null, calls queue as
+   * usual.
    */
-  #asPartOf(token: symbol): Workspace {
+  #asPartOf(token: () => symbol | null): Workspace {
     const within = <T>(fn: () => T): T => {
       const previous = this.#reentry
-      this.#reentry = token
+      this.#reentry = token()
       try {
         return fn()
       } finally {

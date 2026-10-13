@@ -77,7 +77,7 @@ export function terminalDescription(ws: Workspace, primer?: string): string {
   const secrets = Object.keys(profile.secrets ?? {}).sort()
   if (secrets.length > 0) {
     notes.push(
-      `- secrets: ${names(secrets)}, usable only where a command takes them (curl's URLs and headers); their values never appear in the workspace`,
+      `- secrets: ${names(secrets)}, usable only where a command takes them (curl's URLs and headers, for the sites each is meant for); their values never appear in the workspace`,
     )
   }
   const commands = [...commandDescriptions(profile)].sort(([a], [b]) => a.localeCompare(b))
@@ -109,8 +109,15 @@ export function codeDescription(ws: Workspace, primer?: string): string {
     )
   }
   const variables = Object.keys(profile.variables ?? {}).sort()
-  if (variables.length > 0)
+  if (variables.length > 0) {
     notes.push(`- env: configuration, e.g. env.${variables[0]} (${variables.join(', ')})`)
+  }
+  const secrets = Object.keys(profile.secrets ?? {}).sort()
+  if (secrets.length > 0) {
+    notes.push(
+      `- secrets: ${secrets.join(', ')}. \`secret('${secrets[0]}')\` is a reference a host object fills at a request (http.fetch fills it in a URL or header, for the sites the secret is meant for); code never sees the value`,
+    )
+  }
   notes.push(
     code.resolve !== undefined
       ? "- packages: import them by name (`import * as aq from 'arquero'`); they load over the network"

@@ -7,6 +7,8 @@
  *   'utf8')`, `readText`, `writeText` and string writes besides;
  * - `cache`: the session's cache (absent when the workspace has none);
  * - `env`: the profile's variables, read-only;
+ * - `secret(name)`: a reference to one of the profile's secrets, which
+ *   a host object fills at a request (the value never comes here);
  * - each host object by name, and all of them as `host` (also
  *   `import { db } from 'host'`);
  * - `console`: `log` and `info` to stdout, `warn` and `error` to
@@ -366,6 +368,10 @@ async function run(msg: RunMessage): Promise<void> {
     fs: wrapAgentFs(bridge.stub('fs', FS_METHODS) as Parameters<typeof wrapAgentFs>[0]),
     cache: msg.hasCache ? bridge.stub('cache', CACHE_METHODS) : undefined,
     env: Object.freeze({ ...msg.env }),
+    secret: (name: string): string => {
+      if (!msg.secrets.includes(name)) throw new Error(`no secret named '${name}'`)
+      return `\${${name}}`
+    },
     console: makeConsole(msg.runId),
     host: Object.freeze(host),
     ...host,

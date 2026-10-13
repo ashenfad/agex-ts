@@ -12,4 +12,12 @@
 
 **`curlCommand()`:** a host-granted `curl` that fills secrets into URLs and headers, refuses oversized responses, and tells a CORS refusal from a dead network.
 
+**`httpHost()`:** the same requests for code, through `http.fetch`.
+
+**Secrets:**
+- Code passes `secret('NAME')`, a reference that `http` fills.
+- `hostFactory` factories receive the secrets, so a host-built client can hold one.
+- A secret given as `{value, origins}` is filled only for those origins, and its requests follow no redirect.
+- A command made with `commandFactory` gets a workspace that is part of the shell call it runs in.
+
 **Code errors:** they show the code's own frames at its own line numbers, and an error from a host call points at the line that made it.

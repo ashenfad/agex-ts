@@ -177,8 +177,10 @@ describe('stopping code', () => {
     const ws = await open()
     expect(ws.interrupt()).toBe(false)
     const running = ws.runCode(`
-      await fs.write('partial.txt', 'yes')
+      // Printed before the write: messages arrive in order, so by the
+      // time the file exists, the output has arrived too.
       console.log('waiting')
+      await fs.write('partial.txt', 'yes')
       await new Promise((r) => setTimeout(r, 30_000))
     `)
     while (!(await ws.files.exists('partial.txt'))) await new Promise((r) => setTimeout(r, 10))

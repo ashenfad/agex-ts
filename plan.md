@@ -117,8 +117,8 @@ from 0.1.8 to 0.2.2 is missing.
 - **agex-git** is a virtual `git` command the studio doesn't use.
 
 **agex-studio** also runs a **Python kernel**: Pyodide 0.27.7 with the
-old agex stack (0.12 era) from micropip, on its own OPFS store. Its fate
-is a studio-phase decision (below).
+old agex stack (0.12 era) from micropip, on its own OPFS store. The
+rebuild drops it (below).
 
 ## Decided for the foundation (2026-10-12)
 
@@ -293,9 +293,9 @@ nontainer's semantics for a serverless studio. In order:
    one at the end stamped with the run's status (`completed`,
    `cancelled`, `failed`, `interrupted`), and the harness-neutral
    conversation index (`__conversation__/`) with per-run bodies.
-5. **W5. Values:** nontainer's value encoding for what crosses the
-   worker and what is stored: data as JSON, typed arrays and tables
-   where both sides have them, decoded by the declared type.
+5. **W5. Values:** what crosses the worker and what is stored, by
+   value: live parts refused where they would cross, a stored encoding,
+   and values checked against a declared type (a Standard Schema).
 6. **W6. Delegation:** nontainer's `Sessions`: delegates as forked
    branches, jobs and answers, a runner per job, notes on the next
    tool result.
@@ -381,6 +381,27 @@ it covers) from the generated JSON, and its own suite on memory and idb.
   tiers 0 to 2; the inbox (tier 3) comes with delegation (W6), and
   compaction (tier 4) with its record (W7).
 
+**Decided for values (2026-10-13):**
+- **A declared type is a Standard Schema** (zod, valibot, arktype), as
+  agex-ts's tasks already use, not a type system of the world's own:
+  TS types don't exist at runtime. How strict a check is (coercion and
+  all) is the schema's choice. Its JSON Schema, for showing a model, is
+  the library's own (Standard JSON Schema).
+- **The stored encoding is the world's CBOR codec** behind a format
+  header (`world-value/1`), not a port of `nt-value/1`: values are
+  nontainer's semantics, not its bytes. Decoding runs no code, so the
+  type checks the shape after it rather than guarding it.
+- **Typed host objects** are nontainer's stubs: `typedHost(obj,
+  contract)` exposes the contract's methods, checks each argument on the
+  host (a mismatch is a `TypeError` at the call), hands the method what
+  the schemas return, and checks the result.
+- **Live parts are refused where they'd cross,** naming where (`at
+  [0].client: a live Client`): structured clone would turn a class's
+  instance into a plain object.
+- **Tables are left out:** the code's `apache-arrow` isn't the host's
+  module, so a table needs Arrow IPC at the boundary and the library on
+  both sides. They come with the first task that needs one.
+
 ## Then agex-ts
 
 Redesigned as a loop over the world package, matching agex 0.13: an
@@ -391,17 +412,26 @@ run record and `TurnEvent`s; providers behind a small protocol;
 compaction within a run; agent-defined tasks through an `agex` host
 object; delegation through the `sessions` tool. Its own plan is written
 when the foundation is done, against the shape corpus. Open there:
-what replaces Standard Schema for task types (the value encoding's
-types, or schemas as the TS spelling of them), and whether
-agent-directed chapters survive beside folding.
+whether agent-directed chapters survive beside folding.
+
+**Decided for the redesign (2026-10-13):**
+- **Providers are the Vercel AI SDK's** (`@ai-sdk/anthropic`,
+  `@ai-sdk/openai`, `@ai-sdk/google`, OpenRouter's
+  `@openrouter/ai-sdk-provider`), used as transport only behind agex's
+  own provider protocol, as Python agex uses pydantic-ai. They replace
+  `@agex-ts/anthropic`, `openai` and `gemini`, whose interface is tied
+  to the old fixed tool set. A spike in the studio comes first:
+  browser access (CORS), thinking signatures round-tripping, cache hits
+  matching today's, and the bundle's size.
+- **Task types are Standard Schemas,** the world's declared types (W5).
 
 ## Then agex-studio
 
-Rebuilt on the new agex-ts, with its apps ported by hand. Open there:
-- **The Python kernel.** Drop it; keep it frozen on the old stack; or
-  rebuild it on agex 0.13 and nontainer in Pyodide, which needs a
-  Pyodide story for sandtrap. A matching kvgit format (decision 1)
-  would let one store serve both kernels.
+Rebuilt on the new agex-ts, with its apps ported by hand. Decided and open there:
+- **The Python kernel is dropped** in the rebuild (decided
+  2026-10-13), with its Pyodide bridge. It may come back as an option
+  if a need for both languages together appears; a matching kvgit
+  format (decision 1) would let one store serve both kernels then.
 - **Sync** moves onto kvgit-ts v4 (F2e) and the world's branches.
 - **agex-git** is folded into the world as its ws-git, or dropped.
 - **The bridge** is the app's whole server-side surface, designed on

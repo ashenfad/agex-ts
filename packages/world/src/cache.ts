@@ -2,16 +2,18 @@ import { cborCodec } from '@agex-ts/kvgit'
 import { InvalidNameError, ReadOnlyError } from './errors'
 import type { KeyReader, KeyWriter } from './fs'
 import { CACHE_PREFIX } from './layout'
+import { storable } from './values'
 
 /**
  * A session's cache: named values kept with its files.
  *
  * Versioned like everything else in the session: an entry commits with
  * the next commit, and forks and checkouts carry it. It is left out of
- * file diffs. Values are anything the session's codec (CBOR) holds:
- * JSON-shaped data, bytes, typed arrays, `Map`, `Set`, `Date`, bigints.
- * Values are copied in and out, so changing one afterwards changes
- * nothing stored.
+ * file diffs. Values are what a stored value is (see `values`): data,
+ * bytes, typed arrays, `Map`, `Set`, `Date`, `RegExp`, bigints; one
+ * holding anything else (a class's instance, a function) is refused
+ * with `Unencodable` rather than stored changed. Values are copied in
+ * and out, so changing one afterwards changes nothing stored.
  *
  * Keys are strings that don't start with `__` and contain no `/`.
  */
@@ -45,6 +47,7 @@ export class WorkspaceCache {
   set(key: string, value: unknown): void {
     const k = CACHE_PREFIX + checkKey(key)
     if (value === undefined) throw new TypeError('a cache value cannot be undefined')
+    storable(value)
     this.#writer().set(k, cborCodec.decode(cborCodec.encode(value)))
   }
 

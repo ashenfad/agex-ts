@@ -48,7 +48,14 @@ import {
 } from './layout'
 import { checkSessionName, checkTagName } from './names'
 import { dirname, resolve, within } from './path'
-import { type HostCall, type Profile, makeCommands, makeHostObjects, shellEnv } from './profile'
+import {
+  type HostCall,
+  type HostEntry,
+  type Profile,
+  makeCommands,
+  makeHostObjects,
+  shellEnv,
+} from './profile'
 import { Queue } from './queue'
 import { Secrets } from './secrets'
 import type { Store } from './store'
@@ -221,7 +228,7 @@ export class Workspace {
   readonly #fs: WorldFS
   readonly #cache: WorkspaceCache | null
   readonly #queue = new Queue()
-  readonly #hostObjects: Map<string, object>
+  readonly #hostObjects: Map<string, HostEntry>
   readonly #commands: Map<string, CommandHandler>
   /** Stops the shell script running, while one is. */
   #shell: AbortController | null = null

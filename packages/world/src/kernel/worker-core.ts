@@ -20,6 +20,7 @@
  * asynchronously.
  */
 
+import { describe, inspect } from '../values/inspect'
 import { wrapAgentFs } from './agent-fs'
 import {
   CACHE_METHODS,
@@ -68,6 +69,14 @@ class Bridge {
     const answer = new Promise<unknown>((resolve, reject) => {
       this.#pending.set(callId, { resolve, reject, site })
       try {
+        // What structured clone would change (a class's instance loses
+        // its methods) or refuse, refused here, naming where it is.
+        for (const [i, arg] of args.entries()) {
+          const found = inspect(arg, 'cross')
+          if (found !== null) {
+            throw new Error(`argument ${i + 1} can't be sent by value: ${describe(found)}`)
+          }
+        }
         post({
           type: 'call',
           runId: this.runId,

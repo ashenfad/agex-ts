@@ -669,7 +669,7 @@ five routes this way, a tool call's round trip included.
 - **The shape corpus** is vendored as the harness corpus is: a sync
   script copies agex's `conformance/json` and records the commit.
 
-Done 2026-10-13 (agex-ts PR "A1"): the five sibling packages, the
+Done 2026-10-13: the five sibling packages, the
 examples and the previous docs are gone; the record's field names are
 the world's camelCase, its part `kind`s Python's (`tool_call`), its
 times milliseconds. The shape corpus is synced from agex daeb5fe: 18

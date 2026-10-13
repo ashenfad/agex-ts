@@ -36,6 +36,10 @@ export interface WorldFSOptions {
   /** Write each `chdir` to the session, so it commits and reopens with
    *  the files. Default false. */
   readonly persistCwd?: boolean
+  /** Whether writes are allowed now, over a view that takes them
+   *  (default: always). When it says no, writes throw `EROFS`: the
+   *  workspace turns it off when it closes. */
+  readonly writable?: () => boolean
 }
 
 const EPOCH = new Date(0).toISOString()
@@ -52,17 +56,19 @@ const metaPrefixUnder = (abs: string): string =>
 export class WorldFS implements FileSystem {
   readonly #view: KeyReader
   readonly #persistCwd: boolean
+  readonly #writable: () => boolean
   #cwd: string
 
   constructor(view: KeyReader, opts: WorldFSOptions = {}) {
     this.#view = view
     this.#cwd = opts.cwd ?? '/'
     this.#persistCwd = opts.persistCwd ?? false
+    this.#writable = opts.writable ?? (() => true)
   }
 
   /** Whether writes throw `EROFS`. */
   get readOnly(): boolean {
-    return !isWriter(this.#view)
+    return !isWriter(this.#view) || !this.#writable()
   }
 
   // ---------- cwd ----------
@@ -76,8 +82,7 @@ export class WorldFS implements FileSystem {
     if (!(await this.#isDir(abs))) {
       throw new FsError((await this.exists(path)) ? 'ENOTDIR' : 'ENOENT', path)
     }
-    this.#cwd = abs
-    if (this.#persistCwd && isWriter(this.#view)) this.#view.set(CWD_KEY, abs)
+    this.#moveCwd(path, abs)
   }
 
   /** Move the in-memory working directory without checking or storing
@@ -271,14 +276,21 @@ export class WorldFS implements FileSystem {
       const moved = absDst + key.slice(prefix.length)
       view.set(isMeta ? metaKey(moved) : fileKey(moved), value)
     }
-    if (within(this.#cwd, absSrc)) this.resetCwd(absDst + this.#cwd.slice(absSrc.length))
+    if (within(this.#cwd, absSrc)) this.#moveCwd(src, absDst + this.#cwd.slice(absSrc.length))
   }
 
   // ---------- internals ----------
 
   #writer(path: string): KeyWriter {
-    if (!isWriter(this.#view)) throw new FsError('EROFS', path)
+    if (!isWriter(this.#view) || !this.#writable()) throw new FsError('EROFS', path)
     return this.#view
+  }
+
+  /** Move the working directory to `abs`, storing it in the session
+   *  when it persists there. */
+  #moveCwd(path: string, abs: string): void {
+    if (this.#persistCwd && isWriter(this.#view)) this.#writer(path).set(CWD_KEY, abs)
+    this.#cwd = abs
   }
 
   async #record(abs: string): Promise<FileRecord | undefined> {

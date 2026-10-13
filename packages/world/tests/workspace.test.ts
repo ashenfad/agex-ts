@@ -45,6 +45,31 @@ describe.each(BACKENDS)('on %s', (_, make) => {
       expect(await tools(again)).toEqual(['init', 'terminal'])
     })
 
+    it('reopens at / when that is where it was', async () => {
+      const ws = await open()
+      await ws.files.fs.chdir('/')
+      await ws.commit({ tool: 'terminal' })
+      expect((await store.open('s')).files.fs.getcwd()).toBe('/')
+    })
+
+    it('with root /, reopening commits nothing', async () => {
+      const ws = await open('s', { root: '/' })
+      expect(ws.files.fs.getcwd()).toBe('/')
+      const again = await store.open('s', { root: '/' })
+      expect(again.uncommitted).toBe(false)
+      expect(await tools(again)).toEqual(['init'])
+    })
+
+    it('stores the working directory moved by renaming a directory it is in', async () => {
+      const ws = await open()
+      await ws.files.fs.mkdir('/workspace/old/deep', { parents: true })
+      await ws.files.fs.chdir('/workspace/old/deep')
+      await ws.files.fs.rename('/workspace/old', '/workspace/new')
+      expect(ws.files.fs.getcwd()).toBe('/workspace/new/deep')
+      await ws.commit({ tool: 'terminal' })
+      expect((await store.open('s')).files.fs.getcwd()).toBe('/workspace/new/deep')
+    })
+
     it('takes a root, and refuses a bad session id or root', async () => {
       const ws = await open('s', { root: '/home//me/' })
       expect(ws.root).toBe('/home/me')
@@ -277,6 +302,15 @@ describe.each(BACKENDS)('on %s', (_, make) => {
       expect(await tools(full)).not.toContain(undefined)
     })
 
+    it('passes autocommit on as it is now, not as it was opened', async () => {
+      const ws = await open()
+      ws.autocommit = false
+      expect(ws.settings.autocommit).toBe(false)
+      const child = await ws.fork('c')
+      expect(child.autocommit).toBe(false)
+      expect((await child.files.write('f', 'x')).commit).toBeNull()
+    })
+
     it('forks from an earlier commit, and refuses a taken name', async () => {
       const ws = await open()
       await ws.files.write('f', '1')
@@ -452,6 +486,16 @@ describe.each(BACKENDS)('on %s', (_, make) => {
       expect(ws.closed).toBe(true)
       await expect(ws.files.write('b', '2')).rejects.toThrow(ReadOnlyError)
       await expect(ws.exclusive(async () => 1)).rejects.toThrow(ReadOnlyError)
+      await expect(ws.files.fs.write('/workspace/b', enc.encode('2'))).rejects.toMatchObject({
+        code: 'EROFS',
+      })
+      await expect(ws.files.fs.mkdir('/workspace/d')).rejects.toMatchObject({ code: 'EROFS' })
+      await expect(ws.files.fs.chdir('/')).rejects.toMatchObject({ code: 'EROFS' })
+      expect(ws.files.fs.readOnly).toBe(true)
+      expect(() => ws.cache.set('k', 1)).toThrow(ReadOnlyError)
+      await expect(ws.cache.delete('k')).rejects.toThrow(ReadOnlyError)
+      expect(ws.uncommitted).toBe(false)
+      expect(await ws.files.readText('a')).toBe('1')
     })
   })
 

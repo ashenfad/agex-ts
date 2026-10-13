@@ -249,6 +249,11 @@ export interface GitHost {
   run<T>(op: string, fn: (wt: Worktree<unknown>) => Promise<T>): Promise<T>
   /** The tree moved: re-read what depends on it (the cwd). */
   moved(): Promise<void>
+  /** Whether the session's view shows `path` (a narrowed fork's). */
+  sees(path: string): boolean
+  /** Why `path` is never work (outside the root, or ignored); null
+   *  when it is. */
+  whyIgnored(path: string): string | null
 }
 
 /** A file path's keys. */
@@ -318,6 +323,27 @@ export class WorkspaceIndex {
    *  head, or a fork's base): modified, and of those added and
    *  removed. With no ref, every file is new. */
   async changes(
+    state: GitState,
+    opts: { all?: boolean } = {},
+  ): Promise<{ modified: Set<string>; added: Set<string>; removed: Set<string> }> {
+    const found = await this.#changes(state)
+    if (opts.all === true) return found
+    // Only what the session can see, and what is work.
+    const keep = (paths: Set<string>) => new Set([...paths].filter((p) => this.#isWork(p)))
+    return {
+      modified: keep(found.modified),
+      added: keep(found.added),
+      removed: keep(found.removed),
+    }
+  }
+
+  /** Whether `path` is the session's work: in its view, and neither
+   *  outside the root nor ignored. */
+  #isWork(path: string): boolean {
+    return this.#host.sees(path) && this.#host.whyIgnored(path) === null
+  }
+
+  async #changes(
     state: GitState,
   ): Promise<{ modified: Set<string>; added: Set<string>; removed: Set<string> }> {
     const { reader, head, pending } = this.#host.view()
@@ -454,8 +480,12 @@ export class WorkspaceIndex {
         known.add(p)
     }
     for (const path of paths) {
-      if (known.has(path)) continue
-      if (await this.#host.fs.isDir(path)) {
+      const why = this.#host.whyIgnored(path)
+      if (why !== null) {
+        throw new WorldError(`cannot stage '${path}': ${why}, so it is never committed or merged`)
+      }
+      if (known.has(path) && this.#host.sees(path)) continue
+      if (this.#host.sees(path) && (await this.#host.fs.isDir(path))) {
         throw new WorldError(`cannot stage '${path}': stage files, not directories`)
       }
       throw new WorldError(`unknown path '${path}': no such file at HEAD or in the working tree`)
@@ -739,7 +769,7 @@ export class WorkspaceIndex {
     const entry = await repo.getCommit(commit)
     if (!isAgentCommit(entry.info)) throw new WorldError(notYours(commit))
     const state = await this.#state(wt)
-    const { added, modified } = await this.changes({ ...state, head: commit })
+    const { added, modified } = await this.changes({ ...state, head: commit }, { all: true })
     const gone = [...added].sort()
     const changed = [...modified].filter((p) => !added.has(p)).sort()
     const live = await contents(wt, [...gone, ...changed])
@@ -793,6 +823,7 @@ export class WorkspaceIndex {
       uncommitted = [...d.added, ...d.removed, ...d.modified]
         .filter((k) => k.startsWith(FILE_PREFIX))
         .map((k) => k.slice(FILE_PREFIX.length))
+        .filter((p) => this.#host.whyIgnored(p) === null)
         .sort()
     }
     let marked: string[] = []

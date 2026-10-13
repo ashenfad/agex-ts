@@ -7,6 +7,7 @@ import {
   UnknownTagError,
 } from '@agex-ts/kvgit'
 import { UnknownSessionError } from './errors'
+import { Patterns } from './ignore'
 import { WORLD_MERGE_FNS, WORLD_MERGE_PREFIXES } from './layout'
 import {
   STORE_TAG_SCOPE,
@@ -72,6 +73,7 @@ export class Store {
       autocommit: opts.autocommit ?? true,
       cache: opts.cache ?? true,
       profile: checkProfile(opts.profile ?? {}),
+      ignore: new Patterns(opts.ignore ?? []).source,
     }
     const wt = await this.repo.worktree(session, { create: true })
     return Workspace._live(this, session, settings, wt)
@@ -122,12 +124,13 @@ export class Store {
     opts: ForkOptions & WorkspaceOptions = {},
   ): Promise<Workspace> {
     if (!(await this.exists(src))) throw new UnknownSessionError(src)
-    const { at, inherit, ...settings } = opts
+    const { at, inherit, paths, ...settings } = opts
     const parent = await this.open(src, settings)
     try {
       return await parent.fork(dst, {
         ...(at !== undefined && { at }),
         ...(inherit !== undefined && { inherit }),
+        ...(paths !== undefined && { paths }),
       })
     } finally {
       await parent.close()
@@ -177,6 +180,7 @@ export class Store {
       autocommit: false,
       cache: opts.cache ?? true,
       profile: checkProfile(opts.profile ?? {}),
+      ignore: new Patterns(opts.ignore ?? []).source,
     }
   }
 

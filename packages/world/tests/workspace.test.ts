@@ -165,7 +165,7 @@ describe.each(BACKENDS)('on %s', (_, make) => {
       const before = ws.head
       ws.cache.set('k', 1)
       await ws.commit()
-      expect(await ws.diff(before)).toEqual({ added: [], removed: [], modified: [] })
+      expect(await ws.diff(before)).toMatchObject({ added: [], removed: [], modified: [] })
     })
   })
 
@@ -225,7 +225,9 @@ describe.each(BACKENDS)('on %s', (_, make) => {
       expect((await ws.log())[0]?.info).toEqual({
         tool: 'checkout',
         target: mark,
-        paths: ['/workspace/src'],
+        takenFrom: `s@${mark}`,
+        paths: ['/workspace/src/a'],
+        removed: ['/workspace/src/new'],
       })
     })
 
@@ -459,7 +461,7 @@ describe.each(BACKENDS)('on %s', (_, make) => {
       release()
       const [slowCommit, quickOut] = await Promise.all([slow, quick])
       expect(await tools(ws)).toEqual(['init', 'slow', 'file_write'])
-      expect(await ws.diff(ws.head, slowCommit as string)).toEqual({
+      expect(await ws.diff(ws.head, slowCommit as string)).toMatchObject({
         added: [],
         removed: ['/workspace/quick'],
         modified: [],
@@ -491,7 +493,6 @@ describe.each(BACKENDS)('on %s', (_, make) => {
       })
       await expect(ws.files.fs.mkdir('/workspace/d')).rejects.toMatchObject({ code: 'EROFS' })
       await expect(ws.files.fs.chdir('/')).rejects.toMatchObject({ code: 'EROFS' })
-      expect(ws.files.fs.readOnly).toBe(true)
       expect(() => ws.cache.set('k', 1)).toThrow(ReadOnlyError)
       await expect(ws.cache.delete('k')).rejects.toThrow(ReadOnlyError)
       expect(ws.uncommitted).toBe(false)

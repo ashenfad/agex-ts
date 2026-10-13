@@ -328,6 +328,35 @@ Work comes back across sessions by three verbs, one three-way engine:
   are gone or `ws.index.abortMerge()`. Something no rule settles (a file
   made a directory) isn't merged at all.
 
+## Views, takes and attachments
+
+**A narrowed fork** sees only some paths: `ws.fork(name, {paths:
+['auth.py']})`. Its branch still holds everything (so the merge back
+is an ordinary three-way); its files list and read only the view.
+It may create a path anywhere, which joins its view, but changing or
+removing a path outside the view is refused (`EACCES`). `paths: []` is
+an empty view. `ws.view` reads it, and `ws.diff` names what a narrowed
+session was given (`seed`), splitting its changes into `inSeed` and
+`elsewhere`, so a delegate's collateral doesn't go unnoticed.
+
+**`ws.checkout(ref, {paths})`** takes paths from anywhere: another
+session by name (at its agent's last commit), `session@commit`, a store
+tag. A file is taken; a directory is mirrored (what `ref` lacks there is
+removed). The commit records `takenFrom`, the files taken, and what was
+removed.
+
+**`ws.files.attach(ref, at)`** mounts another session's tree, frozen,
+read-only, at `at`: for reading a delegate's work in place before
+deciding to merge it. Not versioned, not carried by a fork, gone when
+the session closes; `detach(at)` and `attachments()` go with it. The
+agent's shell and code see it too.
+
+**Ignore patterns** (`store.open(id, {ignore: ['*.log', 'node_modules/']})`,
+a `.gitignore` subset) name paths that are never work, as is anything
+outside the root: ws-git, diffs and merges leave them out (a merge keeps
+this side's copy), and a directory take skips them unless named. They're
+still written and read back. Forks inherit them.
+
 ## Conformance
 
 `@agex-ts/world/conformance` holds nontainer's harness corpus (its
@@ -349,6 +378,7 @@ every scenario of tiers 0 to 3.
 | `__cache__/<key>` | a cache entry |
 | `__conversation__/…`, `__compaction__/…` | the turn's records |
 | `__ws_git__` | the agent's git: index, head, merge, tags |
+| `__ws_view__` | a narrowed fork's view and seed |
 
 Content and metadata are separate keys, so unchanged content keeps its
 stored blob.

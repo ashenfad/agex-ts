@@ -415,6 +415,21 @@ it covers) from the generated JSON, and its own suite on memory and idb.
   a record two sides changed alike, with content merged to other bytes,
   has its size corrected in the merge's bookkeeping commit.
 
+**Decided for views and mounts (G2, 2026-10-13):**
+- **nontainer's semantics:** a narrowed fork's view (the write rule, the
+  record and its seed, merged as ours, not inherited by a whole-tree
+  fork), `diff`'s seed grouping, `checkout(ref, {paths})` from any ref
+  with directory mirroring, `files.attach`, and ignore patterns (outside
+  the root, and a `.gitignore` subset) left out of everything that
+  decides what work is.
+- **The filesystem the agent and the host see is composed:** the
+  session's own (`WorldFS`), a `ViewFS` over it, an `AttachFS` over
+  that. The workspace's own verbs use the session's filesystem beneath.
+- **Left out:** nontainer's app-runtime authoring directories
+  (`app/logs`, `app/screenshots`) have no runtime here yet; symlinks
+  (the world's filesystem has none); a frozen view isn't narrowed.
+- **termish gains `EACCES`** for the view's refusals.
+
 **Decided for delegation (2026-10-13):**
 - **Two steps around ws-git.** The inbox (W6a) comes first; ws-git is
   ported whole (G1-G3), for parity with nontainer, before delegation

@@ -438,11 +438,16 @@ describe('errors', () => {
     expect(anthropic.transient(apiError(400, relayed))).toBe(false)
   })
 
-  it('takes a provider out of reach as transient, and a cancel never', () => {
+  it('takes a provider out of reach or timed out as transient, and a cancel never', () => {
     expect(anthropic.transient(new TypeError('fetch failed'))).toBe(true)
     const reset = Object.assign(new Error('socket'), { code: 'ECONNRESET' })
     expect(anthropic.transient(new TypeError('x', { cause: reset }))).toBe(true)
     expect(anthropic.transient(new DOMException('stopped', 'AbortError'))).toBe(false)
+    expect(anthropic.transient(new DOMException('slow', 'TimeoutError'))).toBe(true)
+    const timedOut = new Error('request failed', {
+      cause: new DOMException('slow', 'TimeoutError'),
+    })
+    expect(anthropic.transient(timedOut)).toBe(true)
     expect(anthropic.transient(new Error('a bug'))).toBe(false)
   })
 

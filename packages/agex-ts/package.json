@@ -14,7 +14,7 @@
   "bugs": "https://github.com/ashenfad/agex-ts/issues",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "exports": {
     ".": {

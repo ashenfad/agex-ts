@@ -1,3 +1,22 @@
+export {
+  BookkeepingLostError,
+  CHECKOUT_TOOL,
+  type GitState,
+  type GitStatus,
+  MERGE_RECORD_TOOL,
+  MERGE_TOOL,
+  type MergeOutcome,
+  PICK_TOOL,
+  RESTORE_TOOL,
+  REVERT_TOOL,
+  TOOL as WS_GIT_TOOL,
+  WorkspaceIndex,
+  WorkspaceIndexTags,
+  checkTagName as checkGitTagName,
+  isAgentCommit,
+  isBookkeepingCommit,
+  virtualParents,
+} from './agentgit'
 export { WorkspaceCache } from './cache'
 export {
   CommitConflictError,
@@ -16,6 +35,7 @@ export {
   CWD_KEY,
   FILE_PREFIX,
   type FileRecord,
+  GIT_KEY,
   META_PREFIX,
   fileKey,
   metaKey,

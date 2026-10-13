@@ -400,6 +400,21 @@ it covers) from the generated JSON, and its own suite on memory and idb.
   tiers 0 to 2; the inbox (tier 3) comes with W6a, delegation (tier 5)
   with W6b, and compaction (tier 4) with its record (W7).
 
+**Decided for ws-git's host verbs (G1, 2026-10-13):**
+- **nontainer's fiction, ported:** the blob, partial commits with their
+  restore, the agent's graph through `virtualParents`, bookkeeping kept
+  out of `ws.log()` by default, merges and applies recorded in the
+  graph, an outstanding merge until its markers go, and abort.
+- **On kvgit-ts's engine:** `merge` (never fast-forwarding), `apply`
+  for revert and cherry-pick, its marker text merge, keyed commits.
+- **Where the TS world differs:** a commit's info is camelCase
+  (`virtualParents`, `restoreOf`); a delegate's first commit is measured
+  from the `base` its blob recorded at the fork, rather than by walking
+  to the fork's commit; a directory record stays while this side has
+  files under it (the TS filesystem keeps directories as records); and
+  a record two sides changed alike, with content merged to other bytes,
+  has its size corrected in the merge's bookkeeping commit.
+
 **Decided for delegation (2026-10-13):**
 - **Two steps around ws-git.** The inbox (W6a) comes first; ws-git is
   ported whole (G1-G3), for parity with nontainer, before delegation

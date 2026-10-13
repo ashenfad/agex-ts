@@ -287,6 +287,47 @@ from), the harness's record, and a body per run, read back with
 `ws.conversation`. So a checkout rewinds it with the files, a full fork
 carries it (as the child's), and a fresh fork starts without it.
 
+## The agent's git
+
+`ws.index` is the agent's own git over the session: an index it fills
+across several edits, commits it names, and a log of just those. It is
+metadata over the session's history (a blob at `__ws_git__`), so the
+framework's commit per call never disturbs what the agent is composing:
+
+```ts
+await ws.index.stage(['/workspace/a.py'])
+const commit = await ws.index.commit('add a') // the staged set, or all modified
+await ws.index.status() // {staged, unstaged, added, removed, mergeSource, …}
+await ws.index.log() // the agent's commits, newest first
+await ws.index.checkout(commit) // files back, as a new commit
+await ws.index.tags.add('v1') // the agent's own bookmarks
+```
+
+- **An agent commit holds exactly what it committed:** paths outside it
+  are put back for the commit and restored after, in a bookkeeping
+  commit (`ws-git.restore`) that `ws.log()` leaves out (`{kind: 'all'}`
+  shows it; `{kind: 'agent'}` is the agent's alone).
+- **A fork starts afresh:** no index, no head, no tags, and the commit
+  it started from recorded as its `base`, so its first commit takes only
+  what it changed.
+- **The tools `ws-git` and `ws-git.*` are reserved** to these commits:
+  `ws.commit` refuses them.
+
+Work comes back across sessions by three verbs, one three-way engine:
+
+- **`ws.merge(session)`** brings another session's committed work: at
+  its agent's last commit, refused while either side has ws-git work
+  uncommitted. It brings files only; the cache, the conversation and the
+  agent's git stay this session's.
+- **`ws.revert(commit)`** undoes one commit's change as a new commit;
+  **`ws.cherryPick('session@commit')`** brings one. A commit's change is
+  measured in the agent's graph, so a delegate's commit brings its own
+  work and nothing it inherited.
+- **Conflicts** land as markers in the commit (`conflicts` in the
+  outcome) and stay outstanding, refusing other moves, until the markers
+  are gone or `ws.index.abortMerge()`. Something no rule settles (a file
+  made a directory) isn't merged at all.
+
 ## Conformance
 
 `@agex-ts/world/conformance` holds nontainer's harness corpus (its
@@ -307,6 +348,7 @@ every scenario of tiers 0 to 3.
 | `__cwd__` | the working directory |
 | `__cache__/<key>` | a cache entry |
 | `__conversation__/…`, `__compaction__/…` | the turn's records |
+| `__ws_git__` | the agent's git: index, head, merge, tags |
 
 Content and metadata are separate keys, so unchanged content keeps its
 stored blob.

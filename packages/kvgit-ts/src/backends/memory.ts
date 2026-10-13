@@ -9,17 +9,22 @@ import { bytesEqual, checkBatch } from './_batch'
  * Operations are synchronous internally but exposed as `async` to
  * match the `KVStore` interface — user code is uniform across
  * backends.
+ *
+ * Values are copied on the way in and on the way out, as a backend
+ * that serializes them does by nature: a caller holding an array it
+ * wrote, or one it read, can't change what the store holds (and with
+ * it a commit whose hash covers those bytes).
  */
 export class Memory implements KVStore {
   readonly #data = new Map<string, Uint8Array>()
 
   async get(key: string): Promise<Uint8Array | null> {
     const v = this.#data.get(key)
-    return v === undefined ? null : v
+    return v === undefined ? null : v.slice()
   }
 
   async set(key: string, value: Uint8Array): Promise<void> {
-    this.#data.set(key, value)
+    this.#data.set(key, value.slice())
   }
 
   async remove(key: string): Promise<void> {
@@ -34,14 +39,14 @@ export class Memory implements KVStore {
     const out = new Map<string, Uint8Array>()
     for (const k of keys) {
       const v = this.#data.get(k)
-      if (v !== undefined) out.set(k, v)
+      if (v !== undefined) out.set(k, v.slice())
     }
     return out
   }
 
   async setMany(items: Iterable<readonly [string, Uint8Array]>): Promise<void> {
     for (const [k, v] of items) {
-      this.#data.set(k, v)
+      this.#data.set(k, v.slice())
     }
   }
 
@@ -54,7 +59,7 @@ export class Memory implements KVStore {
   async cas(key: string, value: Uint8Array, expected: Uint8Array | null): Promise<boolean> {
     const current = this.#data.get(key) ?? null
     if (!bytesEqual(current, expected)) return false
-    this.#data.set(key, value)
+    this.#data.set(key, value.slice())
     return true
   }
 
@@ -67,7 +72,7 @@ export class Memory implements KVStore {
     for (const [key, value] of expected) {
       if (!bytesEqual(this.#data.get(key) ?? null, value)) return false
     }
-    for (const [key, value] of writes) this.#data.set(key, value)
+    for (const [key, value] of writes) this.#data.set(key, value.slice())
     for (const key of removeList) this.#data.delete(key)
     return true
   }
@@ -83,12 +88,8 @@ export class Memory implements KVStore {
   }
 
   async *items(prefix?: string): AsyncIterable<readonly [string, Uint8Array]> {
-    if (prefix === undefined) {
-      for (const entry of this.#data.entries()) yield entry
-    } else {
-      for (const entry of this.#data.entries()) {
-        if (entry[0].startsWith(prefix)) yield entry
-      }
+    for (const [k, v] of this.#data.entries()) {
+      if (prefix === undefined || k.startsWith(prefix)) yield [k, v.slice()] as const
     }
   }
 

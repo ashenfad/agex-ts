@@ -69,6 +69,39 @@ describe('findLive', () => {
     expect(findLive({ rows: new Rows() })).toBe('at rows: a live Rows')
   })
 
+  it('refuses shared memory, which would cross as the same memory', () => {
+    const shared = new SharedArrayBuffer(4)
+    expect(findLive({ buf: shared })).toBe(
+      'at buf: a SharedArrayBuffer: shared memory, not sent by value',
+    )
+    expect(findLive([new Int32Array(shared)])).toBe(
+      'at [0]: a Int32Array over a SharedArrayBuffer: shared memory, not sent by value',
+    )
+    expect(findLive(new DataView(shared))).toBe(
+      'a DataView over a SharedArrayBuffer: shared memory, not sent by value',
+    )
+    expect(() => encode({ buf: shared })).toThrow(Unencodable)
+  })
+
+  it("looks at an array's other properties, which structured clone carries", () => {
+    const items: unknown[] & { client?: Client } = [1, 2]
+    items.client = new Client()
+    expect(findLive({ items })).toBe('at items.client: a live Client')
+    const tagged: unknown[] & { note?: string } = [1]
+    tagged.note = 'ok'
+    expect(findLive(tagged)).toBeNull()
+    const gotten: unknown[] = [1]
+    Object.defineProperty(gotten, 0, { get: () => 1, enumerable: true })
+    expect(findLive(gotten)).toBe('at [0]: a live getter')
+    expect(() => encode(tagged)).toThrow(
+      'can\'t be stored: an array with a property "note", which isn\'t stored',
+    )
+    const holey: number[] = []
+    holey[0] = 1
+    holey[2] = 3
+    expect(decode(encode(holey))).toEqual([1, undefined, 3])
+  })
+
   it('lets a value hold itself, which structured clone carries', () => {
     const loop: Record<string, unknown> = { n: 1 }
     loop.self = loop

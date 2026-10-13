@@ -142,13 +142,16 @@ What crosses the worker, and what is stored, crosses by value:
 
 - **Live parts are refused where they'd cross:** a function, an
   instance of a class (structured clone would make it a plain object,
-  its methods gone), a promise, a symbol, a getter. The error names
-  where: `at [0].client: a live Client`. `findLive(value)` asks first.
+  its methods gone), a promise, a symbol, a getter, and shared memory
+  (a `SharedArrayBuffer` or a view over one), which would cross as the
+  same memory. The error names where: `at [0].client: a live Client`.
+  `findLive(value)` asks first.
 - **A stored value** is one blob: `encode(value)` and `decode(bytes)`,
   on the session's CBOR codec, behind a `world-value/1` header. Data,
   bytes, typed arrays, `Map`, `Set`, `Date`, `RegExp` and bigints come
   back as themselves; what wouldn't (an `ArrayBuffer`, an error, a value
-  holding itself) is refused with `Unencodable`. `copy(value)` copies
+  holding itself, an array with a property besides its items) is
+  refused with `Unencodable`. `copy(value)` copies
   by the same rules, and the cache stores by them.
 - **A declared type is a Standard Schema** (zod, valibot, arktype…):
   `check(value, schema)` gives what the schema's validation returns, or

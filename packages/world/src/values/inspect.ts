@@ -43,7 +43,10 @@ export function segment(key: PropertyKey): string {
  * `Set`, `Date`, `RegExp`, bytes and typed arrays, `ArrayBuffer`,
  * errors and blobs. A function is, as is an instance of any class
  * (its methods would be lost, and its private state with them), a
- * promise, a symbol, or a getter.
+ * promise, a symbol, or a getter; and shared memory (a
+ * `SharedArrayBuffer`, or a view over one) can't be sent by value at
+ * all. An array is looked at whole: its items, and any other property
+ * it has.
  */
 export function findLive(value: unknown): string | null {
   const found = inspect(value, 'cross')
@@ -89,7 +92,6 @@ const ERRORS = new Set([
  *  keep as themselves, with what to do instead. */
 const CROSS_ONLY: Record<string, string> = {
   ArrayBuffer: 'store a Uint8Array',
-  SharedArrayBuffer: 'store a Uint8Array',
   DataView: 'store a Uint8Array',
   Float16Array: 'store a Float32Array',
   Blob: 'store its bytes',
@@ -133,14 +135,19 @@ function walkObject(v: object, carry: Carry, seen: Set<object>, open: Set<object
   const tag = Object.prototype.toString.call(v).slice(8, -1)
 
   if (proto === null || (name === 'Object' && Object.getPrototypeOf(proto) === null)) {
-    return walkRecord(v as Record<string, unknown>, carry, seen, open)
+    return walkKeys(v, false, carry, seen, open)
   }
-  if (Array.isArray(v) && name === 'Array') {
-    for (let i = 0; i < v.length; i++) {
-      const found = walk(v[i], carry, seen, open)
-      if (found !== null) return inside(found, `[${i}]`)
+  if (Array.isArray(v) && name === 'Array') return walkKeys(v, true, carry, seen, open)
+  // Shared memory crosses as the same memory, not a copy: the host and
+  // the code would both write it.
+  if (tag === 'SharedArrayBuffer') {
+    return { path: [], detail: 'a SharedArrayBuffer: shared memory, not sent by value' }
+  }
+  if (ArrayBuffer.isView(v) && isShared(v.buffer)) {
+    return {
+      path: [],
+      detail: `a ${tag} over a SharedArrayBuffer: shared memory, not sent by value`,
     }
-    return null
   }
   if (name === 'Map' && tag === 'Map') {
     let i = 0
@@ -182,8 +189,12 @@ function walkObject(v: object, carry: Carry, seen: Set<object>, open: Set<object
   return { path: [], detail: `a live ${name ?? tag}` }
 }
 
-function walkRecord(
-  v: Record<string, unknown>,
+/** A plain object's or an array's own properties: an array's items,
+ *  and any other property it has, which structured clone carries and
+ *  the encoding drops. */
+function walkKeys(
+  v: object,
+  array: boolean,
   carry: Carry,
   seen: Set<object>,
   open: Set<object>,
@@ -194,16 +205,33 @@ function walkRecord(
     if (typeof key === 'symbol') {
       return { path: [], detail: `a symbol key (${String(key)}), which doesn't cross` }
     }
+    const index = array && isIndex(key)
+    const at = index ? `[${key}]` : segment(key)
     if (desc.get !== undefined || desc.set !== undefined) {
-      return { path: [segment(key)], detail: 'a live getter' }
+      return { path: [at], detail: 'a live getter' }
+    }
+    if (carry === 'store' && array && !index) {
+      return {
+        path: [],
+        detail: `an array with a property ${JSON.stringify(key)}, which isn't stored`,
+      }
     }
     if (carry === 'store' && key === '__proto__') {
       return { path: [], detail: "a key named __proto__, which isn't stored as itself" }
     }
     const found = walk(desc.value, carry, seen, open)
-    if (found !== null) return inside(found, segment(key))
+    if (found !== null) return inside(found, at)
   }
   return null
+}
+
+/** An array index, as a property key: a canonical integer below 2^32 - 1. */
+function isIndex(key: string): boolean {
+  return /^(?:0|[1-9]\d*)$/.test(key) && Number(key) < 4_294_967_295
+}
+
+function isShared(buffer: unknown): boolean {
+  return Object.prototype.toString.call(buffer) === '[object SharedArrayBuffer]'
 }
 
 function inside(found: Found, at: string): Found {

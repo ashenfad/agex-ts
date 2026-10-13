@@ -23,11 +23,15 @@
  *     matching closing quote
  *   - closing `'` or `"` (must match the opener via backreference)
  *
- * The `(?<!\\)` lookbehind prevents matching a quote that's itself
- * escaped (e.g. inside an outer quoted span). The `s` flag lets `.`
+ * A quote opens only after an even run of backslashes (none
+ * included): in `\\'x'` the backslashes escape each other and the
+ * quote still opens, while `\\\'` is an escaped quote. The run is
+ * matched from its start (`(?<!\\)`), so its parity is counted whole,
+ * and it's kept outside the mask. The `s` flag lets `.`
  * span newlines so heredoc-style multi-line quotes round-trip.
  */
-const QUOTE_RX = /(?<!\\)(?<quote>["'])(?<content>(?:\\.|(?!\k<quote>).)*)\k<quote>/gs
+const QUOTE_RX =
+  /(?<!\\)(?<escapes>(?:\\\\)*)(?<quote>["'])(?<content>(?:\\.|(?!\k<quote>).)*)\k<quote>/gs
 
 export interface MaskResult {
   /** Text with every quoted span replaced by a unique placeholder. */
@@ -40,10 +44,10 @@ export function maskQuotes(text: string): MaskResult {
   const map = new Map<string, string>()
   const session = randomHex(8)
   let counter = 0
-  const masked = text.replace(QUOTE_RX, (match) => {
+  const masked = text.replace(QUOTE_RX, (match, escapes: string) => {
     const token = `__Q_${session}_${counter++}__`
-    map.set(token, match)
-    return token
+    map.set(token, match.slice(escapes.length))
+    return escapes + token
   })
   return { masked, map }
 }

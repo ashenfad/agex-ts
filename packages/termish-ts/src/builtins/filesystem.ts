@@ -339,18 +339,24 @@ export const mv: CommandHandler = async (ctx) => {
     const target = dstIsDir ? joinPath(dstNormalized, pathBasename(src.replace(/\/$/, ''))) : dstArg
     // Reject "move into self" symmetric with cp's check — would be
     // unrecoverable (rename would shuffle the tree partially).
-    if (dstIsDir) {
-      const srcAbs = resolve(src, ctx.fs.getcwd())
-      const targetAbs = resolve(target, ctx.fs.getcwd())
-      if (targetAbs === srcAbs || targetAbs.startsWith(`${srcAbs}/`)) {
-        throw new TerminalError(`mv: cannot move '${src}' to a subdirectory of itself, '${target}'`)
-      }
+    const srcAbs = resolve(src, ctx.fs.getcwd())
+    const targetAbs = resolve(target, ctx.fs.getcwd())
+    if ((dstIsDir && targetAbs === srcAbs) || targetAbs.startsWith(`${srcAbs}/`)) {
+      throw new TerminalError(`mv: cannot move '${src}' to a subdirectory of itself, '${target}'`)
     }
     if (noClobber && (await ctx.fs.exists(target))) continue
     try {
       await ctx.fs.rename(src, target)
     } catch (e) {
-      throw new TerminalError(`mv: cannot stat '${src}': ${describeError(e)}`)
+      if (!(await ctx.fs.exists(src))) {
+        throw new TerminalError(`mv: cannot stat '${src}': ${describeError(e)}`)
+      }
+      if ((await ctx.fs.isDir(src)) && (await ctx.fs.isFile(target))) {
+        throw new TerminalError(
+          `mv: cannot overwrite non-directory '${target}' with directory '${src}'`,
+        )
+      }
+      throw new TerminalError(`mv: cannot move '${src}' to '${target}': ${describeError(e)}`)
     }
   }
 }

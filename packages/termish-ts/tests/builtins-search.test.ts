@@ -328,3 +328,54 @@ describe('find — depth', () => {
     expect(out.includes('/p/a/b/z')).toBe(false)
   })
 })
+
+describe('grep -r — batched reads', () => {
+  /** A MemoryFS that counts its reads. */
+  class Counting extends MemoryFS {
+    reads = 0
+    batches: number[] = []
+    keyed: ((k: string) => string) | null = null
+    override async read(path: string): Promise<Uint8Array> {
+      this.reads++
+      return super.read(path)
+    }
+    override async readMany(paths: readonly string[]): Promise<Map<string, Uint8Array>> {
+      this.batches.push(paths.length)
+      const found = await super.readMany(paths)
+      const keyed = this.keyed
+      return keyed === null ? found : new Map([...found].map(([k, v]) => [keyed(k), v]))
+    }
+  }
+
+  async function tree(fs: MemoryFS, files: number): Promise<void> {
+    for (let i = 0; i < files; i++) {
+      const dir = `/t/d${i % 10}`
+      if (!(await fs.isDir(dir))) await fs.mkdir(dir, { parents: true })
+      await fs.write(`${dir}/f${i}.txt`, bytes(i === 7 ? 'needle\n' : 'hay\n'))
+    }
+  }
+
+  it('reads a tree in batches, with no read per file', async () => {
+    const fs = new Counting()
+    await tree(fs, 300)
+    expect(await execute('grep -r needle /t', fs)).toBe('/t/d7/f7.txt:needle\n')
+    expect(fs.batches).toEqual([256, 44])
+    expect(fs.reads).toBe(0)
+  })
+
+  it('reads file by file when a batch is keyed otherwise', async () => {
+    const fs = new Counting()
+    await tree(fs, 12)
+    fs.keyed = (k) => `/elsewhere${k}`
+    expect(await execute('grep -rl needle /t', fs)).toBe('/t/d7/f7.txt\n')
+    expect(fs.reads).toBe(12)
+  })
+
+  it("names a missing file's error, batched or not", async () => {
+    const fs = new Counting()
+    await fs.write('/a', bytes('needle\n'))
+    await expect(execute('grep needle /a /missing', fs)).rejects.toThrow(
+      'grep: /missing: No such file or directory',
+    )
+  })
+})

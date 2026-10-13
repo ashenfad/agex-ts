@@ -434,6 +434,50 @@ export const fsConformanceCases: readonly FsConformanceCase[] = Object.freeze([
   check('stat', 'throws on a missing path', async (fs) => {
     await expectRejects('stat', 'a path that does not exist', () => fs.stat('/nope'))
   }),
+
+  // readMany, optional: checked when the filesystem has it
+  check(
+    'readMany',
+    'files map to their bytes; a directory and a missing path are left out',
+    async (fs) => {
+      if (fs.readMany === undefined) return
+      await fs.mkdir('/batch/sub', { parents: true })
+      await fs.write('/batch/one.txt', bytes('1'))
+      await fs.write('/batch/sub/two.txt', bytes('22'))
+      const found = await fs.readMany([
+        '/batch/one.txt',
+        '/batch/sub',
+        '/batch/sub/two.txt',
+        '/batch/nope',
+      ])
+      expectEqual('readMany', 'the files it found', [...found.keys()].sort(), [
+        '/batch/one.txt',
+        '/batch/sub/two.txt',
+      ])
+      expectText('readMany', 'a file', found.get('/batch/one.txt') as Uint8Array, '1')
+      expectText('readMany', 'a nested file', found.get('/batch/sub/two.txt') as Uint8Array, '22')
+    },
+  ),
+  check('readMany', 'relative paths are keyed exactly as given', async (fs) => {
+    if (fs.readMany === undefined) return
+    await fs.mkdir('/batch/sub', { parents: true })
+    await fs.write('/batch/one.txt', bytes('1'))
+    await fs.write('/batch/sub/two.txt', bytes('22'))
+    await fs.chdir('/batch')
+    // A caller looks its own paths up in the answer: a relative path
+    // that came back absolute would read as a missing file.
+    const found = await fs.readMany(['one.txt', './sub/two.txt', '/batch/one.txt'])
+    expectEqual('readMany', 'the keys', [...found.keys()].sort(), [
+      './sub/two.txt',
+      '/batch/one.txt',
+      'one.txt',
+    ])
+    expectText('readMany', 'a relative path', found.get('./sub/two.txt') as Uint8Array, '22')
+  }),
+  check('readMany', 'no paths, no files', async (fs) => {
+    if (fs.readMany === undefined) return
+    expectEqual('readMany', 'an empty batch', (await fs.readMany([])).size, 0)
+  }),
 ])
 
 /**

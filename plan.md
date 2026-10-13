@@ -322,6 +322,11 @@ nontainer's semantics for a serverless studio. In order:
 9. **W7. Compaction's record:** the `__compaction__/` plane and its
    rules, so any loop's folds rewind and fork alike.
 
+10. **W8. Skills,** after `nontainer.skills` (decided with the agex-ts
+   plan, before A2): installed skills as workspace files, the profile's
+   mounted read-only at `<root>/skills/<name>`, and the catalog in
+   `toolInstructions`.
+
 **Exit:** the world package runs nontainer's harness corpus (the tiers
 it covers) from the generated JSON, and its own suite on memory and idb.
 Met 2026-10-13: the reference harness passes every scenario, tiers 0

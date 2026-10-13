@@ -346,7 +346,7 @@ describe('descriptions', () => {
     expect(code).toContain('stops after 12s')
     expect(code).toContain("secret('TOKEN')")
     expect(code).toContain('CODE PRIMER.\n\nMake ONE call per turn')
-    expect(toolInstructions(ws)).toContain('every mutating call is committed')
+    expect(await toolInstructions(ws)).toContain('every mutating call is committed')
     await ws.close()
   })
 })

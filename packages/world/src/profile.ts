@@ -9,6 +9,7 @@ import type { CommandHandler } from '@agex-ts/termish'
 import type { StandardSchemaV1 } from '@standard-schema/spec'
 import { InvalidNameError } from './errors'
 import { type SecretSpec, type Secrets, checkSecrets, secretRef } from './secrets'
+import { type SkillSource, skillName } from './skills'
 import { isSchema } from './values'
 import type { Workspace } from './workspace'
 
@@ -212,6 +213,13 @@ export interface Profile {
    *  theirs replaces it). */
   readonly commands?: Readonly<Record<string, HostCommand>>
   readonly code?: CodeSettings
+  /**
+   * Skills mounted read-only at `<root>/skills/<name>` (see `skills`):
+   * the embedder's, never the agent's to change, and not files of the
+   * session, so no commit carries them. Each is a `SKILL.md` text, or
+   * its files.
+   */
+  readonly skills?: readonly SkillSource[]
 }
 
 /** Names code already has, and words JavaScript reserves. */
@@ -270,6 +278,12 @@ export function checkProfile(profile: Profile): Profile {
     ) {
       throw new TypeError(`command ${name}: a handler or a commandFactory`)
     }
+  }
+  const skills = new Set<string>()
+  for (const skill of profile.skills ?? []) {
+    const name = skillName(skill)
+    if (skills.has(name)) throw new InvalidNameError(`two skills are named '${name}'`)
+    skills.add(name)
   }
   return profile
 }

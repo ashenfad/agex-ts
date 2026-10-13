@@ -214,3 +214,13 @@ export {
   summaryRequest,
   transcript,
 } from './compaction'
+export {
+  SKILLS_DIR,
+  type SkillFiles,
+  type SkillSource,
+  frontmatter,
+  installSkill,
+  skillCatalog,
+  skillName,
+  skillsRoot,
+} from './skills'

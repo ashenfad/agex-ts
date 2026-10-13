@@ -80,6 +80,7 @@ import {
 import { Queue } from './queue'
 import { repr } from './repr'
 import { Secrets } from './secrets'
+import { skillFS, skillName, skillsRoot } from './skills'
 import type { Store } from './store'
 import { Turn, TurnInProgressError, type TurnOptions, statusOf } from './turns'
 import { VIEW_KEY, ViewFS, encodeView, normalizeView, parseView } from './views'
@@ -387,6 +388,7 @@ export class Workspace {
     wt: Worktree<unknown>,
   ): Promise<Workspace> {
     const ws = new Workspace(store, session, settings, { wt })
+    await ws.#mountSkills()
     await ws.#init()
     return ws
   }
@@ -400,6 +402,7 @@ export class Workspace {
   ): Promise<Workspace> {
     const snapshot = await store.repo.snapshot({ commit })
     const ws = new Workspace(store, session, settings, { snapshot })
+    await ws.#mountSkills()
     await ws.#loadState()
     return ws
   }
@@ -1246,6 +1249,19 @@ export class Workspace {
         throw new CommitConflictError(this.session, e.keys, { cause: e })
       throw e
     }
+  }
+
+  /** The profile's skills, each mounted read-only at
+   *  `<root>/skills/<name>`. */
+  async #mountSkills(): Promise<void> {
+    for (const skill of this.#settings.profile.skills ?? []) {
+      this.#top.attach(`${skillsRoot(this)}/${skillName(skill)}`, await skillFS(skill))
+    }
+  }
+
+  /** The names of the skills the profile mounts. */
+  get mountedSkills(): string[] {
+    return (this.#settings.profile.skills ?? []).map(skillName).sort()
   }
 
   async #init(): Promise<void> {

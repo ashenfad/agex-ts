@@ -12,7 +12,7 @@
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { Memory } from '@agex-ts/kvgit/backends/memory'
-import { beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   type Answer,
   type AnswerStatus,
@@ -50,6 +50,30 @@ beforeEach(async () => {
   await parent.files.write('/workspace/main.py', "print('rates')\n")
   await parent.index.commit('seed')
 })
+
+afterEach(() => {
+  vi.restoreAllMocks()
+})
+
+/** A runner that commits part of its work and leaves the rest: the
+ *  delegate whose remainder is committed for it. */
+const halfDone: SessionRunner = {
+  async run(session) {
+    const child = await store.open(session)
+    await child.files.write('/workspace/report.md', 'polished\n')
+    await child.index.commit('the part I finished')
+    await child.files.write('/workspace/notes.md', 'wip\n')
+    await child.close()
+    return 'half done'
+  },
+}
+
+const remainders = async (session: string) => {
+  const child = await store.open(session)
+  const log = await child.index.log()
+  await child.close()
+  return log.filter((c) => c.info?.committedFor !== undefined).length
+}
 
 /** A runner that opens the child, writes to it, and answers. */
 class Scripted implements SessionRunner {
@@ -526,6 +550,84 @@ describe('cancel, keep and close', () => {
     const kept = sessions.keep(answer.branch as string)
     expect(kept).toMatchObject({ kept: true, touched: 5_000 })
     await sessions.close()
+  })
+
+  it('a cancel while the answer is landing commits nothing for the delegate', async () => {
+    const sessions = new Sessions(parent, halfDone)
+    const exists = store.exists.bind(store)
+    let cancelled: string | null = null
+    vi.spyOn(store, 'exists').mockImplementation(async (name) => {
+      const out = await exists(name)
+      // the landing has begun (the fork looked before the job was
+      // asked): its first look at the branch
+      const asked = sessions.list().some((j) => j.name === name)
+      if (name === 'analyst.half' && asked && cancelled === null) {
+        cancelled = sessions.cancel(name).status
+      }
+      return out
+    })
+    const job = await sessions.ask('polish', { name: 'half' })
+    await until(() => cancelled !== null)
+    await sessions.close()
+    expect(cancelled).toBe('cancelled')
+    expect(() => sessions.result(job.name)).toThrow(/was cancelled/)
+    expect(await remainders(job.name)).toBe(0)
+  })
+
+  it('a cancel while the remainder is being committed finds the job answering', async () => {
+    const sessions = new Sessions(parent, halfDone)
+    const open = store.open.bind(store)
+    let seen: string | null = null
+    vi.spyOn(store, 'open').mockImplementation(async (name, opts) => {
+      const ws = await open(name, opts)
+      if (name !== 'analyst.half' || opts === undefined) return ws
+      // the helper's own landing handle: cancel as its commit starts
+      const commit = ws.index.commit.bind(ws.index)
+      ws.index.commit = async (...args: Parameters<typeof commit>) => {
+        seen = sessions.cancel(name).status
+        expect(await runAction(sessions, { action: 'cancel', name: 'half' })).toBe(
+          'analyst.half is already answering: its work is being landed, so there is nothing to stop.',
+        )
+        return commit(...args)
+      }
+      return ws
+    })
+    const job = await sessions.ask('polish', { name: 'half' })
+    await sessions.close()
+    expect(seen).toBe('running')
+    expect(sessions.result(job.name).status).toBe('answered')
+    expect(await remainders(job.name)).toBe(1)
+  })
+
+  it("close waits for an earlier run's onAnswer, past a resume of its branch", async () => {
+    let release = () => {}
+    const hook = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    let calls = 0
+    let heardFirst = false
+    const sessions = new Sessions(parent, new Scripted({}), {
+      async onAnswer() {
+        calls += 1
+        if (calls === 1) {
+          await hook
+          heardFirst = true
+        }
+      },
+    })
+    await sessions.ask('one', { name: 'a' })
+    await until(() => sessions.list()[0]?.status === 'answered')
+    // the first run's hook is still running; its branch is already free
+    await sessions.ask('two', { resume: 'a', wait: true })
+    let closed = false
+    const closing = sessions.close().then(() => {
+      closed = true
+    })
+    await settle()
+    expect(closed).toBe(false)
+    release()
+    await closing
+    expect(heardFirst).toBe(true)
   })
 
   it('close waits for the runs, and keeps the branches', async () => {

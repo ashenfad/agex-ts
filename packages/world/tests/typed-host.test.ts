@@ -7,7 +7,6 @@
 
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { Memory } from '@agex-ts/kvgit/backends/memory'
 import { beforeAll, describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import {
@@ -19,6 +18,7 @@ import {
   typedHost,
   withCall,
 } from '../src/index'
+import { newKV } from './backends'
 
 const WORKER = new URL('../dist/worker.node.js', import.meta.url)
 
@@ -29,7 +29,7 @@ beforeAll(() => {
 })
 
 async function open(profile: Profile = {}): Promise<Workspace> {
-  const store = await Store.open(new Memory())
+  const store = await Store.open(await newKV())
   return store.open('s', {
     profile: { ...profile, code: { worker: { target: 'node', url: WORKER } } },
   })
@@ -188,7 +188,7 @@ describe('a typed host object', () => {
   })
 
   it('is refused when its contract names a method it lacks, or holds no schema', async () => {
-    const store = await Store.open(new Memory())
+    const store = await Store.open(await newKV())
     await expect(
       store.open('s', { profile: { hostObjects: { c: typedHost(new Catalog(), { nope: {} }) } } }),
     ).rejects.toThrow('host object c: its contract names nope, not among its methods')

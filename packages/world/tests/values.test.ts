@@ -3,7 +3,6 @@
  * checks against a declared type (a Standard Schema; zod here).
  */
 
-import { Memory } from '@agex-ts/kvgit/backends/memory'
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import {
@@ -21,6 +20,7 @@ import {
   isSchema,
   jsonSchemaOf,
 } from '../src/index'
+import { newKV } from './backends'
 
 class Client {
   ping(): string {
@@ -170,7 +170,7 @@ describe('encode and decode', () => {
   })
 
   it('store a value in a session as bytes', async () => {
-    const ws = await (await Store.open(new Memory())).open('s')
+    const ws = await (await Store.open(await newKV())).open('s')
     await ws.files.write('value.bin', encode(new Map([['k', new Set([1])]])))
     expect(decode(await ws.files.read('value.bin'))).toEqual(new Map([['k', new Set([1])]]))
     await ws.close()

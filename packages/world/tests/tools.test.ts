@@ -1,6 +1,5 @@
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { Memory } from '@agex-ts/kvgit/backends/memory'
 import type { CommandContext } from '@agex-ts/termish'
 import { beforeAll, describe, expect, it } from 'vitest'
 import {
@@ -14,6 +13,7 @@ import {
   toolInstructions,
   worldTools,
 } from '../src/index'
+import { newKV } from './backends'
 
 const WORKER = new URL('../dist/worker.node.js', import.meta.url)
 
@@ -24,7 +24,7 @@ beforeAll(() => {
 })
 
 async function open(profile: Profile = {}): Promise<Workspace> {
-  const store = await Store.open(new Memory())
+  const store = await Store.open(await newKV())
   return store.open('s', {
     profile: { ...profile, code: { worker: { target: 'node', url: WORKER }, ...profile.code } },
   })

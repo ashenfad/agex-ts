@@ -3,7 +3,6 @@
  * turn, settled when it ends.
  */
 
-import { Memory } from '@agex-ts/kvgit/backends/memory'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   Inbox,
@@ -15,8 +14,9 @@ import {
   renderNotes,
   splitNotes,
 } from '../src/index'
+import { newKV } from './backends'
 
-const open = async (): Promise<Workspace> => (await Store.open(new Memory())).open('s')
+const open = async (): Promise<Workspace> => (await Store.open(await newKV())).open('s')
 
 afterEach(() => {
   vi.restoreAllMocks()

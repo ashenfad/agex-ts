@@ -9,9 +9,9 @@
  */
 
 import { readFileSync, readdirSync } from 'node:fs'
-import { Memory } from '@agex-ts/kvgit/backends/memory'
 import { describe, expect, it } from 'vitest'
 import { Store, type Workspace, wsGit } from '../src/index'
+import { newKV } from './backends'
 
 interface Step {
   readonly kind: 'run' | 'open' | 'write' | 'tag' | 'delete'
@@ -95,7 +95,7 @@ class Names {
 
 /** Replay a script; the steps whose output differs, with both. */
 async function replay(script: Script): Promise<Map<string, string>> {
-  const store = await Store.open(new Memory())
+  const store = await Store.open(await newKV())
   const sessions = new Map<string, Workspace>()
   const names = new Names()
   const session = async (

@@ -5,11 +5,27 @@ import { Store } from '../src/index'
 
 let dbCount = 0
 
-/** Each backend the suite runs on: a fresh, empty KV store per call. */
-export const BACKENDS: ReadonlyArray<readonly [string, () => Promise<KVStore>]> = [
+const ALL: ReadonlyArray<readonly [string, () => Promise<KVStore>]> = [
   ['memory', async () => new Memory()],
   ['idb', async () => IndexedDB.open({ dbName: `world-test-${++dbCount}-${Date.now()}` })],
 ]
+
+/** The backend this run is on (`WORLD_BACKEND`: `memory`, the default,
+ *  or `idb`). `vitest.workspace.ts` runs the suite once on each. */
+export const BACKEND = process.env.WORLD_BACKEND ?? 'memory'
+
+if (!ALL.some(([name]) => name === BACKEND)) {
+  throw new Error(`WORLD_BACKEND=${BACKEND}: the suite runs on memory or idb`)
+}
+
+/** The backends this run covers, for a test written over them: a fresh,
+ *  empty KV store per call. */
+export const BACKENDS = ALL.filter(([name]) => name === BACKEND)
+
+/** A fresh, empty KV store on this run's backend. */
+export function newKV(): Promise<KVStore> {
+  return (BACKENDS[0] as (typeof ALL)[number])[1]()
+}
 
 export const enc = new TextEncoder()
 export const dec = new TextDecoder()

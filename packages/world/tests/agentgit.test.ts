@@ -7,7 +7,6 @@
  */
 
 import { Worktree } from '@agex-ts/kvgit'
-import { Memory } from '@agex-ts/kvgit/backends/memory'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { parseBlob } from '../src/agentgit'
 import {
@@ -20,12 +19,13 @@ import {
   Store,
   type Workspace,
 } from '../src/index'
+import { newKV } from './backends'
 
 const enc = new TextEncoder()
 const dec = new TextDecoder()
 
 async function open(store?: Store, opts: { autocommit?: boolean } = {}): Promise<Workspace> {
-  return (store ?? (await Store.open(new Memory()))).open('s', opts)
+  return (store ?? (await Store.open(await newKV()))).open('s', opts)
 }
 
 /** Write a file without committing it (as code in the kernel does). */
@@ -241,7 +241,7 @@ describe('an agent commit', () => {
   })
 
   it('commits itself, and its bookkeeping, without autocommit', async () => {
-    const store = await Store.open(new Memory())
+    const store = await Store.open(await newKV())
     const ws = await open(store, { autocommit: false })
     await put(ws, '/workspace/a.py', 'A = 1\n')
     await put(ws, '/workspace/b.py', 'B = 1\n')
@@ -286,7 +286,7 @@ describe('an agent commit', () => {
   })
 
   it('lands its bookkeeping beside a concurrent writer', async () => {
-    const store = await Store.open(new Memory())
+    const store = await Store.open(await newKV())
     const ws = await open(store)
     const other = await open(store)
     await put(ws, '/workspace/a.py', 'A = 1\n')

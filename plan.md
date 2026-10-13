@@ -1,7 +1,8 @@
 # agex-ts rebuild: plan
 
-Status: under way, 2026-10-13. F1 (termish-ts) and F2 (kvgit-ts) are
-done; F3 (the world package) is under way, at W1.
+Status: under way, 2026-10-13. The foundation is done: F1
+(termish-ts), F2 (kvgit-ts) and F3 (the world package). Next is
+agex-ts's own plan, written against agex's shape corpus.
 
 The Python side was rebuilt as three layers: kvgit (versioned storage),
 nontainer (the world: workspace, kernel, turn, delegation) and agex (the
@@ -322,6 +323,11 @@ nontainer's semantics for a serverless studio. In order:
 
 **Exit:** the world package runs nontainer's harness corpus (the tiers
 it covers) from the generated JSON, and its own suite on memory and idb.
+Met 2026-10-13: the reference harness passes every scenario, tiers 0
+to 5, and the suite runs whole on each backend (`vitest.workspace.ts`).
+The steps were W1 #79, W2 #80, W3 #81, W4 #82, W5 #83, W6a #84, G1
+#85, G2 #86, G3 #87 (with nontainer#251's ws-git corpus), W6b #88 and
+W7 #89; termish 0.2.3's fixes came after, in #90.
 
 **Decided for the world (2026-10-13):**
 - **nontainer's semantics, not its bytes.** Only kvgit's format is

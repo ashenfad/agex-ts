@@ -15,10 +15,14 @@ import {
   check,
   runScenario,
 } from '../src/conformance/index'
-import { Inbox, type TurnEvent, type Workspace, summaryMessage } from '../src/index'
+import { Inbox, Store, type TurnEvent, type Workspace, summaryMessage } from '../src/index'
+import { newKV } from './backends'
 import { type Message, ReferenceSession, referenceHarness } from './reference-harness'
 
 const covered = SCENARIOS.filter((s) => applies(s, referenceHarness))
+
+/** Each scenario's store, on this run's backend. */
+const onBackend = { store: async () => Store.open(await newKV()) }
 
 function byName(name: string): Scenario {
   const scenario = SCENARIOS.find((s) => s.name === name)
@@ -35,7 +39,7 @@ describe("nontainer's harness corpus on the world", () => {
 
   for (const scenario of covered) {
     it(scenario.name, async () => {
-      const failures = check(scenario, await runScenario(scenario, referenceHarness))
+      const failures = check(scenario, await runScenario(scenario, referenceHarness, onBackend))
       expect(Object.fromEntries(failures)).toEqual({})
     })
   }
@@ -60,7 +64,7 @@ describe('the checks', () => {
     }
     const scenario = SCENARIOS.find((s) => s.name === 'a-cancel-after-a-tool-keeps-the-run')
     if (scenario === undefined) throw new Error('missing scenario')
-    const failures = check(scenario, await runScenario(scenario, forgetful))
+    const failures = check(scenario, await runScenario(scenario, forgetful, onBackend))
     expect([...failures.keys()].sort()).toEqual(['commits', 'runs'])
   })
 
@@ -83,7 +87,7 @@ describe('the checks', () => {
     }
     const scenario = SCENARIOS.find((s) => s.name === 'a-note-rides-the-next-tool-result-once')
     if (scenario === undefined) throw new Error('missing scenario')
-    const failures = check(scenario, await runScenario(scenario, deaf))
+    const failures = check(scenario, await runScenario(scenario, deaf, onBackend))
     expect([...failures.keys()].sort()).toEqual(['inbox', 'turn1.events'])
   })
 
@@ -105,7 +109,7 @@ describe('the checks', () => {
     }
     const scenario = SCENARIOS.find((s) => s.name === 'a-full-fork-carries-the-conversation')
     if (scenario === undefined) throw new Error('missing scenario')
-    const failures = check(scenario, await runScenario(scenario, hasty))
+    const failures = check(scenario, await runScenario(scenario, hasty, onBackend))
     expect([...failures.keys()]).toEqual(['turn1.script'])
   })
 
@@ -124,7 +128,9 @@ describe('the checks', () => {
       },
     }
     const scenario = byName('a-request-over-budget-folds-the-earlier-turns')
-    expect(check(scenario, await runScenario(scenario, storing)).has('summary')).toBe(true)
+    expect(check(scenario, await runScenario(scenario, storing, onBackend)).has('summary')).toBe(
+      true,
+    )
   })
 
   it("can't check a fold when the harness passes nothing it sent", async () => {
@@ -136,7 +142,7 @@ describe('the checks', () => {
       },
     }
     const scenario = byName('a-request-over-budget-folds-the-earlier-turns')
-    const failures = check(scenario, await runScenario(scenario, silent))
+    const failures = check(scenario, await runScenario(scenario, silent, onBackend))
     expect([...failures.keys()].sort()).toEqual(['turn1.folded', 'turn2.folded'])
     expect(failures.get('turn2.folded')).toMatch(/didn't pass/)
   })
@@ -164,7 +170,7 @@ describe('the checks', () => {
       },
     }
     const scenario = byName('a-second-fold-takes-in-the-first')
-    const failures = check(scenario, await runScenario(scenario, stale))
+    const failures = check(scenario, await runScenario(scenario, stale, onBackend))
     expect([...failures.keys()]).toEqual(['turn3.folded'])
     expect(failures.get('turn3.folded')).toMatch(/fold in force/)
   })

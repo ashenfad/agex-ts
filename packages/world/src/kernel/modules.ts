@@ -145,7 +145,10 @@ export async function prepareCode(
     } else {
       replacement = rewriteAsUrlLoad(imp.binding, imp.path)
     }
-    out = out.slice(0, imp.start) + replacement + out.slice(imp.end)
+    out =
+      out.slice(0, imp.start) +
+      keepLines(out.slice(imp.start, imp.end), replacement) +
+      out.slice(imp.end)
   }
   return { code: out, modules }
 }
@@ -185,13 +188,19 @@ function compileHelperBody(stripped: string, sourcePath: string, dirOfHelper: st
     if (isWorldPath(imp.path)) {
       const resolved = resolveVfsPath(imp.path, dirOfHelper)
       const replacement = rewriteAsLookup(imp.binding, resolved)
-      body = body.slice(0, imp.start) + replacement + body.slice(imp.end)
+      body =
+        body.slice(0, imp.start) +
+        keepLines(body.slice(imp.start, imp.end), replacement) +
+        body.slice(imp.end)
       continue
     }
     const replacement = REGISTERED.has(imp.path)
       ? rewriteAsRegisteredAccess(imp.binding, imp.path, true)
       : rewriteAsUrlLoad(imp.binding, imp.path)
-    body = body.slice(0, imp.start) + replacement + body.slice(imp.end)
+    body =
+      body.slice(0, imp.start) +
+      keepLines(body.slice(imp.start, imp.end), replacement) +
+      body.slice(imp.end)
   }
   const exportAssignments = exportNames
     .map((n) => `__exports[${JSON.stringify(n)}] = ${n};`)
@@ -227,7 +236,7 @@ function rewriteHelperReexports(code: string, dirOfHelper: string): string {
   // semicolon and the lookbehind matches).
   out = out.replace(
     /(?<=^|[\n;])[ \t]*export\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"][ \t]*;?/gm,
-    (_m, inside: string, path: string) => {
+    (m: string, inside: string, path: string) => {
       const from = source(path)
       const lines: string[] = []
       for (const part of inside.split(',')) {
@@ -240,7 +249,7 @@ function rewriteHelperReexports(code: string, dirOfHelper: string): string {
           `__exports[${JSON.stringify(exportName)}] = ${from}[${JSON.stringify(sourceName)}];`,
         )
       }
-      return lines.join('\n')
+      return keepLines(m, lines.join(' '))
     },
   )
   // export * as NS from '/path' — bind the whole module's exports
@@ -248,12 +257,13 @@ function rewriteHelperReexports(code: string, dirOfHelper: string): string {
   // pattern so the more specific match wins.
   out = out.replace(
     /(?<=^|[\n;])[ \t]*export\s*\*\s+as\s+([A-Za-z_$][\w$]*)\s+from\s*['"]([^'"]+)['"][ \t]*;?/gm,
-    (_m, name: string, path: string) => `__exports[${JSON.stringify(name)}] = ${source(path)};`,
+    (m: string, name: string, path: string) =>
+      keepLines(m, `__exports[${JSON.stringify(name)}] = ${source(path)};`),
   )
   // export * from '/path' — copy all exports onto __exports
   out = out.replace(
     /(?<=^|[\n;])[ \t]*export\s*\*\s*from\s*['"]([^'"]+)['"][ \t]*;?/gm,
-    (_m, path: string) => `Object.assign(__exports, ${source(path)});`,
+    (m: string, path: string) => keepLines(m, `Object.assign(__exports, ${source(path)});`),
   )
   return out
 }
@@ -311,25 +321,28 @@ function rewriteHelperExports(code: string): { code: string; exportNames: string
   )
 
   // export { a, b as c } — track names + aliases.
-  out = out.replace(/(?<=^|[\n;])[ \t]*export\s*\{([^}]*)\}[ \t]*;?/gm, (_m, inside: string) => {
-    const lines: string[] = []
-    for (const part of inside.split(',')) {
-      const t = part.trim()
-      if (t.length === 0) continue
-      const aliased = t.match(/^([A-Za-z_$][\w$]*)\s+as\s+([A-Za-z_$][\w$]*)$/)
-      if (aliased !== null) {
-        const local = aliased[1] as string
-        const exported = aliased[2] as string
-        // Assigned here from its local name: `exported` names no local
-        // binding, so the trailing block mustn't assign it.
-        lines.push(`__exports[${JSON.stringify(exported)}] = ${local};`)
-      } else if (/^[A-Za-z_$][\w$]*$/.test(t)) {
-        if (!exportNames.includes(t)) exportNames.push(t)
-        // Will be assigned by the trailing __exports block.
+  out = out.replace(
+    /(?<=^|[\n;])[ \t]*export\s*\{([^}]*)\}[ \t]*;?/gm,
+    (m: string, inside: string) => {
+      const lines: string[] = []
+      for (const part of inside.split(',')) {
+        const t = part.trim()
+        if (t.length === 0) continue
+        const aliased = t.match(/^([A-Za-z_$][\w$]*)\s+as\s+([A-Za-z_$][\w$]*)$/)
+        if (aliased !== null) {
+          const local = aliased[1] as string
+          const exported = aliased[2] as string
+          // Assigned here from its local name: `exported` names no local
+          // binding, so the trailing block mustn't assign it.
+          lines.push(`__exports[${JSON.stringify(exported)}] = ${local};`)
+        } else if (/^[A-Za-z_$][\w$]*$/.test(t)) {
+          if (!exportNames.includes(t)) exportNames.push(t)
+          // Will be assigned by the trailing __exports block.
+        }
       }
-    }
-    return lines.join('\n')
-  })
+      return keepLines(m, lines.join(' '))
+    },
+  )
 
   return { code: out, exportNames }
 }
@@ -654,6 +667,14 @@ function rewriteAsLookup(binding: ImportBinding, resolvedPath: string): string {
       return `const { default: ${binding.defaultLocal}, ${named} } = __modules[${key}];`
     }
   }
+}
+
+/** `replacement` on one line, then as many line breaks as `original`
+ *  had, so the lines after a rewritten statement keep their numbers
+ *  (stack traces name them). */
+function keepLines(original: string, replacement: string): string {
+  const breaks = original.split('\n').length - 1
+  return replacement.replace(/\n/g, ' ') + '\n'.repeat(breaks)
 }
 
 // ---------------------------------------------------------------------------

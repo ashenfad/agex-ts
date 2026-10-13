@@ -45,6 +45,8 @@ export interface RunContext {
   readonly fs: WorldFS
   readonly cache: WorkspaceCache | null
   readonly env: Readonly<Record<string, string>>
+  /** The secrets' names, never their values. */
+  readonly secrets: readonly string[]
   readonly hostObjects: ReadonlyMap<string, object>
   /** Given to host methods declared `withCall`. */
   readonly call: HostCall
@@ -200,6 +202,7 @@ export class Kernel {
           methods: publicMethods(obj),
         })),
         env: ctx.env,
+        secrets: ctx.secrets,
         hasCache: ctx.cache !== null,
         hasResolver: this.#settings.resolve !== undefined,
         routeFetch: this.#settings.routeFetch ?? false,

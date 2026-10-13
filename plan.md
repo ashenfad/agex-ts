@@ -354,9 +354,14 @@ it covers) from the generated JSON, and its own suite on memory and idb.
 - **Results are MCP-shaped:** `toMcpResult` gives text, image and
   resource-link blocks, with `isError` set for a failure the agent can
   act on (nontainer leaves it false).
-- **Secrets:** the shell expands a secret to a reference to itself;
-  only commands made with `commandFactory` receive the values. `curl`
-  fills them in a URL or header and scrubs them from what it gets back.
+- **Secrets:** the shell expands a secret to a reference to itself,
+  and code's `secret('NAME')` gives the same reference. Only the host's
+  own code holds values: commands made with `commandFactory`, host
+  objects made with `hostFactory` (a client built with a key), and the
+  `http` host object, which with `curl` fills references in a URL or
+  header and scrubs echoes from what comes back. A secret given as
+  `{value, origins}` is filled only for those origins and its requests
+  follow no redirect; a plain string is unbound, the host's choice.
 - **Code errors** show the code's own frames at its own line numbers,
   with hints re-keyed to this kernel.
 - **Later:** `test_app` and a module test runner (the studio phase),

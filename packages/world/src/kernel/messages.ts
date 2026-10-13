@@ -47,6 +47,9 @@ export type Host2Worker =
       readonly modules: readonly CompiledModule[]
       readonly hostObjects: readonly HostObjectSurface[]
       readonly env: Readonly<Record<string, string>>
+      /** The profile's secrets' names (never their values), for
+       *  `secret(name)`. */
+      readonly secrets: readonly string[]
       readonly hasCache: boolean
       /** Whether bare imports are resolved by the host. */
       readonly hasResolver: boolean

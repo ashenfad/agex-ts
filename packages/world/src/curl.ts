@@ -4,42 +4,31 @@
  *
  * It takes the flags agents reach for: `-o FILE`, `-L`, `-H 'Name:
  * value'`, `-X METHOD`, `-d DATA` (or `-d @file`), `--json DATA`, `-f`,
- * `-s`/`-S`, `-m SECONDS`. A response past the size cap is refused.
+ * `-s`/`-S`, `-m SECONDS`.
  *
- * **Secrets** are used here and nowhere else: `$NAME` (or `${NAME}`) in
- * the URL or a header is replaced by the profile's secret of that name
- * at the request. The shell expands a secret to a reference to itself,
- * so `-H "Authorization: Bearer $TOKEN"` works quoted either way, and
- * the value never passes through the shell. A secret a text response
- * echoes back is replaced by its reference before the response reaches
- * the transcript or a file.
- *
- * **In a browser,** a server that doesn't allow the page's origin
- * (CORS) fails exactly as a network failure does. `curl` tells them
- * apart by asking again with `mode: 'no-cors'`: an answer means the
- * server is up and CORS is the likely cause.
+ * **Secrets:** `$NAME` (or `${NAME}`) in the URL or a header is filled
+ * with the profile's secret at the request, if the secret may go to
+ * that origin. The shell expands a secret to a reference to itself, so
+ * `-H "Authorization: Bearer $TOKEN"` works quoted either way, and the
+ * value never passes through the shell. The rest (the size cap,
+ * scrubbing an echoed secret, telling CORS from a dead network) is
+ * `request`'s, shared with the `http` host object.
  */
 
 import type { CommandContext, CommandResult } from '@agex-ts/termish'
 import { describeFsError } from '@agex-ts/termish'
+import { DEFAULT_MAX_BYTES, NetError, type NetOptions, type NetResponse, request } from './net'
 import { resolve } from './path'
 import { type CommandFactory, commandFactory } from './profile'
+import type { Secrets } from './secrets'
 
-export interface CurlOptions {
-  /** The fetch to use (default `globalThis.fetch`). */
-  readonly fetch?: typeof globalThis.fetch
-  /** The largest response accepted, in bytes (default 10 MB). */
-  readonly maxBytes?: number
-  /** Seconds a request may take unless `-m` says otherwise (default 60). */
-  readonly timeout?: number
-}
-
-export const DEFAULT_CURL_MAX_BYTES = 10 * 1024 * 1024
-export const DEFAULT_CURL_TIMEOUT = 60
+/** How `curl` fetches: the fetch, the size cap (default 10 MB), and the
+ *  timeout unless `-m` says otherwise (default 60 seconds). */
+export type CurlOptions = NetOptions
 
 /** Make `curl` for a profile's `commands`. */
 export function curlCommand(opts: CurlOptions = {}): CommandFactory {
-  const maxBytes = opts.maxBytes ?? DEFAULT_CURL_MAX_BYTES
+  const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES
   return commandFactory(
     ({ secrets }) =>
       (ctx) =>
@@ -174,33 +163,11 @@ async function readData(ctx: CommandContext, path: string): Promise<string> {
   }
 }
 
-/** `$NAME` and `${NAME}` filled from `secrets`; other names left be. */
-function fill(text: string, secrets: Readonly<Record<string, string>>): string {
-  return text.replace(
-    /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g,
-    (whole, a, b) => {
-      const name = (a ?? b) as string
-      return Object.hasOwn(secrets, name) ? (secrets[name] as string) : whole
-    },
-  )
-}
-
-/** Secrets a text echoes back, replaced by their references. */
-function scrub(text: string, secrets: Readonly<Record<string, string>>): string {
-  let out = text
-  for (const [name, value] of Object.entries(secrets)) {
-    if (value.length >= 4) out = out.split(value).join(`\${${name}}`)
-  }
-  return out
-}
-
 async function curl(
   ctx: CommandContext,
-  secrets: Readonly<Record<string, string>>,
+  secrets: Secrets,
   opts: CurlOptions,
 ): Promise<CommandResult | undefined> {
-  const fetchFn = opts.fetch ?? globalThis.fetch
-  const maxBytes = opts.maxBytes ?? DEFAULT_CURL_MAX_BYTES
   let req: Request
   try {
     req = await parse(ctx)
@@ -210,138 +177,54 @@ async function curl(
   }
   const fail = (code: number, message: string): CommandResult => ({
     exitCode: code,
-    stderr: req.silent && !req.showError ? '' : `(${code}) ${scrub(message, secrets)}`,
+    stderr: req.silent && !req.showError ? '' : `(${code}) ${secrets.scrub(message)}`,
   })
 
-  let url: URL
-  try {
-    const raw = fill(req.url as string, secrets)
-    url = new URL(/^[a-z][a-z0-9+.-]*:/i.test(raw) ? raw : `https://${raw}`)
-  } catch {
-    return fail(3, 'URL rejected: malformed URL')
-  }
-
-  const headers = new Headers()
-  for (const [name, value] of req.headers) headers.append(name, fill(value, secrets))
+  const headers: Array<[string, string]> = [...req.headers]
+  const has = (name: string) => headers.some(([n]) => n.toLowerCase() === name)
   let body: string | undefined
   if (req.json !== null) {
     body = req.json
-    if (!headers.has('content-type')) headers.set('content-type', 'application/json')
-    if (!headers.has('accept')) headers.set('accept', 'application/json')
+    if (!has('content-type')) headers.push(['content-type', 'application/json'])
+    if (!has('accept')) headers.push(['accept', 'application/json'])
   } else if (req.data.length > 0) {
     body = req.data.join('&')
-    if (!headers.has('content-type')) {
-      headers.set('content-type', 'application/x-www-form-urlencoded')
-    }
+    if (!has('content-type')) headers.push(['content-type', 'application/x-www-form-urlencoded'])
   }
-  const method = req.method ?? (body === undefined ? 'GET' : 'POST')
 
-  const seconds = req.maxTime ?? opts.timeout ?? DEFAULT_CURL_TIMEOUT
-  const controller = new AbortController()
-  let timedOut = false
-  const timer = setTimeout(() => {
-    timedOut = true
-    controller.abort()
-  }, seconds * 1000)
-  const onAbort = () => controller.abort()
-  ctx.signal.addEventListener('abort', onAbort)
-
+  let response: NetResponse
   try {
-    let response: Response
-    try {
-      response = await fetchFn(url, {
-        method,
+    response = await request(
+      {
+        url: req.url as string,
+        ...(req.method !== null && { method: req.method }),
         headers,
         ...(body !== undefined && { body }),
-        redirect: req.follow ? 'follow' : 'manual',
-        signal: controller.signal,
-      })
-    } catch {
-      if (timedOut) return fail(28, `Operation timed out after ${seconds} seconds`)
-      if (ctx.signal.aborted) return fail(130, 'interrupted')
-      return fail(...(await diagnose(fetchFn, url, controller.signal)))
-    }
-
-    // Not following a redirect: a browser hides it; nothing to show.
-    if (response.type === 'opaqueredirect') return undefined
-    if (req.fail && response.status >= 400) {
-      return fail(22, `The requested URL returned error: ${response.status}`)
-    }
-
-    const bytes = await readCapped(response, maxBytes)
-    if (bytes === null) return fail(63, `Maximum file size exceeded (${maxBytes} bytes)`)
-    const out = scrubBytes(bytes, secrets)
-    if (req.output !== null) {
-      try {
-        await ctx.fs.write(resolve(req.output, ctx.fs.getcwd()), out)
-      } catch (e) {
-        return fail(23, `Failure writing output to ${req.output}: ${describeFsError(e)}`)
-      }
-      return undefined
-    }
-    ctx.stdout.writeBytes(out)
-    return undefined
+        follow: req.follow,
+        ...(req.maxTime !== null && { timeout: req.maxTime }),
+      },
+      secrets,
+      opts,
+      ctx.signal,
+    )
   } catch (e) {
-    if (timedOut) return fail(28, `Operation timed out after ${seconds} seconds`)
+    if (e instanceof NetError) return fail(e.code, e.message)
     throw e
-  } finally {
-    clearTimeout(timer)
-    ctx.signal.removeEventListener('abort', onAbort)
   }
-}
 
-/** Why a request failed with no response: in a browser, CORS refuses
- *  as a dead network does; a no-cors request tells them apart. */
-async function diagnose(
-  fetchFn: typeof globalThis.fetch,
-  url: URL,
-  signal: AbortSignal,
-): Promise<[number, string]> {
-  try {
-    await fetchFn(url, { mode: 'no-cors', signal })
-    return [
-      7,
-      `${url.host} answered, but its CORS policy doesn't let this page read the response (it must send Access-Control-Allow-Origin for this origin)`,
-    ]
-  } catch {
-    return [6, `Could not reach ${url.host}: the network failed (DNS, TLS, offline, or blocked)`]
+  // A redirect not followed, which the browser hid: nothing to show.
+  if (response.hiddenRedirect) return undefined
+  if (req.fail && response.status >= 400) {
+    return fail(22, `The requested URL returned error: ${response.status}`)
   }
-}
-
-/** The body, or null past `maxBytes`. */
-async function readCapped(response: Response, maxBytes: number): Promise<Uint8Array | null> {
-  if (response.body === null) return new Uint8Array(0)
-  const reader = response.body.getReader()
-  const chunks: Uint8Array[] = []
-  let size = 0
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    size += value.byteLength
-    if (size > maxBytes) {
-      await reader.cancel()
-      return null
+  if (req.output !== null) {
+    try {
+      await ctx.fs.write(resolve(req.output, ctx.fs.getcwd()), response.bytes)
+    } catch (e) {
+      return fail(23, `Failure writing output to ${req.output}: ${describeFsError(e)}`)
     }
-    chunks.push(value)
+    return undefined
   }
-  const out = new Uint8Array(size)
-  let at = 0
-  for (const c of chunks) {
-    out.set(c, at)
-    at += c.byteLength
-  }
-  return out
-}
-
-/** A text body with any echoed secret replaced; other bytes as they are. */
-function scrubBytes(bytes: Uint8Array, secrets: Readonly<Record<string, string>>): Uint8Array {
-  if (Object.keys(secrets).length === 0) return bytes
-  let text: string
-  try {
-    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
-  } catch {
-    return bytes
-  }
-  const clean = scrub(text, secrets)
-  return clean === text ? bytes : new TextEncoder().encode(clean)
+  ctx.stdout.writeBytes(response.bytes)
+  return undefined
 }

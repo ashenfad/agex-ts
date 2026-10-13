@@ -145,10 +145,31 @@ persists. `$NAME` expands the profile's variables, and the profile's
 `curlCommand()` is a command a host grants (`commands: {curl:
 curlCommand()}`) to fetch over the network: `-o`, `-L`, `-H`, `-X`,
 `-d`, `--json`, `-f`, `-s`, `-m`, and a size cap. In a browser it tells
-a CORS refusal from a dead network. **Secrets** reach it and nothing
-else: the shell expands `$TOKEN` to a reference to itself, `curl` fills
-it in a URL or header at the request, and a secret a response echoes
-back is replaced by its reference before it reaches the world.
+a CORS refusal from a dead network. A command made with
+`commandFactory` gets a workspace that is part of the shell call it
+runs in, so it can write and commit without waiting on that call.
+
+## Secrets
+
+A secret never enters the world: no code or shell reads its value, and
+nothing stores it. The shell has `$TOKEN` and code has `secret('TOKEN')`,
+both a reference (`${TOKEN}`) that the host's own code fills at the
+request that needs it:
+
+- **`curl`** fills it in a URL or header (`-H "Authorization: Bearer
+  $TOKEN"`).
+- **`httpHost()`**, a host object (`hostObjects: {http: httpHost()}`),
+  does the same for code: `await http.fetch(url, {headers:
+  {Authorization: 'Bearer ' + secret('TOKEN')}, as: 'json'})`.
+- **A host object made with `hostFactory((ws, {secrets}) => …)`** can
+  build a client with `secrets.get('TOKEN')`, so code calls the client
+  and never holds the key.
+
+A secret given as `{value, origins: ['https://abc.supabase.co']}` is
+filled only for requests to those origins, and a request carrying one
+follows no redirect; a plain string goes wherever it is asked to. A
+secret a response echoes back is replaced by its reference before it
+reaches the world.
 
 ## The tools
 

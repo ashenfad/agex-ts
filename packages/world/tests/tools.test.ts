@@ -82,7 +82,7 @@ describe('ws.terminal', () => {
           ctx.stdout.write(`${ctx.args.join(' ').toUpperCase()}\n`)
         },
         whoami: commandFactory(({ ws: w, secrets }) => async (ctx) => {
-          seen.push(Object.keys(secrets).join())
+          seen.push(secrets.names().join())
           ctx.stdout.write(`${w.session}\n`)
         }),
       },
@@ -133,6 +133,49 @@ describe('ws.terminal', () => {
     const r = await view.terminal('echo no > g.txt')
     expect(r.exitCode).not.toBe(0)
     expect(r.commit).toBeNull()
+    await ws.close()
+  })
+})
+
+describe('commands and the workspace', () => {
+  it("a command's workspace is part of the shell call, so it can write and commit", async () => {
+    const ws = await open({
+      commands: {
+        note: commandFactory(({ ws: w }) => async (ctx) => {
+          const out = await w.files.write('note.txt', ctx.args.join(' '))
+          ctx.stdout.write(`noted (${out.commit === null ? 'pending' : 'committed'})\n`)
+        }),
+      },
+    })
+    const r = await ws.terminal('echo before > a.txt; note hello')
+    expect(r.stdout).toBe('noted (committed)\n')
+    expect(await ws.files.readText('note.txt')).toBe('hello')
+    // The command's write committed the script's changes so far.
+    expect(await tools(ws)).toEqual(['init', 'file_write'])
+    await ws.close()
+  })
+})
+
+describe('line numbers', () => {
+  it('are the source lines, below a multi-line import', async () => {
+    const ws = await open()
+    await ws.files.write('m.ts', 'export const a = 1\nexport const b = 2\n')
+    const out = await ws.runCode(
+      "import {\n  a,\n  b,\n} from './m'\nconst c = a + b\nthrow new Error('at six')",
+    )
+    expect(out.error?.stack).toBe('Error: at six\n    at line 6')
+    await ws.close()
+  })
+
+  it('are the source lines in a module below a multi-line re-export', async () => {
+    const ws = await open()
+    await ws.files.write('m.ts', 'export const a = 1\nexport const b = 2\n')
+    await ws.files.write(
+      'lib.ts',
+      "export {\n  a,\n  b as bee,\n} from './m'\nexport function boom() {\n  throw new Error('in lib')\n}\n",
+    )
+    const out = await ws.runCode("import { boom } from './lib'\nboom()")
+    expect(out.error?.stack).toBe('Error: in lib\n    at boom (/workspace/lib.ts:6)\n    at line 2')
     await ws.close()
   })
 })
@@ -301,7 +344,7 @@ describe('descriptions', () => {
     expect(code).toContain('env.API_URL')
     expect(code).toContain('packages: import them by name')
     expect(code).toContain('stops after 12s')
-    expect(code).not.toContain('TOKEN')
+    expect(code).toContain("secret('TOKEN')")
     expect(code).toContain('CODE PRIMER.\n\nMake ONE call per turn')
     expect(toolInstructions(ws)).toContain('every mutating call is committed')
     await ws.close()

@@ -7,21 +7,29 @@
 
 import type { CommandHandler } from '@agex-ts/termish'
 import { InvalidNameError } from './errors'
+import { type SecretSpec, type Secrets, checkSecrets, secretRef } from './secrets'
 import type { Workspace } from './workspace'
 
 const FACTORY = Symbol('world.hostFactory')
 const COMMAND = Symbol('world.commandFactory')
 const WANTS_CALL = Symbol('world.withCall')
 
-/** A host object made per world: `factory(ws)` runs as each workspace
- *  opens, forks included, so the object knows which session it
- *  serves. */
+/** What a host object made per world receives beside its workspace. */
+export interface HostWorld {
+  /** The profile's secrets, which only the host's own code holds: a
+   *  client built with one keeps it out of the world. */
+  readonly secrets: Secrets
+}
+
+/** A host object made per world: `factory(ws, {secrets})` runs as each
+ *  workspace opens, forks included, so the object knows which session
+ *  it serves. */
 export interface HostFactory {
-  readonly [FACTORY]: (ws: Workspace) => object
+  readonly [FACTORY]: (ws: Workspace, world: HostWorld) => object
 }
 
 /** Make a host object per world. */
-export function hostFactory(factory: (ws: Workspace) => object): HostFactory {
+export function hostFactory(factory: (ws: Workspace, world: HostWorld) => object): HostFactory {
   return { [FACTORY]: factory }
 }
 
@@ -92,7 +100,8 @@ export interface CodeSettings {
   readonly routeFetch?: boolean | readonly string[]
   /** TypeScript to JavaScript; default ts-blank-space, which strips
    *  types and refuses the forms that need more (enums, namespaces,
-   *  decorators). */
+   *  decorators). A transform should keep every line where it was, as
+   *  ts-blank-space does, or errors name the wrong lines. */
   readonly transform?: (code: string) => string | Promise<string>
   /** Where the kernel's worker runs: a browser Web Worker or Node
    *  `worker_threads` (default: detected), and its script (default:
@@ -102,9 +111,12 @@ export interface CodeSettings {
 
 /** What a host command made per world knows about it. */
 export interface CommandWorld {
+  /** The workspace, as part of the shell call the command runs in: a
+   *  change it makes (a write, a commit) runs at once, not queued
+   *  behind that call. */
   readonly ws: Workspace
-  /** The profile's secrets, which only host commands ever see. */
-  readonly secrets: Readonly<Record<string, string>>
+  /** The profile's secrets, which only the host's own code holds. */
+  readonly secrets: Secrets
 }
 
 /** A terminal command made per world, with a line for the terminal
@@ -143,10 +155,13 @@ export interface Profile {
   readonly variables?: Readonly<Record<string, string>>
   /**
    * Values that never enter the world: no code or shell reads them,
-   * and nothing stores them. The host's own commands use them, at the
-   * request that needs one.
+   * and nothing stores them. The shell and code have references to them
+   * (`$NAME`, `secret('NAME')`), which the host's own code (a command,
+   * a host object) fills at the request that needs one. A secret given
+   * as `{value, origins}` is filled only for requests to those origins;
+   * a plain string goes wherever it is asked to.
    */
-  readonly secrets?: Readonly<Record<string, string>>
+  readonly secrets?: Readonly<Record<string, SecretSpec>>
   /** Terminal commands, by name, beside termish's own (a name of
    *  theirs replaces it). */
   readonly commands?: Readonly<Record<string, HostCommand>>
@@ -155,7 +170,7 @@ export interface Profile {
 
 /** Names code already has, and words JavaScript reserves. */
 const RESERVED = new Set([
-  ...['fs', 'cache', 'env', 'console', 'host', '__modules', '__load', '__exports'],
+  ...['fs', 'cache', 'env', 'console', 'host', 'secret', '__modules', '__load', '__exports'],
   ...['__registered', 'arguments', 'eval', 'undefined', 'NaN', 'Infinity', 'globalThis'],
   ...['await', 'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default'],
   ...['delete', 'do', 'else', 'enum', 'export', 'extends', 'false', 'finally', 'for'],
@@ -177,19 +192,15 @@ export function checkProfile(profile: Profile): Profile {
       )
     }
   }
-  for (const [kind, map] of [
-    ['variable', profile.variables],
-    ['secret', profile.secrets],
-  ] as const) {
-    for (const [name, value] of Object.entries(map ?? {})) {
-      if (!VARIABLE.test(name)) {
-        throw new InvalidNameError(
-          `${kind} ${JSON.stringify(name)}: a name is [A-Za-z_][A-Za-z0-9_]*`,
-        )
-      }
-      if (typeof value !== 'string') throw new TypeError(`${kind} ${name}: a value is a string`)
+  for (const [name, value] of Object.entries(profile.variables ?? {})) {
+    if (!VARIABLE.test(name)) {
+      throw new InvalidNameError(
+        `variable ${JSON.stringify(name)}: a name is [A-Za-z_][A-Za-z0-9_]*`,
+      )
     }
+    if (typeof value !== 'string') throw new TypeError(`variable ${name}: a value is a string`)
   }
+  checkSecrets(profile.secrets ?? {})
   for (const name of Object.keys(profile.variables ?? {})) {
     if (profile.secrets !== undefined && name in profile.secrets) {
       throw new InvalidNameError(`${name} is both a variable and a secret`)
@@ -213,8 +224,7 @@ export function checkProfile(profile: Profile): Profile {
 
 /** The terminal commands of a profile for one workspace, factories
  *  made. */
-export function makeCommands(profile: Profile, ws: Workspace): Map<string, CommandHandler> {
-  const world: CommandWorld = { ws, secrets: profile.secrets ?? {} }
+export function makeCommands(profile: Profile, world: CommandWorld): Map<string, CommandHandler> {
   const out = new Map<string, CommandHandler>()
   for (const [name, command] of Object.entries(profile.commands ?? {})) {
     out.set(name, typeof command === 'function' ? command : command[COMMAND](world))
@@ -239,16 +249,20 @@ export function commandDescriptions(profile: Profile): Map<string, string | unde
  */
 export function shellEnv(profile: Profile): Record<string, string> {
   const env: Record<string, string> = { ...profile.variables }
-  for (const name of Object.keys(profile.secrets ?? {})) env[name] = `\${${name}}`
+  for (const name of Object.keys(profile.secrets ?? {})) env[name] = secretRef(name)
   return env
 }
 
 /** The host objects of a profile for one workspace, factories made. */
-export function makeHostObjects(profile: Profile, ws: Workspace): Map<string, object> {
+export function makeHostObjects(
+  profile: Profile,
+  ws: Workspace,
+  world: HostWorld,
+): Map<string, object> {
   const out = new Map<string, object>()
   for (const [name, entry] of Object.entries(profile.hostObjects ?? {})) {
     const factory = (entry as Partial<HostFactory>)[FACTORY]
-    out.set(name, factory === undefined ? entry : factory(ws))
+    out.set(name, factory === undefined ? entry : factory(ws, world))
   }
   return out
 }

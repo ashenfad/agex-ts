@@ -29,8 +29,9 @@ import {
   ROOT_COMMIT,
   type Repo,
   textMerge,
+  textMergeResult,
 } from '@agex-ts/kvgit'
-import { BLOB_KEY, type MergeOutcome, hasMarkers, sameBytes } from './agentgit'
+import { BLOB_KEY, type MergeOutcome, sameBytes } from './agentgit'
 import {
   CACHE_PREFIX,
   COMPACTION_PREFIX,
@@ -86,6 +87,19 @@ function mergedSize(base: unknown, ours: unknown, theirs: unknown): number | und
     }
   }
   return merged instanceof Uint8Array ? merged.length : undefined
+}
+
+/** Whether the text merge of one file's three sides marked conflicts:
+ *  only where all three differ, as the merge consults its rule only
+ *  there. */
+function marked(base: unknown, ours: unknown, theirs: unknown): boolean {
+  if (sameBytes(ours, theirs) || sameBytes(ours, base) || sameBytes(theirs, base)) return false
+  const bytes = (v: unknown) => (v instanceof Uint8Array ? v : null)
+  try {
+    return textMergeResult(bytes(base), bytes(ours), bytes(theirs))[1]
+  } catch {
+    return false
+  }
 }
 
 /** The rules a three-way of `ours` and `theirs` over `base` resolves
@@ -193,21 +207,22 @@ export async function staleRecords(
 
 /**
  * Run a three-way verb and say what came of it. `run` makes the commit
- * (a kvgit merge or apply) from `before`; `theirs` is the side the
- * work came from. A conflict no rule settles comes back as `merged:
- * false` with the contested paths; a landed one names the paths it
- * left marked: markers neither side held before, so a file that is
- * about conflict markers isn't one. A verb with nothing to do lands
- * nothing: a merge of what this side holds already is merged at the
- * commit it was (`held`), anything else not merged.
+ * (a kvgit merge or apply) from `before`, over `base`; `theirs` is the
+ * side the work came from. A conflict no rule settles comes back as
+ * `merged: false` with the contested paths; a landed one names the
+ * paths the text merge marked, asked of the merge itself, so a file
+ * that already held marker text is neither hidden nor flagged by it.
+ * A verb with nothing to do lands nothing: a merge of what this side
+ * holds already is merged at the commit it was (`held`), anything else
+ * not merged.
  */
 export async function threeWay(
   repo: Repo<unknown>,
-  before: string,
-  theirs: string,
+  sides: { base: string | null; before: string; theirs: string },
   run: () => Promise<MergeResult>,
   opts: { held?: boolean } = {},
 ): Promise<MergeOutcome> {
+  const { before, theirs } = sides
   let result: MergeResult
   try {
     result = await run()
@@ -232,10 +247,14 @@ export async function threeWay(
     .sort()
   const read = async (commit: string) =>
     (await repo.snapshot({ commit })).getMany(brought.map(fileKey))
-  const [now, ours, other] = await Promise.all([read(result.commit), read(before), read(theirs)])
+  const [old, ours, other] = await Promise.all([
+    read(sides.base ?? ROOT_COMMIT),
+    read(before),
+    read(theirs),
+  ])
   const conflicts = brought.filter((p) => {
     const key = fileKey(p)
-    return hasMarkers(now.get(key)) && !hasMarkers(ours.get(key)) && !hasMarkers(other.get(key))
+    return marked(old.get(key), ours.get(key), other.get(key))
   })
   return {
     merged: true,

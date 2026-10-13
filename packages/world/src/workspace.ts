@@ -794,15 +794,11 @@ export class Workspace {
         )
       }
       const before = wt.head
-      const rules = await threeWayRules(repo, {
-        base: await repo.mergeBase(before, from.commit),
-        ours: before,
-        theirs: from.commit,
-      })
+      const base = await repo.mergeBase(before, from.commit)
+      const rules = await threeWayRules(repo, { base, ours: before, theirs: from.commit })
       const outcome = await threeWay(
         repo,
-        before,
-        from.commit,
+        { base, before, theirs: from.commit },
         () =>
           wt.merge(
             { commit: from.commit },
@@ -944,7 +940,7 @@ export class Workspace {
     const base = change.base ?? ROOT_COMMIT
     const theirs = change.theirs ?? ROOT_COMMIT
     const rules = await threeWayRules(repo, { base: change.base, ours: before, theirs })
-    const outcome = await threeWay(repo, before, theirs, () =>
+    const outcome = await threeWay(repo, { base: change.base, before, theirs }, () =>
       wt.apply(base, theirs, {
         ...rules,
         info: {

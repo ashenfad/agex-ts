@@ -515,18 +515,6 @@ export class WorkspaceIndex {
       const pending = new Map(reverted.map((p) => [p, live.get(p)] as const))
 
       const fs = this.#host.fs
-      for (const path of reverted) {
-        const was = base.get(path)
-        if (was !== undefined) await put(fs, path, was)
-        else if (live.has(path)) await fs.remove(path)
-      }
-      // Written again so the commit takes each one, row and all, even
-      // where a framework commit already holds it.
-      for (const path of files) {
-        const value = live.get(path)
-        if (value !== undefined) await put(fs, path, value)
-      }
-
       const landed: GitState = {
         ...state,
         staged: [],
@@ -538,8 +526,6 @@ export class WorkspaceIndex {
         landed.mergeSource = null
         landed.preMerge = null
       }
-      this.#write(wt, state, landed, true)
-
       const info: CommitInfo = {
         ...(opts.info ?? {}),
         tool: TOOL,
@@ -547,9 +533,25 @@ export class WorkspaceIndex {
         files,
         virtualParents: state.head === null ? [] : [state.head],
       }
-      const keys = [...[...files, ...reverted].flatMap(keysOf), ...pendingDirs(wt, files), BLOB_KEY]
       let commit: string
       try {
+        for (const path of reverted) {
+          const was = base.get(path)
+          if (was !== undefined) await put(fs, path, was)
+          else if (live.has(path)) await fs.remove(path)
+        }
+        // Written again so the commit takes each one, row and all, even
+        // where a framework commit already holds it.
+        for (const path of files) {
+          const value = live.get(path)
+          if (value !== undefined) await put(fs, path, value)
+        }
+        this.#write(wt, state, landed, true)
+        const keys = [
+          ...[...files, ...reverted].flatMap(keysOf),
+          ...pendingDirs(wt, files),
+          BLOB_KEY,
+        ]
         commit = (await wt.commit({ keys, info })).commit as string
       } catch (e) {
         await restore(fs, wt, pending)
@@ -669,9 +671,15 @@ export class WorkspaceIndex {
     const mine = (await this.log()).map((c) => c.hash)
     const found = expand(ref, mine, "in this session's ws-git log")
     if (found !== null) return found
+    // The session's own line (first parents: not what a merge brought
+    // in), back to where a fork started: before that, the parent's.
     const history: Commit[] = []
-    for await (const c of this.#host.store.repo.log({ commit: this.#host.view().head })) {
-      if (c.hash === ROOT_COMMIT) break
+    const line = this.#host.store.repo.log(
+      { commit: this.#host.view().head },
+      { firstParent: true },
+    )
+    for await (const c of line) {
+      if (c.hash === ROOT_COMMIT || c.hash === state.base) break
       history.push(c)
     }
     const hash = expand(
@@ -736,14 +744,9 @@ export class WorkspaceIndex {
     const changed = [...modified].filter((p) => !added.has(p)).sort()
     const live = await contents(wt, [...gone, ...changed])
     const pending = new Map([...gone, ...changed].map((p) => [p, live.get(p)] as const))
-    const target = await contents(await repo.snapshot({ commit }), changed)
+    const targetTree = await repo.snapshot({ commit })
+    const target = await contents(targetTree, changed)
     const fs = this.#host.fs
-    for (const path of gone) await fs.remove(path)
-    for (const path of changed) {
-      const value = target.get(path)
-      if (value === undefined) await fs.remove(path)
-      else await put(fs, path, value)
-    }
     const next: GitState = {
       ...state,
       head: commit,
@@ -753,6 +756,13 @@ export class WorkspaceIndex {
       preMerge: null,
     }
     try {
+      for (const path of gone) await fs.remove(path)
+      await pruneDirs(fs, gone, targetTree)
+      for (const path of changed) {
+        const value = target.get(path)
+        if (value === undefined) await fs.remove(path)
+        else await put(fs, path, value)
+      }
       await this.#record(wt, {
         info: { tool: CHECKOUT_TOOL, restoreOf: commit },
         keys: [...pending.keys()].flatMap(keysOf).concat(BLOB_KEY),
@@ -929,9 +939,37 @@ function expand(prefix: string, hashes: readonly string[], where: string): strin
  *  its record says what the commit will hold. */
 async function put(fs: WorldFS, path: string, value: unknown): Promise<void> {
   const bytes = value instanceof Uint8Array ? value : new TextEncoder().encode(String(value))
+  // A file where a directory was (emptied by now), or under a path
+  // that is a file: what's in the way goes.
+  if (await fs.isDir(path)) await fs.rmdir(path)
+  for (let dir = dirname(path); dir !== '/'; dir = dirname(dir)) {
+    if (await fs.isFile(dir)) {
+      await fs.remove(dir)
+      break
+    }
+  }
   const parent = dirname(path)
   if (parent !== '/' && !(await fs.isDir(parent))) await fs.mkdir(parent, { parents: true })
   await fs.write(path, bytes)
+}
+
+/** Remove the directories removing `paths` left empty, where `tree`
+ *  has none: a checkout leaves the directories its target has. */
+async function pruneDirs(
+  fs: WorldFS,
+  paths: readonly string[],
+  tree: Snapshot<unknown>,
+): Promise<void> {
+  const dirs = new Set<string>()
+  for (const path of paths) {
+    for (let dir = dirname(path); dir !== '/'; dir = dirname(dir)) dirs.add(dir)
+  }
+  const deepest = [...dirs].sort((a, b) => b.length - a.length)
+  const kept = await tree.getMany(deepest.map(metaKey))
+  for (const dir of deepest) {
+    if (kept.has(metaKey(dir)) || !(await fs.isDir(dir))) continue
+    if ((await fs.list(dir)).length === 0) await fs.rmdir(dir)
+  }
 }
 
 /** Put captured content back, path by path; undefined means the path

@@ -54,7 +54,7 @@ jobs:
         run: pnpm test
 
   browser:
-    name: Browser tests (real IndexedDB + Web Worker runtime)
+    name: Browser tests (real IndexedDB)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -78,16 +78,3 @@ jobs:
       - name: kvgit-ts (Chromium + real IndexedDB)
         run: pnpm --filter kvgit-ts test:browser
 
-      # agex-runtime-worker tests import from `agex-ts/types` and
-      # `agex-ts/errors`, which are sub-path exports resolved out of
-      # the built `dist/`. The Node lane builds the whole workspace;
-      # the browser lane is its own job and has to build the
-      # upstream graph explicitly. The trailing `...` in the filter
-      # tells pnpm to build the package *and* every workspace
-      # dependency it transitively needs (kvgit-ts, termish-ts —
-      # without these, agex-ts's own build fails to resolve them).
-      - name: Build agex-ts and its deps (for runtime-worker tests)
-        run: pnpm --filter "agex-ts..." build
-
-      - name: agex-runtime-worker (Web Worker smoke)
-        run: pnpm --filter agex-runtime-worker test:browser

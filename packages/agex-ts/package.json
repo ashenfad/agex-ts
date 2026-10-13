@@ -1,17 +1,8 @@
 {
   "name": "agex-ts",
   "version": "0.5.0",
-  "description": "Embeddable LLM-work primitive: typed-function task contract, code as the action space, kvgit-backed state. TypeScript port of agex-py.",
-  "keywords": [
-    "agent",
-    "llm",
-    "ai-agent",
-    "typescript",
-    "sandbox",
-    "code-execution",
-    "tool-use",
-    "browser"
-  ],
+  "description": "An agent loop over @agex-ts/world: sessions and typed tasks, with code as the action space. The TypeScript counterpart of agex.",
+  "keywords": ["agent", "llm", "ai-agent", "typescript", "code-execution", "browser"],
   "author": "Adam Ashenfelter",
   "license": "MIT",
   "homepage": "https://github.com/ashenfad/agex-ts/tree/main/packages/agex-ts#readme",
@@ -30,50 +21,9 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
-    "./types": {
-      "types": "./dist/types.d.ts",
-      "import": "./dist/types.js"
-    },
-    "./errors": {
-      "types": "./dist/errors.d.ts",
-      "import": "./dist/errors.js"
-    },
-    "./policy": {
-      "types": "./dist/policy.d.ts",
-      "import": "./dist/policy.js"
-    },
-    "./state": {
-      "types": "./dist/state/index.d.ts",
-      "import": "./dist/state/index.js"
-    },
-    "./llm-dummy": {
-      "types": "./dist/llm/dummy.d.ts",
-      "import": "./dist/llm/dummy.js"
-    },
-    "./runtime-eval": {
-      "types": "./dist/runtime/eval.d.ts",
-      "import": "./dist/runtime/eval.js"
-    },
-    "./module-loader": {
-      "types": "./dist/runtime/module-loader.d.ts",
-      "import": "./dist/runtime/module-loader.js"
-    },
-    "./wrap-fs": {
-      "types": "./dist/runtime/wrap-fs.d.ts",
-      "import": "./dist/runtime/wrap-fs.js"
-    },
-    "./console-capture": {
-      "types": "./dist/runtime/console-capture.d.ts",
-      "browser": "./dist/runtime/console-capture.browser.js",
-      "import": "./dist/runtime/console-capture.js"
-    },
-    "./render": {
-      "types": "./dist/render/index.d.ts",
-      "import": "./dist/render/index.js"
-    },
-    "./providers": {
-      "types": "./dist/providers/index.d.ts",
-      "import": "./dist/providers/index.js"
+    "./conformance": {
+      "types": "./dist/conformance/index.d.ts",
+      "import": "./dist/conformance/index.js"
     }
   },
   "files": ["dist", "README.md", "LICENSE"],
@@ -86,16 +36,11 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.0",
-    "@vitest/coverage-v8": "^2.1.9",
     "tsup": "^8.3.5",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
   },
   "dependencies": {
-    "@agex-ts/kvgit": "workspace:^",
-    "@agex-ts/termish": "workspace:^",
-    "@cfworker/json-schema": "^4.1.1",
-    "@standard-schema/spec": "^1.1.0",
-    "ts-blank-space": "^0.6.0"
+    "@agex-ts/world": "workspace:^"
   }
 }

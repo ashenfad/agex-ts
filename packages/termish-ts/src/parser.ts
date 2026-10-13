@@ -109,7 +109,7 @@ export function toScript(text: string): Script {
   const extracted = extractHeredocs(text)
   const joined = handleLineContinuation(extracted.text)
   const { masked, map } = maskQuotes(joined)
-  const tokens = tokenize(masked)
+  const tokens = tokenize(masked, map)
   rejectCommandSubstitution(tokens, map)
   return parseTokens(tokens, map, extracted.heredocs)
 }
@@ -288,10 +288,29 @@ function handleLineContinuation(text: string): string {
  * Backslash inside a word escapes the next character (so
  * `foo\ bar` becomes the single token `foo bar`).
  */
-function tokenize(text: string): string[] {
+/** Characters that mean something bare: operators, globs, quotes, a
+ *  comment's start. */
+const MEANINGFUL = new Set([...OPERATOR_CHARS, '*', '?', '[', ']', "'", '"', '#'])
+
+/**
+ * Split masked text into tokens. `quoted` is the quote masker's map: an
+ * escaped character that means something bare is masked as the quoted
+ * form of itself, so it is a literal everywhere a quoted one is (`\;`
+ * is a word, never the operator; `\*` never globs).
+ */
+function tokenize(text: string, quoted: Map<string, string>): string[] {
   const tokens: string[] = []
   let i = 0
   const n = text.length
+  const session = Math.floor(Math.random() * 0xffff_ffff)
+    .toString(16)
+    .padStart(8, '0')
+  let escapes = 0
+  const escaped = (char: string): string => {
+    const token = `__E_${session}_${escapes++}__`
+    quoted.set(token, char === "'" ? `"'"` : `'${char}'`)
+    return token
+  }
 
   while (i < n) {
     const c = text[i] as string
@@ -369,8 +388,11 @@ function tokenize(text: string): string[] {
         // An escaped `$` or backslash keeps its backslash, so expansion
         // reads `\$NAME` as a literal `$NAME`, and `\\$NAME` as a
         // backslash before an expansion. Expansion drops the backslash.
+        // An escaped character that means something bare (an operator,
+        // a glob, a quote, a comment) is quoted.
         const next = text[i + 1] as string
-        word += next === '$' || next === '\\' ? `\\${next}` : next
+        word +=
+          next === '$' || next === '\\' ? `\\${next}` : MEANINGFUL.has(next) ? escaped(next) : next
         i += 2
         continue
       }

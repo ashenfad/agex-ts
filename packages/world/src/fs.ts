@@ -53,6 +53,26 @@ function isWriter(view: KeyReader): view is KeyWriter {
 const metaPrefixUnder = (abs: string): string =>
   abs === '/' ? `${META_PREFIX}/` : `${metaKey(abs)}/`
 
+/**
+ * Several whole files, each path as given to its bytes, leaving out what
+ * isn't a file: through `fs.readMany` when it has one, else a read each.
+ */
+export async function readManyOf(
+  fs: FileSystem,
+  paths: readonly string[],
+): Promise<Map<string, Uint8Array>> {
+  if (fs.readMany !== undefined) return fs.readMany(paths)
+  const found = new Map<string, Uint8Array>()
+  for (const path of paths) {
+    try {
+      found.set(path, await fs.read(path))
+    } catch {
+      // not a file: left out
+    }
+  }
+  return found
+}
+
 export class WorldFS implements FileSystem {
   readonly #view: KeyReader
   readonly #persistCwd: boolean
@@ -100,6 +120,27 @@ export class WorldFS implements FileSystem {
     if (rec === undefined) throw new FsError('ENOENT', path)
     if (rec.isDir) throw new FsError('EISDIR', path)
     return this.#content(abs)
+  }
+
+  /** Several whole files in two batched reads (their records, then
+   *  their contents), each path as given to its bytes; what isn't a file
+   *  is left out. */
+  async readMany(paths: readonly string[]): Promise<Map<string, Uint8Array>> {
+    const abs = paths.map((p) => resolve(p, this.#cwd))
+    const records = await this.#view.getMany(abs.filter((a) => a !== '/').map(metaKey))
+    const isFile = (a: string) => {
+      const rec = records.get(metaKey(a))
+      return a !== '/' && isFileRecord(rec) && !rec.isDir
+    }
+    const contents = await this.#view.getMany(abs.filter(isFile).map(fileKey))
+    const found = new Map<string, Uint8Array>()
+    paths.forEach((path, i) => {
+      const a = abs[i] as string
+      if (!isFile(a)) return
+      const bytes = contents.get(fileKey(a))
+      found.set(path, bytes instanceof Uint8Array ? new Uint8Array(bytes) : new Uint8Array(0))
+    })
+    return found
   }
 
   async exists(path: string): Promise<boolean> {

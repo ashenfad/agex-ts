@@ -233,13 +233,16 @@ export const grep: CommandHandler = async (ctx) => {
     return fileMatches
   }
 
-  // Resolve the file list.
+  // Resolve the file list. A listed path came from listing a directory;
+  // a named one from the command line.
+  const listed = new Set<string>()
   let filesToSearch: string[]
   if (files.length === 0 && parsed.flags.recursive !== true) {
     return matched(processContent(ctx.stdin.text(), null) > 0)
   }
   if (files.length === 0) {
     filesToSearch = await collectFiles('.', ctx.fs)
+    for (const f of filesToSearch) listed.add(f)
   } else {
     filesToSearch = []
     for (const path of files) {
@@ -247,6 +250,7 @@ export const grep: CommandHandler = async (ctx) => {
         // Auto-recurse into directories (matches modern grep).
         const collected = await collectFiles(path, ctx.fs)
         filesToSearch.push(...collected)
+        for (const f of collected) listed.add(f)
       } else {
         filesToSearch.push(path)
       }
@@ -273,15 +277,12 @@ export const grep: CommandHandler = async (ctx) => {
   const multipleFiles = filesToSearch.length > 1 || parsed.flags.recursive === true
 
   let total = 0
-  let listed = 0
-  for (const filepath of filesToSearch) {
-    let content: string
-    try {
-      const bytes = await ctx.fs.read(filepath)
-      content = decoder.decode(bytes)
-    } catch (e) {
-      throw new TerminalError(`grep: ${filepath}: ${describeError(e)}`, { exitCode: 2 })
+  let named = 0
+  for await (const [filepath, bytes] of readFiles(ctx.fs, filesToSearch, listed)) {
+    if (!(bytes instanceof Uint8Array)) {
+      throw new TerminalError(`grep: ${filepath}: ${describeError(bytes)}`, { exitCode: 2 })
     }
+    const content = decoder.decode(bytes)
     let label: string | null
     if (noFilename) label = null
     else if (withFilename) label = filepath
@@ -292,10 +293,58 @@ export const grep: CommandHandler = async (ctx) => {
     total += m
     if (filesWithoutMatch && m === 0) {
       realStdout.write(`${filepath}\n`)
-      listed++
+      named++
     }
   }
-  return matched(filesWithoutMatch ? listed > 0 : total > 0)
+  return matched(filesWithoutMatch ? named > 0 : total > 0)
+}
+
+/** How many files grep reads in one batch: enough that a filesystem
+ *  that fetches remotely answers a typical tree in a round trip or two,
+ *  few enough that a large tree is never all in memory at once. */
+const READ_BATCH = 256
+
+/**
+ * Each file with its bytes, in order, or the error reading it.
+ *
+ * Files are read `READ_BATCH` at a time with `fs.readMany` when the
+ * filesystem has it, otherwise one `read` each. A listed file the batch
+ * leaves out is gone since its listing, and skipped; a named one is read
+ * again on its own, so its error is the one `read` gives. A batch that
+ * fails, or answers with keys it wasn't asked for, is read file by file.
+ */
+async function* readFiles(
+  fs: FileSystem,
+  paths: readonly string[],
+  listed: ReadonlySet<string>,
+): AsyncGenerator<[string, Uint8Array | unknown]> {
+  for (let start = 0; start < paths.length; start += READ_BATCH) {
+    const chunk = paths.slice(start, start + READ_BATCH)
+    let found: Map<string, Uint8Array> | null = null
+    if (fs.readMany !== undefined) {
+      try {
+        found = await fs.readMany(chunk)
+      } catch {
+        found = null // file by file, so each error names its own path
+      }
+      // Keys must be the paths as given: one spelled otherwise would
+      // leave every listed file looking gone.
+      if (found !== null && [...found.keys()].some((k) => !chunk.includes(k))) found = null
+    }
+    for (const path of chunk) {
+      const bytes = found?.get(path)
+      if (bytes !== undefined) {
+        yield [path, bytes]
+        continue
+      }
+      if (found !== null && listed.has(path)) continue
+      try {
+        yield [path, await fs.read(path)]
+      } catch (e) {
+        yield [path, e]
+      }
+    }
+  }
 }
 
 /** grep's status: 0 when it found what it looked for, 1, silently,

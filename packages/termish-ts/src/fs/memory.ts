@@ -60,6 +60,15 @@ export class MemoryFS implements FileSystem {
     return new Uint8Array(v)
   }
 
+  async readMany(paths: readonly string[]): Promise<Map<string, Uint8Array>> {
+    const found = new Map<string, Uint8Array>()
+    for (const path of paths) {
+      const v = this.#files.get(resolve(path, this.#cwd))
+      if (v !== undefined) found.set(path, new Uint8Array(v))
+    }
+    return found
+  }
+
   async exists(path: string): Promise<boolean> {
     const abs = resolve(path, this.#cwd)
     return this.#files.has(abs) || this.#dirExists(abs)
@@ -139,7 +148,9 @@ export class MemoryFS implements FileSystem {
       throw new FsError('EEXIST', path)
     }
     if (opts.parents) {
-      // Create all missing intermediate dirs.
+      // Create all missing intermediate dirs; a file on the way can't
+      // become a directory as well.
+      this.#refuseAFileOnTheWay(abs, path)
       const segments = abs.split('/').filter((s) => s !== '')
       let prefix = ''
       for (const seg of segments) {
@@ -181,12 +192,18 @@ export class MemoryFS implements FileSystem {
     this.#dirMeta.delete(abs)
   }
 
+  /**
+   * Move or rename, as rename(2) does: a file never replaces a directory
+   * nor a directory a file, a directory replaces only an empty one, and
+   * never moves into itself.
+   */
   async rename(src: string, dst: string): Promise<void> {
     const absSrc = resolve(src, this.#cwd)
     const absDst = resolve(dst, this.#cwd)
-    if (absSrc === absDst) return
+    if (absSrc === absDst && (await this.exists(absSrc))) return
 
     if (this.#files.has(absSrc)) {
+      if (this.#dirExists(absDst)) throw new FsError('EISDIR', dst)
       const dstParent = dirname(absDst)
       if (!this.#dirExists(dstParent)) {
         throw await missingParent(dstParent, this)
@@ -202,6 +219,18 @@ export class MemoryFS implements FileSystem {
 
     if (this.#dirExists(absSrc)) {
       const srcPrefix = `${absSrc}/`
+      if (this.#files.has(absDst)) throw new FsError('ENOTDIR', dst)
+      if (absDst.startsWith(srcPrefix)) {
+        throw new FsError('EINVAL', dst, 'Cannot move a directory into itself')
+      }
+      if (this.#dirExists(absDst)) {
+        if (this.#dirHasChildren(absDst)) throw new FsError('ENOTEMPTY', dst)
+        // An empty directory is replaced.
+        this.#explicitDirs.delete(absDst)
+        this.#dirMeta.delete(absDst)
+      } else if (!this.#dirExists(dirname(absDst))) {
+        throw await missingParent(dirname(absDst), this)
+      }
       // Move every file whose key starts with srcPrefix.
       const moves: Array<[string, string]> = []
       for (const k of this.#files.keys()) {
@@ -328,6 +357,15 @@ export class MemoryFS implements FileSystem {
       if (d !== abs && d.startsWith(prefix)) return true
     }
     return false
+  }
+
+  /** ENOTDIR when a component of `abs` (itself included) is a file. */
+  #refuseAFileOnTheWay(abs: string, path: string): void {
+    let current = ''
+    for (const part of abs.split('/').filter((p) => p !== '')) {
+      current = `${current}/${part}`
+      if (this.#files.has(current)) throw new FsError('ENOTDIR', path)
+    }
   }
 
   #addDir(abs: string): void {

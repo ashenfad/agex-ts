@@ -195,3 +195,37 @@ describe('end to end', () => {
     expect((error as TerminalError).exitCode).toBe(1)
   })
 })
+
+describe('escapes and quotes', () => {
+  it('an escaped operator character is a word, never the operator', async () => {
+    expect(await execute('echo a \\; | wc -c', fs)).toBe('4\n')
+    expect(await execute('echo a \\| b', fs)).toBe('a | b\n')
+    expect(await execute('echo \\>', fs)).toBe('>\n')
+    expect(await execute('echo \\&', fs)).toBe('&\n')
+  })
+
+  it("find -exec's \\; may be followed by a pipe", async () => {
+    await fs.mkdir('/d')
+    await fs.write('/d/a.t', bytes('a\n'))
+    await fs.write('/d/b.t', bytes('b\n'))
+    expect(await execute("find /d -name '*.t' -exec cat {} \\; | wc -l", fs)).toBe('2\n')
+  })
+
+  it('an escaped glob character is literal', async () => {
+    await fs.write('/a.txt', bytes('a'))
+    expect(await execute('echo \\*', fs)).toBe('*\n')
+    expect(await execute('echo a\\?', fs)).toBe('a?\n')
+  })
+
+  it('a quote after an even run of backslashes opens', async () => {
+    expect(await execute("echo \\\\'$NAME'", fs, { env: { NAME: 'x' } })).toBe('\\$NAME\n')
+    // after an odd run it is escaped
+    expect(await execute("echo \\\\\\'x", fs)).toBe("\\'x\n")
+    expect(await execute("echo \\'", fs)).toBe("'\n")
+    expect(await execute('echo \\"q', fs)).toBe('"q\n')
+  })
+
+  it('an escaped space still joins a word', async () => {
+    expect(await execute('echo a\\ b', fs)).toBe('a b\n')
+  })
+})

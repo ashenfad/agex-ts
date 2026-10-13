@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { Memory } from '@agex-ts/kvgit/backends/memory'
 import { describe, expect, it } from 'vitest'
 import { Patterns, isIgnored, whyIgnored } from '../src/ignore'
-import { Store, UnknownRefError, VIEW_KEY, type Workspace } from '../src/index'
+import { Store, UnknownRefError, VIEW_KEY, type Workspace, WorldFS } from '../src/index'
 import { parseView } from '../src/views'
 
 const enc = new TextEncoder()
@@ -537,6 +537,64 @@ describe('ignore patterns', () => {
     await ws.checkout('other', { paths: ['app/theirs.log'] })
     expect(await ws.files.readText('app/theirs.log')).toBe('theirs\n')
     await other.close()
+    await ws.close()
+  })
+})
+
+describe('reading many files at once', () => {
+  it('grep -r reads through a narrowed view and an attachment, as given', async () => {
+    const store = await fresh()
+    const ws = await seeded(store, {
+      'auth.py': 'token = 1\n',
+      'billing.py': 'token = 2\n',
+      'lib/util.py': 'token = 3\n',
+    })
+    const other = await store.open('reviewer')
+    await other.files.write('notes/review.md', 'token looks fine\n')
+    await other.close()
+    await ws.files.attach('reviewer', '/reviews')
+    const out = await ws.terminal('grep -r token . /reviews')
+    expect(out.stdout).toBe(
+      './auth.py:token = 1\n./billing.py:token = 2\n./lib/util.py:token = 3\n/reviews/notes/review.md:token looks fine\n',
+    )
+    const child = await ws.fork('child', { paths: ['auth.py', 'lib'] })
+    expect((await child.terminal('grep -rl token /workspace')).stdout).toBe(
+      '/workspace/auth.py\n/workspace/lib/util.py\n',
+    )
+    const found = await child.files.fs.readMany?.(['auth.py', 'billing.py', '/workspace/lib'])
+    expect([...(found?.keys() ?? [])]).toEqual(['auth.py'])
+    await ws.close()
+    await child.close()
+  })
+
+  it("WorldFS reads a batch in two of the store's reads, one per file never", async () => {
+    const store = await fresh()
+    const ws = await store.open('s')
+    for (let i = 0; i < 50; i++) await ws.files.fs.write(`/workspace/f${i}`, enc.encode(`${i}`))
+    await ws.files.fs.mkdir('/workspace/d')
+    const wt = await store.repo.worktree('s')
+    let gets = 0
+    let batches = 0
+    const counting = {
+      get: (k: string) => {
+        gets++
+        return wt.get(k)
+      },
+      getMany: (keys: Iterable<string>) => {
+        batches++
+        return wt.getMany(keys)
+      },
+      keys: () => wt.keys(),
+    }
+    // what the session committed, read through a counting view of it
+    await ws.commit()
+    await wt.refresh()
+    const fs = new WorldFS(counting)
+    const paths = [...Array.from({ length: 50 }, (_, i) => `/workspace/f${i}`), '/workspace/d', '/']
+    const found = await fs.readMany(paths)
+    expect(found.size).toBe(50)
+    expect(new TextDecoder().decode(found.get('/workspace/f7'))).toBe('7')
+    expect([gets, batches]).toEqual([0, 2])
     await ws.close()
   })
 })

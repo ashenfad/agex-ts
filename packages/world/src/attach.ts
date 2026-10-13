@@ -13,6 +13,7 @@
  */
 
 import { type FileInfo, type FileMetadata, type FileSystem, FsError } from '@agex-ts/termish'
+import { readManyOf } from './fs'
 import { basename, normalize, resolve } from './path'
 
 const EPOCH = new Date(0).toISOString()
@@ -49,6 +50,16 @@ export class SubtreeFS implements FileSystem {
   }
   read(path: string): Promise<Uint8Array> {
     return this.#fs.read(this.#under(path))
+  }
+  async readMany(paths: readonly string[]): Promise<Map<string, Uint8Array>> {
+    const under = paths.map((p) => this.#under(p))
+    const found = await readManyOf(this.#fs, under)
+    const out = new Map<string, Uint8Array>()
+    paths.forEach((path, i) => {
+      const bytes = found.get(under[i] as string)
+      if (bytes !== undefined) out.set(path, bytes)
+    })
+    return out
   }
   exists(path: string): Promise<boolean> {
     return this.#fs.exists(this.#under(path))
@@ -181,6 +192,27 @@ export class AttachFS implements FileSystem {
   async read(path: string): Promise<Uint8Array> {
     const r = this.#to(path)
     return r.fs.read(r.path)
+  }
+
+  /** Each path from the filesystem it routes to: one batch per mount. */
+  async readMany(paths: readonly string[]): Promise<Map<string, Uint8Array>> {
+    const groups = new Map<FileSystem, { given: string[]; routed: string[] }>()
+    for (const path of paths) {
+      const r = this.#to(path)
+      const group = groups.get(r.fs) ?? { given: [], routed: [] }
+      groups.set(r.fs, group)
+      group.given.push(path)
+      group.routed.push(r.path)
+    }
+    const out = new Map<string, Uint8Array>()
+    for (const [fs, { given, routed }] of groups) {
+      const found = await readManyOf(fs, routed)
+      given.forEach((path, i) => {
+        const bytes = found.get(routed[i] as string)
+        if (bytes !== undefined) out.set(path, bytes)
+      })
+    }
+    return out
   }
 
   async exists(path: string): Promise<boolean> {

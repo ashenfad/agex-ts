@@ -59,6 +59,16 @@ export interface FileSystem {
 
   /** Read entire file contents as bytes. */
   read(path: string): Promise<Uint8Array>
+  /**
+   * Optional: read several whole files at once, each path as given to
+   * its bytes. A path that isn't a file (missing, or a directory) is
+   * left out rather than thrown on. `grep` reads the files it searches
+   * through it when it's there, so a filesystem that fetches remotely
+   * answers a batch in one round trip rather than one per file. Keys are
+   * the paths exactly as given, relative ones included.
+   * `checkFileSystem` checks it when it's there.
+   */
+  readMany?(paths: readonly string[]): Promise<Map<string, Uint8Array>>
   /** Write bytes to a file. `mode: 'w'` overwrites; `mode: 'a'` appends. */
   write(path: string, content: Uint8Array, mode?: 'w' | 'a'): Promise<void>
 

@@ -411,3 +411,23 @@ describe('dirname', () => {
     expect(await execute('dirname /a/b/', new MemoryFS())).toBe('/a\n')
   })
 })
+
+describe('mv — refusals in GNU words', () => {
+  it('a directory onto a file, into itself, and onto a full directory', async () => {
+    const fs = new MemoryFS()
+    await fs.mkdir('/d')
+    await fs.write('/f', bytes('f'))
+    await expect(execute('mv /d /f', fs)).rejects.toThrow(
+      "mv: cannot overwrite non-directory '/f' with directory '/d'",
+    )
+    await expect(execute('mv /d /d/e', fs)).rejects.toThrow(
+      "mv: cannot move '/d' to a subdirectory of itself, '/d/e'",
+    )
+    await fs.mkdir('/e/d', { parents: true })
+    await fs.write('/e/d/k', bytes('k'))
+    await expect(execute('mv /d /e', fs)).rejects.toThrow(
+      "mv: cannot move '/d' to '/e/d': Directory not empty",
+    )
+    await expect(execute('mv /nope /x', fs)).rejects.toThrow("mv: cannot stat '/nope'")
+  })
+})

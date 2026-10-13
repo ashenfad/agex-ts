@@ -23,6 +23,7 @@
 
 import { type FileInfo, type FileMetadata, type FileSystem, FsError } from '@agex-ts/termish'
 import { InvalidNameError } from './errors'
+import { readManyOf } from './fs'
 import { VIEW_KEY } from './layout'
 import { normalize, resolve } from './path'
 
@@ -205,6 +206,13 @@ export class ViewFS implements FileSystem {
   async read(path: string): Promise<Uint8Array> {
     if (!this.sees(path)) throw new FsError('ENOENT', path)
     return this.#fs.read(path)
+  }
+
+  readMany(paths: readonly string[]): Promise<Map<string, Uint8Array>> {
+    return readManyOf(
+      this.#fs,
+      paths.filter((p) => this.sees(p)),
+    )
   }
 
   async exists(path: string): Promise<boolean> {

@@ -42,8 +42,10 @@
 
 import type { Remote, RemoteRef } from '../sync/remote'
 import type { KVStore, WireCommit } from '../types'
-import { PARENT_COMMIT, dumps, safeLoads } from '../versioned/layout'
+import { BLOB_PREFIX, PARENT_COMMIT, dumps, safeLoads, sha256Hex } from '../versioned/layout'
 import type { GithubClient, TreeEntry } from './client'
+import { GithubError } from './errors'
+import { gitBlobSha1 } from './git-hash'
 import { INLINE_LIMIT, INLINE_TREE_BUDGET, inlinable, inlineCost } from './inline'
 import { PathPlanner, SIDECAR_PATH, naturalPath, relocatedPath } from './paths'
 import { SIDECAR_FORMAT, decodeSidecar, encodeSidecar, wireFromSidecar } from './sidecar'
@@ -97,7 +99,15 @@ interface TransportState {
   treeSha: string
   /** Full key → tree path assignments at that commit. */
   assignments: Array<[string, string]>
+  /** Key → [value SHA-256 hex, git blob SHA] for values in that
+   *  commit's tree, as far as known. Push references a value the
+   *  remote already holds by its git SHA instead of sending it again;
+   *  a missing entry only means the bytes are sent. */
+  values?: Array<[string, string, string]>
 }
+
+/** A value as both sides name it: kvgit's SHA-256 and git's blob SHA. */
+type BlobIds = readonly [hex: string, gitSha: string]
 
 /** Per-in-stream-commit rendering state (forked per parent, like
  *  applyWire's pointer maps — merges need the non-linear ancestor). */
@@ -105,6 +115,8 @@ interface CommitRender {
   gitSha: string
   treeSha: string
   planner: PathPlanner
+  /** Key → the value's ids, for values in this commit's tree. */
+  values: Map<string, BlobIds>
 }
 
 /** A remote commit as learned from the commits-list walk. */
@@ -255,9 +267,13 @@ export class GithubRemote implements Remote {
     // base: trivially true for full-history walks; incremental walks
     // need prior state at a have-frontier commit.
     const pathMaps = new Map<string, Map<string, string>>()
+    // Values fold alongside paths, best effort: a missing entry only
+    // means a later push sends those bytes rather than referencing them.
+    const valueMaps = new Map<string, Map<string, BlobIds>>()
     const state = await this.#loadState(tip.branch)
     if (state !== null && haveSet.has(state.kvgitHead)) {
       pathMaps.set(state.kvgitHead, new Map(state.assignments))
+      valueMaps.set(state.kvgitHead, valuesOf(state))
     }
     let foldComplete = true
 
@@ -282,29 +298,53 @@ export class GithubRemote implements Remote {
         sidecars.set(gitSha, sidecar)
       })
 
-      // Window phase 2 — blobs: flattened across the window and bounded
-      // at GET_CHUNK concurrent, so a wide window's fan-out (commits ×
-      // updates) can't burst past GitHub's secondary limits. Per-commit
-      // maps are pre-created so the concurrent writes never race.
+      // Window phase 2 — values. One the local store already holds
+      // (the sidecar names it by hash) is read from there, and one that
+      // several commits in the window share is downloaded once. The
+      // rest come down flattened across the window and bounded at
+      // GET_CHUNK concurrent, so a wide window's fan-out can't burst
+      // past GitHub's secondary limits. Per-commit maps are pre-created
+      // so the concurrent writes never race.
       const blobs = new Map<string, Map<string, Uint8Array>>()
       for (const gitSha of window) blobs.set(gitSha, new Map())
-      const blobRefs = [...sidecars].flatMap(([gitSha, sidecar]) =>
-        [...sidecar.updates].map(([key, entry]) => ({
-          gitSha,
-          key,
-          path: entry.path,
-          hash: sidecar.hash,
-        })),
+      const byHex = new Map<string, Uint8Array>()
+      const downloads = new Map<string, { path: string; gitSha: string; hash: string }>()
+      const refs = [...sidecars].flatMap(([gitSha, sidecar]) =>
+        [...sidecar.updates].map(([key, entry]) => ({ gitSha, key, entry, hash: sidecar.hash })),
       )
-      await chunked(blobRefs, GET_CHUNK, async (ref) => {
-        const bytes = await this.client.getContent(ref.path, ref.gitSha)
+      for (const ref of refs) {
+        const hex = ref.entry.blob
+        if (hex === undefined || byHex.has(hex)) continue
+        const local = await this.#store.get(BLOB_PREFIX + hex)
+        if (local !== null) byHex.set(hex, local)
+        else if (!downloads.has(hex)) {
+          downloads.set(hex, { path: ref.entry.path, gitSha: ref.gitSha, hash: ref.hash })
+        }
+      }
+      await chunked([...downloads], GET_CHUNK, async ([hex, at]) => {
+        const bytes = await this.client.getContent(at.path, at.gitSha)
         if (bytes === null) {
           throw new Error(
-            `GithubRemote.fetch: blob missing at ${ref.path} for ${ref.hash.slice(0, 7)}`,
+            `GithubRemote.fetch: blob missing at ${at.path} for ${at.hash.slice(0, 7)}`,
+          )
+        }
+        byHex.set(hex, bytes)
+      })
+      const unnamed = refs.filter((ref) => ref.entry.blob === undefined)
+      await chunked(unnamed, GET_CHUNK, async (ref) => {
+        const bytes = await this.client.getContent(ref.entry.path, ref.gitSha)
+        if (bytes === null) {
+          throw new Error(
+            `GithubRemote.fetch: blob missing at ${ref.entry.path} for ${ref.hash.slice(0, 7)}`,
           )
         }
         ;(blobs.get(ref.gitSha) as Map<string, Uint8Array>).set(ref.key, bytes)
       })
+      for (const ref of refs) {
+        if (ref.entry.blob === undefined) continue
+        const bytes = byHex.get(ref.entry.blob) as Uint8Array
+        ;(blobs.get(ref.gitSha) as Map<string, Uint8Array>).set(ref.key, bytes)
+      }
 
       // Window phase 3 — fold + yield in topo order. No network here,
       // so applyWire drains the window at CPU speed; the window's blob
@@ -326,6 +366,15 @@ export class GithubRemote implements Remote {
           for (const [key, entry] of sidecar.updates) fold.set(key, entry.path)
           pathMaps.set(wire.hash, fold)
         }
+        const valueFold = new Map(
+          (firstParent !== undefined ? valueMaps.get(firstParent) : undefined) ?? [],
+        )
+        for (const key of wire.removals) valueFold.delete(key)
+        for (const [key, bytes] of wire.updates) {
+          const hex = sidecar.updates.get(key)?.blob ?? (await sha256Hex(bytes))
+          valueFold.set(key, [hex, await gitBlobSha1(bytes)])
+        }
+        valueMaps.set(wire.hash, valueFold)
 
         if (wire.hash === want) tipTreeSha = meta.treeSha
         yield wire
@@ -340,6 +389,7 @@ export class GithubRemote implements Remote {
         gitHead: tip.gitSha,
         treeSha: tipTreeSha,
         assignments: [...tipMap],
+        values: valueRows(valueMaps.get(want) ?? new Map()),
       })
     }
   }
@@ -623,8 +673,17 @@ export class GithubRemote implements Remote {
         gitSha: state.gitHead,
         treeSha: state.treeSha,
         planner: PathPlanner.fromAssignments(state.assignments),
+        values: valuesOf(state),
       })
     }
+
+    // Values the remote repo holds, as far as this store knows: the
+    // trees every branch here last pushed or fetched, then everything
+    // this push places. git stores a blob once per repo, so a value
+    // under another key, path or branch is referenced by SHA rather
+    // than sent again (a rename, a copy, a revert, or what a merge
+    // takes from the other side).
+    const known = await this.#knownBlobs()
 
     let head: CommitRender | null = null
     let headHash: string | null = null
@@ -643,61 +702,105 @@ export class GithubRemote implements Remote {
           ? PathPlanner.fromAssignments(parentRender.planner.entries())
           : new PathPlanner()
 
-      const entries: TreeEntry[] = []
-      // Spent down as values are inlined. Every inlined value in this
-      // commit ships in ONE tree request, so without a running budget a
-      // set of individually-acceptable values can still build a body no
-      // endpoint will take — and there would be no smaller request to
-      // retry with, where before inlining each value had its own.
-      let inlineBudget = this.#inlineBudget
-
-      /** Inline `bytes` at `path` when it fits both gates, else upload
-       *  it as its own blob and reference the SHA. */
-      const placeValue = async (path: string, bytes: Uint8Array): Promise<TreeEntry> => {
-        const text = inlinable(bytes, this.#inlineLimit)
-        if (text !== null) {
-          const cost = inlineCost(text)
-          if (cost <= inlineBudget) {
-            inlineBudget -= cost
-            return { path, mode: '100644', type: 'blob', content: text }
-          }
-        }
-        return { path, mode: '100644', type: 'blob', sha: await this.client.createBlob(bytes) }
-      }
-
-      // Updates: place bytes at planned paths, inline where we can.
-      // A merge commit lists every key that differs from its first
-      // parent, the ones it took from the other side included, so this
-      // covers them too.
-      //
-      // `content` on a tree entry makes GitHub write the blob as part
-      // of the tree call, so the per-key POST disappears into a request
-      // that was happening anyway — the difference between N + 3 and 2
-      // requests for a commit, against a budget of 500 an hour. Git
-      // stores equal bytes once, so a value the other side of a merge
-      // already pushed costs request bytes, not storage.
-      for (const key of [...wc.updates.keys()].sort()) {
-        const bytes = wc.updates.get(key) as Uint8Array
-        entries.push(await placeValue(planner.assign(key), bytes))
-      }
+      const values = new Map(parentRender?.values ?? [])
+      const keys = [...wc.updates.keys()].sort()
+      const paths = new Map(keys.map((key) => [key, planner.assign(key)] as const))
+      const hexes = new Map<string, string>()
+      for (const key of keys) hexes.set(key, await sha256Hex(wc.updates.get(key) as Uint8Array))
 
       // Removals: clear the key's slot in the parent's rendering.
+      const removals: TreeEntry[] = []
       for (const key of [...wc.removals].sort()) {
         const path = planner.get(key)
         if (path !== undefined) {
-          entries.push({ path, mode: '100644', type: 'blob', sha: null })
+          removals.push({ path, mode: '100644', type: 'blob', sha: null })
           planner.remove(key)
         }
+        values.delete(key)
       }
 
-      // Sidecar last — its paths must reflect this commit's planning.
-      // Deterministic compact JSON, so `inlinable` always says yes; the
-      // fallback is kept so one policy governs every entry rather than
-      // this one assuming its own answer.
-      const sidecar = encodeSidecar(wc, { kernel: this.#kernel, paths: plannerView(planner) })
-      entries.push(await placeValue(SIDECAR_PATH, sidecar))
+      // Sidecar last: its paths reflect this commit's planning, and it
+      // records each value's hash so a fetcher can skip what it has.
+      const sidecar = encodeSidecar(wc, {
+        kernel: this.#kernel,
+        paths: plannerView(planner),
+        blobs: hexes,
+      })
 
-      const treeSha = await this.client.createTree(entries, parentRender?.treeSha)
+      /**
+       * The commit's tree entries. With `dedup`, a value the remote
+       * already holds is referenced by its git SHA; anything else is
+       * inlined when it fits the gates, else uploaded as its own blob.
+       *
+       * `content` on a tree entry makes GitHub write the blob as part of
+       * the tree call, so the per-key POST disappears into a request
+       * that was happening anyway: the difference between N + 3 and 2
+       * requests for a commit, against a budget of 500 an hour.
+       */
+      const build = async (
+        dedup: boolean,
+      ): Promise<{ entries: TreeEntry[]; placed: Map<string, BlobIds>; reused: string[] }> => {
+        // Spent down as values are inlined. Every inlined value in this
+        // commit ships in ONE tree request, so without a running budget
+        // a set of individually-acceptable values can still build a
+        // body no endpoint will take.
+        let inlineBudget = this.#inlineBudget
+        const placeValue = async (path: string, bytes: Uint8Array): Promise<TreeEntry> => {
+          const text = inlinable(bytes, this.#inlineLimit)
+          if (text !== null) {
+            const cost = inlineCost(text)
+            if (cost <= inlineBudget) {
+              inlineBudget -= cost
+              return { path, mode: '100644', type: 'blob', content: text }
+            }
+          }
+          return { path, mode: '100644', type: 'blob', sha: await this.client.createBlob(bytes) }
+        }
+        const entries: TreeEntry[] = []
+        const placed = new Map<string, BlobIds>()
+        const reused: string[] = []
+        for (const key of keys) {
+          const bytes = wc.updates.get(key) as Uint8Array
+          const path = paths.get(key) as string
+          const hex = hexes.get(key) as string
+          const remote = dedup ? known.get(hex) : undefined
+          if (remote !== undefined) {
+            entries.push({ path, mode: '100644', type: 'blob', sha: remote })
+            placed.set(key, [hex, remote])
+            reused.push(hex)
+            continue
+          }
+          const entry = await placeValue(path, bytes)
+          // An inlined value's SHA never comes back from GitHub; git's
+          // blob hash of the bytes is what it stored.
+          const sha = typeof entry.sha === 'string' ? entry.sha : await gitBlobSha1(bytes)
+          entries.push(entry)
+          placed.set(key, [hex, sha])
+        }
+        entries.push(...removals)
+        entries.push(await placeValue(SIDECAR_PATH, sidecar))
+        return { entries, placed, reused }
+      }
+
+      let built = await build(true)
+      let treeSha: string
+      try {
+        treeSha = await this.client.createTree(built.entries, parentRender?.treeSha)
+      } catch (e) {
+        // A referenced blob the repo no longer has (a branch deleted
+        // for good, then collected) fails the tree as invalid: forget
+        // what was reused and send every value.
+        if (!(e instanceof GithubError && e.kind === 'validation') || built.reused.length === 0) {
+          throw e
+        }
+        for (const hex of built.reused) known.delete(hex)
+        built = await build(false)
+        treeSha = await this.client.createTree(built.entries, parentRender?.treeSha)
+      }
+      for (const [key, ids] of built.placed) {
+        values.set(key, ids)
+        known.set(ids[0], ids[1])
+      }
 
       const parentShas: string[] = []
       for (const p of wc.parents) {
@@ -713,7 +816,7 @@ export class GithubRemote implements Remote {
         committer: { ...this.#author, date },
       })
 
-      const render: CommitRender = { gitSha, treeSha, planner }
+      const render: CommitRender = { gitSha, treeSha, planner, values }
       renders.set(wc.hash, render)
       this.#kvgitBySha.set(gitSha, wc.hash)
       head = render
@@ -739,8 +842,22 @@ export class GithubRemote implements Remote {
       gitHead: head.gitSha,
       treeSha: head.treeSha,
       assignments: [...head.planner.entries()],
+      values: valueRows(head.values),
     })
     return true
+  }
+
+  /** Every value the saved states for this repo say its trees hold:
+   *  value SHA-256 hex → git blob SHA. */
+  async #knownBlobs(): Promise<Map<string, string>> {
+    const known = new Map<string, string>()
+    const prefix = stateKey(this.client.repo, '')
+    for await (const [, raw] of this.#store.items(prefix)) {
+      const state = safeLoads(raw) as TransportState | null
+      if (state === null || state.format !== STATE_FORMAT) continue
+      for (const [hex, sha] of valuesOf(state).values()) known.set(hex, sha)
+    }
+    return known
   }
 
   /** git SHA for a kvgit parent: in-stream renders, then the trailer
@@ -787,6 +904,21 @@ export class GithubRemote implements Remote {
   async #saveState(branch: string, state: TransportState): Promise<void> {
     await this.#store.set(stateKey(this.client.repo, branch), dumps(state))
   }
+}
+
+/** A saved state's values, keyed by key; malformed rows are dropped. */
+function valuesOf(state: TransportState): Map<string, BlobIds> {
+  const out = new Map<string, BlobIds>()
+  for (const row of state.values ?? []) {
+    if (Array.isArray(row) && row.length === 3 && row.every((x) => typeof x === 'string')) {
+      out.set(row[0], [row[1], row[2]])
+    }
+  }
+  return out
+}
+
+function valueRows(values: ReadonlyMap<string, BlobIds>): Array<[string, string, string]> {
+  return [...values].map(([key, [hex, sha]]) => [key, hex, sha])
 }
 
 /** Expose a PathPlanner as the ReadonlyMap encodeSidecar expects. */

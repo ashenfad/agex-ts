@@ -296,10 +296,28 @@ nontainer's semantics for a serverless studio. In order:
 5. **W5. Values:** what crosses the worker and what is stored, by
    value: live parts refused where they would cross, a stored encoding,
    and values checked against a declared type (a Standard Schema).
-6. **W6. Delegation:** nontainer's `Sessions`: delegates as forked
-   branches, jobs and answers, a runner per job, notes on the next
-   tool result.
-7. **W7. Compaction's record:** the `__compaction__/` plane and its
+6. **W6a. The inbox:** notes queued for a running agent, delivered on
+   its next tool result (`turn.deliver`) or opening a woken turn
+   (`turn.opening`), framed by who is speaking, settled when the turn
+   ends. Corpus tier 3.
+7. **G1-G3. ws-git, in full:** the agent's git over its own session,
+   ported whole rather than as the three verbs an answer names.
+   - **G1. The host verbs:** `ws.index` (the agent's staged set, its
+     commits, log, head, checkout and bookmarks, apart from the
+     framework's autocommits) and `ws.merge` / `revert` / `cherryPick`
+     with conflict markers, a merge left outstanding and its abort, on
+     kvgit-ts's merges and marker text merge.
+   - **G2. Views and mounts:** a fork narrowed to some paths (`paths`),
+     another session's tree mounted read-only (`worktree add`), and
+     ignore patterns.
+   - **G3. The `ws-git` command,** a terminal builtin, verb for verb,
+     with a script corpus nontainer exports (scripts, their output and
+     exit codes) run here verbatim, as the harness corpus is.
+8. **W6b. Delegation:** nontainer's `Sessions` on ws-git: delegates as
+   forked branches (narrowed by `paths`), jobs and answers, a runner
+   per job, `untilSettled`, answers delivered through the inbox, and
+   the `sessions` tool. Corpus tier 5.
+9. **W7. Compaction's record:** the `__compaction__/` plane and its
    rules, so any loop's folds rewind and fork alike.
 
 **Exit:** the world package runs nontainer's harness corpus (the tiers
@@ -319,7 +337,8 @@ it covers) from the generated JSON, and its own suite on memory and idb.
   nontainer's kernel does; W2 revisits it if a host object needs to call
   back into the workspace.
 - **Left out of W1:** mounts, views (`paths` on fork), `put` and
-  `attach`, `ignore`, and `ws-git` (a studio-phase decision).
+  `attach`, `ignore`, and `ws-git`. Views, mounts, ignore and ws-git
+  come with G1-G3 (decided 2026-10-13).
   `files.edit` comes with the `file_edit` tool in W3, with its
   agent-tolerant matching; the conversation rebind on fork and checkout
   comes with the conversation in W4.
@@ -378,8 +397,20 @@ it covers) from the generated JSON, and its own suite on memory and idb.
 - **The corpus runs in TS:** `@agex-ts/world/conformance` bundles
   nontainer's exported scenarios verbatim (`scripts/sync-corpus.mjs`)
   with a port of its runner. A reference harness in the tests passes
-  tiers 0 to 2; the inbox (tier 3) comes with delegation (W6), and
-  compaction (tier 4) with its record (W7).
+  tiers 0 to 2; the inbox (tier 3) comes with W6a, delegation (tier 5)
+  with W6b, and compaction (tier 4) with its record (W7).
+
+**Decided for delegation (2026-10-13):**
+- **Two steps around ws-git.** The inbox (W6a) comes first; ws-git is
+  ported whole (G1-G3), for parity with nontainer, before delegation
+  (W6b), so a delegate's answer names real verbs and `ask` takes
+  `paths` from the start.
+- **Async throughout.** A runner is `async run(session, task, {signal,
+  forkedAt, budget})`; cancelling a job aborts its signal. nontainer's
+  thread and coroutine twins (`ask`/`aask`, `wait`/`await_ready`) are
+  one Promise-returning set.
+- **ws-git's parity is checked by a corpus,** exported from nontainer
+  as the harness corpus is.
 
 **Decided for values (2026-10-13):**
 - **A declared type is a Standard Schema** (zod, valibot, arktype), as

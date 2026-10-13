@@ -1,7 +1,7 @@
 /**
  * nontainer's harness corpus, run against the reference harness on the
  * world: every scenario its capabilities cover passes, and the rest
- * (an inbox, compaction, delegation: later steps) are listed.
+ * (compaction, delegation: later steps) are listed.
  */
 
 import { describe, expect, it } from 'vitest'
@@ -14,11 +14,11 @@ import {
   check,
   runScenario,
 } from '../src/conformance/index'
-import type { Workspace } from '../src/index'
+import { Inbox, type Workspace } from '../src/index'
 import { referenceHarness } from './reference-harness'
 
 const covered = SCENARIOS.filter(
-  (s) => applies(s, referenceHarness) && s.tiers.every((t) => t <= 2),
+  (s) => applies(s, referenceHarness) && s.tiers.every((t) => t <= 3),
 )
 
 describe("nontainer's harness corpus on the world", () => {
@@ -33,6 +33,9 @@ describe("nontainer's harness corpus on the world", () => {
       'a-checkout-rewinds-the-conversation-with-the-files',
       'a-fresh-fork-starts-without-the-conversation',
       'a-full-fork-carries-the-conversation',
+      'a-cancel-settles-what-was-delivered',
+      'a-note-after-the-last-tool-waits-for-the-next-turn',
+      'a-note-rides-the-next-tool-result-once',
     ])
   })
 
@@ -51,6 +54,7 @@ describe('the checks', () => {
       async open(...args: Parameters<typeof referenceHarness.open>) {
         const session = await referenceHarness.open(...args)
         return {
+          inbox: session.inbox,
           turn: (p: string) => session.turn(p),
           resume: () => session.resume(),
           cancel: () => session.cancel(),
@@ -64,6 +68,29 @@ describe('the checks', () => {
     if (scenario === undefined) throw new Error('missing scenario')
     const failures = check(scenario, await runScenario(scenario, forgetful))
     expect([...failures.keys()].sort()).toEqual(['commits', 'runs'])
+  })
+
+  it("catch a harness whose turns don't deliver the inbox", async () => {
+    const deaf = {
+      ...referenceHarness,
+      async open(...args: Parameters<typeof referenceHarness.open>) {
+        const session = await referenceHarness.open(...args)
+        return {
+          inbox: new Inbox(),
+          turn: (p: string) => session.turn(p),
+          resume: () => session.resume(),
+          cancel: () => session.cancel(),
+          close: () => session.close(),
+          runs: () => session.runs(),
+          runStatuses: (info: Parameters<typeof session.runStatuses>[0]) =>
+            session.runStatuses(info),
+        }
+      },
+    }
+    const scenario = SCENARIOS.find((s) => s.name === 'a-note-rides-the-next-tool-result-once')
+    if (scenario === undefined) throw new Error('missing scenario')
+    const failures = check(scenario, await runScenario(scenario, deaf))
+    expect([...failures.keys()].sort()).toEqual(['inbox', 'turn1.events'])
   })
 
   it('catch a harness that stops after its tools, without the last reply', async () => {

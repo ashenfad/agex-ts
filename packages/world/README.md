@@ -256,6 +256,31 @@ await turn.end('completed', { body: runMessages })
   `ws.runTurn(fn)` ends the turn however `fn` does (an abort is
   `cancelled`, any other error `failed`).
 
+**The inbox** carries words to an agent that is already working.
+Anyone may `inbox.put(text)` at any moment; a turn opened with the
+inbox delivers what is queued on the next tool result, behind a visible
+mark and a frame that says who is speaking:
+
+```ts
+const inbox = new Inbox()
+const turn = await ws.turn(runId, { harness: 'my-loop', inbox })
+// … for each tool result, before the model sees it:
+const { text, notes } = await turn.deliver(result)
+// … and the end settles what was delivered
+```
+
+- **Delivery is at a tool result, never sooner:** nothing interrupts a
+  run, and a run that ends without another tool call leaves its notes
+  for the next turn. `turn.opening()` is the first message of a turn
+  woken for what is waiting rather than by a prompt.
+- **Who is speaking:** a `principal` note is from whoever the session
+  works for; a `mechanism` note is the machinery around the agent (a
+  delegate's answer), framed as evidence rather than instruction.
+- **States:** pending, then delivered (in an attempt that may yet be
+  thrown away: `inbox.requeue()` puts its notes back), then settled
+  when the turn ends. A turn's `sources` add notes of their own at each
+  delivery; `onDelivered` hears of every delivery.
+
 The conversation lives in the branch (`__conversation__/`): an index
 (the harness, the session, the runs in order, the session it was forked
 from), the harness's record, and a body per run, read back with
@@ -271,7 +296,7 @@ through a scripted model, and `check` says how it differs from what the
 scenario expects (including a turn that leaves script steps unused:
 a harness that stops early). A harness declares its capabilities, and the
 scenarios it covers apply. The package's own reference harness passes
-every scenario of tiers 0 to 2.
+every scenario of tiers 0 to 3.
 
 ## Layout
 

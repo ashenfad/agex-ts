@@ -117,12 +117,26 @@ export {
   WorkspaceConversation,
 } from './conversation'
 export {
+  type DeliveredNote,
   type EndOptions,
   RUN_STATUSES,
   type RunStatus,
+  type Source,
   Turn,
   type TurnEvent,
   TurnInProgressError,
   type TurnOptions,
+  deliveredNote,
   statusOf,
 } from './turns'
+export {
+  Inbox,
+  type InboxOptions,
+  MARK,
+  type Note,
+  type NoteKind,
+  type NoteOptions,
+  defaultFrame,
+  render as renderNotes,
+  split as splitNotes,
+} from './inbox'

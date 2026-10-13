@@ -26,6 +26,7 @@ import {
   type MergeRuleOptions,
   type PostCheck,
   UnknownBranchError,
+  UnknownCommitError,
   type Versioned,
   type VersionedCommitOptions,
 } from '../types'
@@ -276,20 +277,10 @@ export abstract class VersionedBase implements Versioned {
    */
   async mergeHeads(theirHead: string, opts: MergeHeadsOptions = {}): Promise<MergeResult> {
     const onConflict = checkDisposition(opts.onConflict)
+    await this.requireCommit(theirHead)
     const ourHead = this.currentCommitHash
     const lca = await this.findLca(ourHead, theirHead)
-    if (lca === theirHead) {
-      // Nothing is written, so no publish guards this answer the way the
-      // other outcomes' CAS on our head does: check the branch is still
-      // where this handle left it.
-      const live = await this.latestHead()
-      if (live === null) throw new UnknownBranchError(this.branch)
-      if (live !== ourHead) {
-        if (onConflict === 'abandon') return this.finish(abandoned('no_op'))
-        throw new ConcurrencyError('HEAD changed during merge. Refresh and retry.')
-      }
-      return this.finish(noOp(ourHead))
-    }
+    if (lca === theirHead) return this.finish(await this.liveNoOp(ourHead, onConflict))
     if (lca === ourHead && opts.fastForward !== false) {
       return this.finish(await this.fastForward(theirHead, onConflict))
     }
@@ -321,6 +312,10 @@ export abstract class VersionedBase implements Versioned {
     opts: ApplyChangeOptions = {},
   ): Promise<MergeResult> {
     const onConflict = checkDisposition(opts.onConflict)
+    // A missing commit would read as an empty tree, and applying "to
+    // empty" removes every key.
+    await this.requireCommit(base)
+    await this.requireCommit(target)
     const ourHead = this.currentCommitHash
     return this.threeWayMerge(target, {
       onConflict,
@@ -409,8 +404,9 @@ export abstract class VersionedBase implements Versioned {
     }
 
     if (opts.base !== undefined && !changesOurs(resolution)) {
-      // The change is already in our state, or changes nothing.
-      return this.finish(noOp(this.currentCommitHash))
+      // The change is already in our state, or changes nothing: as
+      // long as our state is still the branch's.
+      return this.finish(await this.liveNoOp(this.currentCommitHash, opts.onConflict))
     }
 
     // Lost-race default: follow the moved HEAD. Cross-branch callers
@@ -431,6 +427,26 @@ export abstract class VersionedBase implements Versioned {
     this.restoreState(opts.savedState)
     if (opts.onConflict === 'abandon') return this.finish(abandoned(strategy))
     throw new ConcurrencyError('HEAD changed during three-way merge. Refresh and retry.')
+  }
+
+  /**
+   * A merge or apply that changes nothing, at `ourHead`. Nothing is
+   * written, so no publish guards the answer the way the other outcomes'
+   * CAS on our head does: it holds only if the branch is still where
+   * this handle left it.
+   */
+  private async liveNoOp(ourHead: string, onConflict: ConflictDisposition): Promise<MergeResult> {
+    const live = await this.latestHead()
+    if (live === null) throw new UnknownBranchError(this.branch)
+    if (live !== ourHead) {
+      if (onConflict === 'abandon') return abandoned('no_op')
+      throw new ConcurrencyError('HEAD changed during merge. Refresh and retry.')
+    }
+    return noOp(ourHead)
+  }
+
+  private async requireCommit(commit: string): Promise<void> {
+    if (!(await this.hasCommit(commit))) throw new UnknownCommitError(commit)
   }
 
   private finish(result: MergeResult): MergeResult {
@@ -479,6 +495,8 @@ export abstract class VersionedBase implements Versioned {
   protected abstract loadParents(commitHash: string): Promise<readonly string[]>
   protected abstract findLca(commitA: string, commitB: string): Promise<string | null>
   protected abstract readBlob(blobId: string): Promise<Uint8Array | null>
+  /** Whether a commit is in the store. */
+  protected abstract hasCommit(commit: string): Promise<boolean>
 }
 
 function checkDisposition(value: ConflictDisposition | undefined): ConflictDisposition {

@@ -9,7 +9,7 @@ import {
   UnknownCommitError,
   jsonCodec,
 } from '../src/index'
-import { mergeBase } from '../src/versioned/kv'
+import { VersionedKV, mergeBase } from '../src/versioned/kv'
 import { PARENT_GENS } from '../src/versioned/layout'
 
 /** A JSON repo with `main` holding `seed`, and a clock the test moves. */
@@ -231,6 +231,46 @@ describe('Worktree.apply, cherryPick and revert', () => {
     const { main } = await setup()
     await expect(main.cherryPick('f'.repeat(40))).rejects.toThrow(UnknownCommitError)
     await expect(main.apply(main.head, 'f'.repeat(40))).rejects.toThrow(UnknownCommitError)
+  })
+
+  it('does not report a no-op from a stale handle', async () => {
+    // The stale handle already holds the picked change, but another
+    // writer has since reverted it on the branch: "nothing to do" holds
+    // for the handle, not the branch.
+    const { repo, main } = await setup({ a: 1 })
+    await repo.branches.create('dev', main.head)
+    const dev = await repo.worktree('dev')
+    dev.set('a', 2)
+    const change = (await dev.commit()).commit as string
+    await main.cherryPick(change)
+    const stale = await repo.worktree('main')
+    await main.revert(change)
+
+    await expect(stale.cherryPick(change)).rejects.toThrow(ConcurrencyError)
+    const abandoned = await stale.cherryPick(change, { onConflict: 'abandon' })
+    expect(abandoned.merged).toBe(false)
+    expect(await main.get('a')).toBe(1)
+
+    await stale.refresh()
+    expect((await stale.cherryPick(change)).strategy).toBe('apply')
+    expect(await (await repo.snapshot({ branch: 'main' })).get('a')).toBe(2)
+  })
+})
+
+describe('the engine checks the commits it is handed', () => {
+  it('refuses an unknown commit to apply or merge, rather than reading it as empty', async () => {
+    const store = new Memory()
+    const engine = await VersionedKV.open(store)
+    await engine.commit({ updates: new Map([['k', new Uint8Array([1])]]) })
+    const known = engine.currentCommit
+    const missing = 'f'.repeat(40)
+
+    await expect(engine.applyChange(known, missing)).rejects.toThrow(UnknownCommitError)
+    await expect(engine.applyChange(missing, known)).rejects.toThrow(UnknownCommitError)
+    await expect(engine.mergeHeads(missing)).rejects.toThrow(UnknownCommitError)
+    // Nothing was published.
+    expect(await engine.latestHead()).toBe(known)
+    expect(await engine.get('k')).toEqual(new Uint8Array([1]))
   })
 })
 

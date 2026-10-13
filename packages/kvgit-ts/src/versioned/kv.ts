@@ -1200,6 +1200,10 @@ export class VersionedKV extends VersionedBase {
     return this.store.get(blobId)
   }
 
+  protected async hasCommit(commit: string): Promise<boolean> {
+    return (await this.store.get(COMMIT_ROOT(commit))) !== null
+  }
+
   // --- Navigation ---
 
   async refresh(): Promise<void> {

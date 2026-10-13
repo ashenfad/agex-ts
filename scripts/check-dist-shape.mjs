@@ -59,6 +59,7 @@ const PACKAGES = [
   'agex-gemini',
   'agex-runtime-worker',
   'agex-git',
+  'world',
 ]
 
 async function* walkJsFiles(dir) {

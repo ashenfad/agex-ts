@@ -1,0 +1,47 @@
+{
+  "name": "@agex-ts/world",
+  "version": "0.0.0",
+  "description": "A versioned world for agents: sessions as branches of one kvgit repository, with files, a cache, a working directory, forks, checkouts and tags.",
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": ["agent", "workspace", "versioned", "filesystem", "kvgit", "typescript", "browser"],
+  "author": "Adam Ashenfelter",
+  "license": "MIT",
+  "homepage": "https://github.com/ashenfad/agex-ts/tree/main/packages/world#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ashenfad/agex-ts.git",
+    "directory": "packages/world"
+  },
+  "bugs": "https://github.com/ashenfad/agex-ts/issues",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "tsup",
+    "prepare": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@agex-ts/kvgit": "workspace:^",
+    "@agex-ts/termish": "workspace:^"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "fake-indexeddb": "^6.2.5",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}

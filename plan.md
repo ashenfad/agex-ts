@@ -1,7 +1,7 @@
 # agex-ts rebuild: plan
 
-Status: under way, 2026-10-12. F1 (termish-ts) is done but for the FS
-conformance kit's export; F2 (kvgit-ts) is next.
+Status: under way, 2026-10-13. F1 (termish-ts) and F2 (kvgit-ts) are
+done; F3 (the world package) is under way, at W1.
 
 The Python side was rebuilt as three layers: kvgit (versioned storage),
 nontainer (the world: workspace, kernel, turn, delegation) and agex (the
@@ -39,9 +39,9 @@ plan: compaction folds within a run, and delegation is redesigned.
   `rebuild`, so `main` stays the code agex-studio is built from. When
   the rebuild is done, `main` fast-forwards to it.
 - **One step is one PR,** or a short stack, with a changeset. The user
-  drives merges and releases. A foundation package can release from
-  `rebuild` along the way: the studio's `^0.x` ranges keep it on the
-  old line.
+  drives merges and releases.
+- **Nothing releases until the rebuild is done.** Then every package
+  releases at once, in lockstep, from `rebuild` (decided 2026-10-13).
 
 ## Decided
 
@@ -265,8 +265,8 @@ injection, BRE, globs) pass in TS, ported or as golden fixtures.
    content cache if reads need it.
 
 **Exit:** the Python golden fixtures pass; the shared KV conformance
-suite passes on memory, idb and sqlite; sync round-trips on v4.
-kvgit-ts releases as 0.2.0. agex-ts 0.5 and the studio stay on 0.1.3.
+suite passes on memory, idb and sqlite; sync round-trips on v4. Met
+2026-10-13; kvgit-ts releases with the rest of the rebuild.
 
 ### F3. The world package
 
@@ -303,6 +303,25 @@ nontainer's semantics for a serverless studio. In order:
 
 **Exit:** the world package runs nontainer's harness corpus (the tiers
 it covers) from the generated JSON, and its own suite on memory and idb.
+
+**Decided for the world (2026-10-13):**
+- **nontainer's semantics, not its bytes.** Only kvgit's format is
+  shared with Python. The world keeps its own keys (readable paths, not
+  base32) and its own records, on the `cbor` codec, and follows
+  nontainer's meaning: sessions as branches, a commit per mutating call
+  with nontainer's commit info (`{tool: 'file_write'}` and the rest),
+  checkout as an appended restore commit, tags scoped `<session>/<name>`
+  and `@store/<name>`.
+- **The queue isn't re-entrant.** A promise queue can't tell a callback
+  from a new caller without `AsyncLocalStorage`, which browsers lack.
+  Code inside a call uses the unqueued filesystem and cache, as
+  nontainer's kernel does; W2 revisits it if a host object needs to call
+  back into the workspace.
+- **Left out of W1:** mounts, views (`paths` on fork), `put` and
+  `attach`, `ignore`, and `ws-git` (a studio-phase decision).
+  `files.edit` comes with the `file_edit` tool in W3, with its
+  agent-tolerant matching; the conversation rebind on fork and checkout
+  comes with the conversation in W4.
 
 ## Then agex-ts
 

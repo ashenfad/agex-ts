@@ -122,10 +122,15 @@ export const CACHE_METHODS = ['get', 'set', 'has', 'delete', 'keys'] as const
 
 export function serializeError(e: unknown): SerializedError {
   if (e instanceof Error) {
-    const code = (e as { code?: unknown }).code
+    const { code, path } = e as { code?: unknown; path?: unknown }
+    // An FsError keeps its path apart from its message; code needs both.
+    const message =
+      typeof path === 'string' && path !== '' && !e.message.includes(path)
+        ? `${e.message}: ${path}`
+        : e.message
     return {
       name: e.name,
-      message: e.message,
+      message,
       ...(typeof code === 'string' && { code }),
       ...(e.stack !== undefined && { stack: e.stack }),
     }

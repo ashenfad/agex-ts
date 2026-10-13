@@ -10,8 +10,16 @@ import {
   type Worktree,
   cborCodec,
 } from '@agex-ts/kvgit'
-import { FsError } from '@agex-ts/termish'
+import {
+  type CommandHandler,
+  FsError,
+  ParseError,
+  TerminalError,
+  describeFsError,
+  execute,
+} from '@agex-ts/termish'
 import { WorkspaceCache } from './cache'
+import { EditError, type EditMode, applyEdit } from './editing'
 import {
   CommitConflictError,
   ReadOnlyError,
@@ -20,7 +28,7 @@ import {
   WorldError,
 } from './errors'
 import { type KeyReader, WorldFS } from './fs'
-import { Kernel } from './kernel/kernel'
+import { DEFAULT_MAX_OBSERVATION, Kernel } from './kernel/kernel'
 import type { Image, SerializedError } from './kernel/messages'
 import {
   COMPACTION_PREFIX,
@@ -33,7 +41,7 @@ import {
 } from './layout'
 import { checkSessionName, checkTagName } from './names'
 import { dirname, resolve, within } from './path'
-import { type HostCall, type Profile, makeHostObjects } from './profile'
+import { type HostCall, type Profile, makeCommands, makeHostObjects, shellEnv } from './profile'
 import { Queue } from './queue'
 import type { Store } from './store'
 
@@ -113,6 +121,35 @@ export interface CodeResult {
   readonly commit: string | null
 }
 
+/** What `terminal` gave. */
+export interface TerminalResult {
+  /** What the commands printed, with the diagnostics of failures the
+   *  script went on past. */
+  readonly stdout: string
+  /** 0 on success; the failing command's code (127 for a command not
+   *  found, 2 for a script that doesn't parse, 130 when interrupted). */
+  readonly exitCode: number
+  /** Why the script failed; empty on success. */
+  readonly stderr: string
+  /** stdout or stderr was cut to the profile's `maxObservation`. */
+  readonly truncated: boolean
+  /** The commit holding what the commands changed; null when they
+   *  changed nothing, with autocommit off, or on a frozen workspace. */
+  readonly commit: string | null
+}
+
+/** What `files.edit` did. */
+export interface EditOutcome {
+  readonly path: string
+  /** Replacements made; 0 when the replacement was already there. */
+  readonly count: number
+  /** How the quote matched. */
+  readonly mode: EditMode
+  /** The commit the edit made; null when nothing changed or autocommit
+   *  is off. */
+  readonly commit: string | null
+}
+
 export interface RemoveOutcome {
   readonly path: string
   readonly size: number
@@ -174,6 +211,9 @@ export class Workspace {
   readonly #cache: WorkspaceCache | null
   readonly #queue = new Queue()
   readonly #hostObjects: Map<string, object>
+  readonly #commands: Map<string, CommandHandler>
+  /** Stops the shell script running, while one is. */
+  #shell: AbortController | null = null
   #kernel: Kernel | null = null
   /** The call a host method made through its `HostCall` is part of,
    *  set while that method's workspace call starts. */
@@ -209,6 +249,7 @@ export class Workspace {
     this.files = new WorkspaceFiles(inner, this.#fs, (info) => this.autoCommit(info))
     this.tags = new WorkspaceTags(inner)
     this.#hostObjects = makeHostObjects(settings.profile, this)
+    this.#commands = makeCommands(settings.profile, this)
   }
 
   /** @internal Opens a session's tip; used by `Store.open`. */
@@ -354,7 +395,66 @@ export class Workspace {
    * running.
    */
   interrupt(): boolean {
+    if (this.#shell !== null) {
+      this.#shell.abort()
+      return true
+    }
     return this.#kernel?.interrupt() ?? false
+  }
+
+  // ---------- the shell ----------
+
+  /**
+   * Run a shell script (termish) over the session's files, as one call,
+   * committed as `{tool: 'terminal'}` when it changed anything. The
+   * working directory persists between calls. `$NAME` expands the
+   * profile's variables; a secret expands to a reference to itself,
+   * which only a command made with `commandFactory` can fill. The
+   * profile's commands sit beside termish's own.
+   *
+   * A failure is a result, not a throw: a non-zero `exitCode` with
+   * `stderr` saying why. `interrupt()` stops a script between commands
+   * (and tells a running command through its signal), exit code 130.
+   */
+  async terminal(command: string): Promise<TerminalResult> {
+    return this.#queue.run(async () => {
+      this.#checkOpen()
+      const controller = new AbortController()
+      this.#shell = controller
+      let stdout = ''
+      let stderr = ''
+      let exitCode = 0
+      try {
+        stdout = await execute(command, this.#fs, {
+          commands: this.#commands,
+          env: shellEnv(this.#settings.profile),
+          signal: controller.signal,
+        })
+      } catch (e) {
+        if (e instanceof ParseError) {
+          exitCode = 2
+          stderr = `parse error: ${e.message}`
+        } else if (e instanceof TerminalError) {
+          stdout = e.partialOutput
+          exitCode = e.exitCode
+          stderr = e.message
+        } else {
+          throw e
+        }
+      } finally {
+        this.#shell = null
+      }
+      const limit = this.#settings.profile.code?.maxObservation ?? DEFAULT_MAX_OBSERVATION
+      const cut = stdout.length > limit || stderr.length > limit
+      const commit = this.#wt === null ? null : await this.autoCommit({ tool: 'terminal' })
+      return {
+        stdout: stdout.slice(0, limit),
+        exitCode,
+        stderr: stderr.slice(0, limit),
+        truncated: cut,
+        commit,
+      }
+    }, this.#reentry)
   }
 
   // ---------- versioning ----------
@@ -754,6 +854,43 @@ export class WorkspaceFiles {
         size: data.byteLength,
         created,
         commit: await this.#autoCommit({ tool: 'file_write' }),
+      }
+    })
+  }
+
+  /**
+   * Replace `oldString` with `newString` in a text file, committed as
+   * `{tool: 'file_edit'}`. The quote must match once (or, with
+   * `replaceAll`, everywhere); it may differ from the file by trailing
+   * whitespace, or by indent (the replacement is then re-indented), and
+   * an edit whose replacement is already there is a no-op. See
+   * `applyEdit`.
+   *
+   * @throws EditError, with a message written for the agent, when
+   *   nothing matches (naming the closest lines), several places do,
+   *   or the file can't be read as UTF-8.
+   */
+  async edit(
+    path: string,
+    oldString: string,
+    newString: string,
+    opts: { replaceAll?: boolean } = {},
+  ): Promise<EditOutcome> {
+    return this.#inner.run('file_edit', async () => {
+      let text: string
+      try {
+        text = new TextDecoder('utf-8', { fatal: true }).decode(await this.#fs.read(path))
+      } catch (e) {
+        throw new EditError(`cannot read ${path}: ${describeFsError(e)}`)
+      }
+      const result = applyEdit(text, oldString, newString, { ...opts, path })
+      if (result.count === 0) return { path, count: 0, mode: result.mode, commit: null }
+      await this.#fs.write(path, enc.encode(result.content))
+      return {
+        path,
+        count: result.count,
+        mode: result.mode,
+        commit: await this.#autoCommit({ tool: 'file_edit' }),
       }
     })
   }

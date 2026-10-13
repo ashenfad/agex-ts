@@ -7,8 +7,8 @@ counterpart of [nontainer](https://github.com/ashenfad/nontainer)'s
 store and workspace, with the same semantics and its own storage
 layout.
 
-> **Status:** Pre-alpha, on the agex-ts `rebuild` branch. The tools
-> and the turn come next.
+> **Status:** Pre-alpha, on the agex-ts `rebuild` branch. The turn
+> comes next.
 
 ## Use
 
@@ -131,6 +131,41 @@ const ws = await store.open('alice', {
   its `ws` is the calling workspace as part of the code's call, so the
   method can fork or commit without waiting behind the call that's
   waiting for it.
+
+## The shell
+
+`ws.terminal(script)` runs a termish script over the session's files as
+one call, committed as `{tool: 'terminal'}` when it changed anything,
+and returns `{stdout, exitCode, stderr, truncated, commit}`; a failure
+is a result (127 for a command not found, 2 for a script that doesn't
+parse, 130 when interrupted), not a throw. The working directory
+persists. `$NAME` expands the profile's variables, and the profile's
+`commands` sit beside termish's own.
+
+`curlCommand()` is a command a host grants (`commands: {curl:
+curlCommand()}`) to fetch over the network: `-o`, `-L`, `-H`, `-X`,
+`-d`, `--json`, `-f`, `-s`, `-m`, and a size cap. In a browser it tells
+a CORS refusal from a dead network. **Secrets** reach it and nothing
+else: the shell expands `$TOKEN` to a reference to itself, `curl` fills
+it in a URL or header at the request, and a secret a response echoes
+back is replaced by its reference before it reaches the world.
+
+## The tools
+
+`worldTools(ws)` gives the tools an agent loop hands a model, with
+nontainer's names, schemas and result text: `terminal`, `file_write`,
+`file_edit`, `view_image` and `run_ts`. Each returns `{text, images,
+written?, isError}`; a failure the agent can act on is an error result,
+and `toMcpResult(out)` is the MCP `CallToolResult` for it. The
+descriptions name what the world grants (variables, secrets, commands,
+host objects, packages), and `toolInstructions(ws)` says how to pace
+calls.
+
+`file_edit` (and `ws.files.edit`) is nontainer's edit engine, checked
+against it case by case: an exact match, then trailing-whitespace and
+indent-flexible ones (the replacement re-indented), "already applied"
+for a retry, and on a miss the closest lines of the file, plus a note
+when the quote missed only by typographic look-alikes or Unicode form.
 
 ## Layout
 

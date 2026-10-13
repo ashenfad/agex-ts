@@ -343,6 +343,25 @@ it covers) from the generated JSON, and its own suite on memory and idb.
   commit inline (nontainer's delegation from code needs this); other
   calls queue.
 
+**Decided for the tools (2026-10-13):**
+- **Five tools,** with nontainer's names, schemas and result text:
+  `terminal`, `file_write`, `file_edit`, `view_image`, `run_ts`. `run_ts`
+  is always its own tool; there is no terminal-only mode and no `node`
+  in the shell.
+- **The edit engine is nontainer's,** checked against `editing.py` by
+  golden cases (`scripts/golden-editing.py`), with agex-ts's near-miss
+  notes (look-alike characters, Unicode form) added.
+- **Results are MCP-shaped:** `toMcpResult` gives text, image and
+  resource-link blocks, with `isError` set for a failure the agent can
+  act on (nontainer leaves it false).
+- **Secrets:** the shell expands a secret to a reference to itself;
+  only commands made with `commandFactory` receive the values. `curl`
+  fills them in a URL or header and scrubs them from what it gets back.
+- **Code errors** show the code's own frames at its own line numbers,
+  with hints re-keyed to this kernel.
+- **Later:** `test_app` and a module test runner (the studio phase),
+  and the `sessions` tool (W6).
+
 ## Then agex-ts
 
 Redesigned as a loop over the world package, matching agex 0.13: an

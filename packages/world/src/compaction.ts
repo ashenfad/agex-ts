@@ -163,6 +163,9 @@ export class WorkspaceCompaction {
         first: null,
         ...fold,
       }
+      // Checked again at the write: the workspace may have closed while
+      // the keys were read.
+      if (!this.#writable()) throw new ReadOnlyError('this workspace cannot record a fold')
       writer.set(key, { ...stored })
       return key
     })

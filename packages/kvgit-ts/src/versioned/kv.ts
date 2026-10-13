@@ -27,6 +27,7 @@
 
 import {
   BranchExistsError,
+  ConcurrencyError,
   CorruptHeadError,
   UnknownBranchError,
   UnknownCommitError,
@@ -324,12 +325,26 @@ export async function createBranchHead(
  * Delete branch `name`: its head and its backup, in one removal. Its
  * commits become collectable.
  *
+ * The removal is conditional on the head it read. If the branch moved
+ * or was made again in between, nothing is removed: a delete decided
+ * on one head must not take a newer one with it. Read it again and
+ * retry if the newer head should go too.
+ *
  * @throws UnknownBranchError if there is no such branch.
+ * @throws ConcurrencyError if the branch changed while being deleted.
  */
 export async function deleteBranchHead(store: KVStore, name: string): Promise<void> {
   rejectReservedBranch(name)
-  if ((await store.get(BRANCH_HEAD(name))) === null) throw new UnknownBranchError(name)
-  await store.removeMany([BRANCH_HEAD(name), BRANCH_HEAD_PREV(name)])
+  const head = BRANCH_HEAD(name)
+  const current = await store.get(head)
+  if (current === null) throw new UnknownBranchError(name)
+  const removed = await store.casMany(new Map([[head, current]]), new Map(), [
+    head,
+    BRANCH_HEAD_PREV(name),
+  ])
+  if (!removed) {
+    throw new ConcurrencyError(`Branch '${name}' changed while being deleted; nothing was removed`)
+  }
 }
 
 /**

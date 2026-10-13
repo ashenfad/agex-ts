@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { Memory } from '../src/backends/memory'
 import {
   BranchExistsError,
+  ConcurrencyError,
   CorruptHeadError,
   KvgitError,
   MergeConflict,
@@ -16,6 +17,32 @@ import {
   jsonCodec,
 } from '../src/index'
 import { BRANCH_HEAD, BRANCH_HEAD_PREV } from '../src/versioned/layout'
+
+/** A Memory that runs a one-shot hook just before a `casMany` that
+ *  removes `key`: the window between a delete's read and its removal. */
+class DeleteRaceMemory extends Memory {
+  #hooks = new Map<string, () => Promise<void>>()
+
+  beforeRemoving(key: string, hook: () => Promise<void>): void {
+    this.#hooks.set(key, hook)
+  }
+
+  override async casMany(
+    expected: ReadonlyMap<string, Uint8Array | null>,
+    writes: ReadonlyMap<string, Uint8Array>,
+    removes: Iterable<string> = [],
+  ): Promise<boolean> {
+    const list = [...removes]
+    for (const key of list) {
+      const hook = this.#hooks.get(key)
+      if (hook !== undefined) {
+        this.#hooks.delete(key)
+        await hook()
+      }
+    }
+    return super.casMany(expected, writes, list)
+  }
+}
 
 const enc = new TextEncoder()
 const dec = new TextDecoder()
@@ -74,9 +101,13 @@ describe('Repo.worktree', () => {
     await expect(repo.worktree('main')).rejects.toThrow(CorruptHeadError)
   })
 
-  it('refuses branch names in the tag namespace', async () => {
+  it('refuses branch names in the tag namespace, and the empty name', async () => {
     const { repo } = await jsonRepo()
     await expect(repo.worktree('refs/tags/v1', { create: true })).rejects.toThrow(RangeError)
+    // An empty name would be a branch no listing shows.
+    await expect(repo.worktree('', { create: true })).rejects.toThrow(RangeError)
+    await expect(repo.branches.create('')).rejects.toThrow(RangeError)
+    expect(await repo.branches.has('')).toBe(false)
   })
 })
 
@@ -262,6 +293,24 @@ describe('Branches', () => {
     await expect(repo.branches.delete('dev')).rejects.toThrow(UnknownBranchError)
   })
 
+  it('a stale delete does not take a branch made again in the meantime', async () => {
+    const store = new DeleteRaceMemory()
+    const { repo } = await jsonRepo(store)
+    await repo.branches.create('dev')
+    const wt = await repo.worktree('main', { create: true })
+    wt.set('k', 'new history')
+    const newer = (await wt.commit()).commit as string
+
+    // Between the stale delete's read and its removal, another writer
+    // deletes the branch and makes it again somewhere else.
+    store.beforeRemoving(BRANCH_HEAD('dev'), async () => {
+      await repo.branches.delete('dev')
+      await repo.branches.create('dev', newer)
+    })
+    await expect(repo.branches.delete('dev')).rejects.toThrow(ConcurrencyError)
+    expect(await repo.branches.get('dev')).toBe(newer)
+  })
+
   it('drops a stale backup when a name is reused', async () => {
     const { repo, store } = await jsonRepo()
     await repo.branches.create('dev')
@@ -307,6 +356,23 @@ describe('Tags', () => {
     await expect(repo.tags.get('v1')).rejects.toThrow(UnknownTagError)
     await expect(repo.tags.info('v1')).rejects.toThrow(UnknownTagError)
     await expect(repo.tags.delete('v1')).rejects.toThrow(UnknownTagError)
+  })
+
+  it('a stale delete does not take a tag made again in the meantime', async () => {
+    const store = new DeleteRaceMemory()
+    const { repo } = await jsonRepo(store)
+    const wt = await repo.worktree('main', { create: true })
+    wt.set('k', 1)
+    const commit = (await wt.commit()).commit as string
+    await repo.tags.create('v1', ROOT_COMMIT)
+
+    store.beforeRemoving(BRANCH_HEAD('refs/tags/v1'), async () => {
+      await repo.tags.delete('v1')
+      await repo.tags.create('v1', commit, { info: { note: 'replacement' } })
+    })
+    await expect(repo.tags.delete('v1')).rejects.toThrow(ConcurrencyError)
+    expect(await repo.tags.get('v1')).toBe(commit)
+    expect((await repo.tags.info('v1')).info).toEqual({ note: 'replacement' })
   })
 
   it('keeps a tagged commit alive through gc after its branch is gone', async () => {

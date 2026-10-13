@@ -19,6 +19,13 @@ import {
   execute,
 } from '@agex-ts/termish'
 import { WorkspaceCache } from './cache'
+import {
+  WorkspaceConversation,
+  readIndex,
+  rebindConversation,
+  reclaimConversation,
+  wipeConversation,
+} from './conversation'
 import { EditError, type EditMode, applyEdit } from './editing'
 import {
   CommitConflictError,
@@ -45,6 +52,7 @@ import { type HostCall, type Profile, makeCommands, makeHostObjects, shellEnv } 
 import { Queue } from './queue'
 import { Secrets } from './secrets'
 import type { Store } from './store'
+import { Turn, TurnInProgressError, type TurnOptions, statusOf } from './turns'
 
 /** How a workspace is opened. */
 export interface WorkspaceOptions {
@@ -204,6 +212,8 @@ export class Workspace {
   autocommit: boolean
   readonly files: WorkspaceFiles
   readonly tags: WorkspaceTags
+  /** The conversation stored in the session (see `Turn`). */
+  readonly conversation: WorkspaceConversation
 
   readonly #settings: WorkspaceSettings
   readonly #wt: Worktree<unknown> | null
@@ -218,6 +228,8 @@ export class Workspace {
   /** The call a shell script runs in, while one does: the commands'
    *  workspace is part of it. */
   #shellCall: symbol | null = null
+  /** The turn open on this workspace, if any. */
+  #turn: Turn | null = null
   readonly #secrets: Secrets
   #kernel: Kernel | null = null
   /** The call a host method made through its `HostCall` is part of,
@@ -253,6 +265,7 @@ export class Workspace {
     }
     this.files = new WorkspaceFiles(inner, this.#fs, (info) => this.autoCommit(info))
     this.tags = new WorkspaceTags(inner)
+    this.conversation = new WorkspaceConversation(reader)
     this.#secrets = new Secrets(settings.profile.secrets)
     this.#hostObjects = makeHostObjects(settings.profile, this, { secrets: this.#secrets })
     this.#commands = makeCommands(settings.profile, {
@@ -411,6 +424,82 @@ export class Workspace {
       return true
     }
     return this.#kernel?.interrupt() ?? false
+  }
+
+  // ---------- turns ----------
+
+  /** The turn open on this workspace, if any. */
+  get currentTurn(): Turn | null {
+    return this.#turn
+  }
+
+  /**
+   * Open a turn for one run (see `Turn`). The run's id may come later
+   * (`turn.bind`); resuming one names it.
+   *
+   * @throws TurnInProgressError while another turn is open here.
+   * @throws WorldError resuming a run the conversation doesn't hold.
+   * @throws ReadOnlyError on a frozen or closed workspace.
+   */
+  async turn(runId: string | null = null, opts: TurnOptions = {}): Promise<Turn> {
+    const wt = this.#live('turn')
+    if (opts.resume === true) {
+      if (runId === null) throw new WorldError('resuming a run names it: runId')
+      if (!(await readIndex(wt))?.runs.includes(runId)) {
+        throw new WorldError(`session '${this.session}' holds no run '${runId}' to resume`)
+      }
+    }
+    if (this.#turn !== null) {
+      throw new TurnInProgressError(
+        `turn ${runId ?? '(unnamed)'} is still open on session '${this.session}'; end it before beginning another`,
+      )
+    }
+    const turn = new Turn(
+      {
+        session: this.session,
+        run: (op, fn) => this.#run(op, fn),
+        commitPending: (info) => this.#commitPending(info),
+        release: (t) => {
+          if (this.#turn === t) this.#turn = null
+        },
+      },
+      runId,
+      opts,
+    )
+    this.#turn = turn
+    return turn
+  }
+
+  /**
+   * Run `fn` in a turn, and end it however `fn` does, unless `fn` ended
+   * it itself: completed when it returns, cancelled when it throws an
+   * abort (`AbortError`, `CancelledError`), failed for any other error,
+   * with the error as the message. The error is thrown on.
+   */
+  async runTurn<T>(
+    fn: (turn: Turn) => Promise<T>,
+    opts: TurnOptions & { runId?: string } = {},
+  ): Promise<T> {
+    const turn = await this.turn(opts.runId ?? null, opts)
+    let result: T
+    try {
+      result = await fn(turn)
+    } catch (e) {
+      if (turn.open) {
+        const status = statusOf(e)
+        const message =
+          status === 'cancelled'
+            ? 'cancelled'
+            : e instanceof Error
+              ? `${e.name}: ${e.message}`
+              : String(e)
+        // The run's error is the one to throw, whatever ending did.
+        await turn.end(status, { message }).catch(() => undefined)
+      }
+      throw e
+    }
+    if (turn.open) await turn.end('completed')
+    return result
   }
 
   // ---------- the shell ----------
@@ -727,6 +816,11 @@ export class Workspace {
   async #restore(wt: Worktree<unknown>, target: string): Promise<string> {
     const repo = this.store.repo
     const info = { tool: 'checkout', target }
+    // A commit from before a fork holds the conversation as another
+    // session's: restored here it becomes this one's again, keeping the
+    // lineage this session's own conversation names.
+    const current = await readIndex(wt)
+    const lineage = current?.session === this.session ? current.forkedFrom : null
     // Another workspace's commit can land between the diff and ours,
     // and merge into the restore; diff again until nothing differs.
     for (let attempt = 0; attempt < 5; attempt++) {
@@ -743,6 +837,7 @@ export class Workspace {
         if (value === undefined) await wt.delete(key)
         else wt.set(key, value)
       }
+      await reclaimConversation(wt, this.session, lineage)
       try {
         const result = await wt.commit({ info })
         if (result.strategy !== 'three_way') {
@@ -790,13 +885,8 @@ export class Workspace {
 
   async #seedFork(parent: string, inherit: Inherit): Promise<void> {
     await this.#run('fork', async (wt) => {
-      if (inherit === 'fresh') {
-        for (const key of await wt.keys()) {
-          if (key.startsWith(CONVERSATION_PREFIX) || key.startsWith(COMPACTION_PREFIX)) {
-            await wt.delete(key)
-          }
-        }
-      }
+      if (inherit === 'fresh') await wipeConversation(wt)
+      else await rebindConversation(wt, this.session, parent)
       await this.#commitPending({ tool: 'fork', parent, inherit })
     })
   }

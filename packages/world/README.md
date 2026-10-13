@@ -7,8 +7,8 @@ counterpart of [nontainer](https://github.com/ashenfad/nontainer)'s
 store and workspace, with the same semantics and its own storage
 layout.
 
-> **Status:** Pre-alpha, on the agex-ts `rebuild` branch. The turn
-> comes next.
+> **Status:** Pre-alpha, on the agex-ts `rebuild` branch. Values,
+> delegation and compaction's record come next.
 
 ## Use
 
@@ -187,6 +187,45 @@ against it case by case: an exact match, then trailing-whitespace and
 indent-flexible ones (the replacement re-indented), "already applied"
 for a retry, and on a miss the closest lines of the file, plus a note
 when the quote missed only by typographic look-alikes or Unicode form.
+
+## Turns and the conversation
+
+A harness frames each agent run as a turn:
+
+```ts
+const turn = await ws.turn(runId, { harness: 'my-loop' })
+// … the run: each tool call commits on its own …
+await turn.end('completed', { body: runMessages })
+// one more commit: {tool: 'turn', runs: {[runId]: 'completed'}}
+```
+
+- **Statuses:** `completed`; `cancelled` (stopped from outside);
+  `interrupted` (an error to resume from: `ws.turn(runId, {resume:
+  true})` continues the run in place); `failed`.
+- **The end** stores the run's body (the harness's format) in the
+  conversation and commits what's left, stamped with the status and an
+  optional message. A turn that changed nothing makes no commit.
+- **An interrupt, not a rollback:** a cancelled or failed run's files
+  stay, and the harness keeps the run with a closing note in its body.
+- **One turn at a time** per workspace; a fork has its own.
+  `ws.runTurn(fn)` ends the turn however `fn` does (an abort is
+  `cancelled`, any other error `failed`).
+
+The conversation lives in the branch (`__conversation__/`): an index
+(the harness, the session, the runs in order, the session it was forked
+from), the harness's record, and a body per run, read back with
+`ws.conversation`. So a checkout rewinds it with the files, a full fork
+carries it (as the child's), and a fresh fork starts without it.
+
+## Conformance
+
+`@agex-ts/world/conformance` holds nontainer's harness corpus (its
+exported scenarios, synced with `scripts/sync-corpus.mjs`) and a runner:
+`runScenario(scenario, harness)` plays a scenario against a harness
+through a scripted model, and `check` says how it differs from what the
+scenario expects. A harness declares its capabilities, and the
+scenarios it covers apply. The package's own reference harness passes
+every scenario of tiers 0 to 2.
 
 ## Layout
 

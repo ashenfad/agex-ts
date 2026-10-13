@@ -1,0 +1,175 @@
+{
+  "acts": [
+    {
+      "kind": "turn",
+      "prompt": "Find the rates.",
+      "resume": false,
+      "steps": [
+        {
+          "fail": "",
+          "input_tokens": 0,
+          "kind": "model",
+          "text": "",
+          "thinking": "",
+          "tool_calls": [
+            {
+              "args": {
+                "action": "ask",
+                "name": "scout",
+                "task": "find the rates"
+              },
+              "name": "sessions"
+            }
+          ]
+        },
+        {
+          "kind": "event",
+          "text": "scout",
+          "what": "delegate_answers"
+        },
+        {
+          "fail": "",
+          "input_tokens": 0,
+          "kind": "model",
+          "text": "",
+          "thinking": "",
+          "tool_calls": [
+            {
+              "args": {
+                "content": "a",
+                "path": "/workspace/a.txt"
+              },
+              "name": "file_write"
+            }
+          ]
+        },
+        {
+          "fail": "",
+          "input_tokens": 0,
+          "kind": "model",
+          "text": "done",
+          "thinking": "",
+          "tool_calls": []
+        }
+      ]
+    },
+    {
+      "kind": "turn",
+      "prompt": "And then?",
+      "resume": false,
+      "steps": [
+        {
+          "fail": "",
+          "input_tokens": 0,
+          "kind": "model",
+          "text": "",
+          "thinking": "",
+          "tool_calls": [
+            {
+              "args": {
+                "content": "b",
+                "path": "/workspace/b.txt"
+              },
+              "name": "file_write"
+            }
+          ]
+        },
+        {
+          "fail": "",
+          "input_tokens": 0,
+          "kind": "model",
+          "text": "ok",
+          "thinking": "",
+          "tool_calls": []
+        }
+      ]
+    }
+  ],
+  "budget": null,
+  "delegates": {
+    "scout": {
+      "steps": [
+        {
+          "fail": "",
+          "input_tokens": 0,
+          "kind": "model",
+          "text": "the rates are 4 and 7",
+          "thinking": "",
+          "tool_calls": []
+        }
+      ],
+      "wakes": 3
+    }
+  },
+  "expect": {
+    "absent": [],
+    "commits": null,
+    "delegates": {
+      "scout": {
+        "mentions": [
+          "4 and 7"
+        ],
+        "status": "answered",
+        "unread": [],
+        "wakes": 0
+      }
+    },
+    "files": {
+      "/workspace/a.txt": "a",
+      "/workspace/b.txt": "b"
+    },
+    "folds": null,
+    "inbox": {
+      "delivered": 0,
+      "pending": 0
+    },
+    "runs": [
+      {
+        "closing_note": false,
+        "tool_results": 2
+      },
+      {
+        "closing_note": false,
+        "tool_results": 1
+      }
+    ],
+    "turns": [
+      {
+        "events": [
+          "RunStarted",
+          "ToolStarted",
+          "ToolEnded",
+          "ToolStarted",
+          "Delivered",
+          "ToolEnded",
+          "TextDelta",
+          "RunEnded:completed"
+        ],
+        "folded": null,
+        "status": "completed"
+      },
+      {
+        "events": [
+          "RunStarted",
+          "ToolStarted",
+          "ToolEnded",
+          "TextDelta",
+          "RunEnded:completed"
+        ],
+        "folded": null,
+        "status": "completed"
+      }
+    ]
+  },
+  "name": "a-delegates-answer-is-delivered-once-on-the-next-tool-result",
+  "needs": [
+    "delegation"
+  ],
+  "summary": "A delegate's answer lands on its asker's next tool result, mid-turn, and is delivered there only: the next turn's tool results carry nothing, and nothing is left in the inbox.",
+  "tiers": [
+    5
+  ],
+  "world": {
+    "files": {}
+  }
+}

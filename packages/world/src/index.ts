@@ -89,3 +89,22 @@ export {
   toMcpResult,
   worldTools,
 } from './tools/tools'
+export {
+  CONVERSATION_FORMAT,
+  CONVERSATION_INDEX_KEY,
+  CONVERSATION_RECORD_KEY,
+  CONVERSATION_RUN_PREFIX,
+  type ConversationIndex,
+  HarnessMismatchError,
+  WorkspaceConversation,
+} from './conversation'
+export {
+  type EndOptions,
+  RUN_STATUSES,
+  type RunStatus,
+  Turn,
+  type TurnEvent,
+  TurnInProgressError,
+  type TurnOptions,
+  statusOf,
+} from './turns'

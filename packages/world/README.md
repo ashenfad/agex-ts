@@ -401,6 +401,34 @@ outside the root: ws-git, diffs and merges leave them out (a merge keeps
 this side's copy), and a directory take skips them unless named. They're
 still written and read back. Forks inherit them.
 
+## Skills
+
+Packaged instructions, as Claude Code lays them out:
+`<root>/skills/<name>/SKILL.md`, with frontmatter (`name`,
+`description`), and any files beside it.
+
+```ts
+await installSkill(ws, skillMarkdown) // or {name, files: {'SKILL.md': …, 'helpers/x.ts': …}}
+const ws = await store.open('alice', { profile: { skills: [starter] } }) // mounted read-only
+await toolInstructions(ws) // the pacing notes, then one line per skill
+```
+
+- **Installed** skills are ordinary workspace files, committed as
+  `{tool: 'skill', skill}`: they version, fork and rewind with the rest,
+  and an agent may improve them.
+- **Mounted** skills (the profile's `skills`) are the embedder's: each
+  is mounted read-only at `<root>/skills/<name>` on every open, forks
+  included. Not being the session's files, ws-git never sees them and no
+  commit carries them; an install of one's name is refused.
+- **Discovery** is the tool text's: `skillCatalog(ws)` lists every
+  skill's name and description, and `toolInstructions` carries it. The
+  shell and code read the rest as files.
+
+A directory that holds only mount points (`<root>/skills` before any
+skill is installed, or `/reviews` under an attachment at
+`/reviews/alice`) reads as a directory: it lists, and the shell can
+enter it.
+
 ## Delegation
 
 A delegate is a fork: `Sessions` is the calling convention over `fork`,

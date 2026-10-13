@@ -365,6 +365,20 @@ describe('attachments', () => {
     expect(await ws.files.exists('/reviews/review.md')).toBe(false)
   })
 
+  it('may sit below a directory the session lacks, which then reads as one', async () => {
+    const store = await fresh()
+    const ws = await seeded(store, { 'a.txt': 'mine\n' })
+    await reviewer(store)
+    await ws.files.attach('reviewer', '/reviews/alice')
+    expect(await ws.files.fs.isDir('/reviews')).toBe(true)
+    expect((await ws.terminal('ls /reviews')).stdout).toBe('alice\n')
+    expect((await ws.terminal('cd /reviews && ls alice')).stdout).toBe('review.md\n')
+    expect((await ws.terminal('find /reviews -type f')).stdout).toBe('/reviews/alice/review.md\n')
+    await ws.files.detach('/reviews/alice')
+    expect(await ws.files.fs.exists('/reviews')).toBe(false)
+    await ws.close()
+  })
+
   it('refuse a taken point, writes, and a detach of nothing', async () => {
     const store = await fresh()
     const ws = await seeded(store, { 'a.txt': 'mine\n' })

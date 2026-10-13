@@ -6,6 +6,7 @@
 
 import { DEFAULT_TIMEOUT } from '../kernel/kernel'
 import { commandDescriptions } from '../profile'
+import { skillCatalog } from '../skills'
 import type { Workspace } from '../workspace'
 
 const TERMINAL_CORE = `\
@@ -196,12 +197,16 @@ export function codeDescription(ws: Workspace, primer?: string): string {
   return `${out}\n\nMake ONE call per turn; put all the code for a step in a single call.`
 }
 
-/** Instructions to give with the tools: how to pace calls, and when
- *  work is committed. */
-export function toolInstructions(ws: Workspace): string {
+/** Instructions to give with the tools: how to pace calls, when work
+ *  is committed, and the skills catalog (see `skills`). */
+export async function toolInstructions(ws: Workspace): Promise<string> {
   const commits = ws.autocommit
     ? '; every mutating call is committed'
     : '; your work is committed at the end of each turn'
+  return `${instructionsText(commits)}${await skillCatalog(ws)}`
+}
+
+function instructionsText(commits: string): string {
   return `\
 You have a persistent workspace (files, shell, and TypeScript). Make ONE
 terminal / run_ts call per turn, batching related commands/code within

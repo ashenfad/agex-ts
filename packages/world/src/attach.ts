@@ -132,7 +132,7 @@ export class AttachFS implements FileSystem {
   async detach(at: string): Promise<void> {
     this.#mounts = this.#mounts.filter(([p]) => p !== at)
     // Standing inside it, there's nowhere to go back to: home.
-    if (this.#cwd !== null && this.#route(this.#cwd).at === null) {
+    if (this.#cwd !== null && this.#route(this.#cwd).at === null && !this.#holds(this.#cwd)) {
       this.#cwd = null
       await this.#base.chdir(this.#home)
     }
@@ -160,13 +160,25 @@ export class AttachFS implements FileSystem {
     return r.at === null && this.#cwd === null ? { ...r, path } : r
   }
 
-  /** The mount points directly inside directory `abs`. */
+  /** The names directly inside directory `abs` that lead to a mount
+   *  point: the point itself, or a directory it is under. */
   #pointsIn(abs: string): string[] {
     const prefix = abs === '/' ? '/' : `${abs}/`
-    return this.#mounts
+    const names = this.#mounts
       .map(([at]) => at)
-      .filter((at) => at.startsWith(prefix) && !at.slice(prefix.length).includes('/'))
-      .map((at) => basename(at))
+      .filter((at) => at.startsWith(prefix))
+      .map((at) => at.slice(prefix.length).split('/')[0] as string)
+    return [...new Set(names)]
+  }
+
+  /** Whether `abs` is a directory only because a mount point is under
+   *  it: `/workspace/skills` when a skill is mounted at
+   *  `/workspace/skills/<name>`. It reads as an empty directory holding
+   *  the way to its mounts. */
+  #holds(abs: string): boolean {
+    if (this.#route(abs).at !== null) return false
+    const prefix = abs === '/' ? '/' : `${abs}/`
+    return this.#mounts.some(([at]) => at.startsWith(prefix))
   }
 
   #readOnly(path: string, at: string): FsError {
@@ -181,6 +193,11 @@ export class AttachFS implements FileSystem {
     const abs = this.#abs(path)
     const r = this.#route(abs)
     if (r.at === null) {
+      if (this.#holds(abs) && !(await this.#base.isDir(abs))) {
+        // only a way to its mounts: the cwd is kept here, as inside one
+        this.#cwd = abs
+        return
+      }
       await this.#base.chdir(this.#cwd === null ? path : abs)
       this.#cwd = null
       return
@@ -217,7 +234,7 @@ export class AttachFS implements FileSystem {
 
   async exists(path: string): Promise<boolean> {
     const r = this.#to(path)
-    return r.fs.exists(r.path)
+    return (await r.fs.exists(r.path)) || this.#holds(this.#abs(path))
   }
 
   async isFile(path: string): Promise<boolean> {
@@ -227,28 +244,43 @@ export class AttachFS implements FileSystem {
 
   async isDir(path: string): Promise<boolean> {
     const r = this.#to(path)
-    return r.fs.isDir(r.path)
+    return (await r.fs.isDir(r.path)) || this.#holds(this.#abs(path))
   }
 
   async stat(path: string): Promise<FileMetadata> {
     const r = this.#to(path)
-    return r.fs.stat(r.path)
+    try {
+      return await r.fs.stat(r.path)
+    } catch (e) {
+      if (!this.#holds(this.#abs(path))) throw e
+      return { size: 0, createdAt: EPOCH, modifiedAt: EPOCH, isDir: true }
+    }
+  }
+
+  /** What the session's own filesystem lists at `abs`: nothing, for a
+   *  directory that only leads to mounts. */
+  async #own<T>(abs: string, list: () => Promise<T[]>): Promise<T[]> {
+    try {
+      return await list()
+    } catch (e) {
+      if (this.#holds(abs) && !(await this.#base.exists(abs))) return []
+      throw e
+    }
   }
 
   async list(path = '.', opts: { recursive?: boolean } = {}): Promise<string[]> {
     const abs = this.#abs(path)
     const r = this.#route(abs)
-    const own = await r.fs.list(r.path, opts)
-    if (r.at !== null) return own
+    if (r.at !== null) return r.fs.list(r.path, opts)
+    const own = await this.#own(abs, () => r.fs.list(r.path, opts))
     const points = this.#pointsIn(abs)
     if (points.length === 0) return own
     const extra = new Set(own)
     for (const name of points) extra.add(name)
     if (opts.recursive === true) {
       for (const name of points) {
-        const at = abs === '/' ? `/${name}` : `${abs}/${name}`
-        const mounted = this.#route(at)
-        for (const e of await mounted.fs.list('/', opts)) extra.add(`${name}/${e}`)
+        const below = abs === '/' ? `/${name}` : `${abs}/${name}`
+        for (const e of await this.list(below, opts)) extra.add(`${name}/${e}`)
       }
     }
     return [...extra].sort()
@@ -259,9 +291,10 @@ export class AttachFS implements FileSystem {
     const r = this.#route(abs)
     const prefix = path === '/' ? '' : path.replace(/\/$/, '')
     if (r.at !== null) return this.#mounted(prefix, r.fs, r.path, opts)
-    const infos = await r.fs.listDetailed(path, opts)
+    const infos = await this.#own(abs, () => r.fs.listDetailed(path, opts))
+    const seen = new Set(infos.map((i) => i.path))
     for (const name of this.#pointsIn(abs)) {
-      if (!infos.some((i) => i.name === name)) {
+      if (!infos.some((i) => i.name === name && i.path === `${prefix}/${name}`)) {
         infos.push({
           name,
           path: `${prefix}/${name}`,
@@ -270,10 +303,15 @@ export class AttachFS implements FileSystem {
           modifiedAt: EPOCH,
           isDir: true,
         })
+        seen.add(`${prefix}/${name}`)
       }
       if (opts.recursive === true) {
-        const mounted = this.#route(abs === '/' ? `/${name}` : `${abs}/${name}`)
-        infos.push(...(await this.#mounted(`${prefix}/${name}`, mounted.fs, '/', opts)))
+        for (const info of await this.listDetailed(`${prefix}/${name}`, opts)) {
+          if (!seen.has(info.path)) {
+            seen.add(info.path)
+            infos.push(info)
+          }
+        }
       }
     }
     return infos.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))

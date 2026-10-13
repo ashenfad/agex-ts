@@ -15,6 +15,7 @@ import {
   isSessionName,
   normalizeRoot,
 } from './names'
+import { checkProfile } from './profile'
 import {
   type ForkOptions,
   Workspace,
@@ -70,6 +71,7 @@ export class Store {
       root: normalizeRoot(opts.root ?? '/workspace'),
       autocommit: opts.autocommit ?? true,
       cache: opts.cache ?? true,
+      profile: checkProfile(opts.profile ?? {}),
     }
     const wt = await this.repo.worktree(session, { create: true })
     return Workspace._live(this, session, settings, wt)
@@ -174,6 +176,7 @@ export class Store {
       root: normalizeRoot(opts.root ?? '/workspace'),
       autocommit: false,
       cache: opts.cache ?? true,
+      profile: checkProfile(opts.profile ?? {}),
     }
   }
 

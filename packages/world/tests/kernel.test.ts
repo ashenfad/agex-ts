@@ -1,0 +1,367 @@
+/**
+ * The kernel, run in a Node `worker_threads` worker from the built
+ * `dist/worker.node.js` (build the package before testing).
+ */
+
+import { existsSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { Memory } from '@agex-ts/kvgit/backends/memory'
+import { beforeAll, describe, expect, it } from 'vitest'
+import {
+  type CodeSettings,
+  InvalidNameError,
+  type Profile,
+  ReadOnlyError,
+  Store,
+  type Workspace,
+  hostFactory,
+  withCall,
+} from '../src/index'
+import { BACKENDS, newStore } from './backends'
+
+const WORKER = new URL('../dist/worker.node.js', import.meta.url)
+
+beforeAll(() => {
+  if (!existsSync(fileURLToPath(WORKER))) {
+    throw new Error('build @agex-ts/world first: the kernel tests run its built Node worker')
+  }
+})
+
+const code = (extra: CodeSettings = {}): CodeSettings => ({
+  worker: { target: 'node', url: WORKER },
+  ...extra,
+})
+
+async function open(profile: Profile = {}, session = 's'): Promise<Workspace> {
+  const store = await Store.open(new Memory())
+  return store.open(session, { profile: { ...profile, code: code(profile.code) } })
+}
+
+const tools = async (ws: Workspace): Promise<unknown[]> =>
+  (await ws.log()).map((c) => c.info?.tool).reverse()
+
+describe('running code', () => {
+  it('captures the console, a returned value, and commits nothing for no change', async () => {
+    const ws = await open()
+    const out = await ws.runCode(`
+      console.log('hello', { n: 1 })
+      console.info('info')
+      console.warn('careful')
+      console.error('bad', 2)
+      const n: number = 40
+      return n + 2
+    `)
+    expect(out.stdout).toBe('hello {"n":1}\ninfo')
+    expect(out.stderr).toBe('careful\nbad 2')
+    expect(out.value).toBe('42')
+    expect(out.error).toBeNull()
+    expect(out.commit).toBeNull()
+    expect(out.duration).toBeGreaterThan(0)
+    await ws.close()
+  })
+
+  it('writes files, committed as run_ts, with relative paths from the cwd', async () => {
+    const ws = await open()
+    const out = await ws.runCode(`
+      await fs.write('notes.txt', 'hi')
+      await fs.mkdir('sub')
+      await fs.chdir('sub')
+      await fs.writeText('inner.txt', 'deep')
+      return [await fs.read('/workspace/notes.txt', 'utf8'), await fs.getcwd()]
+    `)
+    expect(out.value).toBe('["hi","/workspace/sub"]')
+    expect(out.commit).toBe(ws.head)
+    expect(await tools(ws)).toEqual(['init', 'run_ts'])
+    expect(await ws.files.readText('/workspace/sub/inner.txt')).toBe('deep')
+    expect(ws.files.fs.getcwd()).toBe('/workspace/sub')
+    await ws.close()
+  })
+
+  it('reports what the code threw, and still commits what it wrote first', async () => {
+    const ws = await open()
+    const out = await ws.runCode(`
+      await fs.write('before.txt', 'kept')
+      throw new RangeError('nope')
+    `)
+    expect(out.error).toMatchObject({ name: 'RangeError', message: 'nope' })
+    expect(out.commit).not.toBeNull()
+    expect(await ws.files.readText('before.txt')).toBe('kept')
+    await ws.close()
+  })
+
+  it('reports a syntax error without running anything', async () => {
+    const ws = await open()
+    const out = await ws.runCode('const = 1')
+    expect(out.error?.name).toBe('SyntaxError')
+    expect(out.commit).toBeNull()
+    await ws.close()
+  })
+
+  it('keeps nothing between runs but files and cache', async () => {
+    const ws = await open()
+    await ws.runCode(`let x = 1; cache.set('k', { n: 1 })`)
+    const out = await ws.runCode(`return [typeof x, await cache.get('k')]`)
+    expect(out.value).toBe('["undefined",{"n":1}]')
+    expect(await ws.cache.get('k')).toEqual({ n: 1 })
+    await ws.close()
+  })
+
+  it('reads its variables as env, and never sees secrets', async () => {
+    const ws = await open({
+      variables: { API_URL: 'https://x.test' },
+      secrets: { TOKEN: 's3cret' },
+    })
+    const out = await ws.runCode(`
+      try { (env as any).API_URL = 'changed' } catch {}
+      return env
+    `)
+    expect(out.value).toBe('{"API_URL":"https://x.test"}')
+    await ws.close()
+  })
+
+  it('shows images, and cuts long output', async () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0])
+    const ws = await open({ code: { maxObservation: 10 } })
+    const out = await ws.runCode(`
+      console.log('see', new Uint8Array(${JSON.stringify([...png])}))
+      console.log('x'.repeat(50))
+    `)
+    expect(out.images).toEqual([{ format: 'png', data: Buffer.from(png).toString('base64') }])
+    expect(out.stdout).toBe('see\nxxxxxx')
+    expect(out.truncated).toBe(true)
+    await ws.close()
+  })
+})
+
+describe('stopping code', () => {
+  it('stops a run that takes too long, keeping its writes, and runs again after', async () => {
+    const ws = await open({ code: { timeout: 0.5 } })
+    const out = await ws.runCode(`
+      await fs.write('started.txt', 'yes')
+      while (true) {}
+    `)
+    expect(out.error).toMatchObject({ name: 'TimeoutError' })
+    expect(out.commit).not.toBeNull()
+    expect(await ws.files.readText('started.txt')).toBe('yes')
+    expect((await ws.runCode('return 1')).value).toBe('1')
+    await ws.close()
+  })
+
+  it('interrupts a run, which commits what it wrote', async () => {
+    const ws = await open()
+    expect(ws.interrupt()).toBe(false)
+    const running = ws.runCode(`
+      await fs.write('partial.txt', 'yes')
+      console.log('waiting')
+      await new Promise((r) => setTimeout(r, 30_000))
+    `)
+    while (!(await ws.files.exists('partial.txt'))) await new Promise((r) => setTimeout(r, 10))
+    expect(ws.interrupt()).toBe(true)
+    const out = await running
+    expect(out.error).toEqual({ name: 'CancelledError', message: 'cancelled' })
+    expect(out.stdout).toBe('waiting')
+    expect(out.commit).not.toBeNull()
+    expect((await ws.runCode('return 2')).value).toBe('2')
+    await ws.close()
+  })
+
+  it('a closed workspace runs nothing', async () => {
+    const ws = await open()
+    await ws.close()
+    await expect(ws.runCode('return 1')).rejects.toThrow(ReadOnlyError)
+  })
+})
+
+describe('host objects', () => {
+  class Counter {
+    #n = 0
+    add(by: number): number {
+      this.#n += by
+      return this.#n
+    }
+    async later(v: string): Promise<string> {
+      return `later ${v}`
+    }
+    fail(): never {
+      throw new TypeError('host says no')
+    }
+    giveFunction(): () => void {
+      return () => {}
+    }
+    _secret(): string {
+      return 'hidden'
+    }
+  }
+
+  it('are bindings, members of host, and importable from host', async () => {
+    const counter = new Counter()
+    const ws = await open({ hostObjects: { counter, math: { double: (x: number) => x * 2 } } })
+    const out = await ws.runCode(`
+      import { math as m } from 'host'
+      const a = await counter.add(2)
+      const b = await host.counter.add(3)
+      return [a, b, await m.double(21), await counter.later('x')]
+    `)
+    expect(out.error).toBeNull()
+    expect(out.value).toBe('[2,5,42,"later x"]')
+    expect(counter.add(0)).toBe(5)
+    await ws.close()
+  })
+
+  it('expose public methods only, and their errors reach the code', async () => {
+    const ws = await open({ hostObjects: { counter: new Counter() } })
+    const out = await ws.runCode(`
+      const seen = []
+      try { await counter.fail() } catch (e) { seen.push(e.name + ': ' + e.message) }
+      try { await counter.giveFunction() } catch (e) { seen.push(e.name) }
+      seen.push(typeof counter._secret)
+      return seen
+    `)
+    expect(out.value).toBe('["TypeError: host says no","DataCloneError","undefined"]')
+    await ws.close()
+  })
+
+  it('made by a factory are made per world, forks included', async () => {
+    const made: string[] = []
+    const ws = await open({
+      hostObjects: {
+        who: hostFactory((w) => {
+          made.push(w.session)
+          return { session: () => w.session }
+        }),
+      },
+    })
+    const child = await ws.fork('child')
+    expect((await child.runCode('return await who.session()')).value).toBe('child')
+    expect((await ws.runCode('return await who.session()')).value).toBe('s')
+    expect(made).toEqual(['s', 'child'])
+    await child.close()
+    await ws.close()
+  })
+
+  it('declared withCall change the workspace as part of the code call', async () => {
+    const ws = await open({
+      hostObjects: {
+        sessions: {
+          fork: withCall(async (call, name: string) => {
+            if (call === undefined) throw new Error('only from code')
+            const child = await call.ws.fork(name)
+            await child.files.write('from-host.txt', 'made by the host')
+            await call.ws.files.write('parent-note.txt', 'noted')
+            return child.session
+          }),
+        },
+      },
+    })
+    const out = await ws.runCode(`
+      await fs.write('before-fork.txt', 'in the fork')
+      const child = await sessions.fork('delegate')
+      await fs.write('after-fork.txt', 'not in the fork')
+      return child
+    `)
+    expect(out.error).toBeNull()
+    expect(out.value).toBe('delegate')
+    expect(await tools(ws)).toEqual(['init', 'fork', 'file_write', 'run_ts'])
+    const child = await ws.store.open('delegate')
+    expect(await child.files.readText('before-fork.txt')).toBe('in the fork')
+    expect(await child.files.exists('after-fork.txt')).toBe(false)
+    expect(await ws.files.readText('parent-note.txt')).toBe('noted')
+    await expect(ws.store.open('s').then((w) => w.runCode('1'))).resolves.toBeDefined()
+    await child.close()
+    await ws.close()
+  })
+
+  it('refuses names code already has', async () => {
+    const store = await Store.open(new Memory())
+    for (const name of ['fs', 'env', 'host', 'console', 'class', '1x']) {
+      await expect(store.open('s', { profile: { hostObjects: { [name]: {} } } })).rejects.toThrow(
+        InvalidNameError,
+      )
+    }
+    await expect(store.open('s', { profile: { variables: { 'A-B': 'x' } } })).rejects.toThrow(
+      InvalidNameError,
+    )
+  })
+})
+
+describe('imports', () => {
+  it("loads the world's modules relative to the cwd and to each other", async () => {
+    const ws = await open()
+    await ws.files.write('lib/math.ts', 'export const double = (x: number): number => x * 2\n')
+    await ws.files.write(
+      'lib/index.ts',
+      "import { double } from './math'\nexport const quad = (x: number) => double(double(x))\nexport default 'lib'\n",
+    )
+    const out = await ws.runCode(`
+      import name, { quad } from './lib/index.ts'
+      import * as math from '/workspace/lib/math'
+      return [name, quad(2), math.double(5)]
+    `)
+    expect(out.error).toBeNull()
+    expect(out.value).toBe('["lib",8,10]')
+    await ws.close()
+  })
+
+  it('names a missing module', async () => {
+    const ws = await open()
+    const out = await ws.runCode(`import { x } from './missing'`)
+    expect(out.error?.message).toMatch(/Cannot find module '\/workspace\/missing'/)
+    await ws.close()
+  })
+
+  it('imports URLs, and bare names through the resolver', async () => {
+    const mod = `data:text/javascript,${encodeURIComponent('export const hi = (n) => "hi " + n; export default 7')}`
+    const ws = await open({ code: { resolve: (name) => (name === 'greet' ? mod : null) } })
+    const out = await ws.runCode(`
+      import seven, { hi } from 'greet'
+      import { hi as again } from '${mod}'
+      return [seven, hi('a'), again('b')]
+    `)
+    expect(out.error).toBeNull()
+    expect(out.value).toBe('[7,"hi a","hi b"]')
+    const missing = await ws.runCode(`import { y } from 'not-there'`)
+    expect(missing.error?.message).toMatch(/Cannot find module 'not-there'/)
+    await ws.close()
+  })
+
+  it('without a resolver, a bare name is missing', async () => {
+    const ws = await open()
+    const out = await ws.runCode(`import _ from 'lodash'`)
+    expect(out.error?.message).toMatch(/Cannot find module 'lodash'/)
+    await ws.close()
+  })
+})
+
+describe('fetch from the files', () => {
+  it('reads world paths when routed, and 404s under a prefix', async () => {
+    const ws = await open({ code: { routeFetch: ['/workspace/data/'] } })
+    await ws.files.write('data/points.json', '[1,2,3]')
+    const out = await ws.runCode(`
+      const r = await fetch('/workspace/data/points.json')
+      const miss = await fetch('/workspace/data/none.json')
+      return [r.headers.get('content-type'), await r.json(), miss.status]
+    `)
+    expect(out.error).toBeNull()
+    expect(out.value).toBe('["application/json",[1,2,3],404]')
+    await ws.close()
+  })
+})
+
+describe.each(BACKENDS)('on %s', (_, make) => {
+  it('a frozen workspace runs code that reads, and refuses writes', async () => {
+    const store = await newStore(make)
+    const ws = await store.open('s', { profile: { code: code() } })
+    await ws.files.write('f.txt', 'v1')
+    const tag = await ws.tags.add('v1')
+    await ws.files.write('f.txt', 'v2')
+    const view = await store.resolve(`s@${tag}`, { profile: { code: code() } })
+    const out = await view.runCode(`
+      const text = await fs.read('/workspace/f.txt', 'utf8')
+      try { await fs.write('/workspace/f.txt', 'v3') } catch (e) { return [text, e.name, e.code] }
+    `)
+    expect(out.value).toBe('["v1","FsError","EROFS"]')
+    expect(out.commit).toBeNull()
+    await view.close()
+    await ws.close()
+  })
+})

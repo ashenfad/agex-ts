@@ -769,7 +769,13 @@ export class WorkspaceIndex {
     const entry = await repo.getCommit(commit)
     if (!isAgentCommit(entry.info)) throw new WorldError(notYours(commit))
     const state = await this.#state(wt)
-    const { added, modified } = await this.changes({ ...state, head: commit }, { all: true })
+    // The whole tree comes back, hidden paths included, but what is
+    // never work (ignored, outside the root) is left as it is.
+    const found = await this.changes({ ...state, head: commit }, { all: true })
+    const work = (paths: Set<string>) =>
+      new Set([...paths].filter((p) => this.#host.whyIgnored(p) === null))
+    const added = work(found.added)
+    const modified = work(found.modified)
     const gone = [...added].sort()
     const changed = [...modified].filter((p) => !added.has(p)).sort()
     const live = await contents(wt, [...gone, ...changed])

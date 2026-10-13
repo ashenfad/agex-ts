@@ -141,6 +141,29 @@ describe('a narrowed fork', () => {
     await ws.close()
   })
 
+  it('follows the tree when it moves', async () => {
+    const ws = await seeded(await fresh(), { 'a.py': 'a\n', 'b.py': 'b\n' })
+    const before = ws.head
+    const child = await ws.fork('child', { paths: ['a.py'] })
+    expect(await child.files.exists('b.py')).toBe(false)
+    await child.checkout(before)
+    expect(child.view).toBeNull()
+    expect(await child.files.exists('b.py')).toBe(true)
+    await child.close()
+    await ws.close()
+  })
+
+  it('puts all an empty view changed elsewhere', async () => {
+    const ws = await seeded(await fresh(), { 'a.py': 'a\n' })
+    const point = ws.head
+    const child = await ws.fork('child', { paths: [] })
+    await child.files.write('mine.md', 'mine\n')
+    const d = await ws.diff(point, await child.index.commit('mine'))
+    expect(d).toMatchObject({ seed: [], inSeed: [], elsewhere: ['/workspace/mine.md'] })
+    await child.close()
+    await ws.close()
+  })
+
   it('comes from store.fork too', async () => {
     const store = await fresh()
     const ws = await seeded(store, { 'a.py': 'a\n', 'b.py': 'b\n' })
@@ -308,6 +331,37 @@ describe('attachments', () => {
     await ws.close()
   })
 
+  it('show in recursive listings, under their own names', async () => {
+    const store = await fresh()
+    const ws = await seeded(store, { 'a.txt': 'needle here\n' })
+    const other = await store.open('reviewer')
+    await other.files.write('sub/deep.md', 'needle there\n')
+    await other.close()
+    await ws.files.attach('reviewer', 'reviews')
+    expect((await ws.terminal('grep -r needle /workspace')).stdout.split('\n').sort()).toEqual([
+      '',
+      '/workspace/a.txt:needle here',
+      '/workspace/reviews/sub/deep.md:needle there',
+    ])
+    expect((await ws.terminal('find /workspace/reviews/sub')).stdout).toBe(
+      '/workspace/reviews/sub/deep.md\n',
+    )
+    expect((await ws.terminal('cd reviews && grep -r needle sub')).stdout).toBe(
+      'sub/deep.md:needle there\n',
+    )
+    await ws.close()
+  })
+
+  it('close with the session', async () => {
+    const store = await fresh()
+    const ws = await seeded(store, { 'a.txt': 'mine\n' })
+    await reviewer(store)
+    await ws.files.attach('reviewer', '/reviews')
+    await ws.close()
+    expect(ws.files.attachments()).toEqual({})
+    expect(await ws.files.exists('/reviews/review.md')).toBe(false)
+  })
+
   it('refuse a taken point, writes, and a detach of nothing', async () => {
     const store = await fresh()
     const ws = await seeded(store, { 'a.txt': 'mine\n' })
@@ -394,6 +448,24 @@ describe('ignore patterns', () => {
     expect(await ws.files.readText('run.log')).toBe('ran\n')
     await ws.files.write('again.log', 'more\n')
     await expect(ws.index.commit('only logs')).rejects.toThrow('nothing to commit')
+    await ws.close()
+  })
+
+  it("are left alone by the agent's checkout", async () => {
+    const ws = await (await fresh()).open('main', { ignore: ['*.log'] })
+    await ws.files.write('app.py', 'v1\n')
+    await ws.files.write('run.log', 'first\n')
+    const first = await ws.index.commit('first')
+    await ws.files.write('app.py', 'v2\n')
+    await ws.files.write('later.log', 'later\n')
+    await ws.index.commit('second')
+    await ws.files.write('run.log', 'newer\n')
+    await ws.terminal('mkdir -p /tmp && echo scratch > /tmp/t.txt')
+    await ws.index.checkout(first)
+    expect(await ws.files.readText('app.py')).toBe('v1\n')
+    expect(await ws.files.readText('run.log')).toBe('newer\n')
+    expect(await ws.files.readText('later.log')).toBe('later\n')
+    expect(await ws.files.readText('/tmp/t.txt')).toBe('scratch\n')
     await ws.close()
   })
 

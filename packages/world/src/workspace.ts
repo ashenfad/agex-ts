@@ -359,7 +359,7 @@ export class Workspace {
       },
       run: (op, fn) => this.#run(op, fn),
       moved: async () => {
-        await this.#loadCwd()
+        await this.#loadState()
       },
       sees: (path) => this.#view?.sees(path) ?? true,
       whyIgnored: (path) => whyIgnored(path, this.root, this.#patterns),
@@ -381,7 +381,6 @@ export class Workspace {
   ): Promise<Workspace> {
     const ws = new Workspace(store, session, settings, { wt })
     await ws.#init()
-    ws.#view?.setView(parseView(await wt.get(VIEW_KEY)))
     return ws
   }
 
@@ -394,7 +393,7 @@ export class Workspace {
   ): Promise<Workspace> {
     const snapshot = await store.repo.snapshot({ commit })
     const ws = new Workspace(store, session, settings, { snapshot })
-    await ws.#loadCwd()
+    await ws.#loadState()
     return ws
   }
 
@@ -695,7 +694,7 @@ export class Workspace {
   async discard(): Promise<void> {
     await this.#run('discard', async (wt) => {
       wt.discard()
-      await this.#loadCwd()
+      await this.#loadState()
     })
   }
 
@@ -704,7 +703,7 @@ export class Workspace {
   async refresh(): Promise<void> {
     await this.#run('refresh', async (wt) => {
       await wt.refresh()
-      await this.#loadCwd()
+      await this.#loadState()
     })
   }
 
@@ -755,11 +754,12 @@ export class Workspace {
     const added = paths(d.added)
     const removed = paths(d.removed)
     const modified = paths(d.modified)
-    const seed =
-      parseView(await (await repo.snapshot({ commit: to.commit })).get(VIEW_KEY))?.seed ?? []
+    const view = parseView(await (await repo.snapshot({ commit: to.commit })).get(VIEW_KEY))
+    const seed = view?.seed ?? []
     const all = [...added, ...removed, ...modified].sort()
-    const inSeed =
-      seed.length === 0 ? all : all.filter((p) => seed.some((entry) => within(p, entry)))
+    // No view: everything is the session's. An empty one was given
+    // nothing, so all it changed is elsewhere.
+    const inSeed = view === null ? all : all.filter((p) => seed.some((entry) => within(p, entry)))
     return {
       added,
       removed,
@@ -960,7 +960,7 @@ export class Workspace {
         const fixes = await staleRecords(repo, commit, outcome.autoMerged.concat(outcome.conflicts))
         await this.index.recordMerge(wt, source, commit, outcome.conflicts, fixes)
       }
-      await this.#loadCwd()
+      await this.#loadState()
       return outcome
     })
   }
@@ -1098,7 +1098,7 @@ export class Workspace {
       const commit = outcome.commit as string
       const fixes = await staleRecords(repo, commit, outcome.autoMerged.concat(outcome.conflicts))
       await this.index.recordMerge(wt, change.source, commit, outcome.conflicts, fixes)
-      await this.#loadCwd()
+      await this.#loadState()
     }
     return outcome
   }
@@ -1126,6 +1126,7 @@ export class Workspace {
       this.#closed = true
     })
     // Attachments go with the session.
+    this.#top.clear()
     for (const { ws } of this.#attached.values()) await ws.close()
     this.#attached.clear()
   }
@@ -1208,13 +1209,18 @@ export class Workspace {
   async #init(): Promise<void> {
     const wt = this.#wt as Worktree<unknown>
     if (!(await this.#fs.isDir(this.root))) await this.#fs.mkdir(this.root, { parents: true })
-    if (!(await this.#loadCwd())) await this.#fs.chdir(this.root)
+    if (!(await this.#loadState())) await this.#fs.chdir(this.root)
     if (!wt.status().clean) await this.#commitPending({ tool: 'init' })
   }
 
   /** Take the working directory from the session; false if it holds
    *  none usable, and the root (or `/`) was taken instead. */
-  async #loadCwd(): Promise<boolean> {
+  /** Take what the session holds about where it stands: its view (a
+   *  narrowed fork's) and its working directory. After anything that
+   *  moves the tree. False if it holds no usable working directory,
+   *  and the root (or `/`) was taken instead. */
+  async #loadState(): Promise<boolean> {
+    if (this.#wt !== null) this.#view?.setView(parseView(await this.#wt.get(VIEW_KEY)))
     const reader = this.#wt ?? null
     const stored = reader === null ? await this.#frozenCwd() : await reader.get(CWD_KEY)
     if (typeof stored === 'string' && (await this.#fs.isDir(stored))) {
@@ -1264,7 +1270,7 @@ export class Workspace {
       const d = await repo.diff(wt.head, target)
       const differing = [...d.added, ...d.removed, ...d.modified]
       if (differing.length === 0) {
-        await this.#loadCwd()
+        await this.#loadState()
         return wt.head
       }
       const values = await (await repo.snapshot({ commit: target })).getMany(differing)
@@ -1277,7 +1283,7 @@ export class Workspace {
       try {
         const result = await wt.commit({ info })
         if (result.strategy !== 'three_way') {
-          await this.#loadCwd()
+          await this.#loadState()
           return result.commit as string
         }
       } catch (e) {
@@ -1285,7 +1291,7 @@ export class Workspace {
       }
     }
     await wt.refresh()
-    await this.#loadCwd()
+    await this.#loadState()
     throw new WorldError(`checkout of ${target}: other commits kept landing; try again`)
   }
 
@@ -1362,7 +1368,7 @@ export class Workspace {
       ...(drop.size > 0 && { removed: [...drop].sort() }),
     }
     const commit = await this.#commitPending(info)
-    await this.#loadCwd()
+    await this.#loadState()
     return commit ?? wt.head
   }
 

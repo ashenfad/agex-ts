@@ -12,6 +12,7 @@
 import type { CommitInfo } from '@agex-ts/kvgit'
 import { Memory } from '@agex-ts/kvgit/backends/memory'
 import type { Inbox } from '../inbox'
+import type { Sessions } from '../sessions'
 import { Store } from '../store'
 import type { TurnEvent } from '../turns'
 import type { Workspace } from '../workspace'
@@ -48,6 +49,14 @@ export interface HarnessSession {
   close(): Promise<void>
 }
 
+/** What a session is opened with beside its workspace and clock. */
+export interface OpenOptions {
+  /** With `delegation`, for a scenario with delegates: the helper the
+   *  session's `sessions` tool asks through, and whose answers its
+   *  turns deliver. */
+  readonly sessions?: Sessions
+}
+
 export interface Harness {
   readonly name: string
   /** What it can do (see `CAPABILITIES`): a scenario applies when it
@@ -56,7 +65,38 @@ export interface Harness {
   /** Checks a scenario is known to fail, with why: exactly these must
    *  fail, so a gap that closes is noticed. */
   readonly knownGaps?: Readonly<Record<string, Readonly<Record<string, string>>>>
-  open(ws: Workspace, clock: Clock): Promise<HarnessSession>
+  open(ws: Workspace, clock: Clock, opts?: OpenOptions): Promise<HarnessSession>
+  /** With `delegation`: what runs a scenario's delegates. The runner
+   *  can't build a helper itself; `CorpusDelegates` is the one a
+   *  harness hands over. */
+  delegation?(store: Store, scenario: Scenario): Delegation
+}
+
+/** One delegate as the scenario saw it: the answer its asker got
+ *  (`status` empty when none came), the woken turns it took, the
+ *  delegates of its own it answered without hearing from, whether its
+ *  runner returned with writes uncommitted, and the steps of its
+ *  script it left unused. */
+export interface DelegateView {
+  readonly status: string
+  readonly text: string
+  readonly wakes: number
+  readonly unread: readonly string[]
+  readonly uncommitted: boolean
+  readonly unused: number
+}
+
+/** What runs a scenario's delegates: it builds the helper each session
+ *  asks through, fires the events a script holds, and at the end says
+ *  how each delegate came back. */
+export interface Delegation {
+  /** A delegate's model was asked for more than its script holds. */
+  readonly exhausted: boolean
+  helper(ws: Workspace): Sessions
+  fire(step: EventStep, session: HarnessSession, helper: Sessions): Promise<void>
+  /** Release every delegate still held, close every helper, and say
+   *  how each delegate came back, by the name it was asked under. */
+  finish(): Promise<Record<string, DelegateView>>
 }
 
 /** What the scripted model says when the script has run out. */
@@ -81,7 +121,7 @@ export class Clock {
   /** More model calls were made than the script holds. */
   exhausted = false
   #steps: Step[] = []
-  #fire: (event: EventStep) => void = () => {}
+  #fire: (event: EventStep) => unknown = () => {}
 
   /** @internal The runner's. */
   load(steps: readonly Step[]): void {
@@ -95,14 +135,15 @@ export class Clock {
     return this.#steps.length
   }
 
-  /** @internal The runner's. */
-  onEvent(fire: (event: EventStep) => void): void {
+  /** The runner's, or a delegation's: what fires an event. A delegate
+   *  answering is waited for, so the next reply comes after it. */
+  onEvent(fire: (event: EventStep) => unknown): void {
     this.#fire = fire
   }
 
-  next(sent?: readonly string[]): ModelStep {
+  async next(sent?: readonly string[]): Promise<ModelStep> {
     if (sent !== undefined) this.sent = [...sent]
-    while (this.#steps[0]?.kind === 'event') this.#fire(this.#steps.shift() as EventStep)
+    while (this.#steps[0]?.kind === 'event') await this.#fire(this.#steps.shift() as EventStep)
     const step = this.#steps.shift()
     if (step === undefined) {
       this.exhausted = true
@@ -122,6 +163,9 @@ export interface Observation {
   readonly commits: readonly { readonly tool: string; readonly runs: readonly string[] }[]
   readonly inbox: { readonly pending: number; readonly delivered: number }
   readonly exhausted: boolean
+  /** Every delegate asked, at any depth, by the name it was asked
+   *  under. */
+  readonly delegates: Readonly<Record<string, DelegateView>>
 }
 
 /** Whether a scenario applies to a harness: it needs nothing more than
@@ -138,17 +182,31 @@ export async function runScenario(
   opts: { store?: () => Promise<Store> } = {},
 ): Promise<Observation> {
   const store = await (opts.store ?? (() => Store.open(new Memory())))()
+  let delegates: Delegation | null = null
+  if (scenario.needs.includes('delegation')) {
+    if (harness.delegation === undefined) {
+      throw new Error(`${harness.name}: a scenario with delegates needs harness.delegation`)
+    }
+    delegates = harness.delegation(store, scenario)
+  }
   let ws = await store.open('scenario')
   for (const [path, text] of Object.entries(scenario.world.files)) await ws.files.write(path, text)
   if (ws.uncommitted) await ws.commit({ tool: 'world' })
   const start = ws.head
 
   const clock = new Clock()
-  let session = await harness.open(ws, clock)
+  let helper: Sessions | null = null
+  const openSession = (on: Workspace) => {
+    helper = delegates?.helper(on) ?? null
+    return harness.open(on, clock, helper === null ? {} : { sessions: helper })
+  }
+  let session = await openSession(ws)
   clock.onEvent((event) => {
+    if (delegates !== null) return delegates.fire(event, session, helper as Sessions)
     if (event.what === 'cancel') session.cancel()
     else if (event.what === 'queue_note') session.inbox.put(event.text)
-    else throw new Error(`the runner can't deliver a ${event.what} event yet`)
+    else throw new Error(`a ${event.what} event needs delegation`)
+    return undefined
   })
 
   const turns: TurnEvent[][] = []
@@ -168,10 +226,17 @@ export async function runScenario(
         await session.close()
         await ws.close()
         ws = child
-        session = await harness.open(ws, clock)
+        session = await openSession(ws)
       }
     }
 
+    let delegated: Record<string, DelegateView> = {}
+    let delegatesRanOut = false
+    if (delegates !== null) {
+      delegated = await delegates.finish()
+      delegatesRanOut = delegates.exhausted
+      delegates = null
+    }
     const files: Record<string, string | null> = {}
     for (const path of [...Object.keys(scenario.expect.files), ...scenario.expect.absent]) {
       files[path] = (await ws.files.exists(path)) ? await ws.files.readText(path) : null
@@ -191,11 +256,17 @@ export async function runScenario(
         pending: session.inbox.pending().length,
         delivered: session.inbox.delivered().length,
       },
-      exhausted: clock.exhausted,
+      exhausted: clock.exhausted || delegatesRanOut,
+      delegates: delegated,
     }
   } finally {
-    await session.close()
-    await ws.close()
+    try {
+      // A scenario that failed midway: release the delegates and wait.
+      if (delegates !== null) await delegates.finish()
+    } finally {
+      await session.close()
+      await ws.close()
+    }
   }
 }
 
@@ -288,6 +359,48 @@ export function check(scenario: Scenario, seen: Observation): Map<string, string
       seen.inbox.delivered !== want.inbox.delivered
     ) {
       failures.set('inbox', `want ${show(want.inbox)}, got ${show(seen.inbox)}`)
+    }
+  }
+  if (want.delegates !== null) {
+    for (const [name, expected] of Object.entries(want.delegates)) {
+      const got = seen.delegates[name]
+      if (got === undefined) {
+        failures.set(`delegate.${name}`, 'it was never asked')
+        continue
+      }
+      if (got.status !== expected.status) {
+        failures.set(
+          `delegate.${name}.status`,
+          `${show(got.status || 'no answer')}, not ${show(expected.status)}`,
+        )
+      }
+      const missing = expected.mentions.filter((w) => !got.text.includes(w))
+      if (missing.length > 0) {
+        failures.set(
+          `delegate.${name}.mentions`,
+          `its answer doesn't say ${show(missing)}: ${show(got.text.slice(0, 120))}`,
+        )
+      }
+      if (expected.wakes !== null && got.wakes !== expected.wakes) {
+        failures.set(`delegate.${name}.wakes`, `${got.wakes} woken turn(s), not ${expected.wakes}`)
+      }
+      if (show([...got.unread].sort()) !== show([...expected.unread].sort())) {
+        failures.set(
+          `delegate.${name}.unread`,
+          `answered without ${show(got.unread)}, not ${show(expected.unread)}`,
+        )
+      }
+    }
+  }
+  for (const [name, got] of Object.entries(seen.delegates)) {
+    if (got.uncommitted) {
+      failures.set(`delegate.${name}.uncommitted`, 'its runner returned with writes uncommitted')
+    }
+    if (got.unused > 0) {
+      failures.set(
+        `delegate.${name}.script`,
+        `it answered with ${got.unused} step(s) of its script unused`,
+      )
     }
   }
   if (seen.exhausted)

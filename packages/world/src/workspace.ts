@@ -118,7 +118,8 @@ export type Inherit = 'full' | 'fresh'
 
 export interface ForkOptions {
   /** Fork from this commit (a hash, a unique prefix of one, or a tag
-   *  of this session) instead of the current one. */
+   *  of this session; or a whole commit id from anywhere in the store)
+   *  instead of the current one. */
   readonly at?: string
   readonly inherit?: Inherit
   /** Narrow the child's view to these paths (directories or files,
@@ -817,6 +818,36 @@ export class Workspace {
   }
 
   /**
+   * A ref from anywhere in the store, as the commit it names and the
+   * name to record it by (`session@commit`, or a store tag's): what
+   * `diff` and `checkout(ref, {paths})` take. See {@link expandRef}
+   * for this session's own refs alone.
+   *
+   * @throws UnknownRefError if it names no commit the store holds.
+   * @throws UnknownSessionError for `session@commit` with no such
+   *   session.
+   */
+  async resolveRef(ref: string): Promise<{ commit: string; label: string }> {
+    return this.#resolveAny(ref)
+  }
+
+  /** A fork's starting commit: this session's ref, or a whole commit id
+   *  the store holds on another session's line. */
+  async #forkPoint(ref: string): Promise<string> {
+    try {
+      return await this.#expand(ref)
+    } catch (e) {
+      if (!(e instanceof UnknownRefError) || !/^[0-9a-f]{40}$/.test(ref)) throw e
+      try {
+        await this.store.repo.getCommit(ref)
+      } catch {
+        throw e
+      }
+      return ref
+    }
+  }
+
+  /**
    * The commit a ref names: a commit hash, a unique prefix of one (7
    * characters or more) in this session's history, or one of the
    * session's tags.
@@ -874,7 +905,7 @@ export class Workspace {
       let at: string
       if (opts.at !== undefined) {
         // The agent's own bookmarks name its commits too.
-        at = (await this.index.tags.get(opts.at)) ?? (await this.#expand(opts.at))
+        at = (await this.index.tags.get(opts.at)) ?? (await this.#forkPoint(opts.at))
       } else if (paths !== null && paths.length === 0) {
         // An empty view needs none of what's pending here.
         at = wt.head

@@ -455,6 +455,24 @@ it covers) from the generated JSON, and its own suite on memory and idb.
   one Promise-returning set.
 - **ws-git's parity is checked by a corpus,** exported from nontainer
   as the harness corpus is.
+- **nontainer's `Sessions`, ported (W6b):** the job table and its
+  verbs, the remainder committed for a delegate, `changed` measured
+  from where parent and child last met, `forkFrom`, `resume`, the
+  retention sweep, `untilSettled`, `answerNotes`, and the `sessions`
+  tool with nontainer's description and result text. Corpus tier 5
+  passes on the reference harness, through a port of
+  `CorpusDelegates`.
+- **Where the TS helper differs:** one async API; a runner returns a
+  string or the parts of an answer only it knows (`text`, `status`,
+  `artifacts`, `provenance`); times are milliseconds since the epoch,
+  and `sweep`'s `idle` is seconds, as `store.delete`'s `minAge` is;
+  `cancel` stops the run (its signal) as well as discarding the answer;
+  the sessions tool marks a refusal `isError`, as the world's other
+  tools do; the conformance clock's `next` is async, so a
+  `delegate_answers` event waits for the answer before the next reply;
+  `Sessions.of` finds a session's helper by store and session, so a
+  `HostCall`'s workspace finds it too, and an ask from code passes
+  `{call}`.
 
 **Decided for values (2026-10-13):**
 - **A declared type is a Standard Schema** (zod, valibot, arktype), as

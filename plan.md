@@ -2,7 +2,8 @@
 
 Status: under way, 2026-10-13. The foundation is done: F1
 (termish-ts), F2 (kvgit-ts) and F3 (the world package). Next is
-agex-ts's own plan, written against agex's shape corpus.
+agex-ts, rewritten as a loop over the world ("Then agex-ts"), starting
+with the provider spike (A0).
 
 The Python side was rebuilt as three layers: kvgit (versioned storage),
 nontainer (the world: workspace, kernel, turn, delegation) and agex (the
@@ -519,36 +520,250 @@ W7 #89; termish 0.2.3's fixes came after, in #90.
 
 ## Then agex-ts
 
-Redesigned as a loop over the world package, matching agex 0.13: an
-`Agent` as a recipe (model, primer, settings, limits); two front doors,
-`agent.session(ws)` and `agent.task(...)`, returning an `Outcome`; the
-`task` host object (`success`, `fail`, `needsInput`) and resuming; the
-run record and `TurnEvent`s; providers behind a small protocol;
-compaction within a run; agent-defined tasks through an `agex` host
-object; delegation through the `sessions` tool. Its own plan is written
-when the foundation is done, against the shape corpus. Open there:
-whether agent-directed chapters survive beside folding.
+A full rewrite, not a port of today's package: agex-ts becomes a small
+loop over the world, matching agex 0.13's meaning. **Simplification is
+the goal.** The world now owns everything that isn't the loop (the
+workspace, the kernel, the tools, the turn, the inbox, delegation's
+helper, compaction's record), so the loop's own code should come out
+near Python agex's size (about 5k lines, its conformance aside), where
+today's agex-ts is 11.6k and its five sibling packages another 7.7k.
 
-**Decided for the redesign (2026-10-13):**
-- **Providers are the Vercel AI SDK's** (`@ai-sdk/anthropic`,
-  `@ai-sdk/openai`, `@ai-sdk/google`, OpenRouter's
-  `@openrouter/ai-sdk-provider`), used as transport only behind agex's
-  own provider protocol, as Python agex uses pydantic-ai. They replace
-  `@agex-ts/anthropic`, `openai` and `gemini`, whose interface is tied
-  to the old fixed tool set. A spike in the studio comes first:
-  browser access (CORS), thinking signatures round-tripping, cache hits
-  matching today's, and the bundle's size.
-- **Task types are Standard Schemas,** the world's declared types (W5).
+### What it is
+
+One package, `agex-ts` (the name kept), holding only the loop:
+- **`Agent`,** a recipe with no state: a provider, a primer, settings,
+  `maxSteps`, `maxToolCalls`, a compaction `Policy`, and a profile for
+  the worlds it makes itself.
+- **`agent.session(ws)`:** turns on the session's branch, in place.
+- **`agent.task(...)`:** a typed call on a fork or a scratch world.
+- **`Outcome`,** what both return: status, text, head, events, and a
+  task's value and ref.
+- **The run record,** agex's stored format, mirrored from `agex.record`.
+- **The provider protocol,** with an AI SDK provider and a scripted one.
+- **Folding,** within a run as well as across turns.
+- **The delegation runner** for the world's `Sessions`.
+- **Agent-defined tasks,** the `agex` host object.
+
+```ts
+const agent = new Agent({ model, primer, compaction: new Policy(120_000) })
+
+const chat = agent.session(ws, { sessions: true })
+const out = await chat.say('make a flashcard app', { onEvent })  // Outcome
+for await (const event of chat.stream('add a timer')) render(event)
+chat.cancel('stopped')                     // also resume(), abandon(), wake()
+
+const grade = agent.task({
+  name: 'grade',
+  instructions: 'Grade the quiz.',
+  params: { responses: z.array(Response) },
+  returns: Report,
+})
+const report = await grade({ responses })  // the value, or TaskFailed / NeedsInput / ...
+const kept = await grade.run({ responses }, { world: ws, keep: true })  // Outcome: .value .ref
+const next = await kept.resume('the answer')  // or grade.resume(ref, answer, { world: ws })
+```
+
+### Simpler than Python
+
+- **One async API.** No sync twins, so no private event loop.
+- **One rung.** TS code always runs in the world's worker, so every
+  value crosses encoded (W5) and there is no in-process/off-process
+  split. A live input is always a host object of the task's world.
+  Scenarios marked `in-process` don't apply.
+- **Task types are Standard Schemas** (decided), given as an object of
+  parameters, since TS has no runtime signatures. The model is shown a
+  TS declaration rendered from their JSON Schema, never the schema.
+- **No tables or arrays yet,** as in W5: the corpus's `tables` and
+  `arrays` scenarios don't apply until a task needs one.
+- **No reconfigure.** An agent holds nothing, so a change of model or
+  primer is a new `Agent` for the next turn.
+- **No debug module at first** (`agex.debug` isn't ported either).
+
+### What goes
+
+On `rebuild`, each is deleted in the step that replaces it. agex-studio
+stays on the published 0.x packages from `main` until its own phase.
+
+| today | replaced by |
+|---|---|
+| `@agex-ts/runtime-worker` | the world's kernel (W2) |
+| `@agex-ts/git` | the world's ws-git (G1-G3) |
+| `@agex-ts/anthropic`, `openai`, `gemini` | AI SDK providers behind the protocol (A3) |
+| the event log (`__event_log__`, `evt/`), emissions, `TokenChunk` | the run record and `TurnEvent` |
+| the fixed action tools, `render/`, `apply-patch`, `dispatcher` | the world's tools (`worldTools`) and the tool protocol |
+| `fn` / `cls` / `namespace` registration, `policy.ts` | the world's profile: host objects, `typedHost`, commands |
+| the same-realm eval runtime, module loader, console capture | the world's kernel |
+| `MountFS` and the `/skills` and `/chapters` overlays | skills in the world (decision 2); chapters go (decision 1) |
+| `state/`, `connectState`, a store per session | the world's `Store`, sessions as branches |
+| `spawn` and its clones | delegation (`sessions`) and agent-defined tasks |
+| chaptering | folding (A4) |
+| `examples/funcy`, `examples/mathy` | rewritten in A8, or dropped |
+
+What remains of the monorepo: `kvgit-ts`, `termish-ts`, `world` and
+`agex-ts`.
+
+### Steps
+
+**A0. The provider spike** (agex-studio, a throwaway branch; decided to
+come first). Each AI SDK provider (`@ai-sdk/anthropic`, `openai`,
+`google`, and OpenRouter's `@openrouter/ai-sdk-provider`) is checked
+from the browser for:
+- CORS, with the key in the page (BYOK);
+- thinking signatures round-tripping across a tool call;
+- prompt-cache hits matching today's clients;
+- the bundle's size;
+- a custom `fetch` and headers (the studio's OpenRouter routing and
+  session-affinity headers).
+
+**Exit:** a yes or no per provider. Where it's no, that provider keeps
+a small `fetch` client of its own behind the same protocol.
+
+**A1. The clean slate and the record.**
+- The old agex-ts sources and the sibling packages come out.
+- **The run record** (`record.ts`) mirrors `agex.record` field for
+  field, as JSON.
+- **The provider protocol:** `stream(messages, tools, settings)`
+  yields deltas and then one `Reply`, plus `transient(error)` and an
+  optional `describe(error)`.
+- **`ScriptedProvider`** replies from a corpus script.
+- **The shape corpus** is vendored as the harness corpus is: a sync
+  script copies agex's `conformance/json` and records the commit.
+
+**A2. The session loop.** `agent.session(ws)` runs each turn on
+`ws.turn`:
+- **Tools:** `worldTools`, plus the embedder's own (one named like a
+  built-in replaces it).
+- **Streaming:** `TurnEvent`s, through `onEvent` and `stream()`.
+- **Endings:** `completed`, `cancelled`, `failed`, `interrupted`, with
+  a closing note on an aborted run; `resume`, `abandon` and `cancel`.
+- **The inbox,** delivered on each tool result, and `wake()`.
+- **The limits,** `maxSteps` and `maxToolCalls`, and the nudge to
+  finish a run that stops without replying.
+
+**Exit:** nontainer's harness corpus, tiers 0 to 3, through an
+`AgexHarness` (a port of agex's `conformance/harness.py`) on the
+world's runner.
+
+**A3. Real providers.**
+- The AI SDK provider, mapping the run record to and from its messages
+  at the edge, per A0's verdicts.
+- Settings: `thinking` as an effort, `maxTokens`, `temperature`, and
+  `extra` passed through, cache controls among it.
+- Transient errors: overloaded and rate-limited requests interrupt a
+  run rather than failing it.
+
+**Exit:** a smoke run on each provider against a real model (a manual
+script, keyed by the developer, not CI).
+
+**A4. Folding.** `agex.compaction` ported:
+- a fold before a model call that would reach the budget, within a run
+  too;
+- never between a tool call and its result;
+- the summary written by the agent's own model, from nearly the request
+  it was about to send;
+- summary calls counted against `maxSteps`, and in the run's usage;
+- each fold recorded on `ws.compaction` and streamed as `Compacted`.
+
+**Exit:** tier 4.
+
+**A5. Delegation.** `agent.session(ws, { sessions: true })` builds the
+world's `Sessions` with a runner that drives each delegate as a session
+of the same agent, through `untilSettled`, and offers the `sessions`
+tool. Answers arrive through the inbox (`answerNotes`).
+
+**Exit:** tier 5.
+
+**A6. Tasks.**
+- `agent.task(...)` with Standard Schemas, its arguments checked at the
+  call.
+- **The `task` host object:** `success`, `fail` and `needsInput`. A
+  value is checked at the call (W5's `check`), and the call stops the
+  script.
+- **Worlds:** a scratch world on a memory store by default, a fork with
+  `world:`, kept with `keep: true`.
+- **The `__task__` plane:** spec, inputs, state and value, so a task
+  resumes by ref, after a restart too.
+- **The model's view:** the brief, a preview of each input, and a live
+  input shown by its methods.
+- **A model that stops without finishing** is sent back, twice, then
+  the task fails.
+
+**Exit:** the shape corpus's task scenarios that apply.
+
+**A7. Agent-defined tasks.**
+- **The `agex` host object,** made per world (`hostFactory`) and
+  declared `withCall`, so a helper forks from inside the calling code's
+  call.
+- **Helpers are delegates:** asked through the world's `Sessions`
+  (`Sessions.of`), with a runner per call.
+- **The rest:** `.map` (at most four at once), the stand-in for apps,
+  and a scratch world for a world with no `Sessions` open.
+
+**Exit:** the shape corpus's code scenarios that apply.
+
+**A8. Docs and examples.**
+- **The README:** sessions, tasks, providers, delegation and folding,
+  with the examples rewritten.
+- **The changesets** for the lockstep release.
+- **The phase's exit:** every tier of the harness corpus and every
+  applicable shape scenario pass on the scripted provider, and a real
+  model runs a session and a task end to end in Node.
+
+### Decisions to make (with a recommendation each)
+
+1. **Agent-directed chapters go.** Folding does what they did for the
+   window: lossy for the model, with nothing lost for the person, whose
+   transcript and branch keep every turn. Browsable originals can come
+   back later as a projection, as nontainer's compaction notes plan.
+2. **Skills move into the world** as a small step, W8: a profile entry
+   mounts skill files read-only under `/skills` and lists each skill's
+   frontmatter in the tool text, as `nontainer.skills` does. It
+   comes before A2, so the loop never grows an overlay of its own.
+3. **Agent code declares a task's types as JSON Schema literals** (A7),
+   the corpus's own form. A Standard Schema that agent code builds
+   itself (zod from an import) is also accepted where its library
+   exports JSON Schema, converted in the worker. Values cross as JSON
+   either way, and the helper's world never sees the caller's library.
+4. **Don't wait for Python's shape freeze.** The vendored corpus is
+   pinned to an agex commit and synced at each step. A later 0.14 that
+   moves the shape shows up as a corpus diff to port, as nontainer's
+   changes did for the world.
+5. **The provider layer depends on A0's verdicts** (already decided).
+   The fallback keeps today's `fetch` clients' transport behind the new
+   protocol, rewritten against the run record.
+
+### What the studio needs, and where it comes from
+
+| the studio relies on | after the rewrite |
+|---|---|
+| a branch-pinned session over one shared store | the world's sessions-as-branches |
+| explicit commits after each turn | a commit per mutating call and at each turn's end |
+| cancel by `AbortSignal`, recording `cancelled` | `session.cancel`: a `cancelled` run with a closing note |
+| `spawn` from apps, with progress chips | agent-defined tasks (`agex`), and delegates for chips |
+| `wantsContext` host functions showing screenshots | the `test_app` tool (the studio phase); `withCall` for the rest |
+| hot `reconfigure` | a new `Agent` per turn |
+| a custom `fetch`, headers and extras on providers | A0, then A3 |
+| the esm.sh `namespaceResolver` | the world profile's `code.resolve` |
+| the `esbuild` terminal command | the world profile's `commands` |
+| the `/skills` overlay | decision 2 |
+| translating events into the old Python shape | `TurnEvent`s and the run record, read directly |
+| token telemetry from action events | each message's `usage` in the run record |
+| bundles, snapshots and sync over raw kvgit keys | the studio phase, on the world's branches and kvgit v4 |
 
 ## Then agex-studio
 
 Rebuilt on the new agex-ts, with its apps ported by hand. Decided and open there:
+- **A full rewrite is allowed** (decided 2026-10-13), where it is
+  simpler on the new foundation than a migration: with one kernel, the
+  `KernelAdapter` layer and the translation of events into the Python
+  kernel's shape go, and the chat reads `TurnEvent`s and the run record
+  directly.
 - **The Python kernel is dropped** in the rebuild (decided
   2026-10-13), with its Pyodide bridge. It may come back as an option
   if a need for both languages together appears; a matching kvgit
   format (decision 1) would let one store serve both kernels then.
 - **Sync** moves onto kvgit-ts v4 (F2e) and the world's branches.
-- **agex-git** is folded into the world as its ws-git, or dropped.
+- **agex-git** is replaced by the world's ws-git (decided 2026-10-13).
 - **The bridge** is the app's whole server-side surface, designed on
   purpose: agent-defined tasks on the viewer's own key with a per-page
   budget, storage and cache. Live network access from a page is direct,

@@ -39,6 +39,13 @@ export function checkStoreTagName(name: string): string {
   if (name.includes('@') || name.includes(':')) {
     throw new InvalidNameError(`store tag ${JSON.stringify(name)}: a store tag has no '@' or ':'`)
   }
+  // ws-git reads seven or more hex characters as a commit id first, so
+  // a store tag spelled that way could never be reached by name.
+  if (/^[0-9a-f]{7,}$/.test(name)) {
+    throw new InvalidNameError(
+      `store tag ${JSON.stringify(name)}: a store tag isn't spelled like a commit id (seven or more hex characters): a word that could be read as either would be neither`,
+    )
+  }
   return name
 }
 

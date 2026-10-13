@@ -387,6 +387,10 @@ describe.each(BACKENDS)('on %s', (_, make) => {
       expect(await store.tags.add('s', 'by-ref')).toBe(commit)
       await expect(store.tags.add(ws, 'release')).rejects.toThrow(TagExistsError)
       await expect(store.tags.add(ws, 'a:b')).rejects.toThrow(InvalidNameError)
+      // Spelled like a commit id, ws-git could never reach it by name.
+      await expect(store.tags.add(ws, 'deadbeef')).rejects.toThrow(InvalidNameError)
+      expect(await store.tags.add(ws, 'cafe')).toBe(commit)
+      await store.tags.delete('cafe')
 
       await store.delete('s', { minAge: 0 })
       const view = await store.tags.at('release')

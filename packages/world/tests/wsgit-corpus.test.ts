@@ -46,8 +46,9 @@ const scripts: Script[] = readdirSync(dir)
   .sort()
   .map((f) => JSON.parse(readFileSync(new URL(f, dir), 'utf8')) as Script)
 
-const FULL = /(?<![0-9a-f])[0-9a-f]{40}(?![0-9a-f])/g
-const SHORT = /(?<![0-9a-f])[0-9a-f]{7}(?![0-9a-f])/g
+/** A commit id as ws-git prints one, whole or short: one pattern, so a
+ *  text is named left to right. */
+const ID = /(?<![0-9a-f])(?:[0-9a-f]{40}|[0-9a-f]{7})(?![0-9a-f])/g
 const NAMED = /<c(\d+)(\*?)>/g
 
 /** Commit ids ↔ `<cN>`, numbered by first appearance, as the recorder
@@ -76,8 +77,8 @@ class Names {
   }
 
   hide(text: string): string {
-    const full = text.replace(FULL, (w) => (this.known.has(w) ? `<c${this.#name(w)}*>` : w))
-    return full.replace(SHORT, (w) => {
+    return text.replace(ID, (w) => {
+      if (w.length === 40) return this.known.has(w) ? `<c${this.#name(w)}*>` : w
       const found = [...this.known].filter((c) => c.startsWith(w))
       return found.length === 1 ? `<c${this.#name(found[0] as string)}>` : w
     })

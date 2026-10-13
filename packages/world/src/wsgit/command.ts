@@ -1052,7 +1052,10 @@ async function showCommit(
 ): Promise<Out> {
   const entry = await git.entry(id)
   if (entry === null) return fail(1, `no commit ${repr(spelled)} here`)
-  const parent = virtualParents(entry.info)[0] ?? null
+  // Measured from the state it was composed on, as revert and
+  // cherry-pick measure it: a fork's first commit has no parent in the
+  // agent's graph, and its change is from the fork's base.
+  const parent = await changeBase(v.ws.store, entry)
   const files = entry.info?.files
   const after = await git.filesAt(id)
   const before = await git.filesAt(parent)
@@ -1474,11 +1477,18 @@ async function log(v: Verb, rest: string[]): Promise<Out> {
   return logOut(v, v.git, limit, every, needle, null)
 }
 
-/** `(commit, its parent)` newest first: the agent's graph, or with
+/** `(commit, its parent)` newest first: the agent's graph (a fork's
+ *  first commit measured from its base, as show measures it), or with
  *  `every` the session's own line. */
-async function walk(git: WorkspaceIndex, every: boolean): Promise<[Commit, string | null][]> {
+async function walk(
+  v: Verb,
+  git: WorkspaceIndex,
+  every: boolean,
+): Promise<[Commit, string | null][]> {
   if (every) return (await git.history()).map((c) => [c, c.parents[0] ?? null])
-  return (await git.log()).map((c) => [c, virtualParents(c.info)[0] ?? null])
+  const out: [Commit, string | null][] = []
+  for (const c of await git.log()) out.push([c, await changeBase(v.ws.store, c)])
+  return out
 }
 
 async function logOut(
@@ -1489,14 +1499,14 @@ async function logOut(
   needle: string | null,
   named: string | null,
 ): Promise<Out> {
-  const steps = await walk(git, every)
+  const steps = await walk(v, git, every)
   const tags = byCommit(await git.tags.list())
   const capped = <T>(list: T[]): T[] =>
     limit !== null && limit <= 0 ? [] : limit === null ? list : list.slice(0, limit)
   if (needle === null) {
     const entries = capped(steps).map(([c]) => c)
     if (entries.length === 0 && !every && (limit === null || limit > 0)) {
-      if ((await walk(git, true)).length > 0) {
+      if ((await walk(v, git, true)).length > 0) {
         const where = named !== null ? `in ${named}` : 'in this session'
         const spelled = named !== null ? `ws-git log ${named} --all` : 'ws-git log --all'
         v.write(

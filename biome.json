@@ -7,7 +7,13 @@
   },
   "files": {
     "ignoreUnknown": true,
-    "ignore": ["**/dist/**", "**/node_modules/**", "**/coverage/**"]
+    "ignore": [
+      "**/dist/**",
+      "**/node_modules/**",
+      "**/coverage/**",
+      "packages/world/src/conformance/corpus/*.json",
+      "packages/world/src/conformance/*.schema.json"
+    ]
   },
   "formatter": {
     "enabled": true,

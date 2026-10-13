@@ -367,6 +367,20 @@ it covers) from the generated JSON, and its own suite on memory and idb.
 - **Later:** `test_app` and a module test runner (the studio phase),
   and the `sessions` tool (W6).
 
+**Decided for the turn (2026-10-13):**
+- **nontainer's turn API,** async: `ws.turn(runId, {resume, harness})`,
+  `turn.end(status, {body, record, message})`, `ws.runTurn(fn)` for the
+  exceptions-to-status mapping. A turn never changes autocommit; its end
+  commits only what's left.
+- **The conversation index** keeps nontainer's fields (in camelCase)
+  and a body per run; a full fork rebinds it to the child, a checkout of
+  a pre-fork commit reclaims it, a fresh fork wipes it.
+- **The corpus runs in TS:** `@agex-ts/world/conformance` bundles
+  nontainer's exported scenarios verbatim (`scripts/sync-corpus.mjs`)
+  with a port of its runner. A reference harness in the tests passes
+  tiers 0 to 2; the inbox (tier 3) comes with delegation (W6), and
+  compaction (tier 4) with its record (W7).
+
 ## Then agex-ts
 
 Redesigned as a loop over the world package, matching agex 0.13: an

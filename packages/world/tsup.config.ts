@@ -4,9 +4,14 @@ export default defineConfig({
   // The kernel's workers are entries of their own, so the host finds
   // them with `new URL('./worker.js', import.meta.url)`, a form every
   // bundler understands.
-  entry: ['src/index.ts', 'src/worker.ts', 'src/worker.node.ts'],
+  entry: {
+    index: 'src/index.ts',
+    'conformance/index': 'src/conformance/index.ts',
+    worker: 'src/worker.ts',
+    'worker.node': 'src/worker.node.ts',
+  },
   format: ['esm'],
-  dts: { entry: ['src/index.ts'] },
+  dts: { entry: { index: 'src/index.ts', 'conformance/index': 'src/conformance/index.ts' } },
   sourcemap: true,
   clean: true,
   target: 'es2022',

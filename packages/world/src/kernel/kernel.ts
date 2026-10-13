@@ -13,7 +13,14 @@
 import tsBlankSpace from 'ts-blank-space'
 import type { WorkspaceCache } from '../cache'
 import type { WorldFS } from '../fs'
-import { type CodeSettings, type HostCall, callAware, publicMethods } from '../profile'
+import {
+  type CodeSettings,
+  type HostCall,
+  type HostEntry,
+  type MethodContract,
+  callAware,
+} from '../profile'
+import { Mismatch, check, findLive } from '../values'
 import { type ResolvedTarget, type WorkerHandle, createWorkerHandle, detectTarget } from './handle'
 import {
   CACHE_METHODS,
@@ -47,7 +54,7 @@ export interface RunContext {
   readonly env: Readonly<Record<string, string>>
   /** The secrets' names, never their values. */
   readonly secrets: readonly string[]
-  readonly hostObjects: ReadonlyMap<string, object>
+  readonly hostObjects: ReadonlyMap<string, HostEntry>
   /** Given to host methods declared `withCall`. */
   readonly call: HostCall
   readonly settings: CodeSettings
@@ -197,9 +204,9 @@ export class Kernel {
         runId,
         code: prepared.code,
         modules: prepared.modules,
-        hostObjects: [...ctx.hostObjects].map(([name, obj]) => ({
+        hostObjects: [...ctx.hostObjects].map(([name, entry]) => ({
           name,
-          methods: publicMethods(obj),
+          methods: entry.methods,
         })),
         env: ctx.env,
         secrets: ctx.secrets,
@@ -289,9 +296,18 @@ export class Kernel {
     msg: Extract<Worker2Host, { type: 'call' }>,
     ctx: RunContext,
   ): Promise<void> {
+    const what = msg.subject === undefined ? msg.target : msg.subject
     let reply: Host2Worker
     try {
       const value = await this.#dispatch(msg, ctx)
+      const live = findLive(value)
+      if (live !== null) {
+        const e = new Error(
+          `${what}.${msg.method} returned a value that can't be sent to code by value (${live})`,
+        )
+        e.name = 'DataCloneError'
+        throw e
+      }
       reply = { type: 'reply', runId: msg.runId, callId: msg.callId, ok: true, value }
     } catch (e) {
       reply = {
@@ -306,9 +322,7 @@ export class Kernel {
     try {
       worker.postMessage(reply)
     } catch (e) {
-      // A value that can't cross (a function, a live object) fails the
-      // call instead of the run.
-      const what = msg.subject === undefined ? msg.target : msg.subject
+      // A value that can't cross fails the call instead of the run.
       worker.postMessage({
         type: 'reply',
         runId: msg.runId,
@@ -340,16 +354,61 @@ export class Kernel {
       return resolve === undefined ? null : await resolve(String(args[0]))
     }
     const name = msg.subject as string
-    const obj = ctx.hostObjects.get(name)
-    if (obj === undefined || !publicMethods(obj).includes(method)) {
+    const entry = ctx.hostObjects.get(name)
+    if (entry === undefined || !entry.methods.includes(method)) {
       throw new TypeError(`${name}.${method} is not a function`)
     }
+    const { obj } = entry
+    const contract = entry.contract?.[method]
+    const where = `${name}.${method}`
+    const given = contract === undefined ? [...args] : await checkArgs(where, contract, args)
     const fn = (obj as Record<string, unknown>)[method] as (...a: unknown[]) => unknown
     const aware = callAware(fn)
-    return await (aware === undefined
-      ? fn.apply(obj, [...args])
-      : aware.call(obj, ctx.call, ...args))
+    const result = await (aware === undefined
+      ? fn.apply(obj, given)
+      : aware.call(obj, ctx.call, ...given))
+    if (contract?.returns === undefined) return result
+    try {
+      return await check(result, contract.returns)
+    } catch (e) {
+      if (!(e instanceof Mismatch)) throw e
+      throw new TypeError(
+        `${where} returned a value that doesn't fit its declared type: ${e.message}`,
+      )
+    }
   }
+}
+
+/** A typed method's arguments, checked against its contract: what the
+ *  schemas give back, in order. */
+async function checkArgs(
+  where: string,
+  contract: MethodContract,
+  args: readonly unknown[],
+): Promise<unknown[]> {
+  if (contract.args === undefined) return [...args]
+  const named = !Array.isArray(contract.args)
+  const schemas = Object.entries(contract.args)
+  if (args.length > schemas.length) {
+    const n = schemas.length
+    throw new TypeError(
+      `${where} takes ${n === 1 ? '1 argument' : `${n} arguments`}, not ${args.length}`,
+    )
+  }
+  const out: unknown[] = []
+  for (const [i, [key, schema]] of schemas.entries()) {
+    try {
+      out.push(await check(args[i], schema))
+    } catch (e) {
+      if (!(e instanceof Mismatch)) throw e
+      const arg = named ? key : `argument ${i + 1}`
+      const at = e.where === '' ? arg : `${arg}${e.where.startsWith('[') ? '' : '.'}${e.where}`
+      throw new TypeError(`${where}: at ${at}: ${e.detail}`)
+    }
+  }
+  // Trailing arguments left out stay left out, so a method's defaults apply.
+  while (out.length > args.length && out[out.length - 1] === undefined) out.pop()
+  return out
 }
 
 function cancelled(message: string): Error {

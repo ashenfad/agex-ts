@@ -124,13 +124,52 @@ const ws = await store.open('alice', {
 
 - **Host objects** are called over async messages: code writes
   `await db.query(…)`. Methods whose names start with `_` aren't
-  reachable, and arguments and results cross by structured clone.
+  reachable, and arguments and results cross by value (see Values).
+- **`typedHost(obj, contract)`** types an object's methods with
+  Standard Schemas (below): only the contract's methods are reachable,
+  each argument is checked on the host, and the result before it goes
+  back.
 - **`hostFactory(make)`** makes an object per world (`make(ws)` as each
   workspace opens, forks included), so it knows which session it serves.
 - **`withCall(fn)`** declares a method that receives a `HostCall` first:
   its `ws` is the calling workspace as part of the code's call, so the
   method can fork or commit without waiting behind the call that's
   waiting for it.
+
+## Values
+
+What crosses the worker, and what is stored, crosses by value:
+
+- **Live parts are refused where they'd cross:** a function, an
+  instance of a class (structured clone would make it a plain object,
+  its methods gone), a promise, a symbol, a getter. The error names
+  where: `at [0].client: a live Client`. `findLive(value)` asks first.
+- **A stored value** is one blob: `encode(value)` and `decode(bytes)`,
+  on the session's CBOR codec, behind a `world-value/1` header. Data,
+  bytes, typed arrays, `Map`, `Set`, `Date`, `RegExp` and bigints come
+  back as themselves; what wouldn't (an `ArrayBuffer`, an error, a value
+  holding itself) is refused with `Unencodable`. `copy(value)` copies
+  by the same rules, and the cache stores by them.
+- **A declared type is a Standard Schema** (zod, valibot, arktype…):
+  `check(value, schema)` gives what the schema's validation returns, or
+  throws a `Mismatch` naming where it doesn't fit (`at
+  scores[1].total: …`). `jsonSchemaOf(schema)` is the library's JSON
+  Schema for it, for a model to read.
+
+```ts
+const catalog = typedHost(new Catalog(), {
+  search: {
+    args: { query: z.string(), limit: z.number().int().optional() },
+    returns: z.array(Item),
+  },
+})
+// in code: await catalog.search(42)
+// TypeError: catalog.search: at query: Invalid input: expected string, received number
+```
+
+Arguments are a schema per position (an array) or by name (an object,
+in the method's order, the names showing in errors). Tables aren't
+carried yet: an Arrow table is refused as a live object.
 
 ## The shell
 

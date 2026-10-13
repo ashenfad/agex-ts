@@ -6,13 +6,16 @@
  */
 
 import type { CommandHandler } from '@agex-ts/termish'
+import type { StandardSchemaV1 } from '@standard-schema/spec'
 import { InvalidNameError } from './errors'
 import { type SecretSpec, type Secrets, checkSecrets, secretRef } from './secrets'
+import { isSchema } from './values'
 import type { Workspace } from './workspace'
 
 const FACTORY = Symbol('world.hostFactory')
 const COMMAND = Symbol('world.commandFactory')
 const WANTS_CALL = Symbol('world.withCall')
+const TYPED = Symbol('world.typedHost')
 
 /** What a host object made per world receives beside its workspace. */
 export interface HostWorld {
@@ -33,9 +36,52 @@ export function hostFactory(factory: (ws: Workspace, world: HostWorld) => object
   return { [FACTORY]: factory }
 }
 
+/**
+ * What one method of a {@link typedHost} takes and gives: a Standard
+ * Schema per argument, in order (an array), or by name (an object, in
+ * the order the method takes them: the names show in errors), and one
+ * for what it returns. Either may be left out, for a method whose
+ * arguments or result are any data.
+ */
+export interface MethodContract {
+  readonly args?: readonly StandardSchemaV1[] | Readonly<Record<string, StandardSchemaV1>>
+  readonly returns?: StandardSchemaV1
+}
+
+/** A typed host object's methods, by name. */
+export type HostContract = Readonly<Record<string, MethodContract>>
+
+/** A host object with a contract: see {@link typedHost}. */
+export interface TypedHost {
+  readonly [TYPED]: { readonly host: object | HostFactory; readonly methods: HostContract }
+}
+
+/**
+ * A host object whose methods are typed: code may call exactly the
+ * methods `methods` names, each argument is checked against its schema
+ * on the host before the method runs (a mismatch is a `TypeError` at
+ * the call in the code, naming where), and the method gets what the
+ * schemas give back, so a schema that transforms hands it the
+ * transformed value. A result is checked against `returns` before it
+ * goes back to the code. `host` is an object or a {@link hostFactory}.
+ */
+export function typedHost(host: object | HostFactory, methods: HostContract): TypedHost {
+  checkContract('typedHost', methods)
+  return { [TYPED]: { host, methods } }
+}
+
 /** A host object: an object whose public methods (not starting with
- *  `_`) code may call, or a {@link hostFactory}. */
-export type HostObject = object | HostFactory
+ *  `_`) code may call, a {@link hostFactory}, or a {@link typedHost}. */
+export type HostObject = object | HostFactory | TypedHost
+
+/** A host object as one workspace holds it: the object, and its
+ *  contract when it is typed. */
+export interface HostEntry {
+  readonly obj: object
+  readonly contract: HostContract | null
+  /** The methods code may call, sorted. */
+  readonly methods: readonly string[]
+}
 
 /**
  * What a host method declared with {@link withCall} receives first,
@@ -185,11 +231,17 @@ const VARIABLE = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 /** Check a profile's names, and return it. */
 export function checkProfile(profile: Profile): Profile {
-  for (const name of Object.keys(profile.hostObjects ?? {})) {
+  for (const [name, entry] of Object.entries(profile.hostObjects ?? {})) {
     if (!IDENTIFIER.test(name) || RESERVED.has(name)) {
       throw new InvalidNameError(
         `host object ${JSON.stringify(name)}: a name is an identifier code doesn't already have`,
       )
+    }
+    // A typed object (not one a factory makes) has its contract checked
+    // against its methods now, not when a workspace opens.
+    const typed = (entry as Partial<TypedHost>)[TYPED]
+    if (typed !== undefined && (typed.host as Partial<HostFactory>)[FACTORY] === undefined) {
+      hostEntry(name, typed.host, typed.methods)
     }
   }
   for (const [name, value] of Object.entries(profile.variables ?? {})) {
@@ -258,13 +310,46 @@ export function makeHostObjects(
   profile: Profile,
   ws: Workspace,
   world: HostWorld,
-): Map<string, object> {
-  const out = new Map<string, object>()
+): Map<string, HostEntry> {
+  const out = new Map<string, HostEntry>()
   for (const [name, entry] of Object.entries(profile.hostObjects ?? {})) {
-    const factory = (entry as Partial<HostFactory>)[FACTORY]
-    out.set(name, factory === undefined ? entry : factory(ws, world))
+    const typed = (entry as Partial<TypedHost>)[TYPED]
+    const host = typed === undefined ? entry : typed.host
+    const factory = (host as Partial<HostFactory>)[FACTORY]
+    const obj = factory === undefined ? host : factory(ws, world)
+    out.set(name, hostEntry(name, obj, typed?.methods ?? null))
   }
   return out
+}
+
+function hostEntry(name: string, obj: object, contract: HostContract | null): HostEntry {
+  const methods = publicMethods(obj)
+  if (contract === null) return { obj, contract, methods }
+  const missing = Object.keys(contract).filter((m) => !methods.includes(m))
+  if (missing.length > 0) {
+    throw new TypeError(
+      `host object ${name}: its contract names ${missing.join(', ')}, not among its methods`,
+    )
+  }
+  return { obj, contract, methods: Object.keys(contract).sort() }
+}
+
+function checkContract(what: string, methods: HostContract): void {
+  if (typeof methods !== 'object' || methods === null || Object.keys(methods).length === 0) {
+    throw new TypeError(`${what}: a contract names at least one method`)
+  }
+  for (const [method, contract] of Object.entries(methods)) {
+    const args = contract.args ?? []
+    const schemas = Array.isArray(args) ? args : Object.values(args)
+    for (const schema of [
+      ...schemas,
+      ...(contract.returns === undefined ? [] : [contract.returns]),
+    ]) {
+      if (!isSchema(schema)) {
+        throw new TypeError(`${what}: ${method} has something other than a Standard Schema`)
+      }
+    }
+  }
 }
 
 /** The methods code may call on a host object: every function-valued

@@ -43,11 +43,29 @@ export {
   type CodeSettings,
   type HostCall,
   type HostFactory,
+  type HostContract,
   type HostObject,
+  type MethodContract,
   type Profile,
+  type TypedHost,
   hostFactory,
+  typedHost,
   withCall,
 } from './profile'
+export {
+  VALUE_FORMAT,
+  Malformed,
+  Mismatch,
+  TooLarge,
+  Unencodable,
+  check,
+  copy,
+  decode,
+  encode,
+  findLive,
+  isSchema,
+  jsonSchemaOf,
+} from './values'
 export type { Image, SerializedError } from './kernel/messages'
 export { DEFAULT_MAX_OBSERVATION, DEFAULT_TIMEOUT, MAX_IMAGES } from './kernel/kernel'
 export { type CurlOptions, curlCommand } from './curl'

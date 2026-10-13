@@ -41,6 +41,7 @@
     "vitest": "^2.1.8"
   },
   "dependencies": {
-    "@agex-ts/world": "workspace:^"
+    "@agex-ts/world": "workspace:^",
+    "@agex-ts/kvgit": "workspace:^"
   }
 }

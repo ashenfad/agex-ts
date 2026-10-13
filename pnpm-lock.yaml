@@ -23,6 +23,9 @@ importers:
 
   packages/agex-ts:
     dependencies:
+      '@agex-ts/kvgit':
+        specifier: workspace:^
+        version: link:../kvgit-ts
       '@agex-ts/world':
         specifier: workspace:^
         version: link:../world

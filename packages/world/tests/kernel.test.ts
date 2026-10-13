@@ -5,7 +5,6 @@
 
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { Memory } from '@agex-ts/kvgit/backends/memory'
 import { beforeAll, describe, expect, it } from 'vitest'
 import {
   type CodeSettings,
@@ -18,7 +17,7 @@ import {
   hostFactory,
   withCall,
 } from '../src/index'
-import { BACKENDS, newStore } from './backends'
+import { BACKENDS, newKV, newStore } from './backends'
 
 const WORKER = new URL('../dist/worker.node.js', import.meta.url)
 
@@ -34,7 +33,7 @@ const code = (extra: CodeSettings = {}): CodeSettings => ({
 })
 
 async function open(profile: Profile = {}, session = 's'): Promise<Workspace> {
-  const store = await Store.open(new Memory())
+  const store = await Store.open(await newKV())
   return store.open(session, { profile: { ...profile, code: code(profile.code) } })
 }
 
@@ -300,7 +299,7 @@ describe('host objects', () => {
   })
 
   it('refuses names code already has', async () => {
-    const store = await Store.open(new Memory())
+    const store = await Store.open(await newKV())
     for (const name of ['fs', 'env', 'host', 'console', 'class', '1x']) {
       await expect(store.open('s', { profile: { hostObjects: { [name]: {} } } })).rejects.toThrow(
         InvalidNameError,

@@ -5,7 +5,6 @@
  * needs.
  */
 
-import { Memory } from '@agex-ts/kvgit/backends/memory'
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
   COMPACTION_MARK,
@@ -25,12 +24,13 @@ import {
   summaryRequest,
   transcript,
 } from '../src/index'
+import { newKV } from './backends'
 
 let store: Store
 let ws: Workspace
 
 beforeEach(async () => {
-  store = await Store.open(new Memory())
+  store = await Store.open(await newKV())
   ws = await store.open('s')
 })
 

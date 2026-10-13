@@ -1,6 +1,6 @@
-import { Memory } from '@agex-ts/kvgit/backends/memory'
 import { describe, expect, it } from 'vitest'
 import { type CurlOptions, Store, type Workspace, curlCommand } from '../src/index'
+import { newKV } from './backends'
 
 interface Seen {
   url: string
@@ -32,7 +32,7 @@ function fakeFetch(
 }
 
 async function open(curl: CurlOptions, secrets: Record<string, string> = {}): Promise<Workspace> {
-  const store = await Store.open(new Memory())
+  const store = await Store.open(await newKV())
   return store.open('s', { profile: { secrets, commands: { curl: curlCommand(curl) } } })
 }
 

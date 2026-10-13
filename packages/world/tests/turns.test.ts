@@ -1,4 +1,3 @@
-import { Memory } from '@agex-ts/kvgit/backends/memory'
 import { describe, expect, it } from 'vitest'
 import {
   CommitConflictError,
@@ -9,9 +8,10 @@ import {
   type Workspace,
   WorldError,
 } from '../src/index'
+import { newKV } from './backends'
 
 const open = async (session = 's'): Promise<Workspace> =>
-  (await Store.open(new Memory())).open(session)
+  (await Store.open(await newKV())).open(session)
 
 const infos = async (ws: Workspace) => (await ws.log()).map((c) => c.info).reverse()
 
@@ -122,7 +122,7 @@ describe('a turn', () => {
   })
 
   it('is released when its commit conflicts, leaving the stored run pending', async () => {
-    const store = await Store.open(new Memory())
+    const store = await Store.open(await newKV())
     const a = await store.open('s')
     const b = await store.open('s')
     const lost = await b.turn('r2', { harness: 'h' })

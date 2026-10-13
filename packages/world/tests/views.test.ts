@@ -13,10 +13,11 @@ import { describe, expect, it } from 'vitest'
 import { Patterns, isIgnored, whyIgnored } from '../src/ignore'
 import { Store, UnknownRefError, VIEW_KEY, type Workspace, WorldFS } from '../src/index'
 import { ViewFS, parseView } from '../src/views'
+import { newKV } from './backends'
 
 const enc = new TextEncoder()
 
-const fresh = () => Store.open(new Memory())
+const fresh = async () => Store.open(await newKV())
 
 async function seeded(store: Store, files: Record<string, string>, opts = {}): Promise<Workspace> {
   const ws = await store.open('main', opts)

@@ -11,7 +11,6 @@
 
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { Memory } from '@agex-ts/kvgit/backends/memory'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   type Answer,
@@ -37,6 +36,7 @@ import {
   withCall,
   worldTools,
 } from '../src/index'
+import { newKV } from './backends'
 
 const WORKER = new URL('../dist/worker.node.js', import.meta.url)
 
@@ -44,7 +44,7 @@ let store: Store
 let parent: Workspace
 
 beforeEach(async () => {
-  store = await Store.open(new Memory())
+  store = await Store.open(await newKV())
   parent = await store.open('analyst')
   await parent.files.write('/workspace/report.md', '# Rates\n\nnorth 4, south 7\n')
   await parent.files.write('/workspace/main.py', "print('rates')\n")

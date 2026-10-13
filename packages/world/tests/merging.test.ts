@@ -6,7 +6,6 @@
  * same lines, and the session's own state takes ours.
  */
 
-import { Memory } from '@agex-ts/kvgit/backends/memory'
 import { describe, expect, it } from 'vitest'
 import {
   MERGE_TOOL,
@@ -16,11 +15,12 @@ import {
   UnknownSessionError,
   type Workspace,
 } from '../src/index'
+import { newKV } from './backends'
 
 const enc = new TextEncoder()
 
 async function open(): Promise<Workspace> {
-  return (await Store.open(new Memory())).open('main')
+  return (await Store.open(await newKV())).open('main')
 }
 
 const put = (ws: Workspace, path: string, text: string) => ws.files.fs.write(path, enc.encode(text))

@@ -1,6 +1,5 @@
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { Memory } from '@agex-ts/kvgit/backends/memory'
 import { beforeAll, describe, expect, it } from 'vitest'
 import {
   InvalidNameError,
@@ -12,6 +11,7 @@ import {
   hostFactory,
   httpHost,
 } from '../src/index'
+import { newKV } from './backends'
 
 const WORKER = new URL('../dist/worker.node.js', import.meta.url)
 
@@ -47,7 +47,7 @@ const SECRETS: Record<string, SecretSpec> = {
 }
 
 async function open(fetch: typeof globalThis.fetch, extra: Profile = {}): Promise<Workspace> {
-  const store = await Store.open(new Memory())
+  const store = await Store.open(await newKV())
   return store.open('s', {
     profile: {
       secrets: SECRETS,
@@ -105,7 +105,7 @@ describe('secrets bound to origins', () => {
   })
 
   it('a profile names real origins', async () => {
-    const store = await Store.open(new Memory())
+    const store = await Store.open(await newKV())
     await expect(
       store.open('s', { profile: { secrets: { X: { value: 'v', origins: ['not a url'] } } } }),
     ).rejects.toThrow(InvalidNameError)

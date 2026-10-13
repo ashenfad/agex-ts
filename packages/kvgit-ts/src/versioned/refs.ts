@@ -8,7 +8,7 @@
  * branch can never be mistaken for a tag, or move one.
  */
 
-import { TagExistsError, UnknownCommitError, UnknownTagError } from '../errors'
+import { ConcurrencyError, TagExistsError, UnknownCommitError, UnknownTagError } from '../errors'
 import { PyFloat } from '../pyjson'
 import type { CommitInfo, KVStore } from '../types'
 import {
@@ -37,9 +37,11 @@ export interface TagInfo {
   readonly dangling: boolean
 }
 
-/** Refuse a branch name inside the reserved tag namespace: a branch
- *  there would list as a tag, and moving it would move the tag. */
+/** Refuse a branch name that can't be a branch: an empty one, which
+ *  no listing would show, or one inside the reserved tag namespace,
+ *  which would list as a tag and move it when moved. */
 export function rejectReservedBranch(name: string): void {
+  if (name.length === 0) throw new RangeError('Branch name must be a non-empty string')
   if (name.startsWith(TAG_BRANCH_PREFIX)) {
     throw new RangeError(
       `Branch name '${name}' is reserved for tags (the '${TAG_BRANCH_PREFIX}' namespace); use the tag API instead`,
@@ -166,11 +168,25 @@ export async function createTag(
  * Delete a tag: its head, any backup of it, and its record. A commit
  * the tag alone kept alive becomes collectable.
  *
+ * The removal is conditional on the head it read. If the tag changed
+ * in between (deleted and made again, since a tag never moves), the
+ * tag this call saw is already gone and the one there now is someone
+ * else's, so nothing is removed.
+ *
  * @throws UnknownTagError if there is no such tag.
+ * @throws ConcurrencyError if the tag changed while being deleted.
  */
 export async function deleteTag(store: KVStore, name: string): Promise<void> {
   validateTagName(name)
   const head = tagHead(name)
-  if ((await store.get(head)) === null) throw new UnknownTagError(name)
-  await store.removeMany([head, BRANCH_HEAD_PREV(TAG_BRANCH_PREFIX + name), TAG_INFO_KEY(name)])
+  const current = await store.get(head)
+  if (current === null) throw new UnknownTagError(name)
+  const removed = await store.casMany(new Map([[head, current]]), new Map(), [
+    head,
+    BRANCH_HEAD_PREV(TAG_BRANCH_PREFIX + name),
+    TAG_INFO_KEY(name),
+  ])
+  if (!removed) {
+    throw new ConcurrencyError(`Tag '${name}' changed while being deleted; nothing was removed`)
+  }
 }

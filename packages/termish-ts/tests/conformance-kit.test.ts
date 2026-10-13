@@ -37,6 +37,26 @@ describe('checkFileSystem', () => {
   })
 })
 
+describe('the stat timestamps check', () => {
+  it('refuses a timestamp that is not ISO 8601 UTC', async () => {
+    for (const bad of [
+      'unknown',
+      '2026-10-13 01:47:08',
+      '2026-10-13T01:47:08+02:00',
+      '2026-13-45T99:99:99Z',
+    ]) {
+      class OddTimesFS extends MemoryFS {
+        override async stat(path: string) {
+          return { ...(await super.stat(path)), createdAt: bad }
+        }
+      }
+      const err = await checkFileSystem(() => new OddTimesFS()).catch((e: unknown) => e)
+      expect(err, bad).toBeInstanceOf(FsConformanceError)
+      expect((err as Error).message).toContain('createdAt should be an ISO 8601 UTC timestamp')
+    }
+  })
+})
+
 describe('fsConformanceCases', () => {
   it('names each case uniquely within its group', () => {
     const keys = fsConformanceCases.map((c) => `${c.group} > ${c.name}`)

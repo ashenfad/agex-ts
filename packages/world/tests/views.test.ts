@@ -7,10 +7,12 @@
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { Memory } from '@agex-ts/kvgit/backends/memory'
+import { FsError, execute } from '@agex-ts/termish'
+import { MemoryFS } from '@agex-ts/termish/fs/memory'
 import { describe, expect, it } from 'vitest'
 import { Patterns, isIgnored, whyIgnored } from '../src/ignore'
 import { Store, UnknownRefError, VIEW_KEY, type Workspace, WorldFS } from '../src/index'
-import { parseView } from '../src/views'
+import { ViewFS, parseView } from '../src/views'
 
 const enc = new TextEncoder()
 
@@ -565,6 +567,34 @@ describe('reading many files at once', () => {
     expect([...(found?.keys() ?? [])]).toEqual(['auth.py'])
     await ws.close()
     await child.close()
+  })
+
+  it('a refused read through a view is an error, not a missing file', async () => {
+    // A filesystem without readMany, refusing one file: the batch read
+    // through a view must not pass the refusal off as an absence.
+    const inner = new MemoryFS()
+    Object.defineProperty(inner, 'readMany', { value: undefined })
+    await inner.mkdir('/workspace/d', { parents: true })
+    await inner.write('/workspace/d/open.txt', enc.encode('token\n'))
+    await inner.write('/workspace/d/secret.txt', enc.encode('token\n'))
+    const read = inner.read.bind(inner)
+    inner.read = async (path: string) => {
+      if (path.endsWith('secret.txt')) throw new FsError('EACCES', path)
+      return read(path)
+    }
+    const view = new ViewFS(inner, '/workspace')
+    await expect(
+      view.readMany(['/workspace/d/open.txt', '/workspace/d/secret.txt']),
+    ).rejects.toMatchObject({ code: 'EACCES' })
+    expect([
+      ...(
+        await view.readMany(['/workspace/d/open.txt', '/workspace/d/nope', '/workspace/d'])
+      ).keys(),
+    ]).toEqual(['/workspace/d/open.txt'])
+    await expect(execute('grep -r token /workspace/d', view)).rejects.toMatchObject({
+      message: 'grep: /workspace/d/secret.txt: Permission denied',
+      exitCode: 2,
+    })
   })
 
   it("WorldFS reads a batch in two of the store's reads, one per file never", async () => {

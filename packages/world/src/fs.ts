@@ -53,9 +53,15 @@ function isWriter(view: KeyReader): view is KeyWriter {
 const metaPrefixUnder = (abs: string): string =>
   abs === '/' ? `${META_PREFIX}/` : `${metaKey(abs)}/`
 
+/** The read errors that mean a path isn't a file: missing, or a
+ *  directory. What `readMany` leaves out rather than throws on. */
+const NOT_A_FILE: ReadonlySet<string> = new Set(['ENOENT', 'ENOTDIR', 'EISDIR'])
+
 /**
  * Several whole files, each path as given to its bytes, leaving out what
  * isn't a file: through `fs.readMany` when it has one, else a read each.
+ * Any other read error (a refusal, an I/O failure) rejects the batch, so
+ * a caller reading file by file reports it against its own path.
  */
 export async function readManyOf(
   fs: FileSystem,
@@ -66,8 +72,8 @@ export async function readManyOf(
   for (const path of paths) {
     try {
       found.set(path, await fs.read(path))
-    } catch {
-      // not a file: left out
+    } catch (e) {
+      if (!(e instanceof FsError && NOT_A_FILE.has(e.code))) throw e
     }
   }
   return found

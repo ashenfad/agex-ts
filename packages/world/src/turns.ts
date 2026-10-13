@@ -114,8 +114,18 @@ export class Turn {
    * commit what's pending, stamped with the status. Returns the commit,
    * or null when nothing was pending.
    *
+   * A turn ends once, and once the end has begun the turn is released
+   * whatever happens, so an end that throws doesn't leave the workspace
+   * refusing turns. What it stored then stays pending, as after any
+   * failed commit: `ws.refresh()` drops it and moves to the session's
+   * latest commit, and a new turn can store the run again. Left
+   * pending, it lands in the next call's commit without the turn's
+   * stamp.
+   *
    * @throws WorldError when the turn already ended, or a body comes
    *   with no run id or no harness name.
+   * @throws CommitConflictError when a concurrent commit to the session
+   *   conflicts (two workspaces ending turns, say).
    */
   async end(status: RunStatus, opts: EndOptions = {}): Promise<string | null> {
     if (!(RUN_STATUSES as readonly string[]).includes(status)) {

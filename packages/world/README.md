@@ -205,6 +205,9 @@ await turn.end('completed', { body: runMessages })
 - **The end** stores the run's body (the harness's format) in the
   conversation and commits what's left, stamped with the status and an
   optional message. A turn that changed nothing makes no commit.
+- **An end that throws** (a `CommitConflictError`, say) still releases
+  the turn. What it stored stays pending: `ws.refresh()` drops it, and a
+  new turn can store the run again.
 - **An interrupt, not a rollback:** a cancelled or failed run's files
   stay, and the harness keeps the run with a closing note in its body.
 - **One turn at a time** per workspace; a fork has its own.
@@ -223,7 +226,8 @@ carries it (as the child's), and a fresh fork starts without it.
 exported scenarios, synced with `scripts/sync-corpus.mjs`) and a runner:
 `runScenario(scenario, harness)` plays a scenario against a harness
 through a scripted model, and `check` says how it differs from what the
-scenario expects. A harness declares its capabilities, and the
+scenario expects (including a turn that leaves script steps unused:
+a harness that stops early). A harness declares its capabilities, and the
 scenarios it covers apply. The package's own reference harness passes
 every scenario of tiers 0 to 2.
 

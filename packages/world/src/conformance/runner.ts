@@ -80,6 +80,13 @@ export class Clock {
   /** @internal The runner's. */
   load(steps: readonly Step[]): void {
     this.#steps = [...steps]
+    this.sent = null
+  }
+
+  /** Steps the harness hasn't reached: a turn that ends with some left
+   *  stopped early. */
+  get left(): number {
+    return this.#steps.length
   }
 
   /** @internal The runner's. */
@@ -102,6 +109,8 @@ export class Clock {
 /** What a run of a scenario saw. */
 export interface Observation {
   readonly turns: readonly (readonly TurnEvent[])[]
+  /** Script steps each turn left unused. */
+  readonly unused: readonly number[]
   readonly files: Readonly<Record<string, string | null>>
   readonly runs: readonly RunView[]
   readonly commits: readonly { readonly tool: string; readonly runs: readonly string[] }[]
@@ -136,12 +145,14 @@ export async function runScenario(
   })
 
   const turns: TurnEvent[][] = []
+  const unused: number[] = []
   const endedAt: string[] = []
   try {
     for (const act of scenario.acts) {
       if (act.kind === 'turn') {
         clock.load(act.steps)
         turns.push(act.resume ? await session.resume() : await session.turn(act.prompt))
+        unused.push(clock.left)
         endedAt.push(ws.head)
       } else if (act.kind === 'checkout') {
         await ws.checkout(endedAt[act.after_turn - 1] as string)
@@ -165,6 +176,7 @@ export async function runScenario(
     }
     return {
       turns,
+      unused,
       files,
       runs: await session.runs(),
       commits: commits.reverse(),
@@ -221,6 +233,9 @@ export function check(scenario: Scenario, seen: Observation): Map<string, string
     const status = last?.kind === 'RunEnded' ? last.status : undefined
     if (status !== turn.status)
       failures.set(`turn${n}.status`, `want ${turn.status}, got ${status}`)
+    const left = seen.unused[i] ?? 0
+    if (left > 0)
+      failures.set(`turn${n}.script`, `the turn ended with ${left} script step(s) unused`)
     if (turn.events !== null && show(eventNames(events)) !== show(turn.events)) {
       failures.set(`turn${n}.events`, `want ${show(turn.events)}, got ${show(eventNames(events))}`)
     }

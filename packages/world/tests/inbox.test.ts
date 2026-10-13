@@ -130,6 +130,40 @@ describe('delivery on a turn', () => {
     await ws.close()
   })
 
+  it('puts back the notes of several failing sources in source order', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const ws = await open()
+    const inbox = new Inbox()
+    const failing = (text: string) => (box: Inbox) => {
+      box.deliverNow(text)
+      throw new Error(text)
+    }
+    const turn = await ws.turn('r', { inbox, sources: [failing('first'), failing('second')] })
+    expect((await turn.deliver('ok')).notes).toEqual([])
+    expect(inbox.pending().map((n) => n.text)).toEqual(['first', 'second'])
+    await turn.end('completed')
+    await ws.close()
+  })
+
+  it('requeues what it delivered when the run cannot be stored', async () => {
+    const ws = await open()
+    const inbox = new Inbox()
+    const turn = await ws.turn(null, { inbox })
+    inbox.put('a correction')
+    await turn.deliver('ok')
+    await expect(turn.end('completed', { body: { messages: [] } })).rejects.toThrow(
+      'storing a run needs its id',
+    )
+    expect(turn.open).toBe(false)
+    expect(inbox.delivered()).toEqual([])
+    expect(inbox.pending().map((n) => n.text)).toEqual(['a correction'])
+    const next = await ws.turn('r2', { inbox, harness: 'h' })
+    expect((await next.deliver('ok')).notes.map((n) => n.text)).toEqual(['a correction'])
+    await next.end('completed', { body: { messages: [] } })
+    expect([inbox.pending(), inbox.delivered()]).toEqual([[], []])
+    await ws.close()
+  })
+
   it('leaves the result as it was when the notes cannot be rendered', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     const ws = await open()

@@ -137,16 +137,18 @@ export class Turn {
     const inbox = this.inbox
     if (inbox === null) return []
     const notes = inbox.drain()
+    // Notes from sources that threw go back together, in source order.
+    const stray: Note[] = []
     for (const source of this.sources) {
       const before = new Set(inbox.delivered().map((n) => n.id))
       try {
         notes.push(...source(inbox))
       } catch (e) {
         warn('a delivery source threw; its notes wait for the next tool result', e)
-        const stray = inbox.delivered().filter((n) => !before.has(n.id))
-        if (stray.length > 0) inbox.restore(stray)
+        stray.push(...inbox.delivered().filter((n) => !before.has(n.id)))
       }
     }
+    if (stray.length > 0) inbox.restore(stray)
     return notes
   }
 
@@ -214,6 +216,12 @@ export class Turn {
    * pending, it lands in the next call's commit without the turn's
    * stamp.
    *
+   * The inbox's delivered notes settle once the run is stored. If
+   * storing it fails, they go back to the queue instead (no stored run
+   * holds what the model saw), for the next delivery. A failure after
+   * that (the commit) finds them settled, and the run they're in is
+   * pending, as above.
+   *
    * @throws WorldError when the turn already ended, or a body comes
    *   with no run id or no harness name.
    * @throws CommitConflictError when a concurrent commit to the session
@@ -228,7 +236,17 @@ export class Turn {
     this.#ending = true
     try {
       return await this.#host.run('turn', async (wt) => {
-        if (opts.body !== undefined || 'record' in opts) await this.#store(wt, opts)
+        if (opts.body !== undefined || 'record' in opts) {
+          try {
+            await this.#store(wt, opts)
+          } catch (e) {
+            // No stored run holds what the model saw, so the notes it
+            // was given haven't reached the conversation: they wait for
+            // the next delivery rather than being lost.
+            this.inbox?.requeue()
+            throw e
+          }
+        }
         this.inbox?.settle()
         const runId = this.#runId
         const info: CommitInfo = {

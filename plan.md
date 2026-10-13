@@ -532,8 +532,8 @@ today's agex-ts is 11.6k and its five sibling packages another 7.7k.
 
 One package, `agex-ts` (the name kept), holding only the loop:
 - **`Agent`,** a recipe with no state: a provider, a primer, settings,
-  `maxSteps`, `maxToolCalls`, a compaction `Policy`, and a profile for
-  the worlds it makes itself.
+  `maxSteps`, `maxToolCalls`, a compaction `Policy`, and a profile (and
+  optionally a store) for the worlds it makes itself.
 - **`agent.session(ws)`:** turns on the session's branch, in place.
 - **`agent.task(...)`:** a typed call on a fork or a scratch world.
 - **`Outcome`,** what both return: status, text, head, events, and a
@@ -576,7 +576,10 @@ const next = await kept.resume('the answer')  // or grade.resume(ref, answer, { 
 - **No tables or arrays yet,** as in W5: the corpus's `tables` and
   `arrays` scenarios don't apply until a task needs one.
 - **No reconfigure.** An agent holds nothing, so a change of model or
-  primer is a new `Agent` for the next turn.
+  primer is a new `Agent` for the next turn. What must outlive it
+  belongs to the workspace or the embedder rather than the agent: the
+  delegation helper (see A5) and the inbox, which the embedder passes
+  to each turn's session.
 - **No debug module at first** (`agex.debug` isn't ported either).
 
 ### What goes
@@ -622,9 +625,13 @@ a small `fetch` client of its own behind the same protocol.
 - The old agex-ts sources and the sibling packages come out.
 - **The run record** (`record.ts`) mirrors `agex.record` field for
   field, as JSON.
-- **The provider protocol:** `stream(messages, tools, settings)`
+- **The provider protocol:** `stream(messages, tools, settings, opts)`
   yields deltas and then one `Reply`, plus `transient(error)` and an
-  optional `describe(error)`.
+  optional `describe(error)`. Cancellation is explicit, since JS has no
+  task cancellation to interrupt an await: an aborted `opts.signal`
+  ends the request (the AI SDK's `abortSignal`, or
+  a `fetch`'s), so `session.cancel()` stops a model call in flight and
+  the run ends `cancelled` at once.
 - **`ScriptedProvider`** replies from a corpus script.
 - **The shape corpus** is vendored as the harness corpus is: a sync
   script copies agex's `conformance/json` and records the commit.
@@ -666,10 +673,19 @@ script, keyed by the developer, not CI).
 
 **Exit:** tier 4.
 
-**A5. Delegation.** `agent.session(ws, { sessions: true })` builds the
-world's `Sessions` with a runner that drives each delegate as a session
-of the same agent, through `untilSettled`, and offers the `sessions`
-tool. Answers arrive through the inbox (`answerNotes`).
+**A5. Delegation.** `agent.session(ws, { sessions: true })` offers the
+`sessions` tool over the workspace's helper:
+- **The helper is the workspace's, not the agent's.** The session uses
+  the one open over its workspace (`Sessions.of(ws)`) and opens one only
+  when there is none, so a new `Agent` for the next turn finds the same
+  job table, outstanding delegates and answers waiting to land.
+- **Each ask brings the current agent's runner** (`ask({ runner })`),
+  which drives the delegate as a session of that agent through
+  `untilSettled`. New delegates run on the current agent, and those in
+  flight finish on theirs. The `sessions` tool passes the runner
+  through, a small change to the world's `runAction`.
+- **Answers arrive through the inbox** (`answerNotes`), which the
+  embedder holds across turns.
 
 **Exit:** tier 5.
 
@@ -679,10 +695,13 @@ tool. Answers arrive through the inbox (`answerNotes`).
 - **The `task` host object:** `success`, `fail` and `needsInput`. A
   value is checked at the call (W5's `check`), and the call stops the
   script.
-- **Worlds:** a scratch world on a memory store by default, a fork with
-  `world:`, kept with `keep: true`.
+- **Worlds:** a scratch world by default, a fork with `world:`, kept
+  with `keep: true`. Scratch worlds go on a memory store unless the
+  agent is given one (`new Agent({ scratch: store })`).
 - **The `__task__` plane:** spec, inputs, state and value, so a task
-  resumes by ref, after a restart too.
+  resumes by ref. After a restart only when its world is on a store that
+  persists (a fork of a supplied `world:`, or a persistent `scratch:`
+  store): a ref into a memory store lasts as long as the process.
 - **The model's view:** the brief, a preview of each input, and a live
   input shown by its methods.
 - **A model that stops without finishing** is sent back, twice, then

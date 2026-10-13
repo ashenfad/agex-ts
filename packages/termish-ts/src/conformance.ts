@@ -41,6 +41,16 @@ const enc = new TextEncoder()
 const dec = new TextDecoder()
 const bytes = (s: string): Uint8Array => enc.encode(s)
 
+/** An ISO 8601 UTC timestamp, as `Date.prototype.toISOString` writes
+ *  one (fractional seconds optional), naming a real instant. */
+function isIsoUtc(value: unknown): boolean {
+  return (
+    typeof value === 'string' &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/.test(value) &&
+    !Number.isNaN(Date.parse(value))
+  )
+}
+
 function show(value: unknown): string {
   if (value instanceof Uint8Array) return `bytes ${JSON.stringify(dec.decode(value))}`
   if (value === undefined) return 'undefined'
@@ -410,8 +420,8 @@ export const fsConformanceCases: readonly FsConformanceCase[] = Object.freeze([
     expectEqual('stat', 'size of a 5-byte file', s.size, 5)
     expectEqual('stat', 'isDir for a file', s.isDir, false)
     for (const field of ['createdAt', 'modifiedAt'] as const) {
-      if (typeof s[field] !== 'string') {
-        fail('stat', `${field} should be an ISO 8601 string, got ${show(s[field])}`)
+      if (!isIsoUtc(s[field])) {
+        fail('stat', `${field} should be an ISO 8601 UTC timestamp, got ${show(s[field])}`)
       }
     }
   }),

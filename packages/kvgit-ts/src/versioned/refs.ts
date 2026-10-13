@@ -185,7 +185,15 @@ export async function createTag(
  * moves), the tag this call saw is already gone and the one there now
  * is someone else's, so nothing is removed. The record is what tells a
  * tag made again at the *same* commit apart: it carries the time the
- * new one landed. A tag with no record is compared by its head alone.
+ * new one landed. A tag with no record is compared by its head alone,
+ * and one made again at the same commit, with the same info and the
+ * same time stamp (as a frozen clock guarantees), is byte-for-byte the
+ * tag this call saw, so it goes, as a branch would.
+ *
+ * The two reads needn't be atomic. A read torn across a delete and
+ * recreate either sees a state some tag really held (the head bytes are
+ * the same for both when the commit is), or expects a head or record
+ * that is no longer there, and the conditional removal fails.
  *
  * @throws UnknownTagError if there is no such tag.
  * @throws ConcurrencyError if the tag changed while being deleted.

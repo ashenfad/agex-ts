@@ -303,10 +303,12 @@ What's in the subpath ([`src/github/`](./src/github)):
   recovery.
 - **Each value crosses once.** Values are keyed by content, so a
   sidecar records each changed value's hash. A push references a value
-  the repo already holds (one this store pushed or fetched on any
-  branch: a rename, a copy, a revert, what a merge took from another
-  branch) by its git SHA instead of sending it again, and sends the
-  bytes after all if the repo has since collected that blob. A fetch
+  the repo already holds by its git SHA instead of sending it again,
+  and sends the bytes after all if the repo has since collected that
+  blob. What the repo holds comes from a local index of every value
+  this store has pushed or fetched there, on any branch and at any
+  point in history (`__ghsync_blob__<repo>__<hash>`): a rename, a copy,
+  a revert, or what a merge took from another branch. A fetch
   reads a value the local store already holds instead of downloading
   it, and downloads a value several fetched commits share once.
 - **Roster ops** — the session-lifecycle layer over the ref

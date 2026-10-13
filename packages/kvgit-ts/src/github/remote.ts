@@ -99,12 +99,14 @@ interface TransportState {
   treeSha: string
   /** Full key → tree path assignments at that commit. */
   assignments: Array<[string, string]>
-  /** Key → [value SHA-256 hex, git blob SHA] for values in that
-   *  commit's tree, as far as known. Push references a value the
-   *  remote already holds by its git SHA instead of sending it again;
-   *  a missing entry only means the bytes are sent. */
-  values?: Array<[string, string, string]>
 }
+
+/** Local index of values the repo holds: one key per value, the git
+ *  blob SHA of a value (by its SHA-256) this store has pushed or
+ *  fetched there, on any branch, at any point in history. It only
+ *  grows; an entry for a blob the repo has since collected is dropped
+ *  when a push trips over it. */
+const blobIndexKey = (repo: string, hex: string): string => `__ghsync_blob__${repo}__${hex}`
 
 /** A value as both sides name it: kvgit's SHA-256 and git's blob SHA. */
 type BlobIds = readonly [hex: string, gitSha: string]
@@ -115,8 +117,6 @@ interface CommitRender {
   gitSha: string
   treeSha: string
   planner: PathPlanner
-  /** Key → the value's ids, for values in this commit's tree. */
-  values: Map<string, BlobIds>
 }
 
 /** A remote commit as learned from the commits-list walk. */
@@ -267,13 +267,9 @@ export class GithubRemote implements Remote {
     // base: trivially true for full-history walks; incremental walks
     // need prior state at a have-frontier commit.
     const pathMaps = new Map<string, Map<string, string>>()
-    // Values fold alongside paths, best effort: a missing entry only
-    // means a later push sends those bytes rather than referencing them.
-    const valueMaps = new Map<string, Map<string, BlobIds>>()
     const state = await this.#loadState(tip.branch)
     if (state !== null && haveSet.has(state.kvgitHead)) {
       pathMaps.set(state.kvgitHead, new Map(state.assignments))
-      valueMaps.set(state.kvgitHead, valuesOf(state))
     }
     let foldComplete = true
 
@@ -366,15 +362,14 @@ export class GithubRemote implements Remote {
           for (const [key, entry] of sidecar.updates) fold.set(key, entry.path)
           pathMaps.set(wire.hash, fold)
         }
-        const valueFold = new Map(
-          (firstParent !== undefined ? valueMaps.get(firstParent) : undefined) ?? [],
-        )
-        for (const key of wire.removals) valueFold.delete(key)
+        // Every value fetched is one the repo holds: remember it, so a
+        // later push from here references it rather than sending it.
+        const fetched = new Map<string, string>()
         for (const [key, bytes] of wire.updates) {
           const hex = sidecar.updates.get(key)?.blob ?? (await sha256Hex(bytes))
-          valueFold.set(key, [hex, await gitBlobSha1(bytes)])
+          fetched.set(hex, await gitBlobSha1(bytes))
         }
-        valueMaps.set(wire.hash, valueFold)
+        await this.#rememberBlobs(fetched)
 
         if (wire.hash === want) tipTreeSha = meta.treeSha
         yield wire
@@ -389,7 +384,6 @@ export class GithubRemote implements Remote {
         gitHead: tip.gitSha,
         treeSha: tipTreeSha,
         assignments: [...tipMap],
-        values: valueRows(valueMaps.get(want) ?? new Map()),
       })
     }
   }
@@ -673,17 +667,17 @@ export class GithubRemote implements Remote {
         gitSha: state.gitHead,
         treeSha: state.treeSha,
         planner: PathPlanner.fromAssignments(state.assignments),
-        values: valuesOf(state),
       })
     }
 
-    // Values the remote repo holds, as far as this store knows: the
-    // trees every branch here last pushed or fetched, then everything
+    // Values the remote repo holds, as far as this store knows: every
+    // value pushed or fetched here (the local blob index), then what
     // this push places. git stores a blob once per repo, so a value
-    // under another key, path or branch is referenced by SHA rather
-    // than sent again (a rename, a copy, a revert, or what a merge
-    // takes from the other side).
-    const known = await this.#knownBlobs()
+    // under another key, path or branch, or back after it was gone, is
+    // referenced by SHA rather than sent again (a rename, a copy, a
+    // revert, or what a merge takes from another branch).
+    const placedInPush = new Map<string, string>()
+    const forgotten = new Set<string>()
 
     let head: CommitRender | null = null
     let headHash: string | null = null
@@ -702,7 +696,6 @@ export class GithubRemote implements Remote {
           ? PathPlanner.fromAssignments(parentRender.planner.entries())
           : new PathPlanner()
 
-      const values = new Map(parentRender?.values ?? [])
       const keys = [...wc.updates.keys()].sort()
       const paths = new Map(keys.map((key) => [key, planner.assign(key)] as const))
       const hexes = new Map<string, string>()
@@ -716,7 +709,6 @@ export class GithubRemote implements Remote {
           removals.push({ path, mode: '100644', type: 'blob', sha: null })
           planner.remove(key)
         }
-        values.delete(key)
       }
 
       // Sidecar last: its paths reflect this commit's planning, and it
@@ -759,11 +751,12 @@ export class GithubRemote implements Remote {
         const entries: TreeEntry[] = []
         const placed = new Map<string, BlobIds>()
         const reused: string[] = []
+        const known = dedup ? await this.#knownShas(hexes.values(), placedInPush, forgotten) : null
         for (const key of keys) {
           const bytes = wc.updates.get(key) as Uint8Array
           const path = paths.get(key) as string
           const hex = hexes.get(key) as string
-          const remote = dedup ? known.get(hex) : undefined
+          const remote = known?.get(hex)
           if (remote !== undefined) {
             entries.push({ path, mode: '100644', type: 'blob', sha: remote })
             placed.set(key, [hex, remote])
@@ -793,13 +786,17 @@ export class GithubRemote implements Remote {
         if (!(e instanceof GithubError && e.kind === 'validation') || built.reused.length === 0) {
           throw e
         }
-        for (const hex of built.reused) known.delete(hex)
+        for (const hex of built.reused) {
+          forgotten.add(hex)
+          placedInPush.delete(hex)
+        }
+        await this.#store.removeMany(built.reused.map((hex) => blobIndexKey(this.client.repo, hex)))
         built = await build(false)
         treeSha = await this.client.createTree(built.entries, parentRender?.treeSha)
       }
-      for (const [key, ids] of built.placed) {
-        values.set(key, ids)
-        known.set(ids[0], ids[1])
+      for (const [hex, sha] of built.placed.values()) {
+        placedInPush.set(hex, sha)
+        forgotten.delete(hex)
       }
 
       const parentShas: string[] = []
@@ -816,7 +813,7 @@ export class GithubRemote implements Remote {
         committer: { ...this.#author, date },
       })
 
-      const render: CommitRender = { gitSha, treeSha, planner, values }
+      const render: CommitRender = { gitSha, treeSha, planner }
       renders.set(wc.hash, render)
       this.#kvgitBySha.set(gitSha, wc.hash)
       head = render
@@ -842,22 +839,46 @@ export class GithubRemote implements Remote {
       gitHead: head.gitSha,
       treeSha: head.treeSha,
       assignments: [...head.planner.entries()],
-      values: valueRows(head.values),
     })
+    // Remembered once the push has landed, so the index names only
+    // blobs a ref reaches.
+    await this.#rememberBlobs(placedInPush)
     return true
   }
 
-  /** Every value the saved states for this repo say its trees hold:
-   *  value SHA-256 hex → git blob SHA. */
-  async #knownBlobs(): Promise<Map<string, string>> {
-    const known = new Map<string, string>()
-    const prefix = stateKey(this.client.repo, '')
-    for await (const [, raw] of this.#store.items(prefix)) {
-      const state = safeLoads(raw) as TransportState | null
-      if (state === null || state.format !== STATE_FORMAT) continue
-      for (const [hex, sha] of valuesOf(state).values()) known.set(hex, sha)
+  /** The git SHAs of those values the repo is known to hold: this
+   *  push's placements first, then the local index. */
+  async #knownShas(
+    hexes: Iterable<string>,
+    placedInPush: ReadonlyMap<string, string>,
+    forgotten: ReadonlySet<string>,
+  ): Promise<Map<string, string>> {
+    const out = new Map<string, string>()
+    const lookup: string[] = []
+    for (const hex of new Set(hexes)) {
+      const sha = placedInPush.get(hex)
+      if (sha !== undefined) out.set(hex, sha)
+      else if (!forgotten.has(hex)) lookup.push(hex)
     }
-    return known
+    if (lookup.length > 0) {
+      const found = await this.#store.getMany(
+        lookup.map((hex) => blobIndexKey(this.client.repo, hex)),
+      )
+      for (const hex of lookup) {
+        const raw = found.get(blobIndexKey(this.client.repo, hex))
+        const sha = raw === undefined ? null : safeLoads(raw)
+        if (typeof sha === 'string') out.set(hex, sha)
+      }
+    }
+    return out
+  }
+
+  /** Record values the repo holds in the local index. */
+  async #rememberBlobs(blobs: ReadonlyMap<string, string>): Promise<void> {
+    if (blobs.size === 0) return
+    await this.#store.setMany(
+      [...blobs].map(([hex, sha]) => [blobIndexKey(this.client.repo, hex), dumps(sha)] as const),
+    )
   }
 
   /** git SHA for a kvgit parent: in-stream renders, then the trailer
@@ -904,21 +925,6 @@ export class GithubRemote implements Remote {
   async #saveState(branch: string, state: TransportState): Promise<void> {
     await this.#store.set(stateKey(this.client.repo, branch), dumps(state))
   }
-}
-
-/** A saved state's values, keyed by key; malformed rows are dropped. */
-function valuesOf(state: TransportState): Map<string, BlobIds> {
-  const out = new Map<string, BlobIds>()
-  for (const row of state.values ?? []) {
-    if (Array.isArray(row) && row.length === 3 && row.every((x) => typeof x === 'string')) {
-      out.set(row[0], [row[1], row[2]])
-    }
-  }
-  return out
-}
-
-function valueRows(values: ReadonlyMap<string, BlobIds>): Array<[string, string, string]> {
-  return [...values].map(([key, [hex, sha]]) => [key, hex, sha])
 }
 
 /** Expose a PathPlanner as the ReadonlyMap encodeSidecar expects. */

@@ -73,6 +73,25 @@ describe('push sends each value once', () => {
     expect(entry?.content).toBeUndefined()
   })
 
+  it('references a value restored after it left the tree', async () => {
+    const gh = new FakeGithub()
+    const a = await device(gh)
+    const original = binary(7)
+    await a.vk.commit({ updates: new Map([['k', original]]) })
+    await pushBranch(a.store, a.remote, 'main')
+    await a.vk.commit({ updates: new Map([['k', binary(8)]]) })
+    await pushBranch(a.store, a.remote, 'main')
+    expect(gh.count('POST', 'git/blobs')).toBe(2)
+
+    // A revert, through a fresh remote on the same store: the value is
+    // in no branch's current tree, but the repo still holds it.
+    const later = new GithubRemote(gh.client(), a.store)
+    await a.vk.commit({ updates: new Map([['k', original]]) })
+    expect((await pushBranch(a.store, later, 'main')).status).toBe('pushed')
+    expect(gh.count('POST', 'git/blobs')).toBe(2)
+    expect(entryAt(treePosts(gh).at(-1), 'k')?.sha).toBe(await gitBlobSha1(original))
+  })
+
   it("references what a merge takes from another branch's push", async () => {
     const gh = new FakeGithub()
     const a = await device(gh)

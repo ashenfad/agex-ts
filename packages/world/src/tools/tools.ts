@@ -4,7 +4,7 @@
  * client as they are.
  *
  * `terminal`, `file_write`, `file_edit`, `view_image` (unless vision is
- * off) and `run_ts`. Each call is one workspace call, committed with
+ * off) and `run_ts`, and `sessions` given a delegation helper. Each call is one workspace call, committed with
  * its tool's name; a failure the agent can act on (a missing file, an
  * edit that didn't match, code that threw) is an error result, not a
  * throw. A workspace that can't take the call (closed, or frozen for a
@@ -13,6 +13,7 @@
 
 import { FsError, describeFsError } from '@agex-ts/termish'
 import { EditError } from '../editing'
+import { type Sessions, sessionsTool } from '../sessions'
 import type { Workspace } from '../workspace'
 import {
   FILE_EDIT_DESCRIPTION,
@@ -58,6 +59,9 @@ export interface ToolOptions {
   readonly terminalPrimer?: string
   /** Text appended to run_ts's description. */
   readonly codePrimer?: string
+  /** Offer `sessions`, delegating through this helper. No helper, no
+   *  tool: an agent that can't delegate is never told about it. */
+  readonly sessions?: Sessions
 }
 
 /** The largest image `view_image` returns, in bytes. */
@@ -225,6 +229,7 @@ export function worldTools(ws: Workspace, opts: ToolOptions = {}): Tool[] {
       }
     }),
   })
+  if (opts.sessions !== undefined) tools.push(sessionsTool(opts.sessions))
   return tools
 }
 

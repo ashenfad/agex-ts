@@ -53,6 +53,15 @@ export interface ForkAct {
 
 export type Act = TurnAct | CheckoutAct | ForkAct
 
+/** A delegate's script: its model's replies across the task's turn and
+ *  every woken turn after it, and how many woken turns it may take
+ *  before it answers with what it has. A delegate starts held, and runs
+ *  once a `delegate_answers` event releases it (or the scenario ends). */
+export interface Delegate {
+  readonly steps: readonly Step[]
+  readonly wakes: number
+}
+
 export interface TurnExp {
   readonly status: RunStatus
   readonly events: readonly string[] | null
@@ -69,6 +78,17 @@ export interface CommitExp {
   readonly runs: readonly RunStatus[]
 }
 
+/** One delegate, by the name it was asked under: how its answer came
+ *  back (its status, and words its text must hold), the woken turns it
+ *  took (null: unchecked), and the delegates of its own it answered
+ *  without hearing from. */
+export interface DelegateExp {
+  readonly status: 'answered' | 'declined' | 'capped' | 'failed'
+  readonly mentions: readonly string[]
+  readonly wakes: number | null
+  readonly unread: readonly string[]
+}
+
 export interface Expect {
   readonly turns: readonly TurnExp[]
   readonly files: Readonly<Record<string, string>>
@@ -77,7 +97,7 @@ export interface Expect {
   readonly commits: readonly CommitExp[] | null
   readonly inbox: { readonly pending: number; readonly delivered: number } | null
   readonly folds: readonly unknown[] | null
-  readonly delegates: Readonly<Record<string, unknown>> | null
+  readonly delegates: Readonly<Record<string, DelegateExp>> | null
 }
 
 export interface Scenario {
@@ -88,7 +108,7 @@ export interface Scenario {
   readonly needs: readonly string[]
   readonly world: { readonly files: Readonly<Record<string, string>> }
   readonly budget: number | null
-  readonly delegates: Readonly<Record<string, unknown>>
+  readonly delegates: Readonly<Record<string, Delegate>>
   readonly acts: readonly Act[]
   readonly expect: Expect
 }

@@ -325,6 +325,21 @@ describe.each(BACKENDS)('on %s', (_, make) => {
       await expect(ws.fork('@bad')).rejects.toThrow(InvalidNameError)
     })
 
+    it("forks at another session's whole commit, and not at an unknown one", async () => {
+      const ws = await open()
+      const other = await store.open('other')
+      await other.files.write('f', 'theirs')
+      const theirs = other.head
+      const child = await ws.fork('from-other', { at: theirs })
+      expect(await child.files.readText('f')).toBe('theirs')
+      await expect(ws.fork('nope', { at: 'f'.repeat(40) })).rejects.toThrow(UnknownRefError)
+      await expect(ws.fork('nope', { at: theirs.slice(0, 7) })).rejects.toThrow(UnknownRefError)
+      expect(await ws.resolveRef(`other@${theirs.slice(0, 7)}`)).toEqual({
+        commit: theirs,
+        label: `other@${theirs}`,
+      })
+    })
+
     it('forks through the store', async () => {
       const ws = await open()
       await ws.files.write('f', '1')

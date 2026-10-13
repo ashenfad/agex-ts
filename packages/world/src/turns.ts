@@ -32,6 +32,7 @@ import type { CommitInfo, Worktree } from '@agex-ts/kvgit'
 import { readIndex, storeRun } from './conversation'
 import { WorldError } from './errors'
 import { type Inbox, type Note, type NoteKind, warn } from './inbox'
+import type { Answer } from './sessions'
 
 export const RUN_STATUSES = ['completed', 'cancelled', 'interrupted', 'failed'] as const
 export type RunStatus = (typeof RUN_STATUSES)[number]
@@ -293,11 +294,21 @@ export interface DeliveredNote {
   readonly kind: NoteKind
   readonly label: string
   readonly job: string | null
+  /** The answer behind a delegate's note, so a transcript can show what
+   *  the delegate said and did without its job table; null otherwise. */
+  readonly answer: Answer | null
 }
 
 /** A delivered note as a {@link TurnEvent} carries it. */
 export function deliveredNote(note: Note): DeliveredNote {
-  return { id: note.id, text: note.text, kind: note.kind, label: note.label, job: note.job }
+  return {
+    id: note.id,
+    text: note.text,
+    kind: note.kind,
+    label: note.label,
+    job: note.job,
+    answer: note.answer,
+  }
 }
 
 /** What a harness streams while a run goes on, for its caller and for

@@ -4,10 +4,14 @@
  */
 
 export { SCENARIOS } from './corpus/index'
+export { CorpusDelegates, PATIENCE } from './delegates'
 export {
+  type DelegateView,
+  type Delegation,
   type Harness,
   type HarnessSession,
   type Observation,
+  type OpenOptions,
   type RunView,
   Clock,
   EXHAUSTED,
@@ -20,6 +24,8 @@ export {
   type Act,
   CAPABILITIES,
   type CheckoutAct,
+  type Delegate,
+  type DelegateExp,
   type EventStep,
   type Expect,
   type ForkAct,

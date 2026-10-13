@@ -1,7 +1,7 @@
 /**
  * nontainer's harness corpus, run against the reference harness on the
- * world: every scenario its capabilities cover passes, and the rest
- * (compaction, delegation: later steps) are listed.
+ * world: every scenario its capabilities cover passes, delegation's
+ * included. Compaction (tier 4) comes with its record.
  */
 
 import { describe, expect, it } from 'vitest'
@@ -18,7 +18,7 @@ import { Inbox, type Workspace } from '../src/index'
 import { referenceHarness } from './reference-harness'
 
 const covered = SCENARIOS.filter(
-  (s) => applies(s, referenceHarness) && s.tiers.every((t) => t <= 3),
+  (s) => applies(s, referenceHarness) && s.tiers.every((t) => t !== 4),
 )
 
 describe("nontainer's harness corpus on the world", () => {
@@ -36,6 +36,10 @@ describe("nontainer's harness corpus on the world", () => {
       'a-cancel-settles-what-was-delivered',
       'a-note-after-the-last-tool-waits-for-the-next-turn',
       'a-note-rides-the-next-tool-result-once',
+      'a-delegate-hears-from-its-own-delegate-before-answering',
+      'a-delegate-out-of-wakes-names-who-it-did-not-hear-from',
+      'a-delegates-answer-is-delivered-once-on-the-next-tool-result',
+      'a-note-left-for-a-delegate-is-read-before-it-answers',
     ])
   })
 
@@ -99,9 +103,9 @@ describe('the checks', () => {
       open(ws: Workspace, clock: Clock) {
         let stop = false
         const early = {
-          next(sent?: readonly string[]): ModelStep {
+          async next(sent?: readonly string[]): Promise<ModelStep> {
             if (stop) return { ...EXHAUSTED, text: '' }
-            const step = clock.next(sent)
+            const step = await clock.next(sent)
             stop = step.tool_calls.length > 0
             return step
           },

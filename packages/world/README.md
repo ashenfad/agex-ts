@@ -7,8 +7,8 @@ counterpart of [nontainer](https://github.com/ashenfad/nontainer)'s
 store and workspace, with the same semantics and its own storage
 layout.
 
-> **Status:** Pre-alpha, on the agex-ts `rebuild` branch. Values,
-> delegation and compaction's record come next.
+> **Status:** Pre-alpha, on the agex-ts `rebuild` branch. Compaction's
+> record comes next.
 
 ## Use
 
@@ -217,7 +217,8 @@ reaches the world.
 
 `worldTools(ws)` gives the tools an agent loop hands a model, with
 nontainer's names, schemas and result text: `terminal`, `file_write`,
-`file_edit`, `view_image` and `run_ts`. Each returns `{text, images,
+`file_edit`, `view_image` and `run_ts`, and `sessions` given a
+delegation helper (`worldTools(ws, {sessions})`). Each returns `{text, images,
 written?, isError}`; a failure the agent can act on is an error result,
 and `toMcpResult(out)` is the MCP `CallToolResult` for it. The
 descriptions name what the world grants (variables, secrets, commands,
@@ -373,6 +374,57 @@ outside the root: ws-git, diffs and merges leave them out (a merge keeps
 this side's copy), and a directory take skips them unless named. They're
 still written and read back. Forks inherit them.
 
+## Delegation
+
+A delegate is a fork: `Sessions` is the calling convention over `fork`,
+`diff`, `checkout` and `merge` that hands one to an agent loop and
+collects what it says back. The loop is the embedder's, a
+`SessionRunner`:
+
+```ts
+const sessions = new Sessions(ws, {
+  async run(session, task, { budget, forkedAt, signal }) {
+    // open `session`, run the delegate's turns until it settles
+    return reply // a string, or {text, status, artifacts, provenance}
+  },
+})
+const job = await sessions.ask('polish the report', { paths: ['report.md'] })
+// … later
+const answer = sessions.result(job.name) // JobRunningError until it lands
+await ws.merge(answer.branch) // or checkout(answer.branch, {paths}), or leave it
+```
+
+- **`ask`** forks under a scoped pet name (`alice.sleepy-otter`) at a
+  real commit (pending writes land first) and starts the run;
+  `{wait: true}` returns the answer. `paths` narrows what the child
+  sees; `forkFrom` starts it elsewhere (a session as it is now, a store
+  tag, `session@commit`), carrying that state's conversation unless
+  `inherit: 'fresh'`; `resume` gives a child its next task on the same
+  branch. A child runs one task at a time.
+- **Everything a delegate wrote is its answer.** One that never used
+  ws-git answers at its branch head; one that committed and then wrote
+  more has the remainder committed for it, unless a merge of its own is
+  unresolved (then `answer.uncommitted`, and a merge refuses it).
+  `answer.changed` groups its paths into `seed` and `elsewhere`, and
+  `provenance.chain` names every hop behind it.
+- **Collecting:** `result` and `take()` share one mark, so an answer is
+  handed over once; `wait()`, `answers()` and `onAnswer` say when one
+  lands. `answerNotes(sessions, inbox)` as a turn's source delivers each
+  on the next tool result, framed as the mechanism speaking.
+- **`untilSettled(runTurn, sessions, inbox, {prompt})`** is the loop a
+  runner drives a delegate with: a reply given while the delegate's own
+  delegates are out, or a note is waiting, is it waiting, so it's woken
+  (`runTurn(null)`, which opens with `turn.opening()`) until nothing is
+  outstanding, or its wakes run out.
+- **`cancel`** aborts the run's signal and discards its answer; the
+  branch stays. **`sweep(idle)`** deletes the branches of finished,
+  unkept jobs left untouched that long (`keep` exempts one); the
+  embedder schedules it. The job table is the helper's, in memory: what
+  survives a restart is the branches.
+- **From code,** a host method declared `withCall` asks with `{call}`,
+  so the fork runs as part of the code's call; `Sessions.of(ws)` finds
+  the session's helper.
+
 ## Conformance
 
 `@agex-ts/world/conformance` holds nontainer's harness corpus (its
@@ -382,7 +434,9 @@ through a scripted model, and `check` says how it differs from what the
 scenario expects (including a turn that leaves script steps unused:
 a harness that stops early). A harness declares its capabilities, and the
 scenarios it covers apply. The package's own reference harness passes
-every scenario of tiers 0 to 3.
+every scenario of tiers 0 to 3 and 5; with `delegation`, a harness hands
+the runner a `CorpusDelegates`, which runs each delegate as a session of
+that harness through `untilSettled`.
 
 ## Layout
 

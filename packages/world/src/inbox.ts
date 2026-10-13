@@ -29,6 +29,8 @@
  * ways out of the middle.
  */
 
+import type { Answer } from './sessions'
+
 /** Who a note is from: whoever this session works for, or the
  *  machinery around the agent speaking for itself. */
 export type NoteKind = 'principal' | 'mechanism'
@@ -47,6 +49,9 @@ export interface Note {
   readonly created: number
   /** The delegation this note carries the answer of; null otherwise. */
   readonly job: string | null
+  /** The answer behind a delegate's note, for an embedder that records
+   *  what was delivered and wants it whole; null otherwise. */
+  readonly answer: Answer | null
 }
 
 /** What `put` and `deliverNow` take beside the text. */
@@ -54,6 +59,7 @@ export interface NoteOptions {
   readonly kind?: NoteKind
   readonly label?: string
   readonly job?: string | null
+  readonly answer?: Answer | null
 }
 
 /** The line a rendered block starts with, so a model reading the raw
@@ -225,6 +231,7 @@ export class Inbox {
       label: opts.label ?? '',
       created: Date.now(),
       job: opts.job ?? null,
+      answer: opts.answer ?? null,
     }
   }
 }

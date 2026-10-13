@@ -11,14 +11,22 @@
  */
 
 import type { CommitInfo } from '@agex-ts/kvgit'
-import type { Clock, Harness, HarnessSession, RunView } from '../src/conformance/index'
+import {
+  type Clock,
+  CorpusDelegates,
+  type Harness,
+  type HarnessSession,
+  type RunView,
+} from '../src/conformance/index'
 import {
   Inbox,
   type RunStatus,
+  type Sessions,
   type Tool,
   type Turn,
   type TurnEvent,
   type Workspace,
+  answerNotes,
   deliveredNote,
   worldTools,
 } from '../src/index'
@@ -35,13 +43,17 @@ class ReferenceSession implements HarnessSession {
   readonly #ws: Workspace
   readonly #clock: Clock
   readonly #tools: Map<string, Tool>
+  readonly #sessions: Sessions | undefined
   #cancelled = false
   #interrupted: string | null = null
 
-  constructor(ws: Workspace, clock: Clock) {
+  constructor(ws: Workspace, clock: Clock, sessions?: Sessions) {
     this.#ws = ws
     this.#clock = clock
-    this.#tools = new Map(worldTools(ws).map((t) => [t.name, t]))
+    this.#sessions = sessions
+    this.#tools = new Map(
+      worldTools(ws, sessions === undefined ? {} : { sessions }).map((t) => [t.name, t]),
+    )
   }
 
   async turn(prompt: string): Promise<TurnEvent[]> {
@@ -56,14 +68,29 @@ class ReferenceSession implements HarnessSession {
   }
 
   #begin(): Promise<Turn> {
-    return this.#ws.turn(crypto.randomUUID(), { harness: HARNESS, inbox: this.inbox })
+    return this.#ws.turn(crypto.randomUUID(), {
+      harness: HARNESS,
+      inbox: this.inbox,
+      sources: this.#sources(),
+    })
+  }
+
+  /** A delegate's answers, delivered as they land. */
+  #sources() {
+    const sessions = this.#sessions
+    return sessions === undefined ? [] : [(inbox: Inbox) => answerNotes(sessions, inbox)]
   }
 
   async resume(): Promise<TurnEvent[]> {
     const runId = this.#interrupted
     if (runId === null) throw new Error('no interrupted run to resume')
     const body = (await this.#ws.conversation.runs([runId])).get(runId) as { messages: Message[] }
-    const turn = await this.#ws.turn(runId, { resume: true, harness: HARNESS, inbox: this.inbox })
+    const turn = await this.#ws.turn(runId, {
+      resume: true,
+      harness: HARNESS,
+      inbox: this.inbox,
+      sources: this.#sources(),
+    })
     return this.#run(turn, [...body.messages])
   }
 
@@ -96,7 +123,7 @@ class ReferenceSession implements HarnessSession {
     let message: string | null = null
     let calls = 0
     for (;;) {
-      const step = this.#clock.next(messages.map((m) => m.text))
+      const step = await this.#clock.next(messages.map((m) => m.text))
       if (this.#cancelled) {
         status = 'cancelled'
         message = 'stopped'
@@ -145,8 +172,11 @@ class ReferenceSession implements HarnessSession {
 
 export const referenceHarness: Harness = {
   name: HARNESS,
-  capabilities: new Set(['resume', 'keeps-aborted-runs']),
-  async open(ws, clock) {
-    return new ReferenceSession(ws, clock)
+  capabilities: new Set(['resume', 'keeps-aborted-runs', 'delegation']),
+  async open(ws, clock, opts = {}) {
+    return new ReferenceSession(ws, clock, opts.sessions)
+  },
+  delegation(store, scenario) {
+    return new CorpusDelegates(this, store, scenario)
   },
 }

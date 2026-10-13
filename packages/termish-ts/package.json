@@ -51,6 +51,10 @@
     "./fs/protocol": {
       "types": "./dist/fs/protocol.d.ts",
       "import": "./dist/fs/protocol.js"
+    },
+    "./conformance": {
+      "types": "./dist/conformance.d.ts",
+      "import": "./dist/conformance.js"
     }
   },
   "files": ["dist", "README.md", "LICENSE"],

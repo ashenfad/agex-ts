@@ -57,6 +57,12 @@ describe('frontmatter', () => {
     expect(skillName({ name: 'My Skill!', files: { 'SKILL.md': '# none' } })).toBe('my-skill')
     expect(() => skillName({ files: { 'notes.md': 'x' } })).toThrow(/SKILL\.md/)
     expect(() => skillName({ files: { 'SKILL.md': 'x', '../escape': 'y' } })).toThrow(/inside/)
+    // a name of dots alone would name another directory
+    expect(() => skillName('---\nname: ..\n---\n')).toThrow(/not dots alone/)
+    expect(() => skillName({ name: '.', files: { 'SKILL.md': '# no name' } })).toThrow(
+      /not dots alone/,
+    )
+    expect(skillName('---\nname: v1.2\n---\n')).toBe('v1.2')
   })
 })
 
@@ -117,6 +123,10 @@ describe('mounted skills', () => {
     expect(await frozen.files.readText('/workspace/skills/numbers/SKILL.md')).toBe(NUMBERS)
     await child.close()
     await ws.close()
+  })
+
+  it('refuse a name of dots alone, at open', async () => {
+    await expect(open({ skills: ['---\nname: ..\n---\nx\n'] })).rejects.toThrow(/not dots alone/)
   })
 
   it('refuse two of one name', async () => {

@@ -101,11 +101,20 @@ function filesOf(source: SkillSource): Map<string, Uint8Array> {
 }
 
 /** What a skill is called once mounted: its frontmatter name, else the
- *  name it was given. */
+ *  name it was given.
+ *
+ *  @throws InvalidNameError for a name of dots alone (`.`, `..`), which
+ *    would name a directory other than its own. */
 export function skillName(source: SkillSource): string {
   const files = filesOf(source)
   const given = typeof source === 'string' ? undefined : source.name
-  return slug(frontmatter(files.get('SKILL.md') as Uint8Array).name ?? given ?? 'skill')
+  const name = slug(frontmatter(files.get('SKILL.md') as Uint8Array).name ?? given ?? 'skill')
+  if (/^\.+$/.test(name)) {
+    throw new InvalidNameError(
+      `skill name ${JSON.stringify(name)}: a name is letters, digits, '.', '_' and '-', not dots alone`,
+    )
+  }
+  return name
 }
 
 /** A read-only filesystem holding one skill's files at its root, for

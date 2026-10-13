@@ -151,7 +151,7 @@ export async function createTag(
   // already decided what is reachable, and the existence check must
   // still hold when it lands: both are decided against one lease record.
   for (;;) {
-    const lease = await waitForGc(store, opts.now)
+    const lease = await waitForGc(store)
     if ((await store.get(COMMIT_ROOT(commit))) === null) throw new UnknownCommitError(commit)
     // Built after the wait, so its time is when the tag lands.
     const record = dumps(

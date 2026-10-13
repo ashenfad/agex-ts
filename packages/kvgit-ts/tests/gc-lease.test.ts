@@ -18,9 +18,11 @@ import {
   StorageVersionError,
   VersionedKV,
   applyWire,
+  publishHead,
   pullBranch,
   walkDelta,
 } from '../src/index'
+import { PyFloat } from '../src/pyjson'
 import { gcStore } from '../src/versioned/kv'
 import {
   BRANCH_HEAD,
@@ -139,22 +141,67 @@ describe('in-flight markers', () => {
   })
 
   it('a lapsed marker releases its commit to the sweep', async () => {
-    let clock = 1_760_000_000
     const store = new PublishHookStore()
-    const vk = await VersionedKV.open(store, { now: () => clock })
+    const vk = await VersionedKV.open(store)
     let commit = ''
+    let swept = -1
     store.beforePublish = async () => {
-      // The writer stalls past its marker's term before publishing.
-      ;[commit] = (await markers(store)).map((k) => k.slice(IN_FLIGHT_PREFIX.length)) as [string]
-      clock += 10_000
-      expect(await gcStore(store, { minAge: 0, now: () => clock })).toBe(1)
+      // The writer stalls past its marker's term before publishing:
+      // the marker reads as lapsed.
+      const [key] = await markers(store)
+      commit = (key as string).slice(IN_FLIGHT_PREFIX.length)
+      await store.set(key as string, dumps(new PyFloat(1)))
+      // minAge -1: the commit counts as old enough even within the
+      // millisecond it was made.
+      swept = await gcStore(store, { minAge: -1 })
     }
     // Its commit was swept, so its publish refuses rather than naming a
     // commit that is gone.
     await expect(vk.commit(one('k', 'v'))).rejects.toThrow()
+    expect(swept).toBe(1)
     expect(await store.get(COMMIT_ROOT(commit))).toBeNull()
     expect(await markers(store)).toEqual([])
     expect(safeLoads((await store.get(BRANCH_HEAD('main'))) as Uint8Array)).toBe(ROOT_COMMIT)
+  })
+
+  it('withdraws an abandoned marker only if it still holds its own bytes', async () => {
+    const store = new Memory()
+    const a = await VersionedKV.open(store)
+    const b = await VersionedKV.open(store)
+    await a.commit(one('k', 'a'))
+    // Another writer's batch rewrites b's marker key between b's batch
+    // and its withdrawal: b must leave that marker alone.
+    const original = store.casMany.bind(store)
+    let theirs: Uint8Array | null = null
+    store.casMany = async (expected, writes, removes = []) => {
+      const list = [...removes]
+      const marker = list.find((k) => k.startsWith(IN_FLIGHT_PREFIX))
+      if (marker !== undefined && writes.size === 0 && theirs === null) {
+        // A later marker than b's own, so the bytes differ.
+        theirs = dumps(new PyFloat(Date.now() / 1000 + 1234.5))
+        await store.set(marker, theirs)
+      }
+      return original(expected, writes, list)
+    }
+    const result = await b.commit({ ...one('k', 'b'), onConflict: 'abandon' })
+    expect(result.merged).toBe(false)
+    await new Promise((r) => setTimeout(r, 0))
+    expect(theirs).not.toBeNull()
+    const left = await markers(store)
+    expect(left.length).toBe(1)
+    expect(await store.get(left[0] as string)).toEqual(theirs)
+  })
+
+  it('sweeps keep and judge markers by wall time, whatever clock commits use', async () => {
+    // A handle on a frozen historical clock: its markers still expire in
+    // wall time, so a sweep on the same clock keeps its commit.
+    const store = new PublishHookStore()
+    const vk = await VersionedKV.open(store, { now: () => 0 })
+    store.beforePublish = async () => {
+      expect(await gcStore(store, { minAge: 0, now: () => 0 })).toBe(0)
+    }
+    await vk.commit(one('k', 'v'))
+    expect(await (await VersionedKV.open(store)).get('k')).toEqual(bytes('v'))
   })
 })
 
@@ -312,6 +359,28 @@ describe('synced commits', () => {
     })
     expect(created.inFlight).toEqual([])
     expect(await markers(fresh)).toEqual([])
+  })
+
+  it('re-protects commits already present, which may be orphans from an earlier fetch', async () => {
+    const src = new Memory()
+    const vk = await VersionedKV.open(src)
+    await vk.commit(one('k', 'v'))
+    const head = vk.currentCommit
+
+    // An earlier fetch left the commits here unpublished, and their
+    // markers have lapsed: they are orphans now.
+    const dst = new Memory()
+    await applyWire(dst, walkDelta(src, { want: head }))
+    for (const key of await markers(dst)) await dst.set(key, dumps(new PyFloat(1)))
+
+    const again = await applyWire(dst, walkDelta(src, { want: head }))
+    expect(again.applied).toBe(0)
+    expect(again.inFlight).toContain(head)
+    // A sweep between the apply and the publish keeps them.
+    expect(await gcStore(dst, { minAge: -1 })).toBe(0)
+    expect(await publishHead(dst, 'main', null, head, { inFlight: again.inFlight })).toBe(true)
+    expect(await markers(dst)).toEqual([])
+    expect(await (await VersionedKV.open(dst)).get('k')).toEqual(bytes('v'))
   })
 
   it('a pull publishes the head and drops the markers together', async () => {

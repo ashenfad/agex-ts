@@ -9,7 +9,7 @@ import {
   setSyncHead,
   walkDelta,
 } from '../src/index'
-import { ROOT_COMMIT } from '../src/versioned/layout'
+import { IN_FLIGHT_PREFIX, ROOT_COMMIT } from '../src/versioned/layout'
 
 const enc = new TextEncoder()
 const dec = new TextDecoder()
@@ -117,9 +117,14 @@ describe('applyWire — round trips', () => {
     const again = await applyWire(dst, wire)
     expect(again.applied).toBe(0)
     expect(again.skipped).toBe(wire.length)
+    // Skipped commits are marked in flight until a head names them, as
+    // written ones are; nothing else changes.
+    expect(again.inFlight).toEqual(wire.map((w) => w.hash))
 
     const after = new Map<string, string>()
-    for await (const [k, v] of dst.items()) after.set(k, text(v))
+    for await (const [k, v] of dst.items()) {
+      if (!k.startsWith(IN_FLIGHT_PREFIX)) after.set(k, text(v))
+    }
     expect(after).toEqual(snapshot)
   })
 

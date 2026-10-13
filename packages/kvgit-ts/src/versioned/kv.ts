@@ -76,8 +76,9 @@ import {
 import {
   GC_LEASE_TTL,
   type HeldLease,
-  IN_FLIGHT_TTL,
   acquireGcLease,
+  inFlightMarker,
+  markerLive,
   releaseGcLease,
   sameBytes,
   tryLand,
@@ -233,19 +234,14 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
  */
 const wallClock = (): number => Date.now() / 1000
 
-async function healHead(
-  store: KVStore,
-  branch: string,
-  recovered: Uint8Array,
-  now: () => number = wallClock,
-): Promise<boolean> {
+async function healHead(store: KVStore, branch: string, recovered: Uint8Array): Promise<boolean> {
   const branchKey = BRANCH_HEAD(branch)
   // Installing a recovered HEAD makes a commit reachable that the store
   // didn't claim a moment ago, so the checks and the write happen
   // against one lease record, and a sweep in between sends the decision
   // round again.
   for (;;) {
-    const lease = await waitForGc(store, now)
+    const lease = await waitForGc(store)
     const raw = await store.get(branchKey)
     if (raw === null || bytesEqual(raw, recovered)) return false
     const commitHash = safeLoads(raw)
@@ -345,7 +341,7 @@ export async function createBranchHead(
   // one lease record: a sweep starting between the check and the write
   // makes the write fail, and the check runs again.
   for (;;) {
-    const lease = await waitForGc(store, now)
+    const lease = await waitForGc(store)
     const expected = new Map<string, Uint8Array | null>([[branchKey, null]])
     const writes = new Map<string, Uint8Array>([[branchKey, dumps(target)]])
     if ((await store.get(COMMIT_ROOT(target))) === null) {
@@ -722,9 +718,9 @@ export async function gcStore(store: KVStore, opts: GcOptions = {}): Promise<num
   await assertStorageVersion(store)
   let held: HeldLease
   for (;;) {
-    if (wait) await waitForGc(store, now)
+    if (wait) await waitForGc(store)
     try {
-      held = await acquireGcLease(store, ttl, now)
+      held = await acquireGcLease(store, ttl)
       break
     } catch (e) {
       if (wait && e instanceof GcBusy) continue
@@ -734,7 +730,7 @@ export async function gcStore(store: KVStore, opts: GcOptions = {}): Promise<num
   try {
     return await sweep(store, opts.minAge ?? 3600, opts.deep ?? false, now)
   } finally {
-    await releaseGcLease(store, held, ttl, now)
+    await releaseGcLease(store, held, ttl)
   }
 }
 
@@ -788,9 +784,7 @@ async function sweep(
   const markerKeys: string[] = []
   for await (const k of store.keys(IN_FLIGHT_PREFIX)) markerKeys.push(k)
   for (const k of markerKeys) {
-    const raw = await store.get(k)
-    const expires = raw === null ? null : safeLoads(raw)
-    if (typeof expires === 'number' && expires > at) {
+    if (markerLive(await store.get(k))) {
       await markFrom(k.slice(IN_FLIGHT_PREFIX.length))
     } else {
       // The writer never published or withdrew it; its commit is an
@@ -1084,9 +1078,15 @@ export class VersionedKV extends VersionedBase {
     this.commitKeys = s.commitKeys
     this.meta = s.meta
     if (this.inFlight.size > 0) {
-      const markers = [...this.inFlight.keys()].map(IN_FLIGHT_KEY)
+      // Each marker goes only if it still holds the bytes this attempt
+      // wrote: another writer that produced the same commit may have
+      // overwritten it, and its protection must stay.
+      const withdrawn = [...this.inFlight].map(([commit, marker]) => {
+        const key = IN_FLIGHT_KEY(commit)
+        return this.store.casMany(new Map([[key, marker]]), new Map(), [key])
+      })
       this.inFlight = new Map()
-      this.store.removeMany(markers).catch(() => {})
+      Promise.all(withdrawn).catch(() => {})
     }
   }
 
@@ -1098,10 +1098,10 @@ export class VersionedKV extends VersionedBase {
    * later sweep treat the commit as live until it is published.
    */
   private async landBatch(commit: string, writes: Map<string, Uint8Array>): Promise<void> {
-    const marker = dumps(new PyFloat(this.now() + IN_FLIGHT_TTL))
+    const marker = inFlightMarker()
     writes.set(IN_FLIGHT_KEY(commit), marker)
     for (;;) {
-      const lease = await waitForGc(this.store, this.now)
+      const lease = await waitForGc(this.store)
       if (await this.store.casMany(new Map([[GC_LEASE_KEY, lease]]), writes)) {
         this.inFlight.set(commit, marker)
         this.leaseSeen = lease
@@ -1296,7 +1296,7 @@ export class VersionedKV extends VersionedBase {
     // record, so a sweep can't take the commit between them.
     let moved = false
     for (;;) {
-      const lease = await waitForGc(this.store, this.now)
+      const lease = await waitForGc(this.store)
       if ((await this.store.get(COMMIT_ROOT(theirHead))) === null) {
         throw new UnknownCommitError(theirHead)
       }
@@ -1304,7 +1304,7 @@ export class VersionedKV extends VersionedBase {
       if (landed === null) continue
       if (landed) break
       if ((await this.store.get(branchKey)) === null) throw new UnknownBranchError(this.branch)
-      if (await healHead(this.store, this.branch, expected, this.now)) continue
+      if (await healHead(this.store, this.branch, expected)) continue
       moved = true
       break
     }
@@ -1358,7 +1358,7 @@ export class VersionedKV extends VersionedBase {
       [BRANCH_HEAD_PREV(this.branch), expectedBytes],
     ])
     const markers = new Map([...this.inFlight].map(([c, m]) => [IN_FLIGHT_KEY(c), m] as const))
-    let lease = this.inFlight.size > 0 ? this.leaseSeen : await waitForGc(this.store, this.now)
+    let lease = this.inFlight.size > 0 ? this.leaseSeen : await waitForGc(this.store)
     for (;;) {
       const expect = new Map<string, Uint8Array | null>([
         [GC_LEASE_KEY, lease],
@@ -1369,14 +1369,14 @@ export class VersionedKV extends VersionedBase {
       if (!sameBytes(await this.store.get(GC_LEASE_KEY), lease)) {
         // A sweep ran, or is running: wait it out and try again. A
         // marker it reaped fails the next attempt on its own.
-        lease = await waitForGc(this.store, this.now)
+        lease = await waitForGc(this.store)
         continue
       }
       const present = await this.store.getMany(markers.keys())
       for (const [key, marker] of markers) {
         if (!sameBytes(present.get(key) ?? null, marker)) return false
       }
-      if (!(await healHead(this.store, this.branch, expectedBytes, this.now))) return false
+      if (!(await healHead(this.store, this.branch, expectedBytes))) return false
     }
     this.inFlight = new Map()
     return true
@@ -1500,7 +1500,7 @@ export class VersionedKV extends VersionedBase {
     // record: this either resets onto a commit that loads or reports it
     // gone.
     for (;;) {
-      const lease = await waitForGc(this.store, this.now)
+      const lease = await waitForGc(this.store)
       if ((await this.store.get(COMMIT_ROOT(commitHash))) === null) return false
       const current = await this.store.get(branchKey)
       if (current === null) throw new UnknownBranchError(this.branch)

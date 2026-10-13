@@ -123,6 +123,9 @@ they held: records, blobs and HAMT nodes.
   publishing.
 - `minAge` (seconds for `repo.gc`, default an hour) is policy only: how
   long abandoned work lingers. Any value is safe, 0 included.
+- Lease and marker expiries are always wall-clock time: they coordinate
+  writers in different handles and processes. A `now` option pins only
+  commit and tag times and the `minAge` cutoff.
 - The lease expires (`leaseTtl`, default ten minutes), so a sweep that
   dies holding it delays writers by the rest of its term and no longer.
   A second sweep waits for the first, or with `wait: false` throws

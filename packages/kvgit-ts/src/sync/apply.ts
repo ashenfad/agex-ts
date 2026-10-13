@@ -26,7 +26,6 @@
 
 import { EMPTY_HASH } from '../hamt'
 import { Keyset } from '../keyset'
-import { PyFloat } from '../pyjson'
 import type { KVStore, KeysetEntry, WireCommit } from '../types'
 import {
   BRANCH_HEAD,
@@ -47,12 +46,9 @@ import {
   loads,
   safeLoads,
 } from '../versioned/layout'
-import { IN_FLIGHT_TTL, tryLand, waitForGc } from '../versioned/lease'
+import { inFlightMarker, tryLand, waitForGc } from '../versioned/lease'
 
 export interface ApplyWireOptions {
-  /** The clock in-flight markers are stamped with, in seconds. Default:
-   *  wall time. */
-  now?: () => number
   /**
    * Create this branch pointing at the stream's final commit. Fails if
    * the branch already exists (import semantics — fast-forwarding an
@@ -92,7 +88,6 @@ export async function applyWire(
   opts: ApplyWireOptions = {},
 ): Promise<ApplyWireResult> {
   await checkStorageVersion(store)
-  const now = opts.now ?? wallClock
   const inFlight: string[] = []
 
   let applied = 0
@@ -102,8 +97,12 @@ export async function applyWire(
 
   for await (const wc of commits) {
     head = wc.hash
-    if ((await store.get(COMMIT_ROOT(wc.hash))) !== null) {
-      // Content-addressed: present means identical.
+    // Content-addressed: present means identical. But present isn't
+    // reachable (it may be an orphan from an earlier fetch), so it is
+    // marked in flight like a commit written here, until the head that
+    // names it is published.
+    if (await remark(store, wc.hash)) {
+      inFlight.push(wc.hash)
       skipped++
       continue
     }
@@ -164,9 +163,9 @@ export async function applyWire(
     for (const [k, v] of records) writes.set(k, v)
     // Marked in flight and landed while no sweep runs: a commit no head
     // names yet must not be swept before one does.
-    writes.set(IN_FLIGHT_KEY(wc.hash), dumps(new PyFloat(now() + IN_FLIGHT_TTL)))
+    writes.set(IN_FLIGHT_KEY(wc.hash), inFlightMarker())
     for (;;) {
-      const lease = await waitForGc(store, now)
+      const lease = await waitForGc(store)
       if (await store.casMany(new Map([[GC_LEASE_KEY, lease]]), writes)) break
     }
     inFlight.push(wc.hash)
@@ -174,13 +173,35 @@ export async function applyWire(
   }
 
   if (opts.createBranch !== undefined && head !== null) {
-    if (!(await publishHead(store, opts.createBranch, null, head, { inFlight, now }))) {
+    if (!(await publishHead(store, opts.createBranch, null, head, { inFlight }))) {
       throw new Error(`applyWire: branch '${opts.createBranch}' already exists`)
     }
     return { applied, skipped, head, inFlight: [] }
   }
 
   return { applied, skipped, head, inFlight }
+}
+
+/**
+ * Give a commit already in the store a fresh in-flight marker, while no
+ * sweep runs and conditional on its root still being there.
+ *
+ * @returns false if the commit isn't in the store (or a sweep took it
+ *   meanwhile), so the caller writes it in full.
+ */
+async function remark(store: KVStore, commit: string): Promise<boolean> {
+  for (;;) {
+    const lease = await waitForGc(store)
+    const root = await store.get(COMMIT_ROOT(commit))
+    if (root === null) return false
+    const landed = await tryLand(
+      store,
+      lease,
+      new Map([[COMMIT_ROOT(commit), root]]),
+      new Map([[IN_FLIGHT_KEY(commit), inFlightMarker()]]),
+    )
+    if (landed !== null) return landed
+  }
 }
 
 /**
@@ -196,9 +217,8 @@ export async function publishHead(
   branch: string,
   expected: string | null,
   newHead: string,
-  opts: { inFlight?: readonly string[]; now?: () => number } = {},
+  opts: { inFlight?: readonly string[] } = {},
 ): Promise<boolean> {
-  const now = opts.now ?? wallClock
   const branchKey = BRANCH_HEAD(branch)
   const expectedBytes = expected === null ? null : dumps(expected)
   const writes = new Map([[branchKey, dumps(newHead)]])
@@ -206,7 +226,7 @@ export async function publishHead(
   if (expectedBytes === null) removes.push(BRANCH_HEAD_PREV(branch))
   else writes.set(BRANCH_HEAD_PREV(branch), expectedBytes)
   for (;;) {
-    const lease = await waitForGc(store, now)
+    const lease = await waitForGc(store)
     // The head must name a commit that is here when it lands.
     if ((await store.get(COMMIT_ROOT(newHead))) === null) {
       throw new Error(`publishHead: commit ${newHead} is not in the store`)
@@ -221,8 +241,6 @@ export async function publishHead(
     if (landed !== null) return landed
   }
 }
-
-const wallClock = (): number => Date.now() / 1000
 
 /** A stored commit's generation: 0 with no parents, else one more than
  *  its highest parent's, as its recorded parent generations say. */

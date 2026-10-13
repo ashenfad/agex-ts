@@ -159,8 +159,9 @@ export class Workspace {
     const reader: KeyReader = 'wt' in source ? source.wt : source.snapshot
     this.#wt = 'wt' in source ? source.wt : null
     this.#frozenAt = 'snapshot' in source ? source.snapshot.commit : null
-    this.#fs = new WorldFS(reader, { persistCwd: true })
-    this.#cache = settings.cache ? new WorkspaceCache(reader) : null
+    const open = () => !this.#closed
+    this.#fs = new WorldFS(reader, { persistCwd: true, writable: open })
+    this.#cache = settings.cache ? new WorkspaceCache(reader, open) : null
 
     const inner: Inner = {
       session,
@@ -226,9 +227,10 @@ export class Workspace {
     return this.#wt !== null && !this.#wt.status().clean
   }
 
-  /** The session's settings, which a fork's child inherits. */
+  /** The session's settings as they are now, which a fork's child
+   *  inherits. */
   get settings(): WorkspaceSettings {
-    return this.#settings
+    return { ...this.#settings, autocommit: this.autocommit }
   }
 
   /**
@@ -389,14 +391,14 @@ export class Workspace {
         if (await this.store.exists(name)) throw new SessionExistsError(name)
         throw e
       }
-      const child = await this.store.open(name, this.#settings)
+      const child = await this.store.open(name, this.settings)
       await child.#seedFork(this.session, inherit)
       return child
     })
   }
 
-  /** Stop: queued calls finish first; later ones throw. Pending changes
-   *  are dropped. */
+  /** Stop: queued calls finish first; later ones throw, and the
+   *  filesystem and cache turn read-only. Pending changes are dropped. */
   async close(): Promise<void> {
     await this.#queue.run(async () => {
       this.#wt?.discard()
@@ -448,7 +450,7 @@ export class Workspace {
   async #loadCwd(): Promise<boolean> {
     const reader = this.#wt ?? null
     const stored = reader === null ? await this.#frozenCwd() : await reader.get(CWD_KEY)
-    if (typeof stored === 'string' && stored !== '/' && (await this.#fs.isDir(stored))) {
+    if (typeof stored === 'string' && (await this.#fs.isDir(stored))) {
       this.#fs.resetCwd(stored)
       return true
     }

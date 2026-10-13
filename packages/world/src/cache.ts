@@ -17,10 +17,12 @@ import { CACHE_PREFIX } from './layout'
  */
 export class WorkspaceCache {
   readonly #view: KeyReader
+  readonly #writable: () => boolean
 
   /** @internal Made by the workspace. */
-  constructor(view: KeyReader) {
+  constructor(view: KeyReader, writable: () => boolean = () => true) {
     this.#view = view
+    this.#writable = writable
   }
 
   /** A copy of the value, or undefined if the key isn't set. */
@@ -53,7 +55,9 @@ export class WorkspaceCache {
 
   #writer(): KeyWriter {
     const view = this.#view as Partial<KeyWriter>
-    if (typeof view.set !== 'function') throw new ReadOnlyError('this cache is read-only')
+    if (typeof view.set !== 'function' || !this.#writable()) {
+      throw new ReadOnlyError('this cache is read-only')
+    }
     return this.#view as KeyWriter
   }
 }

@@ -57,3 +57,31 @@ adapter should do the same; `describeFsError` also maps Node's codes.
 | `MemoryFS` | `@agex-ts/termish/fs/memory` | Tests, ephemeral use, browser-side state with no persistence |
 | `RealFS` | `@agex-ts/termish/fs/real` | Hits the actual disk on Node — wraps `node:fs/promises` + tracks cwd |
 | `KvgitFS` | `@agex-ts/termish/fs/kvgit` | Versioned shell sessions backed by `@agex-ts/kvgit` (peer dep) |
+
+## Checking your own adapter
+
+`@agex-ts/termish/conformance` holds the checks the shipped adapters pass, with
+no test framework behind them. Hand `checkFileSystem` a factory that returns a
+fresh, empty filesystem with its cwd at `/`; it runs every check, each against
+a new filesystem, and throws an `FsConformanceError` on the first failure,
+naming the check, the method and what was expected:
+
+```ts
+import { checkFileSystem } from '@agex-ts/termish/conformance'
+
+await checkFileSystem(() => new MyFS())
+```
+
+To see each check as its own test, register `fsConformanceCases` with your
+runner instead. Each case has a `group`, a `name` and `run(fs)`:
+
+```ts
+import { fsConformanceCases } from '@agex-ts/termish/conformance'
+import { describe, it } from 'vitest'
+
+describe('MyFS conformance', () => {
+  for (const c of fsConformanceCases) {
+    it(`${c.group} > ${c.name}`, async () => c.run(new MyFS()))
+  }
+})
+```

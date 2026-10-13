@@ -8,6 +8,7 @@ export default defineConfig({
     'src/fs/real.ts',
     'src/fs/kvgit.ts',
     'src/fs/protocol.ts',
+    'src/conformance.ts',
   ],
   format: ['esm'],
   dts: true,

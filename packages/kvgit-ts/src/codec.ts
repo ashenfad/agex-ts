@@ -64,12 +64,22 @@ export const cborCodec: Codec<unknown> = {
   decode: (bytes) => plainBytes(_cbor.decode(bytes)),
 }
 
-/** Node hands byte strings back as `Buffer`; make them plain
- *  `Uint8Array`s, so a value reads back the same in every runtime. */
+/**
+ * Give every byte string and typed array its own memory. cbor-x decodes
+ * them as views into the encoded input, which a backend may hand out
+ * as the very bytes it holds; a caller changing a value it read must
+ * not change a stored commit. Node's `Buffer` comes back a plain
+ * `Uint8Array`, so a value reads the same in every runtime.
+ */
 function plainBytes(value: unknown): unknown {
   if (value === null || typeof value !== 'object') return value
-  if (isBuffer(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
-  if (ArrayBuffer.isView(value) || value instanceof Date) return value
+  if (isBuffer(value)) return new Uint8Array(value)
+  if (ArrayBuffer.isView(value)) {
+    return value instanceof DataView
+      ? new DataView(value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength))
+      : (value as unknown as { slice(): unknown }).slice()
+  }
+  if (value instanceof Date) return value
   if (Array.isArray(value)) {
     for (let i = 0; i < value.length; i++) value[i] = plainBytes(value[i])
     return value

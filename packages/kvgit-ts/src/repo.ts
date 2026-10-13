@@ -135,7 +135,18 @@ export class Repo<V = Uint8Array> {
    * @throws StorageVersionError if the store is stamped with a layout
    *   this code does not read.
    */
-  static async open<V = Uint8Array>(store: KVStore, opts: RepoOptions<V> = {}): Promise<Repo<V>> {
+  static open(
+    store: KVStore,
+    opts?: RepoOptions<Uint8Array> & { codec?: 'bytes' | Codec<Uint8Array> },
+  ): Promise<Repo<Uint8Array>>
+  /** A named JSON or CBOR codec: values are `unknown` unless the caller
+   *  names their type (`Repo.open<State>(store, { codec: 'cbor' })`). */
+  static open<V = unknown>(
+    store: KVStore,
+    opts: RepoOptions<V> & { codec: 'json' | 'cbor' },
+  ): Promise<Repo<V>>
+  static open<V>(store: KVStore, opts: RepoOptions<V> & { codec: Codec<V> }): Promise<Repo<V>>
+  static async open<V>(store: KVStore, opts: RepoOptions<V> = {}): Promise<Repo<V>> {
     await checkStorageVersion(store)
     return new Repo(store, opts)
   }

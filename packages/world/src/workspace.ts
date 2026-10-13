@@ -20,6 +20,8 @@ import {
   WorldError,
 } from './errors'
 import { type KeyReader, WorldFS } from './fs'
+import { Kernel } from './kernel/kernel'
+import type { Image, SerializedError } from './kernel/messages'
 import {
   COMPACTION_PREFIX,
   CONVERSATION_PREFIX,
@@ -31,6 +33,7 @@ import {
 } from './layout'
 import { checkSessionName, checkTagName } from './names'
 import { dirname, resolve, within } from './path'
+import { type HostCall, type Profile, makeHostObjects } from './profile'
 import { Queue } from './queue'
 import type { Store } from './store'
 
@@ -44,6 +47,9 @@ export interface WorkspaceOptions {
   readonly autocommit?: boolean
   /** Whether `ws.cache` is available (default true). */
   readonly cache?: boolean
+  /** What the host grants the session: host objects, variables,
+   *  secrets, and how code runs. */
+  readonly profile?: Profile
 }
 
 /** A workspace's settings, filled in; a fork's child gets its parent's. */
@@ -51,6 +57,7 @@ export interface WorkspaceSettings {
   readonly root: string
   readonly autocommit: boolean
   readonly cache: boolean
+  readonly profile: Profile
 }
 
 /** What a fork's child starts with: everything (`'full'`), or the
@@ -80,6 +87,29 @@ export interface WriteOutcome {
   /** The file didn't exist before. */
   readonly created: boolean
   /** The commit the write made; null with autocommit off. */
+  readonly commit: string | null
+}
+
+/** What `runCode` gave. */
+export interface CodeResult {
+  /** What `console.log` and `console.info` printed, a line per call. */
+  readonly stdout: string
+  /** What `console.warn` and `console.error` printed. */
+  readonly stderr: string
+  /** Images the code showed (`console.log` of image bytes, a data URL
+   *  or `{format, data}`). */
+  readonly images: readonly Image[]
+  /** A top-level `return`'s value, shown as text; null for none. */
+  readonly value: string | null
+  /** Why the code failed: what it threw, a syntax error, a missing
+   *  module, `TimeoutError`, or `CancelledError` when interrupted. */
+  readonly error: SerializedError | null
+  /** stdout or stderr was cut to the profile's `maxObservation`. */
+  readonly truncated: boolean
+  /** Seconds the run took. */
+  readonly duration: number
+  /** The commit holding what the code changed; null when it changed
+   *  nothing, with autocommit off, or on a frozen workspace. */
   readonly commit: string | null
 }
 
@@ -143,6 +173,11 @@ export class Workspace {
   readonly #fs: WorldFS
   readonly #cache: WorkspaceCache | null
   readonly #queue = new Queue()
+  readonly #hostObjects: Map<string, object>
+  #kernel: Kernel | null = null
+  /** The call a host method made through its `HostCall` is part of,
+   *  set while that method's workspace call starts. */
+  #reentry: symbol | null = null
   #closed = false
 
   private constructor(
@@ -173,6 +208,7 @@ export class Workspace {
     }
     this.files = new WorkspaceFiles(inner, this.#fs, (info) => this.autoCommit(info))
     this.tags = new WorkspaceTags(inner)
+    this.#hostObjects = makeHostObjects(settings.profile, this)
   }
 
   /** @internal Opens a session's tip; used by `Store.open`. */
@@ -252,13 +288,15 @@ export class Workspace {
    * call that writes, then commits with {@link autoCommit}).
    *
    * Not re-entrant: inside `fn`, use `files.fs` and `cache`, not the
-   * workspace's own queued calls, which would wait for `fn` to end.
+   * workspace's own queued calls, which would wait for `fn` to end. A
+   * host method code calls gets a workspace that is part of the call
+   * by declaring itself `withCall`.
    */
   exclusive<T>(fn: () => Promise<T>): Promise<T> {
     return this.#queue.run(async () => {
       this.#checkOpen()
       return fn()
-    })
+    }, this.#reentry)
   }
 
   /**
@@ -270,6 +308,53 @@ export class Workspace {
   async autoCommit(info: CommitInfo): Promise<string | null> {
     if (!this.autocommit) return null
     return this.#commitPending(info)
+  }
+
+  // ---------- code ----------
+
+  /**
+   * Run TypeScript in the session's kernel, as one call, committed as
+   * `{tool: 'run_ts'}` when it changed anything. A run that fails,
+   * times out or is interrupted still commits what it wrote before it
+   * stopped.
+   *
+   * The code runs in a worker, as the body of an async function: it can
+   * `await` at the top level and `return` a value to show. It has `fs`
+   * (the session's files, async), `cache`, `env` (the profile's
+   * variables), `console`, and the profile's host objects, by name and
+   * as `host`. It can import the world's own modules by path, `'host'`,
+   * URLs, and bare names the profile's `resolve` maps to URLs. Nothing
+   * else carries over between runs: what should outlast one belongs in
+   * the files or the cache.
+   *
+   * On a frozen workspace the code runs, and a write fails with
+   * `EROFS`.
+   */
+  async runCode(code: string): Promise<CodeResult> {
+    return this.#queue.run(async () => {
+      this.#checkOpen()
+      const call: HostCall = { ws: this.#asPartOf(this.#queue.active as symbol) }
+      const out = await this.#kernelFor().run(code, {
+        fs: this.#fs,
+        cache: this.#cache,
+        env: this.#settings.profile.variables ?? {},
+        hostObjects: this.#hostObjects,
+        call,
+        settings: this.#settings.profile.code ?? {},
+      })
+      const commit = this.#wt === null ? null : await this.autoCommit({ tool: 'run_ts' })
+      return { ...out, commit }
+    }, this.#reentry)
+  }
+
+  /**
+   * Stop the code running in the kernel, if any: its worker is
+   * terminated, and `runCode` returns with a `CancelledError`, having
+   * committed what the code wrote. Returns false if no code was
+   * running.
+   */
+  interrupt(): boolean {
+    return this.#kernel?.interrupt() ?? false
   }
 
   // ---------- versioning ----------
@@ -401,6 +486,7 @@ export class Workspace {
    *  filesystem and cache turn read-only. Pending changes are dropped. */
   async close(): Promise<void> {
     await this.#queue.run(async () => {
+      this.#kernel?.close()
       this.#wt?.discard()
       this.#closed = true
     })
@@ -423,7 +509,49 @@ export class Workspace {
   }
 
   #run<T>(op: string, fn: (wt: Worktree<unknown>) => Promise<T>): Promise<T> {
-    return this.#queue.run(() => fn(this.#live(op)))
+    return this.#queue.run(() => fn(this.#live(op)), this.#reentry)
+  }
+
+  #kernelFor(): Kernel {
+    this.#kernel ??= new Kernel(this.#settings.profile.code ?? {})
+    return this.#kernel
+  }
+
+  /**
+   * This workspace, with every call it starts made part of the call
+   * `token`: run at once, not queued behind it. Its `files` and `tags`
+   * too.
+   */
+  #asPartOf(token: symbol): Workspace {
+    const within = <T>(fn: () => T): T => {
+      const previous = this.#reentry
+      this.#reentry = token
+      try {
+        return fn()
+      } finally {
+        this.#reentry = previous
+      }
+    }
+    const wrap = <O extends object>(target: O): O =>
+      new Proxy(target, {
+        get(t, prop) {
+          const value = Reflect.get(t, prop, t)
+          if (typeof value !== 'function') return value
+          return (...args: unknown[]) => within(() => value.apply(t, args))
+        },
+      })
+    const files = wrap(this.files)
+    const tags = wrap(this.tags)
+    const ws = this
+    return new Proxy(this, {
+      get(t, prop) {
+        if (prop === 'files') return files
+        if (prop === 'tags') return tags
+        const value = Reflect.get(t, prop, t)
+        if (typeof value !== 'function') return value
+        return (...args: unknown[]) => within(() => value.apply(ws, args))
+      },
+    })
   }
 
   async #commitPending(info: CommitInfo): Promise<string | null> {

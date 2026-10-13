@@ -46,6 +46,8 @@ const ALLOWLIST = {
   // `dist/worker.js` (via the `./worker` export / runtime URL), never
   // this file, so its `node:worker_threads` import can't leak browser-side.
   'agex-runtime-worker': ['dist/worker.node.js'],
+  // The world's Node kernel worker, reached only on the Node target.
+  world: ['dist/worker.node.js'],
 }
 
 // Packages to scan. Anything not listed is skipped (e.g. the monorepo

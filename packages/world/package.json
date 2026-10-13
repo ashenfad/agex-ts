@@ -23,6 +23,12 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./worker": {
+      "import": "./dist/worker.js"
+    },
+    "./worker.node": {
+      "import": "./dist/worker.node.js"
     }
   },
   "files": ["dist", "README.md", "LICENSE"],
@@ -35,7 +41,8 @@
   },
   "dependencies": {
     "@agex-ts/kvgit": "workspace:^",
-    "@agex-ts/termish": "workspace:^"
+    "@agex-ts/termish": "workspace:^",
+    "ts-blank-space": "^0.6.2"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

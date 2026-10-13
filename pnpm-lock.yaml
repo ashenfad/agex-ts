@@ -261,6 +261,9 @@ importers:
       '@agex-ts/termish':
         specifier: workspace:^
         version: link:../termish-ts
+      ts-blank-space:
+        specifier: ^0.6.2
+        version: 0.6.2
     devDependencies:
       '@types/node':
         specifier: ^22.10.0

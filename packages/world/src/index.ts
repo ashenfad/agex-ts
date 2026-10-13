@@ -24,6 +24,7 @@ export { SESSION_ID_RE } from './names'
 export { Queue } from './queue'
 export { DEFAULT_MIN_AGE, Store, type StoreOptions, StoreTags } from './store'
 export {
+  type CodeResult,
   type ForkOptions,
   type Inherit,
   type RemoveOutcome,
@@ -35,3 +36,15 @@ export {
   WorkspaceTags,
   type WriteOutcome,
 } from './workspace'
+export {
+  type CallAware,
+  type CodeSettings,
+  type HostCall,
+  type HostFactory,
+  type HostObject,
+  type Profile,
+  hostFactory,
+  withCall,
+} from './profile'
+export type { Image, SerializedError } from './kernel/messages'
+export { DEFAULT_MAX_OBSERVATION, DEFAULT_TIMEOUT } from './kernel/kernel'

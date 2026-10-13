@@ -279,9 +279,10 @@ nontainer's semantics for a serverless studio. In order:
 2. **W2. The kernel:** `runtime-worker` moves under the world as its
    executor. Host objects are granted to the world, not the agent (a
    profile, inherited by forks), reached by async RPC with a declared
-   surface. Cancel terminates the worker and restarts it; the work kept
-   is what the last commit holds. **Variables and secrets** come with
-   the profile (see "Decided for apps and services").
+   surface. Cancel terminates the worker and restarts it; what the code
+   wrote before it stopped is committed, as in nontainer. **Variables
+   and secrets** come with the profile (see "Decided for apps and
+   services").
 3. **W3. The tools:** `terminal` (termish-ts with the world's host
    commands), the code tool, `file_write` and `file_edit`, with
    nontainer's names and MCP-shaped results. There is no `ws-curl` or
@@ -322,6 +323,25 @@ it covers) from the generated JSON, and its own suite on memory and idb.
   `files.edit` comes with the `file_edit` tool in W3, with its
   agent-tolerant matching; the conversation rebind on fork and checkout
   comes with the conversation in W4.
+
+**Decided for the kernel (2026-10-13):**
+- **`ws.runCode`, committed as `run_ts`.** Named for its language, so a
+  Pyodide `run_python` could sit beside it.
+- **The script model.** Neither nontainer nor the old worker kept
+  variables between calls, so the kernel holds no state: the files and
+  the cache are what carry over, and close, fork and checkout have
+  nothing to rebuild.
+- **The kernel lives in the world,** ported from `runtime-worker`
+  without the loop's parts (`taskSuccess`/`taskFail`, `inputs`,
+  `spawn`, `Policy`). Host classes (`agent.cls`) are dropped. The old
+  package stays for the old agex-ts until the agex-ts phase.
+- **A stopped run keeps its writes.** A timeout (30 seconds by
+  default, set in the profile) or `ws.interrupt()` terminates the
+  worker; what the code wrote is committed, as in nontainer.
+- **Re-entrancy is explicit.** A host method declared `withCall` gets
+  the calling workspace as part of the code's call, so it can fork or
+  commit inline (nontainer's delegation from code needs this); other
+  calls queue.
 
 ## Then agex-ts
 

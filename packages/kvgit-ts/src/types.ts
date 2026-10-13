@@ -152,81 +152,148 @@ export interface DiffResult {
 }
 
 /**
- * Result of a `commit()` attempt.
+ * What a commit, merge or applied change did.
  *
- * - `merged: true, strategy: 'fast_forward'` — HEAD was at the expected
- *   parent; new commit appended directly.
- * - `merged: true, strategy: 'three_way'` — HEAD had moved; performed a
- *   three-way merge using the registered merge fns.
- * - `merged: false, strategy: 'no_op'` — nothing to commit (empty
- *   updates + removals), or the caller passed `onConflict: 'skip'` and
- *   HEAD had moved.
- *
- * `autoMergedKeys` lists keys that a merge function resolved without
- * user intervention. `carriedKeys` lists keys carried unchanged from
- * either side during a three-way merge.
+ * `strategy` says how it landed:
+ * - `'no_op'`: nothing to do (no changes to commit, or the branch
+ *   already contains what was merged or applied).
+ * - `'fast_forward'`: a commit on a branch that had not moved, or a
+ *   merge that moved the branch to theirs without a merge commit.
+ * - `'three_way'`: a merge commit, from a merge or from a commit that
+ *   found the branch had moved.
+ * - `'apply'`: a change applied as a single-parent commit (`apply`,
+ *   `cherryPick`, `revert`).
  */
 export interface MergeResult {
+  /** Whether the call landed; false when it abandoned
+   *  (`onConflict: 'abandon'`). */
   readonly merged: boolean
+  /** The commit the branch is at afterwards; null when abandoned. */
   readonly commit: string | null
-  readonly strategy: 'no_op' | 'fast_forward' | 'three_way'
+  readonly strategy: 'no_op' | 'fast_forward' | 'three_way' | 'apply'
+  /** Keys a merge rule decided: keys both sides changed that a merge
+   *  function (or the `MergeChoice` it returned) resolved, and keys
+   *  under a registered `MergeChoice` that either side changed. */
   readonly autoMergedKeys: readonly string[]
+  /** Keys the other side changed that the merge took as they were: the
+   *  other writer's changes on a lost race, the merged branch's on a
+   *  merge or fast-forward, the picked change on `apply`. Empty for a
+   *  commit with no other side and for `no_op`. A key both sides
+   *  changed alike is in neither list, unless a registered
+   *  `MergeChoice` covers it. */
   readonly carriedKeys: readonly string[]
 }
 
 /**
- * Three-way merge function over raw bytes. Any argument may be `null`
- * (key absent or removed on that side).
+ * One side of a merge, named as the answer for a key. Two uses, with
+ * deliberately different reach:
  *
- * Throw to signal an unresolvable conflict — the framework wraps it
- * in `MergeConflict` along with conflicts from any other contested
- * keys.
+ * - **Returned by a merge function** in place of a value: the merged
+ *   value of that contested key is that side's, unchanged (no new blob
+ *   is written; a side that removed the key removes it).
+ * - **Registered in place of a merge function** (by key, by prefix, or
+ *   as the default): a standing policy handing one side every key it
+ *   covers that *either* side changed, so `OURS` also drops a key the
+ *   other side added and keeps one it removed. Nothing is read.
+ */
+export class MergeChoice {
+  static readonly OURS = new MergeChoice('ours')
+  static readonly THEIRS = new MergeChoice('theirs')
+
+  private constructor(readonly side: 'ours' | 'theirs') {}
+
+  toString(): string {
+    return `MergeChoice.${this.side.toUpperCase()}`
+  }
+}
+
+/**
+ * Three-way merge function over raw bytes. Any argument may be `null`
+ * (key absent or removed on that side). Return the merged bytes, or a
+ * {@link MergeChoice} to keep one side's value as it is.
+ *
+ * Throw to signal an unresolvable conflict: the merge files the key as
+ * conflicted, with any other contested keys, in one `MergeConflict`.
  */
 export type BytesMergeFn = (
   old: Uint8Array | null,
   ours: Uint8Array | null,
   theirs: Uint8Array | null,
-) => Uint8Array
+) => Uint8Array | MergeChoice
+
+/** What a merge registration holds: a function, consulted for keys both
+ *  sides changed, or a {@link MergeChoice}, which gives one side every
+ *  key it covers. */
+export type MergePolicy = BytesMergeFn | MergeChoice
+
+/**
+ * Accept or refuse a value a merge function produced: `(key, merged)`.
+ * Returning false files the key as conflicted, as if no merge function
+ * had resolved it. Doesn't run for a key whose merge function answered
+ * with a `MergeChoice`, since no new value was produced.
+ */
+export type PostCheck = (key: string, merged: Uint8Array) => boolean
 
 /**
  * User-level merge function. Receives decoded values; the encoding
- * layer wraps these into a `BytesMergeFn` at commit time.
+ * layer wraps these into a `BytesMergeFn` at commit time. May return a
+ * {@link MergeChoice} to keep one side's value.
  */
-export type MergeFn<T = unknown> = (old: T | null, ours: T | null, theirs: T | null) => T
+export type MergeFn<T = unknown> = (
+  old: T | null,
+  ours: T | null,
+  theirs: T | null,
+) => T | MergeChoice
 
 /**
- * Disposition for a `commit()` that can't land cleanly.
- *
- * `commit()` always attempts to advance HEAD: if HEAD has moved, it
- * tries a three-way merge using the registered merge fns. This flag
- * governs only what happens when *that* fails (no LCA, contested key
- * with no merge fn, CAS lost the race).
+ * What a commit, merge or apply does when it can't land cleanly (no
+ * common ancestor, a contested key no rule resolves, a lost race):
  *
  * - `'raise'` (default): throw `ConcurrencyError` or `MergeConflict`.
- * - `'skip'`: return `{ merged: false }`. Staged changes remain;
- *   in-memory base is restored. Caller decides whether to retry.
+ * - `'abandon'`: return `{ merged: false }`. Pending changes remain and
+ *   the in-memory state is restored; the caller decides whether to
+ *   retry.
  */
-export type ConflictDisposition = 'raise' | 'skip'
+export type ConflictDisposition = 'raise' | 'abandon'
 
 /** Optional commit-level metadata. Surfaced via `commitInfo()`. */
 export type CommitInfo = Record<string, unknown>
 
+/** The merge rules a call layers over the handle's registrations. */
+export interface MergeRuleOptions {
+  /** Registrations by key. */
+  mergeFns?: ReadonlyMap<string, MergePolicy> | null
+  /** Registrations by key prefix; a key takes the longest one it
+   *  starts with, after an exact key match. */
+  mergePrefixes?: ReadonlyMap<string, MergePolicy> | null
+  /** The registration for keys nothing else covers. */
+  defaultMerge?: MergePolicy | null
+}
+
 /** Options for `Versioned.commit()`. */
-export interface VersionedCommitOptions {
+export interface VersionedCommitOptions extends MergeRuleOptions {
   updates?: Map<string, Uint8Array> | null
   removals?: Set<string> | null
   onConflict?: ConflictDisposition
-  mergeFns?: Map<string, BytesMergeFn> | null
-  defaultMerge?: BytesMergeFn | null
   info?: CommitInfo | null
 }
 
 /** Options for `Versioned.mergeHeads()`. */
-export interface MergeHeadsOptions {
+export interface MergeHeadsOptions extends MergeRuleOptions {
   onConflict?: ConflictDisposition
-  mergeFns?: Map<string, BytesMergeFn> | null
-  defaultMerge?: BytesMergeFn | null
   info?: CommitInfo | null
+  postCheck?: PostCheck | null
+  /** Move HEAD to theirs without a merge commit when ours is an
+   *  ancestor of theirs (default true); false writes the merge commit
+   *  anyway. */
+  fastForward?: boolean
+}
+
+/** Options for `Versioned.applyChange()`. */
+export interface ApplyChangeOptions extends MergeRuleOptions {
+  onConflict?: ConflictDisposition
+  info?: CommitInfo | null
+  postCheck?: PostCheck | null
 }
 
 /**
@@ -257,13 +324,15 @@ export interface Versioned {
 
   // --- Merge fn registry ---
 
-  setMergeFn(key: string, fn: BytesMergeFn): void
-  setDefaultMerge(fn: BytesMergeFn): void
+  setMergeFn(key: string, fn: MergePolicy): void
+  setMergePrefix(prefix: string, fn: MergePolicy): void
+  setDefaultMerge(fn: MergePolicy): void
 
   // --- Writes ---
 
   commit(opts?: VersionedCommitOptions): Promise<MergeResult>
   mergeHeads(theirHead: string, opts?: MergeHeadsOptions): Promise<MergeResult>
+  applyChange(base: string, target: string, opts?: ApplyChangeOptions): Promise<MergeResult>
 
   // --- Navigation ---
 

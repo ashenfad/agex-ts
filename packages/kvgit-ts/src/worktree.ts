@@ -4,9 +4,21 @@
  */
 
 import { UnknownCommitError } from './errors'
-import type { Repo } from './repo'
-import type { BytesMergeFn, CommitInfo, MergeFn, MergeResult } from './types'
+import type { Ref, Repo } from './repo'
+import {
+  type CommitInfo,
+  MergeChoice,
+  type MergeFn,
+  type MergePolicy,
+  type MergeResult,
+  type PostCheck,
+} from './types'
 import type { VersionedKV } from './versioned/kv'
+import { ROOT_COMMIT } from './versioned/layout'
+
+/** What a merge registration holds at the value level: a merge
+ *  function over decoded values, or a {@link MergeChoice}. */
+export type MergeRule<V> = MergeFn<V> | MergeChoice
 
 /** A worktree's pending changes: keys written and keys deleted since
  *  its last commit. */
@@ -22,18 +34,39 @@ export class Status {
   }
 }
 
-export interface WorktreeCommitOptions<V> {
+/** Merge rules a single call layers over the worktree's and the
+ *  repository's. */
+export interface WorktreeMergeRules<V> {
+  /** Rules by key. */
+  mergeFns?: ReadonlyMap<string, MergeRule<V>>
+  /** Rules by key prefix; a key takes the longest one it starts with,
+   *  after an exact key match. */
+  mergePrefixes?: ReadonlyMap<string, MergeRule<V>>
+  /** The rule for keys nothing else covers. */
+  defaultMerge?: MergeRule<V>
+  /** What a conflict the rules can't resolve does: `'raise'` (default)
+   *  throws `MergeConflict`; `'abandon'` returns a result with
+   *  `merged: false` and changes nothing. */
+  onConflict?: 'raise' | 'abandon'
+}
+
+export interface WorktreeCommitOptions<V> extends WorktreeMergeRules<V> {
   /** Commit only these pending keys and leave the rest pending. */
   keys?: Iterable<string>
   info?: CommitInfo
-  /** What a conflict the merge rules can't resolve does: `'raise'`
-   *  (default) throws `MergeConflict`; `'abandon'` returns a result
-   *  with `merged: false` and leaves the changes pending. */
-  onConflict?: 'raise' | 'abandon'
-  /** Merge functions by key, for this call. */
-  mergeFns?: ReadonlyMap<string, MergeFn<V>>
-  /** The merge function for keys no other rule covers, for this call. */
-  defaultMerge?: MergeFn<V>
+}
+
+export interface WorktreeApplyOptions<V> extends WorktreeMergeRules<V> {
+  info?: CommitInfo
+  /** Accept or refuse each value a merge function produced, as stored
+   *  bytes: `(key, merged)`; false files the key as a conflict. */
+  postCheck?: PostCheck
+}
+
+export interface WorktreeMergeOptions<V> extends WorktreeApplyOptions<V> {
+  /** Fast-forward when this branch hasn't moved since the two forked
+   *  (default true); false writes a merge commit regardless. */
+  fastForward?: boolean
 }
 
 /**
@@ -55,8 +88,9 @@ export class Worktree<V = Uint8Array> {
   readonly #updates = new Map<string, V>()
   readonly #removals = new Set<string>()
   readonly #cache = new Map<string, V>()
-  readonly #mergeFns = new Map<string, MergeFn<V>>()
-  #defaultMerge: MergeFn<V> | undefined
+  readonly #mergeFns = new Map<string, MergeRule<V>>()
+  readonly #mergePrefixes = new Map<string, MergeRule<V>>()
+  #defaultMerge: MergeRule<V> | undefined
 
   /** @internal Made by `Repo.worktree`. */
   constructor(repo: Repo<V>, engine: VersionedKV) {
@@ -158,14 +192,29 @@ export class Worktree<V = Uint8Array> {
 
   // --- Merge rules ---
 
-  /** Register a merge function for one key. A worktree's rules sit over
-   *  the repository's defaults and under a single call's. */
-  setMergeFn(key: string, fn: MergeFn<V>): void {
+  /** Register a merge function, or a `MergeChoice`, for one key. A
+   *  worktree's rules sit over the repository's and under a single
+   *  call's. */
+  setMergeFn(key: string, fn: MergeRule<V>): void {
     this.#mergeFns.set(key, fn)
   }
 
-  /** Register the merge function for keys no other rule covers. */
-  setDefaultMerge(fn: MergeFn<V>): void {
+  /**
+   * Register a merge function, or a `MergeChoice`, under a prefix, for
+   * keys whose names aren't known up front (`runs/` for `runs/<id>`). A
+   * key takes the most specific registration: its exact key, else the
+   * longest prefix it starts with, else the default. A merge function
+   * is consulted only where both sides changed a key; a `MergeChoice`
+   * is a standing policy over the whole prefix, so `OURS` also drops a
+   * key the other side added and keeps one it removed.
+   */
+  setMergePrefix(prefix: string, fn: MergeRule<V>): void {
+    this.#mergePrefixes.set(prefix, fn)
+  }
+
+  /** Register the merge function, or `MergeChoice`, for keys no other
+   *  rule covers. */
+  setDefaultMerge(fn: MergeRule<V>): void {
     this.#defaultMerge = fn
   }
 
@@ -194,20 +243,10 @@ export class Worktree<V = Uint8Array> {
       if (only === null || only.has(key)) removals.add(key)
     }
 
-    const fns = new Map<string, MergeFn<V>>([
-      ...this.repo.mergeFns,
-      ...this.#mergeFns,
-      ...(opts.mergeFns ?? []),
-    ])
-    const fallback = opts.defaultMerge ?? this.#defaultMerge ?? this.repo.defaultMerge
     const result = await this.#engine.commit({
       ...(updates.size > 0 && { updates }),
       ...(removals.size > 0 && { removals }),
-      onConflict: opts.onConflict === 'abandon' ? 'skip' : 'raise',
-      ...(fns.size > 0 && {
-        mergeFns: new Map([...fns].map(([k, fn]) => [k, this.lower(fn)])),
-      }),
-      ...(fallback !== undefined && { defaultMerge: this.lower(fallback) }),
+      ...this.rules(opts),
       ...(opts.info !== undefined && { info: opts.info }),
     })
 
@@ -227,19 +266,130 @@ export class Worktree<V = Uint8Array> {
     return result
   }
 
-  /** A merge function over values, as the bytes-level merge takes it:
-   *  each side decoded with the repository's codec, the result encoded
-   *  back with it. */
-  private lower(fn: MergeFn<V>): BytesMergeFn {
+  // --- Merge and apply ---
+
+  /**
+   * Merge a commit, branch or tag into this worktree's branch.
+   *
+   * The lowest common ancestor, a three-way resolve, and a two-parent
+   * merge commit `[ours, theirs]` published on this worktree's head.
+   * When this branch hasn't moved since the two forked, it
+   * fast-forwards instead, as git does: HEAD moves to theirs and no
+   * commit is written, so `info` isn't recorded (`fastForward: false`
+   * writes the merge commit regardless). A commit this branch already
+   * contains merges as a no-op.
+   *
+   * @throws Error with pending changes: commit or discard them first.
+   * @throws MergeConflict for keys both sides changed that no rule
+   *   resolves (unless `onConflict: 'abandon'`).
+   * @throws ConcurrencyError if the branch moved during the merge, or
+   *   the two share no history.
+   */
+  async merge(ref: Ref, opts: WorktreeMergeOptions<V> = {}): Promise<MergeResult> {
+    this.requireClean('merge')
+    const theirHead = await this.repo.resolveRef(ref)
+    const result = await this.#engine.mergeHeads(theirHead, {
+      ...this.rules(opts),
+      ...(opts.info !== undefined && { info: opts.info }),
+      ...(opts.postCheck !== undefined && { postCheck: opts.postCheck }),
+      ...(opts.fastForward !== undefined && { fastForward: opts.fastForward }),
+    })
+    if (result.merged) this.#cache.clear()
+    return result
+  }
+
+  /**
+   * Commit the change from `base` to `target` onto this branch: a
+   * three-way merge with `base` standing in for the common ancestor.
+   * What `target` changed relative to `base` lands on this worktree's
+   * head as one ordinary commit, and changes made here since are kept.
+   * A change already present commits nothing (`no_op`). `cherryPick`
+   * and `revert` are the common cases.
+   *
+   * @throws Error with pending changes: commit or discard them first.
+   * @throws UnknownCommitError if `base` or `target` is not in the store.
+   * @throws MergeConflict for keys both changed that no rule resolves.
+   * @throws ConcurrencyError if the branch moved during the apply.
+   */
+  async apply(
+    base: string,
+    target: string,
+    opts: WorktreeApplyOptions<V> = {},
+  ): Promise<MergeResult> {
+    this.requireClean('apply a change')
+    await this.repo.getCommit(base)
+    await this.repo.getCommit(target)
+    const result = await this.#engine.applyChange(base, target, {
+      ...this.rules(opts),
+      ...(opts.info !== undefined && { info: opts.info }),
+      ...(opts.postCheck !== undefined && { postCheck: opts.postCheck }),
+    })
+    if (result.merged) this.#cache.clear()
+    return result
+  }
+
+  /** Commit the change `commit` made (relative to its first parent)
+   *  onto this branch. Takes {@link apply}'s options. */
+  async cherryPick(commit: string, opts: WorktreeApplyOptions<V> = {}): Promise<MergeResult> {
+    const parents = (await this.repo.getCommit(commit)).parents
+    return this.apply(parents[0] ?? ROOT_COMMIT, commit, opts)
+  }
+
+  /** Commit the undoing of the change `commit` made (relative to its
+   *  first parent) onto this branch. Takes {@link apply}'s options. */
+  async revert(commit: string, opts: WorktreeApplyOptions<V> = {}): Promise<MergeResult> {
+    const parents = (await this.repo.getCommit(commit)).parents
+    return this.apply(commit, parents[0] ?? ROOT_COMMIT, opts)
+  }
+
+  private requireClean(verb: string): void {
+    if (this.#updates.size > 0 || this.#removals.size > 0) {
+      throw new Error(`cannot ${verb} with pending changes; commit or discard them first`)
+    }
+  }
+
+  /** The effective rules, lowered to bytes: the repository's, then this
+   *  worktree's, then the call's. */
+  private rules(opts: WorktreeMergeRules<V>): {
+    onConflict: 'raise' | 'abandon'
+    mergeFns?: Map<string, MergePolicy>
+    mergePrefixes?: Map<string, MergePolicy>
+    defaultMerge?: MergePolicy
+  } {
+    const lowerAll = (...maps: Array<ReadonlyMap<string, MergeRule<V>> | undefined>) => {
+      const out = new Map<string, MergePolicy>()
+      for (const map of maps) for (const [k, rule] of map ?? []) out.set(k, this.lower(rule))
+      return out
+    }
+    const fns = lowerAll(this.repo.mergeFns, this.#mergeFns, opts.mergeFns)
+    const prefixes = lowerAll(this.repo.mergePrefixes, this.#mergePrefixes, opts.mergePrefixes)
+    const fallback = opts.defaultMerge ?? this.#defaultMerge ?? this.repo.defaultMerge
+    return {
+      onConflict: opts.onConflict ?? 'raise',
+      ...(fns.size > 0 && { mergeFns: fns }),
+      ...(prefixes.size > 0 && { mergePrefixes: prefixes }),
+      ...(fallback !== undefined && { defaultMerge: this.lower(fallback) }),
+    }
+  }
+
+  /**
+   * A merge rule, as the bytes-level merge takes it. A `MergeChoice`
+   * names a side rather than computing a value, so it goes down
+   * untouched. A merge function is wrapped: each side decoded with the
+   * repository's codec, the result encoded back with it (or passed
+   * through, if it is a `MergeChoice`).
+   */
+  private lower(rule: MergeRule<V>): MergePolicy {
+    if (rule instanceof MergeChoice) return rule
     const { codec } = this.repo
-    return (old, ours, theirs) =>
-      codec.encode(
-        fn(
-          old === null ? null : codec.decode(old),
-          ours === null ? null : codec.decode(ours),
-          theirs === null ? null : codec.decode(theirs),
-        ),
+    return (old, ours, theirs) => {
+      const result = rule(
+        old === null ? null : codec.decode(old),
+        ours === null ? null : codec.decode(ours),
+        theirs === null ? null : codec.decode(theirs),
       )
+      return result instanceof MergeChoice ? result : codec.encode(result)
+    }
   }
 
   // --- Moving ---

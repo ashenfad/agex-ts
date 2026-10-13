@@ -14,16 +14,17 @@
  * (cbor for Map/Set/Date/typed arrays, msgpack for compactness, etc.).
  */
 
-import type {
-  CommitInfo,
-  ConflictDisposition,
-  Decoder,
-  Encoder,
-  MergeFn,
-  MergeResult,
-  Versioned,
+import {
+  type BytesMergeFn,
+  type CommitInfo,
+  type ConflictDisposition,
+  type Decoder,
+  type Encoder,
+  MergeChoice,
+  type MergeFn,
+  type MergeResult,
+  type Versioned,
 } from './types'
-import type { BytesMergeFn } from './types'
 
 const _encoder = new TextEncoder()
 const _decoder = new TextDecoder()
@@ -450,7 +451,8 @@ export class Staged {
       const oldV = oldB !== null ? decoder(oldB) : null
       const ours = oursB !== null ? decoder(oursB) : null
       const theirs = theirsB !== null ? decoder(theirsB) : null
-      return encoder(fn(oldV, ours, theirs))
+      const merged = fn(oldV, ours, theirs)
+      return merged instanceof MergeChoice ? merged : encoder(merged)
     }
   }
 }

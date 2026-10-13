@@ -1,173 +1,181 @@
 /**
- * Pure three-way merge resolution.
+ * Three-way merge resolution, from each side's changes since the common
+ * ancestor.
  *
- * `resolveMerge` takes a fully-decoded snapshot of the merge state
- * (LCA / ours / theirs keysets, the diffs from LCA to each, a blob
- * reader, the merge fns) and returns a `MergeResolution` ready to be
- * persisted as a merge commit.
- *
- * The function is pure with respect to storage — the only IO is the
- * injected `blobReader`. `VersionedBase` calls it inside the merge
- * orchestration; users implementing custom backends call it the same
- * way.
+ * `resolveMerge` is pure with respect to storage: its only IO is the
+ * injected `blobReader`, so a backend of any kind calls it the same
+ * way. The result is expressed as changes to our side.
  */
 
-import { type BytesMergeFn, type DiffResult, MergeConflict } from '../types'
+import { MergeConflict } from '../errors'
+import { compareCodePoints } from '../pyjson'
+import { type KeysetEntry, MergeChoice, type MergePolicy } from '../types'
 
-/** Read a blob's bytes by its content identifier (versioned key). */
+/** Read a blob's bytes by its key. */
 export type BlobReader = (id: string) => Promise<Uint8Array | null>
 
+/** One key's change from the common ancestor to one side: its entry
+ *  there and its entry here, null where the key is absent. */
+export interface Change {
+  readonly old: KeysetEntry | null
+  readonly new: KeysetEntry | null
+}
+
 /**
- * Result of a successful merge resolution.
+ * A resolved three-way merge, as changes to make to our side.
  *
- * `mergedKeyset` is the new commit's flat keyset (key → blob pointer).
- * Existing pointers are reused for keys that didn't move; merged-value
- * keys still hold a placeholder pointer (the caller resolves these to
- * `<merge_hash>:<key>` when materializing the merge commit).
- *
- * `mergedValues` holds the bytes for keys that the merge fns produced
- * — these get written as fresh blobs at commit time.
- *
- * `autoMergedKeys` lists the keys a merge fn resolved (for reporting).
+ * `updates` and `removals` turn our keyset into the merged one;
+ * `mergedValues` are values merge functions produced, each still to be
+ * written as a blob and set under its key. Nothing here restates a key
+ * whose merged state is already ours.
  */
 export interface MergeResolution {
-  readonly mergedKeyset: Map<string, string>
-  readonly mergedValues: Map<string, Uint8Array>
+  readonly updates: ReadonlyMap<string, KeysetEntry>
+  readonly removals: ReadonlySet<string>
+  readonly mergedValues: ReadonlyMap<string, Uint8Array>
   readonly autoMergedKeys: readonly string[]
+  readonly carriedKeys: readonly string[]
+}
+
+/** Whether a resolution changes our side at all. */
+export function changesOurs(resolution: MergeResolution): boolean {
+  return (
+    resolution.updates.size > 0 || resolution.removals.size > 0 || resolution.mergedValues.size > 0
+  )
+}
+
+/**
+ * The registration that governs one key: an exact key match first, then
+ * the longest registered prefix the key starts with, then the default.
+ * Merge functions and `MergeChoice` policies compete in that one order.
+ * Null means nothing covers the key, which leaves a contested key a
+ * conflict.
+ */
+export function pickMergePolicy(
+  key: string,
+  mergeFns: ReadonlyMap<string, MergePolicy>,
+  mergePrefixes: ReadonlyMap<string, MergePolicy>,
+  defaultMerge: MergePolicy | null,
+): MergePolicy | null {
+  const exact = mergeFns.get(key)
+  if (exact !== undefined) return exact
+  let best: MergePolicy | null = null
+  let bestLen = -1
+  for (const [prefix, candidate] of mergePrefixes) {
+    if (key.startsWith(prefix) && prefix.length > bestLen) {
+      best = candidate
+      bestLen = prefix.length
+    }
+  }
+  return best ?? defaultMerge
 }
 
 export interface ResolveMergeOptions {
-  lcaKeyset: ReadonlyMap<string, string>
-  ourKeyset: ReadonlyMap<string, string>
-  theirKeyset: ReadonlyMap<string, string>
-  ourDiff: DiffResult
-  theirDiff: DiffResult
+  /** Our side's changes since the common ancestor. */
+  ours: ReadonlyMap<string, Change>
+  /** Their side's changes since the common ancestor. */
+  theirs: ReadonlyMap<string, Change>
   blobReader: BlobReader
-  mergeFns: ReadonlyMap<string, BytesMergeFn>
-  defaultMerge: BytesMergeFn | null
+  mergeFns: ReadonlyMap<string, MergePolicy>
+  mergePrefixes?: ReadonlyMap<string, MergePolicy>
+  defaultMerge: MergePolicy | null
 }
 
 /**
- * Resolve a three-way merge between two diverged keysets.
+ * Resolve a three-way merge from each side's changes since the common
+ * ancestor. Only changed keys are looked at, so the cost follows the
+ * size of the change, not of the keyset.
  *
- * Does NOT create commits or advance HEAD — the caller handles
- * persistence. Throws `MergeConflict` if any contested key is
- * unresolvable (no merge fn, or the fn threw).
+ * A merge function is consulted only where both sides changed a key; a
+ * registered `MergeChoice` gives one side every key it covers that
+ * either side changed.
+ *
+ * @throws MergeConflict for contested keys nothing resolves.
  */
 export async function resolveMerge(opts: ResolveMergeOptions): Promise<MergeResolution> {
-  const {
-    lcaKeyset,
-    ourKeyset,
-    theirKeyset,
-    ourDiff,
-    theirDiff,
-    blobReader,
-    mergeFns,
-    defaultMerge,
-  } = opts
-
-  const ourChanged = union(ourDiff.added, ourDiff.removed, ourDiff.modified)
-  const theirChanged = union(theirDiff.added, theirDiff.removed, theirDiff.modified)
-  const allChanged = union(ourChanged, theirChanged)
-
-  const mergedKeyset = new Map<string, string>()
+  const { ours, theirs, blobReader, mergeFns, defaultMerge } = opts
+  const prefixes = opts.mergePrefixes ?? new Map<string, MergePolicy>()
+  const updates = new Map<string, KeysetEntry>()
+  const removals = new Set<string>()
   const mergedValues = new Map<string, Uint8Array>()
   const autoMerged: string[] = []
+  const carried: string[] = []
   const conflicts = new Set<string>()
   const mergeErrors = new Map<string, unknown>()
 
-  // Unchanged keys: carry from theirs (HEAD).
-  const allKeys = new Set<string>([...ourKeyset.keys(), ...theirKeyset.keys()])
-  for (const key of allKeys) {
-    if (allChanged.has(key)) continue
-    const fromTheirs = theirKeyset.get(key)
-    if (fromTheirs !== undefined) {
-      mergedKeyset.set(key, fromTheirs)
-    } else {
-      const fromOurs = ourKeyset.get(key)
-      if (fromOurs !== undefined) mergedKeyset.set(key, fromOurs)
-    }
+  /** Make `entry` the merged state of `key`, whose state on our side is
+   *  `current`. */
+  const take = (key: string, entry: KeysetEntry | null, current: KeysetEntry | null): void => {
+    if (sameEntry(entry, current)) return
+    if (entry === null) removals.add(key)
+    else updates.set(key, entry)
   }
 
-  // Changed only by us.
-  for (const key of ourChanged) {
-    if (theirChanged.has(key)) continue
-    if (!ourDiff.removed.has(key)) {
-      const ptr = ourKeyset.get(key)
-      if (ptr !== undefined) {
-        mergedKeyset.set(key, ptr)
-        autoMerged.push(key)
-      }
-    }
-  }
+  const keys = [...new Set([...ours.keys(), ...theirs.keys()])].sort(compareCodePoints)
+  for (const key of keys) {
+    const ourChange = ours.get(key)
+    const theirChange = theirs.get(key)
+    const ancestor = ((ourChange ?? theirChange) as Change).old
+    const ourEntry = ourChange !== undefined ? ourChange.new : ancestor
+    const theirEntry = theirChange !== undefined ? theirChange.new : ancestor
+    const policy = pickMergePolicy(key, mergeFns, prefixes, defaultMerge)
 
-  // Changed only by them.
-  for (const key of theirChanged) {
-    if (ourChanged.has(key)) continue
-    if (!theirDiff.removed.has(key)) {
-      const ptr = theirKeyset.get(key)
-      if (ptr !== undefined) mergedKeyset.set(key, ptr)
-    }
-  }
-
-  // Contested: changed by both sides.
-  const contested = intersection(ourChanged, theirChanged)
-  for (const key of contested) {
-    const ourRemoved = ourDiff.removed.has(key)
-    const theirRemoved = theirDiff.removed.has(key)
-
-    if (ourRemoved && theirRemoved) continue // both deleted — drop
-
-    // Same change on both sides → use either (use theirs).
-    if (!ourRemoved && !theirRemoved && ourKeyset.get(key) === theirKeyset.get(key)) {
-      const ptr = theirKeyset.get(key)
-      if (ptr !== undefined) mergedKeyset.set(key, ptr)
+    // A MergeChoice registration: that side's state stands, whether or
+    // not the other side touched the key. Nothing is read.
+    if (policy instanceof MergeChoice) {
+      if (policy === MergeChoice.THEIRS) take(key, theirEntry, ourEntry)
+      autoMerged.push(key)
       continue
     }
 
-    // Try a merge fn.
-    const fn = mergeFns.get(key) ?? defaultMerge
-    if (fn === null || fn === undefined) {
+    if (theirChange === undefined) continue // changed only by us: ours stands
+    if (ourChange === undefined) {
+      take(key, theirEntry, ourEntry) // changed only by them
+      carried.push(key)
+      continue
+    }
+
+    // Contested: changed by both sides. A merge function is consulted
+    // here and nowhere else, so registering one never disturbs a change
+    // only one side made.
+    if (ourEntry === null && theirEntry === null) continue // both removed it
+    if (ourEntry !== null && theirEntry !== null && ourEntry.blob === theirEntry.blob) {
+      continue // the same change on both sides
+    }
+    if (policy === null) {
       conflicts.add(key)
       continue
     }
 
-    const lcaPtr = lcaKeyset.get(key)
-    const ourPtr = ourKeyset.get(key)
-    const theirPtr = theirKeyset.get(key)
-
-    const oldVal = lcaPtr !== undefined ? await blobReader(lcaPtr) : null
-    const ourVal = ourRemoved || ourPtr === undefined ? null : await blobReader(ourPtr)
-    const theirVal = theirRemoved || theirPtr === undefined ? null : await blobReader(theirPtr)
+    const oldVal = ancestor === null ? null : await blobReader(ancestor.blob)
+    const ourVal = ourEntry === null ? null : await blobReader(ourEntry.blob)
+    const theirVal = theirEntry === null ? null : await blobReader(theirEntry.blob)
+    let result: Uint8Array | MergeChoice
     try {
-      const result = fn(oldVal, ourVal, theirVal)
-      mergedValues.set(key, result)
-      autoMerged.push(key)
+      result = policy(oldVal, ourVal, theirVal)
     } catch (e) {
+      // The function is the caller's; any failure is a conflict.
       conflicts.add(key)
       mergeErrors.set(key, e)
+      continue
     }
+
+    // A MergeChoice keeps the chosen side's committed value: its
+    // existing entry, so no new blob is written. A side that removed the
+    // key has no entry, and choosing it removes the key.
+    if (result === MergeChoice.THEIRS) take(key, theirEntry, ourEntry)
+    else if (!(result instanceof MergeChoice)) mergedValues.set(key, result)
+    autoMerged.push(key)
   }
 
-  if (conflicts.size > 0) {
-    throw new MergeConflict(conflicts, mergeErrors)
-  }
-
-  return {
-    mergedKeyset,
-    mergedValues,
-    autoMergedKeys: autoMerged,
-  }
+  if (conflicts.size > 0) throw new MergeConflict(conflicts, mergeErrors)
+  return { updates, removals, mergedValues, autoMergedKeys: autoMerged, carriedKeys: carried }
 }
 
-function union(...sets: Iterable<string>[]): Set<string> {
-  const out = new Set<string>()
-  for (const s of sets) for (const k of s) out.add(k)
-  return out
-}
-
-function intersection(a: ReadonlySet<string>, b: ReadonlySet<string>): Set<string> {
-  const out = new Set<string>()
-  for (const k of a) if (b.has(k)) out.add(k)
-  return out
+function sameEntry(a: KeysetEntry | null, b: KeysetEntry | null): boolean {
+  if (a === null || b === null) return a === b
+  if (a.blob !== b.blob || a.meta.size !== b.meta.size) return false
+  const ca = a.meta.chunks ?? []
+  const cb = b.meta.chunks ?? []
+  return ca.length === cb.length && ca.every((c, i) => c === cb[i])
 }

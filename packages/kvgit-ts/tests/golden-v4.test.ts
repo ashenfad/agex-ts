@@ -3,8 +3,9 @@
  *
  * Replays the history in tests/fixtures/golden-v4.json (from
  * scripts/golden-v4.py: a fresh store, commits with non-ASCII keys,
- * binary values and every kind of info, a branch, a tag, and two writers racing
- * to a three-way merge) at the same clock times, and checks the whole
+ * binary values and every kind of info, a branch, a tag, two writers racing
+ * to a three-way merge, a branch merge with a merge function and a prefix
+ * policy, a fast-forward, a cherry-pick and a revert) at the same clock times, and checks the whole
  * store after every step: every key, every byte.
  */
 
@@ -13,6 +14,7 @@ import { describe, expect, it } from 'vitest'
 import { Memory } from '../src/backends/memory'
 import { PyFloat } from '../src/pyjson'
 import { Repo } from '../src/repo'
+import { MergeChoice, type MergeResult } from '../src/types'
 import { VersionedKV } from '../src/versioned/kv'
 
 interface Step {
@@ -21,6 +23,7 @@ interface Step {
   store: Record<string, string>
   commit?: string
   strategy?: string
+  keys?: { auto: string[]; carried: string[] }
 }
 const golden = JSON.parse(
   readFileSync(new URL('./fixtures/golden-v4.json', import.meta.url), 'utf8'),
@@ -111,8 +114,72 @@ describe('storage v4 matches Python kvgit byte for byte', () => {
       updates: new Map([['y', bytes('from w2')]]),
       info: { merge: true },
     })
-    expect(two.strategy).toBe(steps.get('writer two')?.strategy)
-    expect(two.commit).toBe(steps.get('writer two')?.commit)
+    expectResult('writer two', two)
     expectStep('writer two', await dump(store))
+
+    clock = (steps.get('diverge') as Step).time - 0.5
+    const merger = await VersionedKV.open(store, { now })
+    const side = (await merger.createBranch('side')) as VersionedKV
+    await merger.commit({
+      updates: new Map([
+        ['n', bytes('main')],
+        ['cfg/a', bytes('main')],
+        ['cfg/b', bytes('main')],
+      ]),
+    })
+    clock = (steps.get('diverge') as Step).time
+    await side.commit({
+      updates: new Map([
+        ['n', bytes('side')],
+        ['cfg/a', bytes('side')],
+        ['s', bytes('side')],
+      ]),
+    })
+    expectStep('diverge', await dump(store))
+
+    clock = (steps.get('merge') as Step).time
+    const merged = await merger.mergeHeads(side.currentCommit, {
+      mergeFns: new Map([
+        ['n', (_old, ours, theirs) => concat(theirs as Uint8Array, bytes('+'), ours as Uint8Array)],
+      ]),
+      mergePrefixes: new Map([['cfg/', MergeChoice.THEIRS]]),
+      info: { merge: 'side' },
+    })
+    expectResult('merge', merged)
+    expectStep('merge', await dump(store))
+
+    clock = (steps.get('fast forward') as Step).time
+    const ff = (await merger.createBranch('ff')) as VersionedKV
+    await ff.commit({ updates: new Map([['ff', bytes('1')]]) })
+    expectResult('fast forward', await merger.mergeHeads(ff.currentCommit))
+    expectStep('fast forward', await dump(store))
+
+    clock = (steps.get('cherry-pick') as Step).time - 0.5
+    await side.commit({ updates: new Map([['pick', bytes('picked')]]), removals: new Set(['s']) })
+    const picked = side.currentCommit
+    const parent = (await side.parents(picked))[0] as string
+    clock = (steps.get('cherry-pick') as Step).time
+    expectResult('cherry-pick', await merger.applyChange(parent, picked, { info: { pick: true } }))
+    expectStep('cherry-pick', await dump(store))
+
+    clock = (steps.get('revert') as Step).time
+    expectResult('revert', await merger.applyChange(picked, parent))
+    expectStep('revert', await dump(store))
   })
 })
+
+function expectResult(name: string, result: MergeResult): void {
+  const want = steps.get(name) as Step
+  expect([name, result.strategy, result.commit]).toEqual([name, want.strategy, want.commit])
+  expect({ auto: result.autoMergedKeys, carried: result.carriedKeys }).toEqual(want.keys)
+}
+
+function concat(...parts: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0))
+  let at = 0
+  for (const p of parts) {
+    out.set(p, at)
+    at += p.length
+  }
+  return out
+}

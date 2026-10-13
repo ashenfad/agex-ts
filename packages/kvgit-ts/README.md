@@ -49,6 +49,24 @@ for await (const c of repo.log({ branch: 'main' })) console.log(c.hash, c.info)
   `gc`. Tags are stored as Python kvgit stores them (a branch head under
   `refs/tags/`, plus a record of when and why), so either reads the
   other's.
+- **Merging.** `wt.merge({ branch | commit | tag })` fast-forwards when
+  this branch hasn't moved since the two forked (as git does;
+  `fastForward: false` writes a merge commit anyway), is a no-op for a
+  commit the branch already contains, and otherwise writes a two-parent
+  merge commit `[ours, theirs]`. `wt.apply(base, target)` lands the
+  change from `base` to `target` as one ordinary commit, with
+  `cherryPick(commit)` and `revert(commit)` built on it.
+- **Merge rules** come from the repository, the worktree and the call,
+  in that order, each by key (`mergeFns`), by key prefix
+  (`mergePrefixes`, longest match wins) or as a default. A rule is a
+  merge function over decoded values, consulted only where both sides
+  changed a key (it may answer with a `MergeChoice` to keep one side),
+  or a `MergeChoice` itself: a standing policy giving one side every
+  key it covers that either side changed. `postCheck` can refuse a
+  merged value as a conflict.
+- The common ancestor is found by generation: commits record their
+  parents' generations, so the search for two tips that forked
+  recently reads a few records whatever the history below.
 - Errors derive from `KvgitError`: `UnknownBranchError`,
   `UnknownTagError`, `UnknownCommitError`, `BranchExistsError`,
   `TagExistsError`, `CorruptHeadError`, `StorageVersionError`,
@@ -227,10 +245,11 @@ this layer:
   no ref moves and nothing merges automatically. A vanished
   previously-synced remote ref reports `'remote-gone'` (lifecycle
   conflict) for the caller to resolve.
-- **Parent order is significant.** For three-way merges,
-  `parents[0]` is "theirs" (the head that won the CAS race) and
-  `parents[1]` is "ours" (`VersionedBase.threeWayMerge`). Wire deltas
-  diff against `parents[0]`.
+- **Parent order is significant.** A commit that merges after losing
+  its race has `parents[0]` "theirs" (the head that won) and
+  `parents[1]` "ours"; a branch merge has `[ours, theirs]`, so linear
+  history stays on the merging branch. Wire deltas diff against
+  `parents[0]`.
 - `__sync_head__<branch>` holds remote-tracking state (which remote
   commit a branch was last synced to) via `getSyncHead` /
   `setSyncHead` / `clearSyncHead` in

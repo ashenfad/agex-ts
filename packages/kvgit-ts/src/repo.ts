@@ -19,7 +19,7 @@ import {
   UnknownTagError,
 } from './errors'
 import { Keyset } from './keyset'
-import type { CommitInfo, DiffResult, KVStore, MergeFn } from './types'
+import type { CommitInfo, DiffResult, KVStore } from './types'
 import { walkHistory } from './versioned/helpers'
 import {
   type CorruptHeadRecoverer,
@@ -27,7 +27,7 @@ import {
   createBranchHead,
   deleteBranchHead,
   loadParents,
-  lowestCommonAncestor,
+  mergeBase,
   repairHead,
   resolveHead,
   sweepStore,
@@ -54,7 +54,7 @@ import {
   resolveTag,
   tagInfo,
 } from './versioned/refs'
-import { Worktree } from './worktree'
+import { type MergeRule, Worktree } from './worktree'
 
 /** One commit: its parents, when it was made, what the caller said
  *  about it, and its keyset root (equal roots mean equal contents). */
@@ -74,10 +74,13 @@ export interface RepoOptions<V> {
   /** How values become stored bytes. Default {@link bytesCodec}:
    *  values are `Uint8Array`, stored as they are. */
   codec?: Codec<V>
-  /** Merge functions by key that every worktree inherits. */
-  mergeFns?: ReadonlyMap<string, MergeFn<V>>
-  /** The merge function for keys no other rule covers. */
-  defaultMerge?: MergeFn<V>
+  /** Merge rules by key that every worktree inherits: a merge
+   *  function over decoded values, or a `MergeChoice`. */
+  mergeFns?: ReadonlyMap<string, MergeRule<V>>
+  /** Merge rules by key prefix that every worktree inherits. */
+  mergePrefixes?: ReadonlyMap<string, MergeRule<V>>
+  /** The merge rule for keys no other rule covers. */
+  defaultMerge?: MergeRule<V>
   /** Last-resort recovery for a damaged HEAD with no usable backup. */
   recoverFromCorruptHead?: CorruptHeadRecoverer
   /** The clock commits and tags are stamped with, in seconds. Default:
@@ -101,9 +104,11 @@ export class Repo<V = Uint8Array> {
   /** Every tag, as a live collection of name → commit. */
   readonly tags: Tags
   /** @internal */
-  readonly mergeFns: ReadonlyMap<string, MergeFn<V>>
+  readonly mergeFns: ReadonlyMap<string, MergeRule<V>>
   /** @internal */
-  readonly defaultMerge: MergeFn<V> | undefined
+  readonly mergePrefixes: ReadonlyMap<string, MergeRule<V>>
+  /** @internal */
+  readonly defaultMerge: MergeRule<V> | undefined
   /** @internal */
   readonly recover: CorruptHeadRecoverer | undefined
   /** @internal */
@@ -113,6 +118,7 @@ export class Repo<V = Uint8Array> {
     this.store = store
     this.codec = opts.codec ?? (bytesCodec as unknown as Codec<V>)
     this.mergeFns = new Map(opts.mergeFns ?? [])
+    this.mergePrefixes = new Map(opts.mergePrefixes ?? [])
     this.defaultMerge = opts.defaultMerge
     this.recover = opts.recoverFromCorruptHead
     this.now = opts.now ?? wallClock
@@ -252,7 +258,7 @@ export class Repo<V = Uint8Array> {
    */
   async mergeBase(a: string, b: string): Promise<string | null> {
     await Promise.all([this.rootOf(a), this.rootOf(b)])
-    return lowestCommonAncestor(a, b, (h) => loadParents(this.store, h))
+    return mergeBase(this.store, a, b)
   }
 
   /**

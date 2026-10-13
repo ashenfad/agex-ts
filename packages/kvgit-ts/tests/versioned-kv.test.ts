@@ -374,7 +374,7 @@ describe('VersionedKV — three-way merge', () => {
     )
   })
 
-  it("with onConflict 'skip', returns merged=false instead of throwing", async () => {
+  it("with onConflict 'abandon', returns merged=false instead of throwing", async () => {
     const store = new Memory()
     const a = await VersionedKV.open(store)
     await a.commit({ updates: new Map([['k', bytes('base')]]) })
@@ -383,7 +383,7 @@ describe('VersionedKV — three-way merge', () => {
     await a.commit({ updates: new Map([['k', bytes('a')]]) })
     const r = await b.commit({
       updates: new Map([['k', bytes('b')]]),
-      onConflict: 'skip',
+      onConflict: 'abandon',
     })
     expect(r.merged).toBe(false)
     expect(r.commit).toBeNull()
@@ -560,7 +560,7 @@ describe('VersionedKV — fast-forward race retry', () => {
     const v2 = await VersionedKV.open(store)
     raceOnce(v2, () => v1.commit(one('other', '1')))
 
-    const result = await v2.commit({ ...one('mine', '2'), onConflict: 'skip' })
+    const result = await v2.commit({ ...one('mine', '2'), onConflict: 'abandon' })
 
     expect(result.merged).toBe(true)
     expect(result.strategy).toBe('three_way')
@@ -573,7 +573,7 @@ describe('VersionedKV — fast-forward race retry', () => {
     const v2 = await VersionedKV.open(store)
     raceOnce(v2, () => v1.commit(one('x', 'v1')))
 
-    const result = await v2.commit({ ...one('x', 'v2'), onConflict: 'skip' })
+    const result = await v2.commit({ ...one('x', 'v2'), onConflict: 'abandon' })
 
     expect(result.merged).toBe(false)
     expect(result.strategy).toBe('three_way')

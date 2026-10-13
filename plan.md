@@ -722,7 +722,10 @@ script, keyed by the developer, not CI).
 - never between a tool call and its result;
 - the summary written by the agent's own model, from nearly the request
   it was about to send;
-- summary calls counted against `maxSteps`, and in the run's usage;
+- summary calls counted against `maxSteps`, and in the run's usage,
+  a resumed run's earlier ones too: the record then keeps how many it
+  made, since a resume counts its model calls from the stored replies,
+  and summary calls leave none;
 - each fold recorded on `ws.compaction` and streamed as `Compacted`;
 - **a splice that applies a fold to its range,** `first` to `through`
   (`first` unset: from the start), so chapters add folds rather than

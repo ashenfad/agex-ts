@@ -385,7 +385,9 @@ export class Session {
           parts: [{ kind: 'text', text: opening ?? WOKEN }],
         })
       }
-      let made = 0
+      // every model call counts against maxSteps; a resumed run's replies
+      // were calls of this run, made before it stopped
+      let made = messages.filter((m) => m.role === 'assistant').length
       const limit = this.agent.maxToolCalls
       let spent = messages.reduce(
         (n, m) => n + m.parts.filter((p) => p.kind === 'tool_call').length,

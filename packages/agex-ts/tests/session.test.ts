@@ -241,6 +241,19 @@ describe('limits', () => {
     expect(run?.messages.at(-2)?.role).toBe('tool')
   })
 
+  it('a resumed run counts the model calls it made before it stopped', async () => {
+    const command = calls('terminal', { command: 'true' })
+    const session = agent([command, command, fails('provider'), command, command, command], {
+      maxSteps: 3,
+    }).session(ws)
+    expect((await session.say('go')).status).toBe('interrupted')
+    // two replies made: one call is left of the run's three
+    const outcome = await session.resume()
+    expect(outcome.status).toBe('failed')
+    expect(outcome.message).toContain('3 calls')
+    expect(ended(outcome.events)).toHaveLength(1)
+  })
+
   const REFUSED = `not run: ${limitReached(3)}`
   const command = (n: number) => ({ name: 'terminal', args: { command: `echo ${n}` } })
   const told = async (session: Session) =>

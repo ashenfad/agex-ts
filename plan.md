@@ -596,10 +596,10 @@ stays on the published 0.x packages from `main` until its own phase.
 | the fixed action tools, `render/`, `apply-patch`, `dispatcher` | the world's tools (`worldTools`) and the tool protocol |
 | `fn` / `cls` / `namespace` registration, `policy.ts` | the world's profile: host objects, `typedHost`, commands |
 | the same-realm eval runtime, module loader, console capture | the world's kernel |
-| `MountFS` and the `/skills` and `/chapters` overlays | skills in the world (decision 2); chapters go (decision 1) |
+| `MountFS` and the `/skills` and `/chapters` overlays | skills in the world (decision 2); chapters later, as folds (decision 1) |
 | `state/`, `connectState`, a store per session | the world's `Store`, sessions as branches |
 | `spawn` and its clones | delegation (`sessions`) and agent-defined tasks |
-| chaptering | folding (A4) |
+| chaptering | folding (A4), with chapters later as ranged folds |
 | `examples/funcy`, `examples/mathy` | rewritten in A8, or dropped |
 
 What remains of the monorepo: `kvgit-ts`, `termish-ts`, `world` and
@@ -669,7 +669,13 @@ script, keyed by the developer, not CI).
 - the summary written by the agent's own model, from nearly the request
   it was about to send;
 - summary calls counted against `maxSteps`, and in the run's usage;
-- each fold recorded on `ws.compaction` and streamed as `Compacted`.
+- each fold recorded on `ws.compaction` and streamed as `Compacted`;
+- **a splice that applies a fold to its range,** `first` to `through`
+  (`first` unset: from the start), so chapters add folds rather than
+  rewrite how one is applied. Basic compaction only ever makes the one
+  from the start. Chapters will also need every non-overlapping fold in
+  force at once, where the world's `inForce` returns one: a world
+  addition for when they come, not now.
 
 **Exit:** tier 4.
 
@@ -728,12 +734,17 @@ script, keyed by the developer, not CI).
   applicable shape scenario pass on the scripted provider, and a real
   model runs a session and a task end to end in Node.
 
-### Decisions to make (with a recommendation each)
+### Decided for the redesign (2026-10-13)
 
-1. **Agent-directed chapters go.** Folding does what they did for the
-   window: lossy for the model, with nothing lost for the person, whose
-   transcript and branch keep every turn. Browsable originals can come
-   back later as a projection, as nontainer's compaction notes plan.
+1. **Compaction is one large fold now; chapters are folds later.** Basic
+   compaction folds everything before its anchor into one summary: a
+   `Fold` with `first` unset. Agent-directed chapters stay a planned
+   expansion on the same record, as nontainer's compaction doc lays
+   out ("Chaptering, later"): a chapter is a fold with `first` set and
+   a name, over a range of finished work the agent picks and
+   summarises, with its originals browsable as files under
+   `/chapters/<slug>/`. Today's chaptering code goes, since it is built
+   on the old event log; the idea stays, and A4 keeps the door open.
 2. **Skills move into the world** as a small step, W8: a profile entry
    mounts skill files read-only under `/skills` and lists each skill's
    frontmatter in the tool text, as `nontainer.skills` does. It
@@ -747,7 +758,7 @@ script, keyed by the developer, not CI).
    pinned to an agex commit and synced at each step. A later 0.14 that
    moves the shape shows up as a corpus diff to port, as nontainer's
    changes did for the world.
-5. **The provider layer depends on A0's verdicts** (already decided).
+5. **The provider layer follows A0's verdicts.**
    The fallback keeps today's `fetch` clients' transport behind the new
    protocol, rewritten against the run record.
 

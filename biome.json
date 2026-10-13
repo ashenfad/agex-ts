@@ -12,7 +12,9 @@
       "**/node_modules/**",
       "**/coverage/**",
       "**/src/conformance/corpus/*.json",
-      "**/src/conformance/*.schema.json"
+      "**/src/conformance/*.schema.json",
+      "**/tests/wsgit-corpus/*.json",
+      "**/tests/difflib-golden.json"
     ]
   },
   "formatter": {

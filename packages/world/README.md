@@ -313,6 +313,22 @@ await ws.index.tags.add('v1') // the agent's own bookmarks
 - **The tools `ws-git` and `ws-git.*` are reserved** to these commits:
   `ws.commit` refuses them.
 
+**`ws-git`** is the same git as a terminal command, for the agent:
+give it in the profile, and the shell has it.
+
+```ts
+import { wsGit } from '@agex-ts/world'
+const ws = await store.open('main', { profile: { commands: { 'ws-git': wsGit } } })
+await ws.terminal('ws-git status')
+// stage/add, commit, status, diff, log, show, checkout, tag, stash,
+// branch, merge, revert, cherry-pick, worktree, sparse-checkout, help
+```
+
+It is a port of nontainer's `ws-git`, and prints what it prints, word
+for word: `tests/wsgit-corpus/` holds nontainer's recorded scripts
+(every command's stdout, stderr and exit code), and the world's test
+replays each one and compares.
+
 Work comes back across sessions by three verbs, one three-way engine:
 
 - **`ws.merge(session)`** brings another session's committed work: at

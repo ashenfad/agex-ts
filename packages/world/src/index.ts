@@ -18,6 +18,7 @@ export {
   virtualParents,
 } from './agentgit'
 export { WorkspaceCache } from './cache'
+export { wsGit } from './wsgit/command'
 export { AttachFS, SubtreeFS } from './attach'
 export { Patterns, isIgnored, whyIgnored } from './ignore'
 export { ViewFS, type ViewRecord, normalizeView } from './views'

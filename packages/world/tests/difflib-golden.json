@@ -1,0 +1,111 @@
+[
+ {
+  "old": "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12\nline 13\nline 14\nline 15\nline 16\nline 17\nline 18\nline 19\nline 20\nline 21\nline 22\nline 23\nline 24\nline 25\nline 26\nline 27\nline 28\nline 29\nline 30\nline 31\nline 32\nline 33\nline 34\nline 35\nline 36\nline 37\nline 38\nline 39\nline 40\n",
+  "new": "line 1\nline 2\nLINE 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12\nline 13\nline 14\nline 15\nline 16\nline 17\nline 18\nline 19\nline 20\nline 21\nline 22\nline 23\nline 24\nline 25\nline 26\nline 27\nline 28\nline 29\nline 30\nadded\nline 31\nline 32\nline 33\nline 34\nline 35\nline 36\nline 37\nline 39\nline 40\n",
+  "diff": [
+   "--- a/f",
+   "+++ b/f",
+   "@@ -1,6 +1,6 @@",
+   " line 1\n",
+   " line 2\n",
+   "-line 3\n",
+   "+LINE 3\n",
+   " line 4\n",
+   " line 5\n",
+   " line 6\n",
+   "@@ -28,6 +28,7 @@",
+   " line 28\n",
+   " line 29\n",
+   " line 30\n",
+   "+added\n",
+   " line 31\n",
+   " line 32\n",
+   " line 33\n",
+   "@@ -35,6 +36,5 @@",
+   " line 35\n",
+   " line 36\n",
+   " line 37\n",
+   "-line 38\n",
+   " line 39\n",
+   " line 40\n"
+  ]
+ },
+ {
+  "old": "x\nx\nx\nx\nx\ny\ny\ny\ny\ny\n",
+  "new": "x\nx\nx\nx\nx\nz\ny\ny\ny\ny\ny\n",
+  "diff": [
+   "--- a/f",
+   "+++ b/f",
+   "@@ -3,6 +3,7 @@",
+   " x\n",
+   " x\n",
+   " x\n",
+   "+z\n",
+   " y\n",
+   " y\n",
+   " y\n"
+  ]
+ },
+ {
+  "old": "only\n",
+  "new": "",
+  "diff": [
+   "--- a/f",
+   "+++ b/f",
+   "@@ -1 +0,0 @@",
+   "-only\n"
+  ]
+ },
+ {
+  "old": "",
+  "new": "only\n",
+  "diff": [
+   "--- a/f",
+   "+++ b/f",
+   "@@ -0,0 +1 @@",
+   "+only\n"
+  ]
+ },
+ {
+  "old": "a\nb",
+  "new": "a\nb\n",
+  "diff": [
+   "--- a/f",
+   "+++ b/f",
+   "@@ -1,2 +1,2 @@",
+   " a\n",
+   "-b",
+   "+b\n"
+  ]
+ },
+ {
+  "old": "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12\nline 13\nline 14\nline 15\nline 16\nline 17\nline 18\nline 19\nline 20\nline 21\nline 22\nline 23\nline 24\nline 25\nline 26\nline 27\nline 28\nline 29\nline 30\nline 31\nline 32\nline 33\nline 34\nline 35\nline 36\nline 37\nline 38\nline 39\nline 40\n",
+  "new": "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12\nline 13\nline 14\nline 15\nline 16\nline 17\nline 18\nline 19\ntwenty\nline 21\nline 22\nline 23\nline 24\nline 25\nline 26\nline 27\nline 28\nline 29\nline 30\nline 31\nline 32\nline 33\nline 34\nline 35\nline 36\nline 37\nline 38\nline 39\nline 40\n",
+  "diff": [
+   "--- a/f",
+   "+++ b/f",
+   "@@ -17,7 +17,7 @@",
+   " line 17\n",
+   " line 18\n",
+   " line 19\n",
+   "-line 20\n",
+   "+twenty\n",
+   " line 21\n",
+   " line 22\n",
+   " line 23\n"
+  ]
+ },
+ {
+  "old": "one\r\ntwo\rthree\n",
+  "new": "one\r\nTWO\rthree\n",
+  "diff": [
+   "--- a/f",
+   "+++ b/f",
+   "@@ -1,3 +1,3 @@",
+   " one\r\n",
+   "-two\r",
+   "+TWO\r",
+   " three\n"
+  ]
+ }
+]

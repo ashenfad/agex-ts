@@ -35,8 +35,9 @@ import {
 } from '@agex-ts/kvgit'
 import { UnknownRefError, WorldError } from './errors'
 import type { KeyReader, WorldFS } from './fs'
-import { FILE_PREFIX, GIT_KEY, fileKey, metaKey } from './layout'
+import { FILE_PREFIX, GIT_KEY, VIEW_KEY, fileKey, metaKey } from './layout'
 import { dirname, resolve } from './path'
+import { repr } from './repr'
 import type { Store } from './store'
 
 /** The key of the agent's index and graph. */
@@ -58,6 +59,8 @@ export const PICK_TOOL = 'ws-git.cherry-pick'
  *  Each is made by the verb that needs it, whatever autocommit says,
  *  and none is an agent commit. */
 export const RESTORE_TOOL = 'ws-git.restore'
+/** `tool` on the commit that puts a stash's work on its branch. */
+export const STASH_TOOL = 'ws-git.stash'
 export const CHECKOUT_TOOL = 'ws-git.checkout'
 export const MERGE_RECORD_TOOL = 'ws-git.merge-record'
 
@@ -86,6 +89,19 @@ export function isBookkeepingCommit(info: CommitInfo | null): boolean {
   return BOOKKEEPING_TOOLS.has(info?.tool)
 }
 
+/**
+ * The commit one commit's change is measured from: its parent in the
+ * agent's graph for an agent commit (or, for its first, where its
+ * session was forked, or nothing), else its first parent.
+ */
+export async function changeBase(store: Store, entry: Commit): Promise<string | null> {
+  if (!isAgentCommit(entry.info)) return entry.parents[0] ?? null
+  const parent = virtualParents(entry.info)[0]
+  if (parent !== undefined) return parent
+  const snapshot = await store.repo.snapshot({ commit: entry.hash })
+  return parseBlob(await snapshot.get(BLOB_KEY)).base
+}
+
 /** The agent-graph parents a commit records. */
 export function virtualParents(info: CommitInfo | null): string[] {
   const parents = info?.virtualParents
@@ -108,6 +124,8 @@ export interface GitState {
   preMerge: string | null
   /** The agent's bookmarks: name → commit. */
   tags: Record<string, string>
+  /** On a stash's branch: whose work it holds, and under what name. */
+  stash: { of: string; message: string } | null
 }
 
 const strings = (v: unknown): string[] =>
@@ -128,6 +146,7 @@ export function parseBlob(raw: unknown): GitState {
       if (typeof commit === 'string') tags[name] = commit
     }
   }
+  const stash = v.stash as { of?: unknown; message?: unknown } | null | undefined
   return {
     head: stringOrNull(v.head),
     base: stringOrNull(v.base),
@@ -136,6 +155,10 @@ export function parseBlob(raw: unknown): GitState {
     unresolved: strings(v.unresolved).sort(),
     preMerge: stringOrNull(v.preMerge),
     tags,
+    stash:
+      typeof stash?.of === 'string' && typeof stash.message === 'string'
+        ? { of: stash.of, message: stash.message }
+        : null,
   }
 }
 
@@ -149,6 +172,7 @@ function encodeBlob(state: GitState): Record<string, unknown> {
     unresolved: [...new Set(state.unresolved)].sort(),
     preMerge: state.preMerge,
     tags: Object.fromEntries(Object.entries(state.tags).sort(([a], [b]) => (a < b ? -1 : 1))),
+    stash: state.stash,
   }
 }
 
@@ -170,12 +194,12 @@ export function forkBlob(base: string): Record<string, unknown> {
 export function checkTagName(name: string): string {
   if (HASH_RE.test(name)) {
     throw new WorldError(
-      `'${name}' cannot be a tag name: seven or more hex characters is how a commit id is spelled here, and a word that could be read as either would be neither.`,
+      `${repr(name)} cannot be a tag name: seven or more hex characters is how a commit id is spelled here, and a word that could be read as either would be neither.`,
     )
   }
   if (!TAG_NAME_RE.test(name) || name.includes('..') || /[./]$|\.lock$/.test(name)) {
     throw new WorldError(
-      `'${name}' is not a tag name: letters, digits or _ to start, then any of . - / as well; no .., and nothing trailing a . or a /.`,
+      `${repr(name)} is not a tag name: letters, digits or _ to start, then any of . - / as well; no .., and nothing trailing a . or a /.`,
     )
   }
   return name
@@ -258,6 +282,13 @@ export interface GitHost {
 
 /** A file path's keys. */
 const keysOf = (path: string): string[] => [fileKey(path), metaKey(path)]
+
+/** Every file a reader holds, by path. */
+async function filesOf(reader: KeyReader): Promise<Map<string, unknown>> {
+  const keys = (await reader.keys()).filter((k) => k.startsWith(FILE_PREFIX))
+  const values = await reader.getMany(keys)
+  return new Map(keys.map((k) => [k.slice(FILE_PREFIX.length), values.get(k)] as const))
+}
 
 /** The files of a commit, by path. */
 async function fileKeysAt(snapshot: Snapshot<unknown> | null): Promise<Set<string>> {
@@ -482,13 +513,17 @@ export class WorkspaceIndex {
     for (const path of paths) {
       const why = this.#host.whyIgnored(path)
       if (why !== null) {
-        throw new WorldError(`cannot stage '${path}': ${why}, so it is never committed or merged`)
+        throw new WorldError(
+          `cannot stage ${repr(path)}: ${why}, so it is never committed or merged`,
+        )
       }
       if (known.has(path) && this.#host.sees(path)) continue
       if (this.#host.sees(path) && (await this.#host.fs.isDir(path))) {
-        throw new WorldError(`cannot stage '${path}': stage files, not directories`)
+        throw new WorldError(`cannot stage ${repr(path)}: stage files, not directories`)
       }
-      throw new WorldError(`unknown path '${path}': no such file at HEAD or in the working tree`)
+      throw new WorldError(
+        `unknown path ${repr(path)}: no such file at HEAD or in the working tree`,
+      )
     }
   }
 
@@ -695,7 +730,7 @@ export class WorkspaceIndex {
     if (tagged !== undefined) return tagged
     if (!HASH_RE.test(ref)) {
       throw new WorldError(
-        `'${ref}' is not a commit: sessions are branches, and a branch does not switch here. Name a commit from ws-git log, or a tag from ws-git tag.`,
+        `${repr(ref)} is not a commit — sessions are branches, and a branch does not switch here. Name a commit from ws-git log, or a tag from ws-git tag.`,
       )
     }
     const mine = (await this.log()).map((c) => c.hash)
@@ -715,13 +750,91 @@ export class WorkspaceIndex {
     const hash = expand(
       ref,
       history.map((c) => c.hash),
-      `on session '${this.#host.session}'`,
+      `on session ${repr(this.#host.session)}`,
     )
     const entry = history.find((c) => c.hash === hash)
     if (entry === undefined)
-      throw new UnknownRefError(ref, `names no commit of session '${this.#host.session}'`)
+      throw new UnknownRefError(
+        ref,
+        '',
+        `no commit ${repr(ref)} on session ${repr(this.#host.session)}`,
+      )
     if (isAgentCommit(entry.info)) return entry.hash
     throw new WorldError(notYours(entry.hash))
+  }
+
+  /** @internal The session's commits, newest first, along its own
+   *  line (first parents), the framework's included, back to and with
+   *  the store's first commit. */
+  async history(opts: { limit?: number } = {}): Promise<Commit[]> {
+    const out: Commit[] = []
+    const line = this.#host.store.repo.log(
+      { commit: this.#host.view().head },
+      { firstParent: true },
+    )
+    for await (const c of line) {
+      out.push(c)
+      if (out.length === opts.limit) break
+    }
+    return out
+  }
+
+  /** @internal One commit of the session's history, or null. */
+  async entry(commit: string): Promise<Commit | null> {
+    return (await this.history()).find((c) => c.hash === commit) ?? null
+  }
+
+  /** @internal The files of a commit (null: none), by path. */
+  async filesAt(commit: string | null): Promise<Map<string, unknown>> {
+    if (commit === null) return new Map()
+    return filesOf(await this.#host.store.repo.snapshot({ commit }))
+  }
+
+  /** @internal The live files, by path. */
+  async workingFiles(): Promise<Map<string, unknown>> {
+    return filesOf(this.#host.view().reader)
+  }
+
+  /** @internal The files at the agent's head (or a fork's base). */
+  async headFiles(): Promise<Map<string, unknown>> {
+    const state = await this.#state()
+    return this.filesAt(state.head ?? state.base)
+  }
+
+  /** @internal The session's view record (a narrowed fork's), as
+   *  stored. */
+  async viewRecord(): Promise<unknown> {
+    return this.#host.view().reader.get(VIEW_KEY)
+  }
+
+  /** @internal The stash record of this session's own blob. */
+  async stashRecord(): Promise<{ of: string; message: string } | null> {
+    return (await this.#state()).stash
+  }
+
+  /** @internal Put another session's work in progress on this branch (a
+   *  stash forked at its head): each path's content, or its removal
+   *  (undefined), and the record of whose it is. Commits itself. */
+  async writeStash(
+    of: string,
+    message: string,
+    files: ReadonlyMap<string, unknown>,
+  ): Promise<void> {
+    await this.#host.run('ws-git stash', async (wt) => {
+      const fs = this.#host.fs
+      for (const [path, value] of [...files].sort(([a], [b]) => (a < b ? -1 : 1))) {
+        if (value === undefined) await fs.remove(path)
+        else await put(fs, path, value)
+      }
+      const state = await this.#state(wt)
+      wt.set(BLOB_KEY, encodeBlob({ ...state, stash: { of, message } }))
+      const keys = [
+        ...[...files.keys()].flatMap(keysOf),
+        ...pendingDirs(wt, [...files.keys()]),
+        BLOB_KEY,
+      ]
+      await wt.commit({ keys, info: { tool: STASH_TOOL, of, message } })
+    })
   }
 
   // ---------- tags ----------
@@ -731,18 +844,20 @@ export class WorkspaceIndex {
     return { ...(await this.#state()).tags }
   }
 
-  /** @internal Set or drop one bookmark, inside a call. */
-  async setTag(name: string, commit: string | null, force: boolean): Promise<string> {
+  /** @internal Set (to what `ref` names) or drop (null) one bookmark,
+   *  as one call. */
+  setTag(name: string, ref: string | null, force: boolean): Promise<string> {
     return this.#host.run('ws-git tag', async (wt) => {
+      const commit = ref === null ? null : await this.resolve(ref)
       const state = await this.#state(wt)
       const tags = { ...state.tags }
       const had = tags[name]
       if (commit === null) {
-        if (had === undefined) throw new WorldError(`tag '${name}' not found`)
+        if (had === undefined) throw new WorldError(`tag ${repr(name)} not found`)
         delete tags[name]
       } else {
         if (had !== undefined && !force) {
-          throw new WorldError(`tag '${name}' already exists: ws-git tag -f ${name} moves it.`)
+          throw new WorldError(`tag ${repr(name)} already exists — ws-git tag -f ${name} moves it.`)
         }
         tags[name] = commit
       }
@@ -758,9 +873,12 @@ export class WorkspaceIndex {
    * move its head there; returns the commit. The session doesn't
    * rewind: the restore lands as a new commit. The index is cleared.
    */
-  async checkout(commit: string): Promise<string> {
-    const target = await this.resolve(commit)
-    return this.#host.run('ws-git checkout', (wt) => this.checkoutIn(wt, target))
+  checkout(commit: string): Promise<string> {
+    // Resolved inside the call, so it is one call of the workspace from
+    // its start (a call made from within another joins it as it starts).
+    return this.#host.run('ws-git checkout', async (wt) =>
+      this.checkoutIn(wt, await this.resolve(commit)),
+    )
   }
 
   /** @internal {@link checkout} inside a call of the workspace. */
@@ -886,7 +1004,7 @@ export class WorkspaceIndex {
       const { source } = await this.mergeContext(state)
       if (source === null) {
         throw new WorldError(
-          'no merge to abort: nothing is outstanding here. A merge that conflicts stays outstanding until its markers are gone; start one with ws-git merge <session>.',
+          'no merge to abort: nothing is outstanding here. A merge that conflicts stays outstanding until its markers are gone — start one with ws-git merge <session>.',
         )
       }
       if (state.preMerge === null) {
@@ -940,8 +1058,7 @@ export class WorkspaceIndexTags {
    *  unless `force` moves it. */
   async add(name: string, opts: { at?: string; force?: boolean } = {}): Promise<string> {
     checkTagName(name)
-    const commit = await this.#index.resolve(opts.at ?? 'HEAD')
-    return this.#index.setTag(name, commit, opts.force === true)
+    return this.#index.setTag(name, opts.at ?? 'HEAD', opts.force === true)
   }
 
   /** The bookmarks, name → commit. */
@@ -961,14 +1078,23 @@ export class WorkspaceIndexTags {
 }
 
 function notYours(commit: string): string {
-  return `${commit.slice(0, 7)} is a commit of this session but not one of yours (ws-git log lists yours): moving the whole session to any commit in its history is the host's to invoke: ws.checkout(<id>).`
+  return `${commit.slice(0, 7)} is a commit of this session but not one of yours (ws-git log lists yours) — moving the whole session to any commit in its history is the host's to invoke: ws.checkout(<id>).`
 }
 
 /** The one commit `prefix` names among `hashes`; null for none; an
  *  error for several. */
 function expand(prefix: string, hashes: readonly string[], where: string): string | null {
   const found = [...new Set(hashes.filter((h) => h.startsWith(prefix)))]
-  if (found.length > 1) throw new UnknownRefError(prefix, `names several commits ${where}`)
+  if (found.length > 1) {
+    throw new UnknownRefError(
+      prefix,
+      '',
+      `ambiguous commit ${repr(prefix)} ${where}: it names ${found.length} commits (${found
+        .sort()
+        .map((c) => c.slice(0, 12))
+        .join(', ')}) — type more of the id.`,
+    )
+  }
   return found[0] ?? null
 }
 

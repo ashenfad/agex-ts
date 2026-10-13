@@ -430,6 +430,20 @@ it covers) from the generated JSON, and its own suite on memory and idb.
   (the world's filesystem has none); a frozen view isn't narrowed.
 - **termish gains `EACCES`** for the view's refusals.
 
+**Decided for the ws-git command (G3, 2026-10-13):**
+- **A word-for-word port,** checked against a script corpus nontainer
+  records and exports (nontainer#251): 37 scripts, every command's
+  stdout, stderr and exit code, commit ids named by first appearance.
+  The world's test replays them; one step is a known difference
+  (nontainer's hint names its Python spelling, `paths=None`).
+- **A profile command, not built in:** `commands: {'ws-git': wsGit}`,
+  as nontainer's `register_wsgit` is the embedder's call.
+- **Diffs print Python's hunks:** difflib's `unified_diff` over
+  kvgit's `SequenceMatcher` port (now exported), checked against
+  CPython's output.
+- **The world's agent-git messages are nontainer's,** word for word,
+  since ws-git prints them.
+
 **Decided for delegation (2026-10-13):**
 - **Two steps around ws-git.** The inbox (W6a) comes first; ws-git is
   ported whole (G1-G3), for parity with nontainer, before delegation

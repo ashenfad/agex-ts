@@ -168,6 +168,26 @@ describe('ws.merge', () => {
     await ws.close()
   })
 
+  it('finds a new conflict in a file that already held marker text', async () => {
+    const ws = await open()
+    const doc = 'how to resolve:\n<<<<<<< HEAD\nours\n=======\n\nline\nend\n'
+    await put(ws, '/workspace/notes.md', doc)
+    await ws.index.commit('notes')
+    const fork = await ws.fork('worker')
+    await put(fork, '/workspace/notes.md', doc.replace('line', 'FORK'))
+    await fork.index.commit('worker edit')
+    await put(ws, '/workspace/notes.md', doc.replace('line', 'MAIN'))
+    await ws.index.commit('main edit')
+    const out = await ws.merge('worker')
+    expect(out).toMatchObject({ merged: true, conflicts: ['/workspace/notes.md'] })
+    expect(await ws.index.status()).toMatchObject({
+      mergeSource: 'worker',
+      mergeUnresolved: ['/workspace/notes.md'],
+    })
+    await fork.close()
+    await ws.close()
+  })
+
   it('sizes a merged file by its merged bytes, in the one commit', async () => {
     const ws = await open()
     await put(ws, '/workspace/doc.txt', 'a\nb\n')
@@ -578,6 +598,24 @@ describe('ws.cherryPick', () => {
     expect(body).toContain('CHILD')
     expect(body).toContain('MINE')
     expect((await ws.index.status()).mergeSource).toBe(`child@${wanted.slice(0, 7)}`)
+    await child.close()
+    await ws.close()
+  })
+
+  it('finds a new conflict in a file that already held marker text', async () => {
+    const ws = await open()
+    const doc = 'see:\n<<<<<<< HEAD\nx\n=======\n\none\ntwo\n'
+    await ws.files.write('doc.md', doc)
+    await ws.index.commit('seed')
+    const child = await ws.fork('child')
+    await child.files.write('doc.md', doc.replace('one', 'CHILD'))
+    const wanted = await child.index.commit('child edit')
+    await ws.files.write('doc.md', doc.replace('one', 'MINE'))
+    await ws.index.commit('my edit')
+    expect(await ws.cherryPick(`child@${wanted}`)).toMatchObject({
+      merged: true,
+      conflicts: ['/workspace/doc.md'],
+    })
     await child.close()
     await ws.close()
   })

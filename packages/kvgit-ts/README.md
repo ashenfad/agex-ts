@@ -12,6 +12,51 @@ A `Map<string, T>` with git-like history. Every `commit()` creates a checkpoint;
 
 The canonical type contracts live in [`src/types.ts`](./src/types.ts). For how @agex-ts/kvgit is used inside agex-ts, see [agex-ts's State & Sessions concepts doc](../../docs/concepts/state-and-sessions.md).
 
+## Repo and worktrees
+
+The API follows Python kvgit 0.4's, made async:
+
+```ts
+import { Repo, jsonCodec } from '@agex-ts/kvgit'
+import { Memory } from '@agex-ts/kvgit/backends/memory'
+
+const repo = await Repo.open(new Memory(), { codec: jsonCodec })
+const wt = await repo.worktree('main', { create: true })
+wt.set('greeting', { text: 'hello' }) // pending until commit
+await wt.commit({ info: { title: 'first' } })
+
+await repo.tags.create('v1', wt.head)
+const snap = await repo.snapshot({ tag: 'v1' })
+await snap.get('greeting') // { text: 'hello' }
+for await (const c of repo.log({ branch: 'main' })) console.log(c.hash, c.info)
+```
+
+- **`Repo`** owns the store and the settings every worktree shares: the
+  codec (`bytesCodec` by default, or `jsonCodec`), default merge
+  functions, HEAD recovery and the clock. It reads commit records
+  (`getCommit`, `log`, `diff`, `mergeBase`), makes snapshots, repairs
+  HEADs and runs `gc`.
+- **`Worktree`** is one branch checked out for work: writes stay
+  pending until `commit()`, reads see them, and a commit that loses the
+  race to another worktree on the same branch merges onto the new tip
+  with the effective merge functions (the call's, then the
+  worktree's, then the repository's).
+- **`Snapshot`** is a read-only view pinned to one commit. It looks
+  keys up in the tree a batch at a time, so reading a few keys stays
+  cheap however many the commit holds; `raw` gives the stored bytes.
+- **`repo.branches`** and **`repo.tags`** are live collections. A tag
+  never moves, and keeps its commit and its ancestry alive through
+  `gc`. Tags are stored as Python kvgit stores them (a branch head under
+  `refs/tags/`, plus a record of when and why), so either reads the
+  other's.
+- Errors derive from `KvgitError`: `UnknownBranchError`,
+  `UnknownTagError`, `UnknownCommitError`, `BranchExistsError`,
+  `TagExistsError`, `CorruptHeadError`, `StorageVersionError`,
+  `MergeConflict` and `ConcurrencyError`.
+
+`Worktree` and `Repo` sit on `VersionedKV`, which stays available (as
+does `Staged`) for the code that still uses it.
+
 ## Storage format
 
 Stores use kvgit storage v4, the format Python kvgit 0.4 writes, byte

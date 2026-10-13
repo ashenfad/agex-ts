@@ -111,6 +111,14 @@ export class Keyset {
     return raw === null ? null : decodeEntry(raw)
   }
 
+  /** The entries of the keys that are present, one batched store read
+   *  per tree level. */
+  async getMany(keys: Iterable<string>): Promise<Map<string, KeysetEntry>> {
+    const out = new Map<string, KeysetEntry>()
+    for (const [k, raw] of await this.#hamt.getMany(keys)) out.set(k, decodeEntry(raw))
+    return out
+  }
+
   /** Shortcut: just the blob pointer, skipping a meta decode. */
   async getBlob(key: string): Promise<string | null> {
     const entry = await this.get(key)

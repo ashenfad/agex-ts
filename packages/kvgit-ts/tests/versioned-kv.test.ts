@@ -607,7 +607,7 @@ describe('VersionedKV — fast-forward race retry', () => {
     const v2 = await VersionedKV.open(store)
     raceOnce(v2, () => store.remove(BRANCH_HEAD('main')))
 
-    await expect(v2.commit(one('mine', '2'))).rejects.toThrow(/has no HEAD/)
+    await expect(v2.commit(one('mine', '2'))).rejects.toThrow(UnknownBranchError)
     expect(v2.currentCommit).toBe(baseHead)
     expect(await v2.get('mine')).toBeNull()
     expect(text((await v2.get('base')) as Uint8Array)).toBe('0')

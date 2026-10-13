@@ -3,7 +3,7 @@
  *
  * Replays the history in tests/fixtures/golden-v4.json (from
  * scripts/golden-v4.py: a fresh store, commits with non-ASCII keys,
- * binary values and every kind of info, a branch, and two writers racing
+ * binary values and every kind of info, a branch, a tag, and two writers racing
  * to a three-way merge) at the same clock times, and checks the whole
  * store after every step: every key, every byte.
  */
@@ -12,6 +12,7 @@ import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { Memory } from '../src/backends/memory'
 import { PyFloat } from '../src/pyjson'
+import { Repo } from '../src/repo'
 import { VersionedKV } from '../src/versioned/kv'
 
 interface Step {
@@ -90,6 +91,13 @@ describe('storage v4 matches Python kvgit byte for byte', () => {
     })
     expect(branch.commit).toBe(steps.get('branch')?.commit)
     expectStep('branch', await dump(store))
+
+    clock = (steps.get('tag') as Step).time
+    const repo = await Repo.open(store, { now })
+    await repo.tags.create('v1/ünï', branch.commit as string, {
+      info: { note: 'tagged', ratio: 0.25 },
+    })
+    expectStep('tag', await dump(store))
 
     clock = (steps.get('writer one') as Step).time
     const w1 = await VersionedKV.open(store, { now })

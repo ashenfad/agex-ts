@@ -247,6 +247,67 @@ export class Hamt {
   }
 
   /**
+   * The values of the keys that are present. Walks the paths to all of
+   * them level by level, with one batched store read per level rather
+   * than one walk per key, so the cost follows the tree's depth.
+   */
+  async getMany(keys: Iterable<string>): Promise<Map<string, Uint8Array>> {
+    const found = new Map<string, Uint8Array>()
+    if (this.root === (await emptyHash())) return found
+    let frontier = new Map<string, Array<{ key: string; kh: string }>>()
+    for (const key of new Set(keys)) {
+      const at = frontier.get(this.root) ?? []
+      at.push({ key, kh: await keyHash(key) })
+      frontier.set(this.root, at)
+    }
+    for (let depth = 0; frontier.size > 0; depth++) {
+      const nodes = await this.loadMany([...frontier.keys()])
+      const next = new Map<string, Array<{ key: string; kh: string }>>()
+      for (const [nodeHash, waiting] of frontier) {
+        const node = nodes.get(nodeHash)
+        if (node === undefined) continue
+        for (const item of waiting) {
+          if (node.kind === 'leaf') {
+            const encoded = node.items[item.key]
+            if (encoded !== undefined) found.set(item.key, decodeValue(encoded))
+            continue
+          }
+          const child = node.children[item.kh[depth] as string]
+          if (child === undefined) continue
+          const at = next.get(child) ?? []
+          at.push(item)
+          next.set(child, at)
+        }
+      }
+      frontier = next
+    }
+    return found
+  }
+
+  /** Load several nodes in one store read (pending nodes first);
+   *  absent ones are left out. */
+  private async loadMany(nodeHashes: readonly string[]): Promise<Map<string, Node>> {
+    const out = new Map<string, Node>()
+    const empty = await emptyHash()
+    const fetch: string[] = []
+    for (const h of nodeHashes) {
+      if (h === empty) {
+        out.set(h, EMPTY_LEAF)
+        continue
+      }
+      const pending = this.pending.get(this.prefix + h)
+      if (pending !== undefined) out.set(h, parseNode(pending))
+      else fetch.push(this.prefix + h)
+    }
+    if (fetch.length > 0) {
+      for (const [k, raw] of await this.store.getMany(fetch)) {
+        out.set(k.slice(this.prefix.length), parseNode(raw))
+      }
+    }
+    return out
+  }
+
+  /**
    * Iterate over all `(key, value)` pairs lazily. One store read per
    * visited node. Use `materialize()` if you want the whole map and the
    * underlying store has non-trivial per-call latency.

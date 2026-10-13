@@ -60,3 +60,16 @@ export {
 export { Namespaced, type NamespaceableStore } from './namespaced'
 export { PyFloat, pyDumps, pyLoads, type PyDumpsOptions } from './pyjson'
 export { ROOT_COMMIT, STORAGE_VERSION } from './versioned/layout'
+export { type Codec, bytesCodec, jsonCodec } from './codec'
+export {
+  Branches,
+  type Commit,
+  RawSnapshot,
+  type Ref,
+  Repo,
+  type RepoOptions,
+  Snapshot,
+  Tags,
+} from './repo'
+export { Status, Worktree, type WorktreeCommitOptions } from './worktree'
+export type { TagInfo } from './versioned/refs'

@@ -25,11 +25,17 @@
  * rewriting a full snapshot per commit.
  */
 
+import {
+  BranchExistsError,
+  CorruptHeadError,
+  UnknownBranchError,
+  UnknownCommitError,
+} from '../errors'
 import { EMPTY_HASH } from '../hamt'
 import { Keyset } from '../keyset'
 import type { CommitInfo, KVStore, KeysetEntry, MetaEntry, Versioned } from '../types'
-import { UnknownBranchError } from '../types'
 import { VersionedBase } from './base'
+import { type ParentLoader, walkHistory } from './helpers'
 import {
   BLOB_PREFIX,
   BRANCH_HEAD,
@@ -41,6 +47,7 @@ import {
   PARENT_COMMIT,
   PARENT_GENS,
   ROOT_COMMIT,
+  TAG_BRANCH_PREFIX,
   blobKey,
   checkStorageVersion,
   commitHash,
@@ -52,6 +59,7 @@ import {
   safeLoads,
 } from './layout'
 import type { MergeResolution } from './merge'
+import { listBranches, rejectReservedBranch } from './refs'
 
 // ---------------------------------------------------------------------------
 // Recovery layer
@@ -94,7 +102,7 @@ export type CorruptHeadRecoverer = (store: KVStore, branch: string) => Promise<s
  *
  * Returns null if nothing recovers.
  */
-async function resolveHead(
+export async function resolveHead(
   store: KVStore,
   branch: string,
   opts: { recoverFromCorruptHead?: CorruptHeadRecoverer } = {},
@@ -278,20 +286,22 @@ const wallClock = (): number => Date.now() / 1000
  * is the root commit and the store lacks it, and the removal of any
  * stale backup left under the name by an earlier branch.
  *
- * @throws if the branch exists, or `target` is not in the store.
+ * @throws BranchExistsError if the branch exists.
+ * @throws UnknownCommitError if `target` is not in the store.
  */
-async function createBranchHead(
+export async function createBranchHead(
   store: KVStore,
   name: string,
   target: string,
   now: () => number,
 ): Promise<void> {
+  rejectReservedBranch(name)
   const branchKey = BRANCH_HEAD(name)
   for (;;) {
     const expected = new Map<string, Uint8Array | null>([[branchKey, null]])
     const writes = new Map<string, Uint8Array>([[branchKey, dumps(target)]])
     if ((await store.get(COMMIT_ROOT(target))) === null) {
-      if (target !== ROOT_COMMIT) throw new Error(`Commit '${target}' does not exist`)
+      if (target !== ROOT_COMMIT) throw new UnknownCommitError(target)
       // Minted with the head, and only if nobody minted it first.
       expected.set(COMMIT_ROOT(ROOT_COMMIT), null)
       const records = commitRecords({
@@ -305,9 +315,287 @@ async function createBranchHead(
       for (const [k, v] of records) writes.set(k, v)
     }
     if (await store.casMany(expected, writes, [BRANCH_HEAD_PREV(name)])) return
-    if ((await store.get(branchKey)) !== null) throw new Error(`Branch '${name}' already exists`)
+    if ((await store.get(branchKey)) !== null) throw new BranchExistsError(name)
     // Another writer minted the root commit first: decide again.
   }
+}
+
+/**
+ * Delete branch `name`: its head and its backup, in one removal. Its
+ * commits become collectable.
+ *
+ * @throws UnknownBranchError if there is no such branch.
+ */
+export async function deleteBranchHead(store: KVStore, name: string): Promise<void> {
+  rejectReservedBranch(name)
+  if ((await store.get(BRANCH_HEAD(name))) === null) throw new UnknownBranchError(name)
+  await store.removeMany([BRANCH_HEAD(name), BRANCH_HEAD_PREV(name)])
+}
+
+/**
+ * The lowest common ancestor of two commits, or null if they share no
+ * history. On a criss-cross tie the smallest hash wins: deterministic,
+ * but arbitrary.
+ */
+export async function lowestCommonAncestor(
+  commitA: string,
+  commitB: string,
+  loadParents: ParentLoader,
+): Promise<string | null> {
+  // Ancestor-set intersection with non-minimal candidates dropped
+  // (a candidate that is itself an ancestor of another candidate is
+  // not lowest). When several commits tie for lowest — criss-cross
+  // histories — the smallest hash wins: deterministic, but
+  // arbitrary, so criss-cross merges resolve cleanly rather than
+  // raising.
+  if (commitA === commitB) return commitA
+
+  const parents = new Map<string, readonly string[]>()
+  const ancestorsA = await walkAncestors(commitA, parents, loadParents)
+  // Fast path: B inside A's history (or vice versa) names the
+  // lowest directly — every other common ancestor sits above it.
+  if (ancestorsA.has(commitB)) return commitB
+  const ancestorsB = await walkAncestors(commitB, parents, loadParents)
+  if (ancestorsB.has(commitA)) return commitA
+
+  const common = new Set<string>()
+  for (const c of ancestorsA) {
+    if (ancestorsB.has(c)) common.add(c)
+  }
+  if (common.size === 0) return null
+  // Minimality in one bottom-up pass: a candidate is lowest when no
+  // other candidate sits below it. Propagate "a candidate is
+  // at-or-below here" from tips to roots over the in-memory parent
+  // map — no further store reads, linear in the history.
+  const children = new Map<string, string[]>()
+  for (const node of parents.keys()) children.set(node, [])
+  for (const [node, nodeParents] of parents) {
+    for (const parent of nodeParents) {
+      const kids = children.get(parent)
+      if (kids !== undefined) kids.push(node)
+    }
+  }
+  const below = new Map<string, boolean>()
+  const remaining = new Map<string, number>()
+  for (const [node, kids] of children) {
+    below.set(node, false)
+    remaining.set(node, kids.length)
+  }
+  const queue: string[] = []
+  for (const [node, kids] of children) {
+    if (kids.length === 0) queue.push(node)
+  }
+  while (queue.length > 0) {
+    const node = queue.shift() as string
+    const nodeParents = parents.get(node) ?? []
+    for (const parent of nodeParents) {
+      if (common.has(node) || below.get(node) === true) below.set(parent, true)
+      const left = (remaining.get(parent) ?? 1) - 1
+      remaining.set(parent, left)
+      if (left === 0) queue.push(parent)
+    }
+  }
+  let best: string | null = null
+  for (const c of common) {
+    if (below.get(c) !== true && (best === null || c < best)) best = c
+  }
+  return best
+}
+
+async function walkAncestors(
+  start: string,
+  parents: Map<string, readonly string[]>,
+  loadParents: ParentLoader,
+): Promise<Set<string>> {
+  // All ancestors of `start` (itself included), recording each
+  // visited commit's parents in `parents` for later passes.
+  const ancestors = new Set<string>([start])
+  const stack = [start]
+  while (stack.length > 0) {
+    const current = stack.pop() as string
+    if (parents.has(current)) continue
+    const nodeParents = await loadParents(current)
+    parents.set(current, nodeParents)
+    for (const parent of nodeParents) {
+      if (!ancestors.has(parent)) {
+        ancestors.add(parent)
+        stack.push(parent)
+      }
+    }
+  }
+  return ancestors
+}
+
+/**
+ * Mark and sweep: reclaim every commit no branch or tag reaches and that
+ * is older than `minAge` seconds, with whatever only it held. `deep`
+ * also scans the node and blob namespaces for content no commit
+ * references. Both need a quiescent store; see `VersionedKV.cleanOrphans`.
+ *
+ * @returns The number of commits removed.
+ */
+export async function sweepStore(
+  store: KVStore,
+  opts: { minAge: number; deep: boolean; now: () => number },
+): Promise<number> {
+  const { deep } = opts
+  const cutoffTime = opts.now() - opts.minAge
+
+  const reachableCommits = new Set<string>()
+  const reachableBlobs = new Set<string>()
+  const reachableNodes = new Set<string>()
+
+  // Walk one commit's keyset, accumulating reachable refs.
+  const walkCommitForMarks = async (commitHash: string): Promise<void> => {
+    const rootBytes = await store.get(COMMIT_ROOT(commitHash))
+    if (rootBytes === null) return
+    const root = loads(rootBytes) as string
+    const ks = Keyset.fromRoot(store, root)
+    // skipNodes is read at call time, then we add to it after — so
+    // subtrees shared with already-visited commits are skipped, and
+    // newly-discovered nodes become reachable for the next iteration.
+    const [entries, newNodes] = await ks.walk(reachableNodes)
+    for (const entry of entries.values()) reachableBlobs.add(entry.blob)
+    for (const node of newNodes) reachableNodes.add(node)
+  }
+
+  // Mark phase: walk every branch's full ancestry. Prefix scan
+  // returns only branch-head pointers (prev backups don't match
+  // — see listBranches comment).
+  for await (const k of store.keys(BRANCH_HEAD_PREFIX)) {
+    const branchName = k.slice(BRANCH_HEAD_PREFIX.length)
+    // No `recoverFromCorruptHead` here, deliberately, even when this
+    // handle carries one. GC must not decide reachability from a
+    // guess: a wrong answer marks the wrong commits live, so real
+    // garbage survives forever, and a guessed tip gets walked as
+    // though it were this branch's own history, pinning another
+    // branch's ancestry into this one's mark set. The sweep sees
+    // only what the store actually claims — a branch whose HEAD
+    // resolves is marked from its real HEAD, and one whose HEAD does
+    // not resolve marks nothing and keeps its commits as young
+    // orphans until `minAge` and an explicit `repairHead` settle
+    // what it points at. The inconsistency with the read paths is
+    // the point, not an oversight.
+    const branchHead = await resolveHead(store, branchName)
+    if (branchHead === null) continue
+    // Use allParents=true to follow merge commits' second parents too.
+    for await (const commit of walkHistory(branchHead, (h) => loadParents(store, h), {
+      allParents: true,
+    })) {
+      if (reachableCommits.has(commit)) continue
+      reachableCommits.add(commit)
+      await walkCommitForMarks(commit)
+    }
+  }
+
+  // Sweep phase: scan commit roots, partition into orphans (old enough
+  // to delete) and young orphans (within the minAge window).
+  const orphans: string[] = []
+  const youngOrphanCommits: string[] = []
+  const COMMIT_ROOT_PREFIX = '__commit_root__'
+
+  for await (const k of store.keys(COMMIT_ROOT_PREFIX)) {
+    const commitHash = k.slice(COMMIT_ROOT_PREFIX.length)
+    if (commitHash.length === 0 || reachableCommits.has(commitHash)) continue
+    const timeBytes = await store.get(COMMIT_TIME(commitHash))
+    if (timeBytes === null) continue // no timestamp — be conservative, skip
+    const ts = safeLoads(timeBytes)
+    if (typeof ts !== 'number') continue
+    if (ts < cutoffTime) {
+      orphans.push(commitHash)
+    } else {
+      youngOrphanCommits.push(commitHash)
+    }
+  }
+
+  // Protect blobs/HAMT nodes referenced by young orphans — they may
+  // belong to in-flight writers whose CAS hasn't landed yet.
+  for (const young of youngOrphanCommits) {
+    await walkCommitForMarks(young)
+  }
+
+  // Collect everything to delete in one batch so the sweep is atomic
+  // at the store level (defends against partial sweeps under crash).
+  const allRemovals = new Set<string>()
+  const KEYSET_PREFIX = Keyset.DEFAULT_PREFIX
+
+  // Every deletion candidate comes from walking an orphan's own
+  // keyset — never from a namespace scan — so content a commit
+  // landing mid-sweep wrote for itself is never on this list. Content
+  // it shares with an orphan can be, which is why the sweep is for a
+  // quiescent store.
+  //
+  // `skipNodes` starts as the reachable set (subtrees shared with a
+  // live commit or a young orphan must not be touched, and are the
+  // bulk of the tree) and grows with each orphan's nodes, so a
+  // subtree shared between two orphans is walked once and queued
+  // once rather than per orphan.
+  const skipNodes = new Set(reachableNodes)
+
+  for (const orphan of orphans) {
+    const orphanRootBytes = await store.get(COMMIT_ROOT(orphan))
+    if (orphanRootBytes !== null) {
+      try {
+        const orphanRoot = loads(orphanRootBytes) as string
+        const orphanKs = Keyset.fromRoot(store, orphanRoot)
+        const [orphanEntries, orphanNodes] = await orphanKs.walk(skipNodes)
+        for (const entry of orphanEntries.values()) {
+          if (!reachableBlobs.has(entry.blob)) allRemovals.add(entry.blob)
+        }
+        for (const node of orphanNodes) {
+          skipNodes.add(node)
+          allRemovals.add(KEYSET_PREFIX + node)
+        }
+      } catch {
+        // Deliberate catch-all: a damaged orphan must not stall the
+        // sweep. We drop its payload and still reclaim its commit
+        // metadata below. Narrowing this would let one corrupt
+        // keyset block GC for the whole store.
+        //
+        // The cost is a leak: once the commit metadata is gone there
+        // is no keyset left to find the orphan's nodes and blobs
+        // through, so they survive until a `deepClean`.
+      }
+    }
+    allRemovals.add(COMMIT_ROOT(orphan))
+    allRemovals.add(PARENT_COMMIT(orphan))
+    allRemovals.add(PARENT_GENS(orphan))
+    allRemovals.add(COMMIT_TIME(orphan))
+    allRemovals.add(INFO_KEY(orphan))
+  }
+
+  if (deep) {
+    // Namespace scans: reclaim nodes and blobs no orphan keyset
+    // points at (interrupted writes, crashes between a write and its
+    // CAS, a damaged orphan's content). Unsafe against a concurrent
+    // writer, because anything committed since the mark phase looks
+    // unreferenced here. Quiescent stores only — see `deepClean`.
+    for await (const k of store.keys(KEYSET_PREFIX)) {
+      const nodeHash = k.slice(KEYSET_PREFIX.length)
+      if (nodeHash.length > 0 && !reachableNodes.has(nodeHash)) {
+        allRemovals.add(k)
+      }
+    }
+    for await (const k of store.keys(BLOB_PREFIX)) {
+      if (!reachableBlobs.has(k)) allRemovals.add(k)
+    }
+  }
+
+  if (allRemovals.size > 0) {
+    await store.removeMany(allRemovals)
+  }
+  return orphans.length
+}
+
+/** A commit's parents, in order; empty for the root commit or one not
+ *  in the store. */
+export async function loadParents(store: KVStore, commit: string): Promise<readonly string[]> {
+  const raw = await store.get(PARENT_COMMIT(commit))
+  if (raw === null) return []
+  const parsed = loads(raw)
+  if (typeof parsed === 'string') return [parsed]
+  if (Array.isArray(parsed)) return parsed.filter((p): p is string => typeof p === 'string')
+  return []
 }
 
 interface SnapshotState {
@@ -370,6 +658,7 @@ export class VersionedKV extends VersionedBase {
   static async open(store: KVStore, opts: VersionedKVOptions = {}): Promise<VersionedKV> {
     await checkStorageVersion(store)
     const branch = opts.branch ?? 'main'
+    rejectReservedBranch(branch)
     const create = opts.create ?? true
 
     let commitHash = opts.commitHash
@@ -382,7 +671,7 @@ export class VersionedKV extends VersionedBase {
       if (recovered !== null) {
         commitHash = recovered
       } else if ((await store.get(BRANCH_HEAD(branch))) !== null) {
-        throw new Error(`Branch '${branch}' HEAD is corrupt and unrecoverable`)
+        throw new CorruptHeadError(branch)
       } else if (!create) {
         throw new UnknownBranchError(branch, true)
       } else {
@@ -405,7 +694,7 @@ export class VersionedKV extends VersionedBase {
             }),
           })
           if (winner === null) {
-            throw new Error(`Branch '${branch}' HEAD is corrupt and unrecoverable`)
+            throw new CorruptHeadError(branch)
           }
           commitHash = winner
         }
@@ -669,96 +958,11 @@ export class VersionedKV extends VersionedBase {
   }
 
   protected async loadParents(commitHash: string): Promise<readonly string[]> {
-    const raw = await this.store.get(PARENT_COMMIT(commitHash))
-    if (raw === null) return []
-    const parsed = loads(raw)
-    if (typeof parsed === 'string') return [parsed]
-    if (Array.isArray(parsed)) return parsed.filter((p): p is string => typeof p === 'string')
-    return []
+    return loadParents(this.store, commitHash)
   }
 
   protected async findLca(commitA: string, commitB: string): Promise<string | null> {
-    // Ancestor-set intersection with non-minimal candidates dropped
-    // (a candidate that is itself an ancestor of another candidate is
-    // not lowest). When several commits tie for lowest — criss-cross
-    // histories — the smallest hash wins: deterministic, but
-    // arbitrary, so criss-cross merges resolve cleanly rather than
-    // raising.
-    if (commitA === commitB) return commitA
-
-    const parents = new Map<string, readonly string[]>()
-    const ancestorsA = await this.walkAncestors(commitA, parents)
-    // Fast path: B inside A's history (or vice versa) names the
-    // lowest directly — every other common ancestor sits above it.
-    if (ancestorsA.has(commitB)) return commitB
-    const ancestorsB = await this.walkAncestors(commitB, parents)
-    if (ancestorsB.has(commitA)) return commitA
-
-    const common = new Set<string>()
-    for (const c of ancestorsA) {
-      if (ancestorsB.has(c)) common.add(c)
-    }
-    if (common.size === 0) return null
-    // Minimality in one bottom-up pass: a candidate is lowest when no
-    // other candidate sits below it. Propagate "a candidate is
-    // at-or-below here" from tips to roots over the in-memory parent
-    // map — no further store reads, linear in the history.
-    const children = new Map<string, string[]>()
-    for (const node of parents.keys()) children.set(node, [])
-    for (const [node, nodeParents] of parents) {
-      for (const parent of nodeParents) {
-        const kids = children.get(parent)
-        if (kids !== undefined) kids.push(node)
-      }
-    }
-    const below = new Map<string, boolean>()
-    const remaining = new Map<string, number>()
-    for (const [node, kids] of children) {
-      below.set(node, false)
-      remaining.set(node, kids.length)
-    }
-    const queue: string[] = []
-    for (const [node, kids] of children) {
-      if (kids.length === 0) queue.push(node)
-    }
-    while (queue.length > 0) {
-      const node = queue.shift() as string
-      const nodeParents = parents.get(node) ?? []
-      for (const parent of nodeParents) {
-        if (common.has(node) || below.get(node) === true) below.set(parent, true)
-        const left = (remaining.get(parent) ?? 1) - 1
-        remaining.set(parent, left)
-        if (left === 0) queue.push(parent)
-      }
-    }
-    let best: string | null = null
-    for (const c of common) {
-      if (below.get(c) !== true && (best === null || c < best)) best = c
-    }
-    return best
-  }
-
-  private async walkAncestors(
-    start: string,
-    parents: Map<string, readonly string[]>,
-  ): Promise<Set<string>> {
-    // All ancestors of `start` (itself included), recording each
-    // visited commit's parents in `parents` for later passes.
-    const ancestors = new Set<string>([start])
-    const stack = [start]
-    while (stack.length > 0) {
-      const current = stack.pop() as string
-      if (parents.has(current)) continue
-      const nodeParents = await this.loadParents(current)
-      parents.set(current, nodeParents)
-      for (const parent of nodeParents) {
-        if (!ancestors.has(parent)) {
-          ancestors.add(parent)
-          stack.push(parent)
-        }
-      }
-    }
-    return ancestors
+    return lowestCommonAncestor(commitA, commitB, (h) => this.loadParents(h))
   }
 
   protected async readBlob(blobId: string): Promise<Uint8Array | null> {
@@ -774,7 +978,10 @@ export class VersionedKV extends VersionedBase {
       }),
     })
     if (head === null) {
-      throw new Error(`No HEAD commit found for branch '${this.branch}'`)
+      if ((await this.store.get(BRANCH_HEAD(this.branch))) !== null) {
+        throw new CorruptHeadError(this.branch)
+      }
+      throw new UnknownBranchError(this.branch)
     }
     await this.loadCommitInto(head, true)
   }
@@ -791,7 +998,7 @@ export class VersionedKV extends VersionedBase {
   async createBranch(name: string, opts: { at?: string } = {}): Promise<Versioned> {
     const target = opts.at ?? this.currentCommitHash
     if (opts.at !== undefined && (await this.store.get(COMMIT_ROOT(opts.at))) === null) {
-      throw new Error(`Commit '${opts.at}' does not exist`)
+      throw new UnknownCommitError(opts.at)
     }
     await createBranchHead(this.store, name, target, this.now)
     return VersionedKV.open(this.store, {
@@ -805,16 +1012,11 @@ export class VersionedKV extends VersionedBase {
     if (name === this.branch) {
       throw new Error('Cannot delete the current branch')
     }
-    if ((await this.store.get(BRANCH_HEAD(name))) === null) {
-      throw new Error(`Branch '${name}' does not exist`)
-    }
-    await this.store.remove(BRANCH_HEAD(name))
-    await this.store.remove(BRANCH_HEAD_PREV(name))
-    // Note: the branch's now-unreachable commits are left in place;
-    // reclaim them with cleanOrphans (or deepClean).
+    await deleteBranchHead(this.store, name)
   }
 
   async switchBranch(name: string): Promise<void> {
+    rejectReservedBranch(name)
     const head = await resolveHead(this.store, name, {
       ...(this.recoverFromCorruptHead !== undefined && {
         recoverFromCorruptHead: this.recoverFromCorruptHead,
@@ -822,7 +1024,7 @@ export class VersionedKV extends VersionedBase {
     })
     if (head === null) {
       if ((await this.store.get(BRANCH_HEAD(name))) !== null) {
-        throw new Error(`Branch '${name}' HEAD is corrupt and unrecoverable`)
+        throw new CorruptHeadError(name)
       }
       throw new UnknownBranchError(name)
     }
@@ -846,26 +1048,37 @@ export class VersionedKV extends VersionedBase {
     return this.store.get(entry.blob)
   }
 
+  /**
+   * Point the branch at `commitHash`. Whatever HEAD held becomes the
+   * backup in the same write, conditional on HEAD still holding it: a
+   * writer moving HEAD in between sends the reset round again, and a
+   * delete landing first makes it throw rather than recreate the
+   * branch.
+   *
+   * @returns false if `commitHash` is not in the store.
+   * @throws UnknownBranchError if the branch has no HEAD.
+   */
   async resetTo(commitHash: string): Promise<boolean> {
-    if ((await this.store.get(COMMIT_ROOT(commitHash))) === null) return false
-    // Save current HEAD as prev before overwriting.
-    const current = await this.store.get(BRANCH_HEAD(this.branch))
-    if (current !== null) await this.store.set(BRANCH_HEAD_PREV(this.branch), current)
-    await this.store.set(BRANCH_HEAD(this.branch), dumps(commitHash))
+    const branchKey = BRANCH_HEAD(this.branch)
+    for (;;) {
+      if ((await this.store.get(COMMIT_ROOT(commitHash))) === null) return false
+      const current = await this.store.get(branchKey)
+      if (current === null) throw new UnknownBranchError(this.branch)
+      const landed = await this.store.casMany(
+        new Map([[branchKey, current]]),
+        new Map([
+          [branchKey, dumps(commitHash)],
+          [BRANCH_HEAD_PREV(this.branch), current],
+        ]),
+      )
+      if (landed) break
+    }
     await this.loadCommitInto(commitHash, true)
     return true
   }
 
   async listBranches(): Promise<string[]> {
-    const out: string[] = []
-    // `__branch_head_prev__*` doesn't start with `__branch_head__`
-    // (the prev variant has `_p` where `__` would be), so the prefix
-    // scan naturally excludes prev backups — no extra filter needed.
-    for await (const k of this.store.keys(BRANCH_HEAD_PREFIX)) {
-      const name = k.slice(BRANCH_HEAD_PREFIX.length)
-      if (name.length > 0) out.push(name)
-    }
-    return out.sort()
+    return listBranches(this.store)
   }
 
   static async exists(store: KVStore, name: string): Promise<boolean> {
@@ -873,6 +1086,7 @@ export class VersionedKV extends VersionedBase {
     // entry. A single read that never writes, so checking cannot
     // resurrect a deleted branch. A damaged HEAD still counts as
     // existing; opening it raises either way.
+    if (name.startsWith(TAG_BRANCH_PREFIX)) return false
     return (await store.get(BRANCH_HEAD(name))) !== null
   }
 
@@ -979,151 +1193,9 @@ export class VersionedKV extends VersionedBase {
 
   /** Shared mark-and-sweep behind `cleanOrphans` / `deepClean`. */
   private async sweep(minAge: number, deep: boolean): Promise<number> {
-    // Commit times are in seconds; minAge is in milliseconds.
-    const cutoffTime = this.now() - minAge / 1000
-
-    const reachableCommits = new Set<string>()
-    const reachableBlobs = new Set<string>()
-    const reachableNodes = new Set<string>()
-
-    // Walk one commit's keyset, accumulating reachable refs.
-    const walkCommitForMarks = async (commitHash: string): Promise<void> => {
-      const rootBytes = await this.store.get(COMMIT_ROOT(commitHash))
-      if (rootBytes === null) return
-      const root = loads(rootBytes) as string
-      const ks = Keyset.fromRoot(this.store, root)
-      // skipNodes is read at call time, then we add to it after — so
-      // subtrees shared with already-visited commits are skipped, and
-      // newly-discovered nodes become reachable for the next iteration.
-      const [entries, newNodes] = await ks.walk(reachableNodes)
-      for (const entry of entries.values()) reachableBlobs.add(entry.blob)
-      for (const node of newNodes) reachableNodes.add(node)
-    }
-
-    // Mark phase: walk every branch's full ancestry. Prefix scan
-    // returns only branch-head pointers (prev backups don't match
-    // — see listBranches comment).
-    for await (const k of this.store.keys(BRANCH_HEAD_PREFIX)) {
-      const branchName = k.slice(BRANCH_HEAD_PREFIX.length)
-      // No `recoverFromCorruptHead` here, deliberately, even when this
-      // handle carries one. GC must not decide reachability from a
-      // guess: a wrong answer marks the wrong commits live, so real
-      // garbage survives forever, and a guessed tip gets walked as
-      // though it were this branch's own history, pinning another
-      // branch's ancestry into this one's mark set. The sweep sees
-      // only what the store actually claims — a branch whose HEAD
-      // resolves is marked from its real HEAD, and one whose HEAD does
-      // not resolve marks nothing and keeps its commits as young
-      // orphans until `minAge` and an explicit `repairHead` settle
-      // what it points at. The inconsistency with the read paths is
-      // the point, not an oversight.
-      const branchHead = await resolveHead(this.store, branchName)
-      if (branchHead === null) continue
-      // Use allParents=true to follow merge commits' second parents too.
-      for await (const commit of this.history(branchHead, { allParents: true })) {
-        if (reachableCommits.has(commit)) continue
-        reachableCommits.add(commit)
-        await walkCommitForMarks(commit)
-      }
-    }
-
-    // Sweep phase: scan commit roots, partition into orphans (old enough
-    // to delete) and young orphans (within the minAge window).
-    const orphans: string[] = []
-    const youngOrphanCommits: string[] = []
-    const COMMIT_ROOT_PREFIX = '__commit_root__'
-
-    for await (const k of this.store.keys(COMMIT_ROOT_PREFIX)) {
-      const commitHash = k.slice(COMMIT_ROOT_PREFIX.length)
-      if (commitHash.length === 0 || reachableCommits.has(commitHash)) continue
-      const timeBytes = await this.store.get(COMMIT_TIME(commitHash))
-      if (timeBytes === null) continue // no timestamp — be conservative, skip
-      const ts = safeLoads(timeBytes)
-      if (typeof ts !== 'number') continue
-      if (ts < cutoffTime) {
-        orphans.push(commitHash)
-      } else {
-        youngOrphanCommits.push(commitHash)
-      }
-    }
-
-    // Protect blobs/HAMT nodes referenced by young orphans — they may
-    // belong to in-flight writers whose CAS hasn't landed yet.
-    for (const young of youngOrphanCommits) {
-      await walkCommitForMarks(young)
-    }
-
-    // Collect everything to delete in one batch so the sweep is atomic
-    // at the store level (defends against partial sweeps under crash).
-    const allRemovals = new Set<string>()
-    const KEYSET_PREFIX = Keyset.DEFAULT_PREFIX
-
-    // Every deletion candidate comes from walking an orphan's own
-    // keyset — never from a namespace scan — so content a commit
-    // landing mid-sweep wrote for itself is never on this list. Content
-    // it shares with an orphan can be, which is why the sweep is for a
-    // quiescent store.
-    //
-    // `skipNodes` starts as the reachable set (subtrees shared with a
-    // live commit or a young orphan must not be touched, and are the
-    // bulk of the tree) and grows with each orphan's nodes, so a
-    // subtree shared between two orphans is walked once and queued
-    // once rather than per orphan.
-    const skipNodes = new Set(reachableNodes)
-
-    for (const orphan of orphans) {
-      const orphanRootBytes = await this.store.get(COMMIT_ROOT(orphan))
-      if (orphanRootBytes !== null) {
-        try {
-          const orphanRoot = loads(orphanRootBytes) as string
-          const orphanKs = Keyset.fromRoot(this.store, orphanRoot)
-          const [orphanEntries, orphanNodes] = await orphanKs.walk(skipNodes)
-          for (const entry of orphanEntries.values()) {
-            if (!reachableBlobs.has(entry.blob)) allRemovals.add(entry.blob)
-          }
-          for (const node of orphanNodes) {
-            skipNodes.add(node)
-            allRemovals.add(KEYSET_PREFIX + node)
-          }
-        } catch {
-          // Deliberate catch-all: a damaged orphan must not stall the
-          // sweep. We drop its payload and still reclaim its commit
-          // metadata below. Narrowing this would let one corrupt
-          // keyset block GC for the whole store.
-          //
-          // The cost is a leak: once the commit metadata is gone there
-          // is no keyset left to find the orphan's nodes and blobs
-          // through, so they survive until a `deepClean`.
-        }
-      }
-      allRemovals.add(COMMIT_ROOT(orphan))
-      allRemovals.add(PARENT_COMMIT(orphan))
-      allRemovals.add(PARENT_GENS(orphan))
-      allRemovals.add(COMMIT_TIME(orphan))
-      allRemovals.add(INFO_KEY(orphan))
-    }
-
-    if (deep) {
-      // Namespace scans: reclaim nodes and blobs no orphan keyset
-      // points at (interrupted writes, crashes between a write and its
-      // CAS, a damaged orphan's content). Unsafe against a concurrent
-      // writer, because anything committed since the mark phase looks
-      // unreferenced here. Quiescent stores only — see `deepClean`.
-      for await (const k of this.store.keys(KEYSET_PREFIX)) {
-        const nodeHash = k.slice(KEYSET_PREFIX.length)
-        if (nodeHash.length > 0 && !reachableNodes.has(nodeHash)) {
-          allRemovals.add(k)
-        }
-      }
-      for await (const k of this.store.keys(BLOB_PREFIX)) {
-        if (!reachableBlobs.has(k)) allRemovals.add(k)
-      }
-    }
-
-    if (allRemovals.size > 0) {
-      await this.store.removeMany(allRemovals)
-    }
-    return orphans.length
+    // minAge is in milliseconds here, and in seconds (as commit times
+    // are) below.
+    return sweepStore(this.store, { minAge: minAge / 1000, deep, now: this.now })
   }
 
   // --- Internal ---

@@ -20,6 +20,7 @@ import {
   MergeConflict,
   type MergeHeadsOptions,
   type MergeResult,
+  UnknownBranchError,
   type Versioned,
   type VersionedCommitOptions,
 } from '../types'
@@ -231,7 +232,7 @@ export abstract class VersionedBase implements Versioned {
       // found it. A null first read builds nothing, so only a retry can
       // have anything to restore.
       if (oursBuilt) this.restoreState(saved)
-      throw new Error(`Branch '${this.branch}' has no HEAD`)
+      throw new UnknownBranchError(this.branch)
     }
     if (!oursBuilt) {
       saved = this.snapshotState()

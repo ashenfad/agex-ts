@@ -8,56 +8,18 @@
 
 import type { PyFloat } from './pyjson'
 
-// ---------------------------------------------------------------------------
-// Errors
-// ---------------------------------------------------------------------------
-
-/**
- * Branch HEAD moved between read and CAS — caller raced another writer.
- *
- * Recovery: refresh and retry, or call `commit({ onConflict: 'merge' })`
- * to attempt a three-way merge.
- */
-export class ConcurrencyError extends Error {
-  override readonly name = 'ConcurrencyError'
-}
-
-/**
- * One or more contested keys had no merge function (or their merge fn
- * threw). The merge attempt is aborted; staged changes remain intact
- * for inspection.
- */
-export class MergeConflict extends Error {
-  override readonly name = 'MergeConflict'
-  readonly keys: ReadonlySet<string>
-  readonly causes: ReadonlyMap<string, unknown>
-
-  constructor(keys: Iterable<string>, causes?: ReadonlyMap<string, unknown>) {
-    const keySet = new Set(keys)
-    super(`Merge conflict on ${keySet.size} key(s): ${[...keySet].sort().join(', ')}`)
-    this.keys = keySet
-    this.causes = causes ?? new Map()
-  }
-}
-
-/**
- * Opening (with `create: false`) or switching to a branch that does
- * not exist. Carries the branch name; the message matches the
- * plain-Error throws it replaces, with an opt-in creation hint.
- */
-export class UnknownBranchError extends Error {
-  override readonly name = 'UnknownBranchError'
-  readonly branch: string
-
-  constructor(branch: string, createHint = false) {
-    super(
-      createHint
-        ? `Branch '${branch}' does not exist (open with create: true to create it)`
-        : `Branch '${branch}' does not exist`,
-    )
-    this.branch = branch
-  }
-}
+export {
+  BranchExistsError,
+  ConcurrencyError,
+  CorruptHeadError,
+  KvgitError,
+  MergeConflict,
+  StorageVersionError,
+  TagExistsError,
+  UnknownBranchError,
+  UnknownCommitError,
+  UnknownTagError,
+} from './errors'
 
 // ---------------------------------------------------------------------------
 // KV store

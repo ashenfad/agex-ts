@@ -373,9 +373,9 @@ async function run(msg: RunMessage): Promise<void> {
     const modules: Record<string, Record<string, unknown>> = {}
     for (const m of msg.modules) {
       const body = new AsyncFunction('__exports', '__modules', '__registered', '__load', m.body)
-      const exports: Record<string, unknown> = {}
-      await body(exports, modules, registered, loader)
-      modules[m.path] = exports
+      // A body returns its exports object (another spelling of a
+      // module returns that module's).
+      modules[m.path] = (await body({}, modules, registered, loader)) as Record<string, unknown>
     }
     const names = [...Object.keys(bindings), '__modules', '__load']
     const values = [...Object.values(bindings), modules, loader]

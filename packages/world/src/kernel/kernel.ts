@@ -122,9 +122,7 @@ export class Kernel {
 
     const runId = this.#nextRun++
     const timeout = this.#settings.timeout ?? DEFAULT_TIMEOUT
-    const stdout: string[] = []
-    const stderr: string[] = []
-    const images: Image[] = []
+    const output = new Collected(ctx.settings.maxObservation ?? DEFAULT_MAX_OBSERVATION)
     const answering = new Set<Promise<void>>()
 
     return new Promise<KernelOutput>((resolve) => {
@@ -138,9 +136,16 @@ export class Kernel {
         this.#stop = null
         // The calls the host already took land before the run ends.
         void Promise.allSettled([...answering]).then(() =>
-          resolve(
-            finish({ stdout: stdout.join('\n'), stderr: stderr.join('\n'), images, value, error }),
-          ),
+          resolve({
+            ...finish({
+              stdout: output.text('stdout'),
+              stderr: output.text('stderr'),
+              images: output.images,
+              value,
+              error,
+            }),
+            ...(output.truncated && { truncated: true }),
+          }),
         )
       }
       const stop = (error: SerializedError): void => {
@@ -151,9 +156,7 @@ export class Kernel {
       const offMessage = worker.addMessageListener((msg: Worker2Host) => {
         if (msg?.type === 'ready' || msg.runId !== runId || ended) return
         if (msg.type === 'output') {
-          const part = msg.part
-          if (part.type === 'image') images.push({ format: part.format, data: part.data })
-          else (part.stream === 'stdout' ? stdout : stderr).push(part.text)
+          output.add(msg.part)
         } else if (msg.type === 'call') {
           const answer = this.#answer(worker, msg, ctx)
           // A stopped run waits for the file and cache calls already
@@ -343,6 +346,53 @@ function cancelled(message: string): Error {
   const e = new Error(message)
   e.name = 'CancelledError'
   return e
+}
+
+/** The most images a run keeps; more set `truncated`. */
+export const MAX_IMAGES = 16
+
+/**
+ * A run's output as it arrives, kept within bounds as it comes: past
+ * `limit` characters a stream keeps nothing more, and past
+ * {@link MAX_IMAGES} no more images, so code printing without end
+ * can't fill the host's memory before the run is stopped.
+ */
+class Collected {
+  readonly images: Image[] = []
+  truncated = false
+  readonly #limit: number
+  readonly #streams = {
+    stdout: { parts: [] as string[], size: 0 },
+    stderr: { parts: [] as string[], size: 0 },
+  }
+
+  constructor(limit: number) {
+    this.#limit = limit
+  }
+
+  add(part: Extract<Worker2Host, { type: 'output' }>['part']): void {
+    if (part.type === 'image') {
+      if (this.images.length < MAX_IMAGES)
+        this.images.push({ format: part.format, data: part.data })
+      else this.truncated = true
+      return
+    }
+    const stream = this.#streams[part.stream]
+    // Parts are joined by newlines, which count too.
+    const room = this.#limit - stream.size - (stream.parts.length > 0 ? 1 : 0)
+    if (room < part.text.length) {
+      this.truncated = true
+      if (room > 0) stream.parts.push(part.text.slice(0, room))
+      stream.size = this.#limit
+      return
+    }
+    stream.parts.push(part.text)
+    stream.size += part.text.length + (stream.parts.length > 1 ? 1 : 0)
+  }
+
+  text(stream: 'stdout' | 'stderr'): string {
+    return this.#streams[stream].parts.join('\n')
+  }
 }
 
 function headCut(text: string, limit: number): [string, boolean] {

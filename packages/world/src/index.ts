@@ -47,4 +47,4 @@ export {
   withCall,
 } from './profile'
 export type { Image, SerializedError } from './kernel/messages'
-export { DEFAULT_MAX_OBSERVATION, DEFAULT_TIMEOUT } from './kernel/kernel'
+export { DEFAULT_MAX_OBSERVATION, DEFAULT_TIMEOUT, MAX_IMAGES } from './kernel/kernel'

@@ -95,7 +95,9 @@ const result = await ws.runCode(`
   as in nontainer: each run gets a fresh scope.
 - **Imports:** the world's own modules by path (relative to the working
   directory, or absolute), `'host'`, URLs, and bare names the profile's
-  `resolve` maps to URLs (``(name) => `https://esm.sh/${name}` ``).
+  `resolve` maps to URLs (``(name) => `https://esm.sh/${name}` ``). A
+  module reaches the host objects through `import { db } from 'host'`;
+  only the code run has them as bare names.
 - **Stopping:** a run longer than the profile's timeout (30 seconds by
   default) is stopped with a `TimeoutError`, and `ws.interrupt()` stops
   one with a `CancelledError`. Either way the worker is terminated, what

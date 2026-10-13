@@ -10,6 +10,7 @@ import { beforeAll, describe, expect, it } from 'vitest'
 import {
   type CodeSettings,
   InvalidNameError,
+  MAX_IMAGES,
   type Profile,
   ReadOnlyError,
   Store,
@@ -128,6 +129,31 @@ describe('running code', () => {
     `)
     expect(out.images).toEqual([{ format: 'png', data: Buffer.from(png).toString('base64') }])
     expect(out.stdout).toBe('see\nxxxxxx')
+    expect(out.truncated).toBe(true)
+    await ws.close()
+  })
+})
+
+describe('bounded output', () => {
+  it('keeps no more than maxObservation of a stream while code prints', async () => {
+    const ws = await open({ code: { maxObservation: 5000 } })
+    const out = await ws.runCode(`
+      for (let i = 0; i < 2000; i++) console.log('x'.repeat(1000))
+      console.error('e')
+    `)
+    expect(out.stdout.length).toBe(5000)
+    expect(out.stderr).toBe('e')
+    expect(out.truncated).toBe(true)
+    await ws.close()
+  })
+
+  it('keeps a bounded number of images', async () => {
+    const png = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]
+    const ws = await open()
+    const out = await ws.runCode(
+      `for (let i = 0; i < 40; i++) console.log(new Uint8Array(${JSON.stringify(png)}))`,
+    )
+    expect(out.images).toHaveLength(MAX_IMAGES)
     expect(out.truncated).toBe(true)
     await ws.close()
   })
@@ -299,6 +325,65 @@ describe('imports', () => {
     `)
     expect(out.error).toBeNull()
     expect(out.value).toBe('["lib",8,10]')
+    await ws.close()
+  })
+
+  it('exports under another name', async () => {
+    const ws = await open()
+    await ws.files.write('alias.ts', 'const x = 1\nconst w = 2\nexport { x as y, w }\n')
+    const out = await ws.runCode(`import { y, w } from './alias'; return [y, w]`)
+    expect(out.error).toBeNull()
+    expect(out.value).toBe('[1,2]')
+    await ws.close()
+  })
+
+  it('re-exports from the host, packages and URLs', async () => {
+    const pkg = `data:text/javascript,${encodeURIComponent('export const hi = () => "hi"; export const bye = () => "bye"')}`
+    const ws = await open({
+      hostObjects: { counter: { add: (n: number) => n + 1 } },
+      code: { resolve: (name) => (name === 'greet' ? pkg : null) },
+    })
+    await ws.files.write(
+      'barrel.ts',
+      `export { counter } from 'host'\nexport { hi as hello } from 'greet'\nexport * as all from '${pkg}'\nexport * from 'greet'\n`,
+    )
+    const out = await ws.runCode(`
+      import { counter, hello, all, bye } from './barrel.ts'
+      return [await counter.add(1), hello(), all.bye(), bye()]
+    `)
+    expect(out.error).toBeNull()
+    expect(out.value).toBe('[2,"hi","bye","bye"]')
+    await ws.close()
+  })
+
+  it('evaluates a module once, however its imports spell it', async () => {
+    let loads = 0
+    const ws = await open({ hostObjects: { tally: { hit: () => ++loads } } })
+    await ws.files.write(
+      'dep.ts',
+      "import { tally } from 'host'\nexport const n = await tally.hit()\n",
+    )
+    await ws.files.write('user.ts', "export { n } from './dep'\n")
+    const out = await ws.runCode(`
+      import * as a from './dep.ts'
+      import * as b from './dep'
+      import { n } from './user'
+      return [a === b, a.n, n]
+    `)
+    expect(out.error).toBeNull()
+    expect(out.value).toBe('[true,1,1]')
+    expect(loads).toBe(1)
+    await ws.close()
+  })
+
+  it('reads imports that share a line with code', async () => {
+    const ws = await open()
+    await ws.files.write('m.ts', 'export const x = 3\nexport const y = 4\n')
+    const out = await ws.runCode(
+      "import { x } from './m'; import { y } from './m.ts'; return x * y",
+    )
+    expect(out.error).toBeNull()
+    expect(out.value).toBe('12')
     await ws.close()
   })
 

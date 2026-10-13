@@ -11,6 +11,7 @@
 
 import type { CommitInfo } from '@agex-ts/kvgit'
 import { Memory } from '@agex-ts/kvgit/backends/memory'
+import type { Inbox } from '../inbox'
 import { Store } from '../store'
 import type { TurnEvent } from '../turns'
 import type { Workspace } from '../workspace'
@@ -25,11 +26,18 @@ export interface RunView {
 }
 
 export interface HarnessSession {
+  /** The session's inbox: a scenario queues notes in it, and its
+   *  pending and delivered notes are checked at the end. */
+  readonly inbox: Inbox
   /** Run a turn on `prompt`; its events, `RunStarted` first and
    *  `RunEnded` last. */
   turn(prompt: string): Promise<TurnEvent[]>
   /** Continue the last turn's interrupted run in place. */
   resume(): Promise<TurnEvent[]>
+  /** Run a WOKEN turn: one with no prompt, which opens with what is
+   *  waiting to be delivered (`turn.opening()`). Needed with
+   *  `delegation`. */
+  wake?(): Promise<TurnEvent[]>
   /** Stop the run in progress. Called from inside a model call. */
   cancel(): void
   /** The stored conversation's runs, oldest first, read from the
@@ -37,8 +45,6 @@ export interface HarnessSession {
   runs(): Promise<RunView[]>
   /** The run statuses a commit's info records. */
   runStatuses(info: CommitInfo | null): string[]
-  /** Pending and delivered inbox notes, for a harness with an inbox. */
-  inbox?(): { pending: number; delivered: number }
   close(): Promise<void>
 }
 
@@ -141,6 +147,7 @@ export async function runScenario(
   let session = await harness.open(ws, clock)
   clock.onEvent((event) => {
     if (event.what === 'cancel') session.cancel()
+    else if (event.what === 'queue_note') session.inbox.put(event.text)
     else throw new Error(`the runner can't deliver a ${event.what} event yet`)
   })
 
@@ -180,7 +187,10 @@ export async function runScenario(
       files,
       runs: await session.runs(),
       commits: commits.reverse(),
-      inbox: session.inbox?.() ?? { pending: 0, delivered: 0 },
+      inbox: {
+        pending: session.inbox.pending().length,
+        delivered: session.inbox.delivered().length,
+      },
       exhausted: clock.exhausted,
     }
   } finally {

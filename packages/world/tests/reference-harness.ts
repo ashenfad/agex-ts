@@ -3,15 +3,25 @@
  * the contract and nothing else, after nontainer's reference harness.
  *
  * Each run is a turn (`ws.turn`) that plays the clock's replies, calls
- * the world's own tools (each commits), and ends by handing the turn
- * its body: the messages, with a closing note when the run was
- * cancelled or failed. A provider failure ends the run interrupted, and
- * `resume` continues it in place under the same id.
+ * the world's own tools (each commits), delivers the inbox's notes on
+ * each tool result (`turn.deliver`), and ends by handing the turn its
+ * body: the messages, with a closing note when the run was cancelled
+ * or failed. A provider failure ends the run interrupted, and `resume`
+ * continues it in place under the same id.
  */
 
 import type { CommitInfo } from '@agex-ts/kvgit'
 import type { Clock, Harness, HarnessSession, RunView } from '../src/conformance/index'
-import { type RunStatus, type Tool, type TurnEvent, type Workspace, worldTools } from '../src/index'
+import {
+  Inbox,
+  type RunStatus,
+  type Tool,
+  type Turn,
+  type TurnEvent,
+  type Workspace,
+  deliveredNote,
+  worldTools,
+} from '../src/index'
 
 interface Message {
   readonly role: 'user' | 'assistant' | 'tool' | 'note'
@@ -21,6 +31,7 @@ interface Message {
 const HARNESS = 'reference'
 
 class ReferenceSession implements HarnessSession {
+  readonly inbox = new Inbox()
   readonly #ws: Workspace
   readonly #clock: Clock
   readonly #tools: Map<string, Tool>
@@ -34,15 +45,25 @@ class ReferenceSession implements HarnessSession {
   }
 
   async turn(prompt: string): Promise<TurnEvent[]> {
-    const turn = await this.#ws.turn(crypto.randomUUID(), { harness: HARNESS })
+    const turn = await this.#begin()
     return this.#run(turn, [{ role: 'user', text: prompt }])
+  }
+
+  /** A woken turn: it opens with what is waiting to be delivered. */
+  async wake(): Promise<TurnEvent[]> {
+    const turn = await this.#begin()
+    return this.#run(turn, [{ role: 'user', text: (await turn.opening()) ?? '' }])
+  }
+
+  #begin(): Promise<Turn> {
+    return this.#ws.turn(crypto.randomUUID(), { harness: HARNESS, inbox: this.inbox })
   }
 
   async resume(): Promise<TurnEvent[]> {
     const runId = this.#interrupted
     if (runId === null) throw new Error('no interrupted run to resume')
     const body = (await this.#ws.conversation.runs([runId])).get(runId) as { messages: Message[] }
-    const turn = await this.#ws.turn(runId, { resume: true, harness: HARNESS })
+    const turn = await this.#ws.turn(runId, { resume: true, harness: HARNESS, inbox: this.inbox })
     return this.#run(turn, [...body.messages])
   }
 
@@ -67,10 +88,7 @@ class ReferenceSession implements HarnessSession {
 
   async close(): Promise<void> {}
 
-  async #run(
-    turn: Awaited<ReturnType<Workspace['turn']>>,
-    messages: Message[],
-  ): Promise<TurnEvent[]> {
+  async #run(turn: Turn, messages: Message[]): Promise<TurnEvent[]> {
     const runId = turn.runId as string
     const events: TurnEvent[] = [{ kind: 'RunStarted', runId }]
     this.#cancelled = false
@@ -103,7 +121,9 @@ class ReferenceSession implements HarnessSession {
           tool === undefined
             ? { text: `no tool named ${call.name}`, isError: true }
             : await tool.call(call.args)
-        messages.push({ role: 'tool', text: out.text })
+        const { text, notes } = await turn.deliver(out.text)
+        if (notes.length > 0) events.push({ kind: 'Delivered', notes: notes.map(deliveredNote) })
+        messages.push({ role: 'tool', text })
         events.push({
           kind: 'ToolEnded',
           callId,

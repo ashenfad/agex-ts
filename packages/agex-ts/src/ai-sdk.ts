@@ -466,9 +466,9 @@ function usageOf(usage: LanguageModelV4Usage): Usage {
 // Errors
 // ---------------------------------------------------------------------------
 
+/** A cancel. A timeout is not one: it says the provider was slow. */
 function isAbort(error: unknown): boolean {
-  const name = (error as { name?: unknown } | null)?.name
-  return name === 'AbortError' || name === 'TimeoutError'
+  return (error as { name?: unknown } | null)?.name === 'AbortError'
 }
 
 /** Whether an error, or one that caused it, says the provider couldn't
@@ -479,6 +479,7 @@ function unreachable(error: unknown): boolean {
   while (typeof current === 'object' && current !== null && !seen.has(current)) {
     seen.add(current)
     const { name, message, code } = current as { name?: unknown; message?: unknown; code?: unknown }
+    if (name === 'TimeoutError') return true
     if (
       name === 'TypeError' &&
       typeof message === 'string' &&

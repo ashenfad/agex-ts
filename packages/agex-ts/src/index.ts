@@ -38,3 +38,21 @@ export {
   toolSpec,
 } from './provider'
 export { SCRIPTED, ScriptOverloaded, ScriptedProvider, texts } from './scripted'
+export {
+  Agent,
+  type AgentOptions,
+  CLOSING_NOTE,
+  HARNESS,
+  MAX_STEPS,
+  type Outcome,
+  RunStream,
+  STOPPED,
+  Session,
+  type SessionOptions,
+  type Status,
+  WOKEN,
+  closingNote,
+  cutOff,
+  limitReached,
+  unanswered,
+} from './agent'

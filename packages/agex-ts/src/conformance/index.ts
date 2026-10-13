@@ -5,3 +5,4 @@
 
 export { AGEX_COMMIT, CODE_SCENARIOS, TASK_SCENARIOS } from './corpus/index'
 export * from './shape'
+export { AgexHarnessSession, agexHarness } from './harness'

@@ -691,6 +691,12 @@ arrays don't apply to agex-ts yet.
 `AgexHarness` (a port of agex's `conformance/harness.py`) on the
 world's runner.
 
+Done 2026-10-13: every scenario of tiers 0 to 3 passes on `agexHarness`
+(`agex-ts/conformance`). A stop races the model call and the tool call
+in flight (each takes the turn's abort signal), and a call cut off is
+interrupted until it lets go of the workspace. `vision` is off unless
+the embedder turns it on, as in Python.
+
 **A3. Real providers.**
 - **One adapter for any AI SDK model:** `new Agent({ model })` takes a
   `LanguageModelV4` (what `createAnthropic(...)('claude-...')` returns)

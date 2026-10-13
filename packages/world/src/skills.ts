@@ -8,20 +8,23 @@
  *   skill's name and description, and `toolInstructions` carries it.
  * - **Access** needs no tool of its own: the shell and code read skill
  *   files like any other.
- * - **Installed** skills ({@link installSkill}) are ordinary workspace
- *   files: they version, fork and rewind with the rest, and an agent may
- *   improve them.
- * - **Mounted** skills (the profile's `skills`) are the embedder's and
- *   never the agent's to change: each is mounted read-only at
- *   `<root>/skills/<name>`, beside the installed ones, on every open of
- *   a session and its forks. Not being files of the session, ws-git never
- *   sees them and no commit carries them. An agent that wants to adapt
- *   one copies it under a new name.
+ * - **The embedder's skills are mounted** (the profile's `skills`): each
+ *   read-only at `<root>/skills/<name>`, on every open of a session and
+ *   its forks. Not being files of the session, ws-git never sees them and
+ *   no commit carries them.
+ * - **An agent's own skills are files it writes** there, beside the
+ *   mounted ones: they version, fork and rewind with the rest, and ws-git
+ *   counts them as its work. An agent that wants to adapt a mounted one
+ *   copies it under a new name.
+ *
+ * There is no installing: nontainer's `install` copies a skill a granted
+ * Python package ships, which has no counterpart here, and a copy the
+ * framework commits would read in ws-git as work the agent never did.
  */
 
 import type { FileSystem } from '@agex-ts/termish'
 import { MemoryFS } from '@agex-ts/termish/fs/memory'
-import { InvalidNameError, WorldError } from './errors'
+import { InvalidNameError } from './errors'
 import { dirname } from './path'
 import type { Workspace } from './workspace'
 
@@ -97,8 +100,8 @@ function filesOf(source: SkillSource): Map<string, Uint8Array> {
   return files
 }
 
-/** What a skill is called once installed or mounted: its frontmatter
- *  name, else the name it was given. */
+/** What a skill is called once mounted: its frontmatter name, else the
+ *  name it was given. */
 export function skillName(source: SkillSource): string {
   const files = filesOf(source)
   const given = typeof source === 'string' ? undefined : source.name
@@ -119,34 +122,7 @@ export async function skillFS(source: SkillSource): Promise<FileSystem> {
 }
 
 /**
- * Install a skill into the workspace at `<root>/skills/<name>/`; its
- * name. Installing again overwrites. The files are committed
- * (`{tool: 'skill', skill}`), as the framework writing at a moment it
- * chose: an agent's ws-git measures from its own last commit, so a
- * composition in flight reads as before.
- *
- * @throws WorldError for a name the profile mounts.
- */
-export async function installSkill(ws: Workspace, source: SkillSource): Promise<string> {
-  const files = filesOf(source)
-  const name = skillName(source)
-  const root = skillsRoot(ws)
-  if (ws.mountedSkills.includes(name)) {
-    throw new WorldError(
-      `skill '${name}' is mounted read-only at ${root}/${name}; install this one under another name`,
-    )
-  }
-  for (const [rel, content] of files) {
-    const path = `${root}/${name}/${rel}`
-    await ws.files.fs.mkdir(dirname(path), { parents: true, existOk: true })
-    await ws.files.fs.write(path, content)
-  }
-  if (ws.uncommitted) await ws.commit({ tool: 'skill', skill: name })
-  return name
-}
-
-/**
- * The discovery primer: one line per skill (installed or mounted), for
+ * The discovery primer: one line per skill (mounted, or the agent's), for
  * the tool text; empty when there are none. A broken skills directory
  * never blocks a session: it reads as no skills.
  */

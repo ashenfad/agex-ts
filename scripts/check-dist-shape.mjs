@@ -41,28 +41,13 @@ const FORBIDDEN = [
 const ALLOWLIST = {
   'kvgit-ts': ['dist/backends/sqlite.js'],
   'termish-ts': ['dist/fs/real.js'],
-  // The Node `worker_threads` worker entry. Selected only by
-  // `workerRuntime({ target: 'node' })`; the browser graph reaches
-  // `dist/worker.js` (via the `./worker` export / runtime URL), never
-  // this file, so its `node:worker_threads` import can't leak browser-side.
-  'agex-runtime-worker': ['dist/worker.node.js'],
   // The world's Node kernel worker, reached only on the Node target.
   world: ['dist/worker.node.js'],
 }
 
 // Packages to scan. Anything not listed is skipped (e.g. the monorepo
 // root, examples).
-const PACKAGES = [
-  'agex-ts',
-  'kvgit-ts',
-  'termish-ts',
-  'agex-anthropic',
-  'agex-openai',
-  'agex-gemini',
-  'agex-runtime-worker',
-  'agex-git',
-  'world',
-]
+const PACKAGES = ['agex-ts', 'kvgit-ts', 'termish-ts', 'world']
 
 async function* walkJsFiles(dir) {
   for (const entry of await readdir(dir, { withFileTypes: true })) {

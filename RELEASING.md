@@ -98,14 +98,13 @@ On `v*` tag push (or manual dispatch from the Actions UI):
 1. Checks out the tagged commit on a clean Ubuntu runner.
 2. Runs `pnpm install --frozen-lockfile`, `pnpm build`, `pnpm check:dist`, `pnpm lint`, `pnpm typecheck`, `pnpm test`. Any failure aborts before publishing.
 3. Runs `pnpm publish -r --provenance --no-git-checks`. The `--provenance` flag triggers the OIDC handshake: GitHub Actions issues a short-lived JWT, npm verifies it against each package's Trusted Publisher config, and the published tarball is attested via Sigstore.
-4. pnpm publishes in topological order (`@agex-ts/kvgit` → `@agex-ts/termish` → `agex-ts` → providers) and skips any package whose current version is already on the registry — so partial-publish recovery is safe (re-running the workflow only ships what's actually new).
+4. pnpm publishes in topological order (`@agex-ts/kvgit` → `@agex-ts/termish` → `@agex-ts/world` → `agex-ts`) and skips any package whose current version is already on the registry — so partial-publish recovery is safe (re-running the workflow only ships what's actually new).
 
 ## What does *not* need a changeset
 
 - Documentation-only changes (READMEs, `docs/`)
 - CI / tooling changes that don't affect package consumers
 - Internal refactors that don't change any package's public surface
-- Changes to `examples/` (they're private, not published)
 
 If unsure, add one — `patch` with a short description is fine.
 

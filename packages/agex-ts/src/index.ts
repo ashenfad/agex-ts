@@ -1,39 +1,40 @@
-// Public surface — the lean default entry: Agent + createAgent + types.
-//
-// Heavier surfaces live behind sub-path imports so unused code paths
-// tree-shake cleanly:
-//
-//   - `agex-ts/types`        — contracts only, no runtime code
-//   - `agex-ts/state`        — Live / KvgitState / connectState / backend types
-//   - `agex-ts/llm-dummy`    — Dummy LLM client for tests
-//   - `agex-ts/runtime-eval` — same-realm eval RuntimeAdapter
-//
-// Production runtime (`@agex-ts/runtime-worker`) and provider clients
-// (`@agex-ts/anthropic` etc.) ship as separate packages.
+/**
+ * agex-ts: an agent loop over `@agex-ts/world`, matching agex's meaning.
+ * Rebuilt on the `rebuild` branch, step by step (see the repo's
+ * plan.md): this holds the run record and the provider protocol so far.
+ */
 
 export {
-  Agent,
-  type AgentOptions,
-  type ClsRegistration,
-  createAgent,
-  type FnRegistration,
-  type NsRegistration,
-  type ReconfigurableOptions,
-  type SkillRegistration,
-  type TerminalRegistration,
-  type UrlSpec,
-} from './agent'
-export { shouldTriggerChaptering } from './chaptering'
+  type Details,
+  FORMAT,
+  type Image,
+  type Message,
+  NO_USAGE,
+  type Part,
+  RecordError,
+  type Role,
+  type Run,
+  type Text,
+  type Thinking,
+  type ToolCall,
+  type ToolResult,
+  type Usage,
+  addUsage,
+  dumpRun,
+  loadRun,
+  messageText,
+  newId,
+  runUsage,
+} from './record'
 export {
-  AgentError,
-  CancelledError,
-  FatalError,
-  RegistrationError,
-  SchemaError,
-  TaskFailError,
-  TransientError,
-  isTaskControlError,
-} from './errors'
-export { prettyEvents, prettyTokens } from './pretty'
-export type { TaskDefinition } from './task'
-export * from './types'
+  type Effort,
+  type Provider,
+  type ProviderEvent,
+  type Reply,
+  type Settings,
+  type StreamOptions,
+  type ToolSpec,
+  aborted,
+  toolSpec,
+} from './provider'
+export { SCRIPTED, ScriptOverloaded, ScriptedProvider, texts } from './scripted'

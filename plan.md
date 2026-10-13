@@ -669,6 +669,13 @@ five routes this way, a tool call's round trip included.
 - **The shape corpus** is vendored as the harness corpus is: a sync
   script copies agex's `conformance/json` and records the commit.
 
+Done 2026-10-13 (agex-ts PR "A1"): the five sibling packages, the
+examples and the previous docs are gone; the record's field names are
+the world's camelCase, its part `kind`s Python's (`tool_call`), its
+times milliseconds. The shape corpus is synced from agex daeb5fe: 18
+task and 10 code scenarios, of which the three needing tables or
+arrays don't apply to agex-ts yet.
+
 **A2. The session loop.** `agent.session(ws)` runs each turn on
 `ws.turn`:
 - **Tools:** `worldTools`, plus the embedder's own (one named like a

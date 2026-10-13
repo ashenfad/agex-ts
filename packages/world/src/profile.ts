@@ -5,10 +5,12 @@
  * forks.
  */
 
+import type { CommandHandler } from '@agex-ts/termish'
 import { InvalidNameError } from './errors'
 import type { Workspace } from './workspace'
 
 const FACTORY = Symbol('world.hostFactory')
+const COMMAND = Symbol('world.commandFactory')
 const WANTS_CALL = Symbol('world.withCall')
 
 /** A host object made per world: `factory(ws)` runs as each workspace
@@ -98,6 +100,38 @@ export interface CodeSettings {
   readonly worker?: { readonly target?: 'auto' | 'browser' | 'node'; readonly url?: string | URL }
 }
 
+/** What a host command made per world knows about it. */
+export interface CommandWorld {
+  readonly ws: Workspace
+  /** The profile's secrets, which only host commands ever see. */
+  readonly secrets: Readonly<Record<string, string>>
+}
+
+/** A terminal command made per world, with a line for the terminal
+ *  tool's description. */
+export interface CommandFactory {
+  readonly [COMMAND]: (world: CommandWorld) => CommandHandler
+  readonly description?: string
+}
+
+/**
+ * Make a terminal command per world: `make({ws, secrets})` runs as each
+ * workspace opens, forks included. A command that uses secrets is made
+ * this way, since nothing else carries them.
+ */
+export function commandFactory(
+  make: (world: CommandWorld) => CommandHandler,
+  opts: { description?: string } = {},
+): CommandFactory {
+  return {
+    [COMMAND]: make,
+    ...(opts.description !== undefined && { description: opts.description }),
+  }
+}
+
+/** A terminal command: a termish handler, or a {@link commandFactory}. */
+export type HostCommand = CommandHandler | CommandFactory
+
 export interface Profile {
   /** Objects code can call, by name. Each is a binding of its own and
    *  a member of `host` (`import { db } from 'host'`). */
@@ -113,6 +147,9 @@ export interface Profile {
    * request that needs one.
    */
   readonly secrets?: Readonly<Record<string, string>>
+  /** Terminal commands, by name, beside termish's own (a name of
+   *  theirs replaces it). */
+  readonly commands?: Readonly<Record<string, HostCommand>>
   readonly code?: CodeSettings
 }
 
@@ -153,7 +190,57 @@ export function checkProfile(profile: Profile): Profile {
       if (typeof value !== 'string') throw new TypeError(`${kind} ${name}: a value is a string`)
     }
   }
+  for (const name of Object.keys(profile.variables ?? {})) {
+    if (profile.secrets !== undefined && name in profile.secrets) {
+      throw new InvalidNameError(`${name} is both a variable and a secret`)
+    }
+  }
+  for (const [name, command] of Object.entries(profile.commands ?? {})) {
+    if (!/^[A-Za-z0-9_][A-Za-z0-9_.+-]*$/.test(name)) {
+      throw new InvalidNameError(
+        `command ${JSON.stringify(name)}: a name is letters, digits and _ . + -`,
+      )
+    }
+    if (
+      typeof command !== 'function' &&
+      (command as Partial<CommandFactory>)[COMMAND] === undefined
+    ) {
+      throw new TypeError(`command ${name}: a handler or a commandFactory`)
+    }
+  }
   return profile
+}
+
+/** The terminal commands of a profile for one workspace, factories
+ *  made. */
+export function makeCommands(profile: Profile, ws: Workspace): Map<string, CommandHandler> {
+  const world: CommandWorld = { ws, secrets: profile.secrets ?? {} }
+  const out = new Map<string, CommandHandler>()
+  for (const [name, command] of Object.entries(profile.commands ?? {})) {
+    out.set(name, typeof command === 'function' ? command : command[COMMAND](world))
+  }
+  return out
+}
+
+/** The description lines of a profile's commands, by name. */
+export function commandDescriptions(profile: Profile): Map<string, string | undefined> {
+  const out = new Map<string, string | undefined>()
+  for (const [name, command] of Object.entries(profile.commands ?? {})) {
+    out.set(name, typeof command === 'function' ? undefined : command.description)
+  }
+  return out
+}
+
+/**
+ * The shell's variables for one call: the profile's variables, and each
+ * secret as a reference to itself (`$TOKEN` expands to `${TOKEN}`), so
+ * a command that takes secrets can find and fill it, and nothing else
+ * ever sees its value.
+ */
+export function shellEnv(profile: Profile): Record<string, string> {
+  const env: Record<string, string> = { ...profile.variables }
+  for (const name of Object.keys(profile.secrets ?? {})) env[name] = `\${${name}}`
+  return env
 }
 
 /** The host objects of a profile for one workspace, factories made. */

@@ -1,0 +1,259 @@
+{
+  "cases": [
+    {
+      "name": "exact once",
+      "content": "def f(x):\n    if x:\n        return 1\n    return 2\n\n\ndef g():\n    pass\n",
+      "old": "return 2",
+      "new": "return 3",
+      "replace_all": false,
+      "result": {
+        "content": "def f(x):\n    if x:\n        return 1\n    return 3\n\n\ndef g():\n    pass\n",
+        "count": 1,
+        "mode": "exact"
+      }
+    },
+    {
+      "name": "exact, ambiguous",
+      "content": "a\na\n",
+      "old": "a",
+      "new": "b",
+      "replace_all": false,
+      "error": "old_string appears 2 times in f.py; include more surrounding context to make it unique, or pass replace_all"
+    },
+    {
+      "name": "exact, replace_all",
+      "content": "a\na\nb\n",
+      "old": "a",
+      "new": "c",
+      "replace_all": true,
+      "result": {
+        "content": "c\nc\nb\n",
+        "count": 2,
+        "mode": "exact"
+      }
+    },
+    {
+      "name": "replacement kept literal",
+      "content": "x = 1\n",
+      "old": "x = 1",
+      "new": "x = r'\\1 $& \\\\'",
+      "replace_all": false,
+      "result": {
+        "content": "x = r'\\1 $& \\\\'\n",
+        "count": 1,
+        "mode": "exact"
+      }
+    },
+    {
+      "name": "trailing whitespace in the file",
+      "content": "one  \ntwo\t\nthree\n",
+      "old": "one\ntwo",
+      "new": "ONE\nTWO",
+      "replace_all": false,
+      "result": {
+        "content": "ONE\nTWO\nthree\n",
+        "count": 1,
+        "mode": "trailing_ws"
+      }
+    },
+    {
+      "name": "trailing whitespace, ambiguous",
+      "content": "a \nb\na  \nb\n",
+      "old": "a\nb",
+      "new": "c",
+      "replace_all": false,
+      "error": "old_string matches 2 places in f.py (ignoring trailing whitespace); add context or replace_all"
+    },
+    {
+      "name": "trailing whitespace, replace_all",
+      "content": "a \nb\na  \nb\n",
+      "old": "a\nb",
+      "new": "c",
+      "replace_all": true,
+      "result": {
+        "content": "c\nc\n",
+        "count": 2,
+        "mode": "trailing_ws"
+      }
+    },
+    {
+      "name": "indent: quote dedented",
+      "content": "def f(x):\n    if x:\n        return 1\n    return 2\n\n\ndef g():\n    pass\n",
+      "old": "if x:\n    return 1",
+      "new": "if x:\n    return 10\n# done",
+      "replace_all": false,
+      "result": {
+        "content": "def f(x):\n    if x:\n        return 10\n    # done\n    return 2\n\n\ndef g():\n    pass\n",
+        "count": 1,
+        "mode": "indent_flexible"
+      }
+    },
+    {
+      "name": "indent: quote over-indented",
+      "content": "def f(x):\n    if x:\n        return 1\n    return 2\n\n\ndef g():\n    pass\n",
+      "old": "        if x:\n            return 1",
+      "new": "        if not x:\n            return 0",
+      "replace_all": false,
+      "result": {
+        "content": "def f(x):\n    if not x:\n        return 0\n    return 2\n\n\ndef g():\n    pass\n",
+        "count": 1,
+        "mode": "indent_flexible"
+      }
+    },
+    {
+      "name": "indent: tabs in the file",
+      "content": "class A:\n\tdef m(self):\n\t\tif ok:\n\t\t\trun()\n\t\treturn 1\n",
+      "old": "if ok:\n    run()",
+      "new": "if ok:\n    run()\n    log()",
+      "replace_all": false,
+      "result": {
+        "content": "class A:\n\tdef m(self):\n\t\tif ok:\n\t\t\trun()\n\t\t\tlog()\n\t\treturn 1\n",
+        "count": 1,
+        "mode": "indent_flexible"
+      }
+    },
+    {
+      "name": "indent: first line indented on its own",
+      "content": "def f(x):\n    if x:\n        return 1\n    return 2\n\n\ndef g():\n    pass\n",
+      "old": "if x:\n            return 1\n        return 2",
+      "new": "if y:\n            return 1\n        return 2",
+      "replace_all": false,
+      "result": {
+        "content": "def f(x):\n    if y:\n        return 1\n    return 2\n\n\ndef g():\n    pass\n",
+        "count": 1,
+        "mode": "indent_flexible"
+      }
+    },
+    {
+      "name": "indent: insert above the head",
+      "content": "def f(x):\n    if x:\n        return 1\n    return 2\n\n\ndef g():\n    pass\n",
+      "old": "if x:\n            return 1\n        return 2",
+      "new": "print(x)\nif x:\n            return 1\n        return 2",
+      "replace_all": false,
+      "result": {
+        "content": "def f(x):\nprint(x)\n    if x:\n        return 1\n    return 2\n\n\ndef g():\n    pass\n",
+        "count": 1,
+        "mode": "indent_flexible"
+      }
+    },
+    {
+      "name": "indent: shifted unevenly is no match",
+      "content": "def f(x):\n    if x:\n        return 1\n    return 2\n\n\ndef g():\n    pass\n",
+      "old": "if x:\nreturn 1\n  return 2",
+      "new": "z",
+      "replace_all": false,
+      "error": "old_string not found in f.py.\n\nDid you mean to match these lines?\n     1 | def f(x):\n>    2 |     if x:\n>    3 |         return 1\n>    4 |     return 2\n     5 | \n     6 | \n     7 | def g():"
+    },
+    {
+      "name": "indent: ambiguous",
+      "content": "  a\n  b\n    a\n    b\n",
+      "old": "a\nb",
+      "new": "c\nd",
+      "replace_all": false,
+      "error": "old_string matches 2 places in f.py (at different indentation); add context or replace_all"
+    },
+    {
+      "name": "indent: replace_all",
+      "content": "  a\n  b\n    a\n    b\n",
+      "old": "a\nb",
+      "new": "c\nd",
+      "replace_all": true,
+      "result": {
+        "content": "  c\n  d\n    c\n    d\n",
+        "count": 2,
+        "mode": "indent_flexible"
+      }
+    },
+    {
+      "name": "indent: crlf file",
+      "content": "def f():\r\n    a = 1\r\n    b = 2\r\n",
+      "old": "a = 1\nb = 2",
+      "new": "a = 3\nb = 4",
+      "replace_all": false,
+      "result": {
+        "content": "def f():\r\n    a = 3\n    b = 4\n",
+        "count": 1,
+        "mode": "indent_flexible"
+      }
+    },
+    {
+      "name": "already applied",
+      "content": "def f(x):\n    if x:\n        return 1\n    return 2\n\n\ndef g():\n    pass\n",
+      "old": "return 99",
+      "new": "return 1",
+      "replace_all": false,
+      "result": {
+        "content": "def f(x):\n    if x:\n        return 1\n    return 2\n\n\ndef g():\n    pass\n",
+        "count": 0,
+        "mode": "already_applied"
+      }
+    },
+    {
+      "name": "not found, similar lines",
+      "content": "line 0: value = 0\nline 1: value = 7\nline 2: value = 14\nline 3: value = 21\nline 4: value = 28\nline 5: value = 35\nline 6: value = 42\nline 7: value = 49\nline 8: value = 56\nline 9: value = 63\nline 10: value = 70\nline 11: value = 77\nline 12: value = 84\nline 13: value = 91\nline 14: value = 98\nline 15: value = 105\nline 16: value = 112\nline 17: value = 119\nline 18: value = 126\nline 19: value = 133\nline 20: value = 140\nline 21: value = 147\nline 22: value = 154\nline 23: value = 161\nline 24: value = 168\nline 25: value = 175\nline 26: value = 182\nline 27: value = 189\nline 28: value = 196\nline 29: value = 203\nline 30: value = 210\nline 31: value = 217\nline 32: value = 224\nline 33: value = 231\nline 34: value = 238\nline 35: value = 245\nline 36: value = 252\nline 37: value = 259\nline 38: value = 266\nline 39: value = 273\n",
+      "old": "line 20: value = 141\nline 21: value = 148",
+      "new": "x",
+      "replace_all": false,
+      "error": "old_string not found in f.py.\n\nDid you mean to match these lines?\n    18 | line 17: value = 119\n    19 | line 18: value = 126\n    20 | line 19: value = 133\n>   21 | line 20: value = 140\n>   22 | line 21: value = 147\n    23 | line 22: value = 154\n    24 | line 23: value = 161\n    25 | line 24: value = 168"
+    },
+    {
+      "name": "not found, nothing similar",
+      "content": "def f(x):\n    if x:\n        return 1\n    return 2\n\n\ndef g():\n    pass\n",
+      "old": "completely unrelated text here",
+      "new": "qqqq",
+      "replace_all": false,
+      "error": "old_string not found in f.py.\n\nSearch was:\ncompletely unrelated text here"
+    },
+    {
+      "name": "not found, long search",
+      "content": "def f(x):\n    if x:\n        return 1\n    return 2\n\n\ndef g():\n    pass\n",
+      "old": "zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz ",
+      "new": "qqqq",
+      "replace_all": false,
+      "error": "old_string not found in f.py.\n\nSearch was:\nzzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz zzz ..."
+    },
+    {
+      "name": "identical strings",
+      "content": "def f(x):\n    if x:\n        return 1\n    return 2\n\n\ndef g():\n    pass\n",
+      "old": "return 2",
+      "new": "return 2",
+      "replace_all": false,
+      "error": "old_string and new_string are identical"
+    },
+    {
+      "name": "blank-only quote",
+      "content": "def f(x):\n    if x:\n        return 1\n    return 2\n\n\ndef g():\n    pass\n",
+      "old": "   \n  ",
+      "new": "x",
+      "replace_all": false,
+      "error": "old_string matches 8 places in f.py (ignoring trailing whitespace); add context or replace_all"
+    }
+  ],
+  "ratios": [
+    {
+      "a": "abcd",
+      "b": "bcde",
+      "ratio": 0.75
+    },
+    {
+      "a": "the quick brown fox",
+      "b": "the quick brown dog",
+      "ratio": 0.8947368421052632
+    },
+    {
+      "a": "",
+      "b": "abc",
+      "ratio": 0.0
+    },
+    {
+      "a": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxabc",
+      "b": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxabdyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy",
+      "ratio": 0.9201520912547528
+    },
+    {
+      "a": "def f(x):\n    return x",
+      "b": "def g(y):\n    return y + 1",
+      "ratio": 0.7916666666666666
+    }
+  ]
+}

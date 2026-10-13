@@ -99,7 +99,13 @@ export class Kernel {
     const finish = (out: Omit<KernelOutput, 'duration' | 'truncated'>): KernelOutput =>
       this.#render(out, started, ctx.settings.maxObservation ?? DEFAULT_MAX_OBSERVATION)
     const failed = (e: unknown) =>
-      finish({ stdout: '', stderr: '', images: [], value: null, error: serializeError(e) })
+      finish({
+        stdout: '',
+        stderr: '',
+        images: [],
+        value: null,
+        error: userStack(serializeError(e), 0),
+      })
 
     if (this.#closed) return failed(cancelled('the workspace closed'))
     if (this.#stop !== null) return failed(new Error('a run is already in progress'))
@@ -121,6 +127,7 @@ export class Kernel {
     if (this.#closed) return failed(cancelled('the workspace closed'))
 
     const runId = this.#nextRun++
+    const codeLines = prepared.code.split('\n').length
     const timeout = this.#settings.timeout ?? DEFAULT_TIMEOUT
     const output = new Collected(ctx.settings.maxObservation ?? DEFAULT_MAX_OBSERVATION)
     const answering = new Set<Promise<void>>()
@@ -167,7 +174,7 @@ export class Kernel {
             void answer.finally(() => answering.delete(answer))
           }
         } else if (msg.type === 'done') {
-          end(msg.value, msg.error)
+          end(msg.value, msg.error === null ? null : userStack(msg.error, codeLines))
         }
       })
       const offError = worker.addErrorListener((err) =>
@@ -346,6 +353,34 @@ function cancelled(message: string): Error {
   const e = new Error(message)
   e.name = 'CancelledError'
   return e
+}
+
+/** Lines the worker puts before the code (the function's header). */
+const HEADER_LINES = 2
+
+/**
+ * An error's stack reduced to the frames of the code and the world's
+ * modules, at their own line numbers: `at line 3` in the code run,
+ * `at boom (/workspace/lib.ts:2)` in a module. The worker's own frames
+ * are left out.
+ */
+export function userStack(error: SerializedError, codeLines: number): SerializedError {
+  if (error.stack === undefined) return error
+  const frames: string[] = []
+  for (const line of error.stack.split('\n').slice(1)) {
+    const code = /<anonymous>:(\d+):\d+\)?$/.exec(line)
+    if (code !== null) {
+      const at = Number(code[1]) - HEADER_LINES
+      if (at >= 1 && at <= codeLines) frames.push(`    at line ${at}`)
+      continue
+    }
+    const mod = /^\s*at (?:(\S+) \()?(\/[^():]*):(\d+):\d+\)?$/.exec(line)
+    if (mod !== null) {
+      const where = `${mod[2]}:${Number(mod[3]) - HEADER_LINES}`
+      frames.push(mod[1] === undefined ? `    at ${where}` : `    at ${mod[1]} (${where})`)
+    }
+  }
+  return { ...error, stack: [`${error.name}: ${error.message}`, ...frames].join('\n') }
 }
 
 /** The most images a run keeps; more set `truncated`. */

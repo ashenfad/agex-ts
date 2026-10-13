@@ -48,7 +48,7 @@ class Bridge {
   #nextId = 1
   readonly #pending = new Map<
     number,
-    { resolve: (v: unknown) => void; reject: (e: Error) => void }
+    { resolve: (v: unknown) => void; reject: (e: Error) => void; site: Error }
   >()
 
   constructor(readonly runId: number) {}
@@ -60,8 +60,11 @@ class Bridge {
     subject?: string,
   ): Promise<unknown> {
     const callId = this.#nextId++
+    // Where the code made the call: a failure answered later gets this
+    // stack, so it points at the code's line.
+    const site = new Error()
     const answer = new Promise<unknown>((resolve, reject) => {
-      this.#pending.set(callId, { resolve, reject })
+      this.#pending.set(callId, { resolve, reject, site })
       try {
         post({
           type: 'call',
@@ -94,6 +97,8 @@ class Bridge {
       const e = new Error(msg.error.message)
       e.name = msg.error.name
       if (msg.error.code !== undefined) Object.assign(e, { code: msg.error.code })
+      const frames = waiting.site.stack?.split('\n').slice(1) ?? []
+      e.stack = [`${e.name}: ${e.message}`, ...frames].join('\n')
       waiting.reject(e)
     }
   }

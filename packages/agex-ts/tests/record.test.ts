@@ -113,6 +113,21 @@ describe('the run record', () => {
       /\.messages\[0\]\.parts\[0\]\.kind: unknown part kind "video"/,
     )
     expect(() => loadRun([])).toThrow(/not an object/)
+    // a record missing its messages is truncated, not empty
+    const { messages: _, ...truncated } = run
+    expect(() => loadRun(truncated)).toThrow(/\.messages: not a list/)
+    const partless = { ...run, messages: [{ id: 'm', role: 'user' }] }
+    expect(() => loadRun(partless)).toThrow(/\.messages\[0\]\.parts: not a list/)
+    // a tool failure isn't turned into a success
+    const result = run.messages[2] as Message
+    const flagged = (isError: unknown) => ({
+      ...run,
+      messages: [{ ...result, parts: [{ ...result.parts[0], isError }] }],
+    })
+    expect(() => loadRun(flagged('true'))).toThrow(/\.isError: not a boolean/)
+    expect(() => loadRun(flagged(1))).toThrow(/not a boolean/)
+    const failed = loadRun(flagged(true)).messages[0]?.parts[0]
+    expect(failed?.kind === 'tool_result' && failed.isError).toBe(true)
   })
 
   it('reads a running run, with defaults for what an older one lacks', () => {

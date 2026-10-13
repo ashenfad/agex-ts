@@ -196,6 +196,8 @@ export function loadRun(data: unknown): Run {
     typeof v === 'number' && Number.isFinite(v) ? v : at(path, 'not a number')
   const optNum = (v: unknown, path: string): number | null =>
     v === undefined || v === null ? null : num(v, path)
+  const bool = (v: unknown, path: string): boolean =>
+    v === undefined || v === null ? false : typeof v === 'boolean' ? v : at(path, 'not a boolean')
   const arr = (v: unknown, path: string): unknown[] =>
     Array.isArray(v) ? v : at(path, 'not a list')
   const details = (v: unknown, path: string): Details | null =>
@@ -250,7 +252,7 @@ export function loadRun(data: unknown): Run {
           callId: str(p.callId, `${path}.callId`),
           name: str(p.name, `${path}.name`),
           content: str(p.content, `${path}.content`),
-          isError: p.isError === true,
+          isError: bool(p.isError, `${path}.isError`),
           images: arr(p.images ?? [], `${path}.images`).map((x, i) =>
             image(x, `${path}.images[${i}]`),
           ),
@@ -267,7 +269,7 @@ export function loadRun(data: unknown): Run {
     return {
       id: str(m.id, `${path}.id`),
       role: role as Role,
-      parts: arr(m.parts ?? [], `${path}.parts`).map((x, i) => part(x, `${path}.parts[${i}]`)),
+      parts: arr(m.parts, `${path}.parts`).map((x, i) => part(x, `${path}.parts[${i}]`)),
       model: optStr(m.model, `${path}.model`),
       provider: optStr(m.provider, `${path}.provider`),
       usage: usage(m.usage, `${path}.usage`),
@@ -286,7 +288,7 @@ export function loadRun(data: unknown): Run {
     format: FORMAT,
     runId: str(r.runId, '.runId'),
     status: status as RunStatus | null,
-    messages: arr(r.messages ?? [], '.messages').map((x, i) => message(x, `.messages[${i}]`)),
+    messages: arr(r.messages, '.messages').map((x, i) => message(x, `.messages[${i}]`)),
     startedAt: optNum(r.startedAt, '.startedAt'),
     endedAt: optNum(r.endedAt, '.endedAt'),
     compaction: usage(r.compaction, '.compaction'),

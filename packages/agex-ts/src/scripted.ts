@@ -64,19 +64,24 @@ export class ScriptedProvider implements Provider {
     opts: StreamOptions = {},
   ): AsyncIterable<ProviderEvent> {
     const signal = opts.signal
-    if (signal?.aborted) throw aborted(signal)
+    // Checked at every point the stream waits, as a real request's is.
+    const check = () => {
+      if (signal?.aborted) throw aborted(signal)
+    }
+    check()
     this.seen.push([...messages])
-    const step = await this.#next(texts(messages))
-    if (signal?.aborted) throw aborted(signal)
+    const step = await untilAborted(this.#next(texts(messages)), signal)
     if (step.fail === 'provider') throw new ScriptOverloaded()
     if (step.fail === 'error') throw new Error('the scripted model failed')
     const parts: Part[] = []
     if (step.thinking !== '') {
       yield { kind: 'ThinkingDelta', text: step.thinking }
+      check()
       parts.push({ kind: 'thinking', text: step.thinking, provider: SCRIPTED })
     }
     if (step.text !== '') {
       yield { kind: 'TextDelta', text: step.text }
+      check()
       parts.push({ kind: 'text', text: step.text, provider: SCRIPTED })
     }
     for (const call of step.tool_calls) {
@@ -110,6 +115,26 @@ export class ScriptedProvider implements Provider {
   transient(error: unknown): boolean {
     return error instanceof ScriptOverloaded
   }
+}
+
+/** `value`, unless `signal` aborts first: then the abort's error. */
+function untilAborted<T>(value: T | Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (signal === undefined) return Promise.resolve(value)
+  if (signal.aborted) return Promise.reject(aborted(signal))
+  return new Promise<T>((resolve, reject) => {
+    const stop = () => reject(aborted(signal))
+    signal.addEventListener('abort', stop, { once: true })
+    Promise.resolve(value).then(
+      (v) => {
+        signal.removeEventListener('abort', stop)
+        resolve(v)
+      },
+      (e) => {
+        signal.removeEventListener('abort', stop)
+        reject(e)
+      },
+    )
+  })
 }
 
 /** The text of each part a request carried, in order: what a script's

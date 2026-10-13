@@ -112,6 +112,28 @@ describe('the scripted provider', () => {
     expect(texts(messages)).toEqual(['first', 'hmm', 'out'])
   })
 
+  it('stops on an abort after a delta, with no reply', async () => {
+    const controller = new AbortController()
+    const provider = new ScriptedProvider([step({ thinking: 'first', text: 'second' })])
+    const seen: string[] = []
+    const run = async () => {
+      for await (const event of provider.stream([], [], {}, { signal: controller.signal })) {
+        seen.push(event.kind)
+        controller.abort()
+      }
+    }
+    await expect(run()).rejects.toMatchObject({ name: 'AbortError' })
+    expect(seen).toEqual(['ThinkingDelta'])
+  })
+
+  it('stops a step still being written, without waiting for it', async () => {
+    const controller = new AbortController()
+    const provider = new ScriptedProvider(() => new Promise<ModelStep>(() => {}))
+    const pending = collect(provider.stream([], [], {}, { signal: controller.signal }))
+    controller.abort()
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+  })
+
   it('stops on an abort signal', async () => {
     const controller = new AbortController()
     controller.abort('the person stopped it')

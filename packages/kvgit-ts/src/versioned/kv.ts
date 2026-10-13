@@ -34,7 +34,16 @@ import {
 } from '../errors'
 import { EMPTY_HASH } from '../hamt'
 import { Keyset } from '../keyset'
-import type { CommitInfo, KVStore, KeysetEntry, MetaEntry, Versioned } from '../types'
+import { compareCodePoints } from '../pyjson'
+import type {
+  CommitInfo,
+  ConflictDisposition,
+  KVStore,
+  KeysetEntry,
+  MergeResult,
+  MetaEntry,
+  Versioned,
+} from '../types'
 import { VersionedBase } from './base'
 import { type ParentLoader, walkHistory } from './helpers'
 import {
@@ -59,7 +68,7 @@ import {
   loadsInfo,
   safeLoads,
 } from './layout'
-import type { MergeResolution } from './merge'
+import type { Change, MergeResolution } from './merge'
 import { listBranches, rejectReservedBranch } from './refs'
 
 // ---------------------------------------------------------------------------
@@ -348,11 +357,11 @@ export async function deleteBranchHead(store: KVStore, name: string): Promise<vo
 }
 
 /**
- * The lowest common ancestor of two commits, or null if they share no
- * history. On a criss-cross tie the smallest hash wins: deterministic,
- * but arbitrary.
+ * The lowest common ancestor, from the two commits' whole histories:
+ * for history written before generations were stored. On a criss-cross
+ * tie the smallest hash wins: deterministic, but arbitrary.
  */
-export async function lowestCommonAncestor(
+async function mergeBaseByWalk(
   commitA: string,
   commitB: string,
   loadParents: ParentLoader,
@@ -439,6 +448,193 @@ async function walkAncestors(
     }
   }
   return ancestors
+}
+
+/** A commit's parents, and their generations if the commit stores them. */
+interface CommitRecord {
+  readonly parents: readonly string[]
+  readonly gens: readonly number[] | null
+}
+
+/** Parents and parent generations of several commits, in one read. */
+async function loadRecords(
+  store: KVStore,
+  commits: Iterable<string>,
+): Promise<Map<string, CommitRecord>> {
+  const list = [...new Set(commits)]
+  const found = await store.getMany(list.flatMap((c) => [PARENT_COMMIT(c), PARENT_GENS(c)]))
+  const out = new Map<string, CommitRecord>()
+  for (const c of list) {
+    const parentsRaw = found.get(PARENT_COMMIT(c))
+    const parsed = parentsRaw === undefined ? null : safeLoads(parentsRaw)
+    const parents =
+      typeof parsed === 'string'
+        ? [parsed]
+        : Array.isArray(parsed)
+          ? parsed.filter((p): p is string => typeof p === 'string')
+          : []
+    const gensRaw = found.get(PARENT_GENS(c))
+    const gens = gensRaw === undefined ? null : safeLoads(gensRaw)
+    const valid =
+      Array.isArray(gens) &&
+      gens.length === parents.length &&
+      gens.every((g) => Number.isInteger(g) && (g as number) >= 0)
+    out.set(c, { parents, gens: valid ? (gens as number[]) : null })
+  }
+  return out
+}
+
+/** A commit's generation from its record; null if it stores none. */
+function generationOfRecord(record: CommitRecord): number | null {
+  if (record.parents.length === 0) return 0
+  if (record.gens === null) return null
+  return generationOf(record.gens)
+}
+
+/** The search reached history written before generations were stored. */
+class NoGenerations extends Error {}
+
+const FROM_A = 1
+const FROM_B = 2
+const STALE = 4
+const FROM_BOTH = FROM_A | FROM_B
+
+/**
+ * The lowest common ancestor, searching down from both commits at once.
+ *
+ * Commits are visited highest generation first, every commit of one
+ * generation in one batched read. A commit is visited only after every
+ * descendant the search reached, so the sides it was reached from are
+ * final when it is popped. Reached from both, it is a common ancestor,
+ * and a lowest one unless it was reached through a common ancestor
+ * already found: finding one marks everything below it stale. The
+ * search stops once every commit still queued is stale; for two tips
+ * that forked recently, that is a few reads whatever the length of the
+ * history below.
+ *
+ * @throws NoGenerations if it reaches a commit that stores no
+ *   generations for its parents.
+ */
+async function mergeBaseByGeneration(
+  store: KVStore,
+  commitA: string,
+  commitB: string,
+  known: Map<string, number> | undefined,
+): Promise<string | null> {
+  const records = await loadRecords(store, [commitA, commitB])
+  const gens = new Map<string, number>()
+  for (const c of [commitA, commitB]) {
+    const g = generationOfRecord(records.get(c) as CommitRecord)
+    if (g === null) throw new NoGenerations()
+    gens.set(c, g)
+  }
+  if (known !== undefined) for (const [c, g] of gens) known.set(c, g)
+  const flags = new Map<string, number>([
+    [commitA, FROM_A],
+    [commitB, FROM_B],
+  ])
+  const levels = new Map<number, Set<string>>()
+  const enqueue = (c: string, g: number): void => {
+    const level = levels.get(g)
+    if (level === undefined) levels.set(g, new Set([c]))
+    else level.add(c)
+  }
+  enqueue(commitA, gens.get(commitA) as number)
+  enqueue(commitB, gens.get(commitB) as number)
+  const active = new Set([commitA, commitB])
+  const found: string[] = []
+  while (active.size > 0) {
+    const levelGen = Math.max(...levels.keys())
+    const level = levels.get(levelGen) as Set<string>
+    levels.delete(levelGen)
+    const unread = [...level].filter((c) => !records.has(c))
+    if (unread.length > 0) {
+      for (const [c, r] of await loadRecords(store, unread)) records.set(c, r)
+    }
+    for (const c of [...level].sort()) {
+      active.delete(c)
+      let f = flags.get(c) as number
+      if ((f & FROM_BOTH) === FROM_BOTH && (f & STALE) === 0) {
+        found.push(c)
+        f |= STALE
+        flags.set(c, f)
+      }
+      const { parents, gens: parentGens } = records.get(c) as CommitRecord
+      if (parents.length > 0 && parentGens === null) throw new NoGenerations()
+      for (let i = 0; i < parents.length; i++) {
+        const parent = parents[i] as string
+        const parentGen = (parentGens as readonly number[])[i] as number
+        // Inconsistent data: search the slow way.
+        if (parentGen >= levelGen) throw new NoGenerations()
+        const before = flags.get(parent) ?? 0
+        const after = before | f
+        if (after === before) continue
+        flags.set(parent, after)
+        if (!gens.has(parent)) {
+          gens.set(parent, parentGen)
+          enqueue(parent, parentGen)
+        }
+        if ((after & STALE) !== 0) active.delete(parent)
+        else active.add(parent)
+      }
+    }
+  }
+  if (known !== undefined) for (const [c, g] of gens) known.set(c, g)
+  return found.length === 0 ? null : found.reduce((a, b) => (b < a ? b : a))
+}
+
+/**
+ * The lowest common ancestor of two commits, or null if they share no
+ * history. On a criss-cross tie the smallest hash wins: deterministic,
+ * but arbitrary, so criss-cross merges resolve cleanly rather than
+ * throwing. `known` collects the generations the search works out, for
+ * a caller that writes a commit over these two next.
+ */
+export async function mergeBase(
+  store: KVStore,
+  commitA: string,
+  commitB: string,
+  known?: Map<string, number>,
+): Promise<string | null> {
+  if (commitA === commitB) return commitA
+  try {
+    return await mergeBaseByGeneration(store, commitA, commitB, known)
+  } catch (e) {
+    if (!(e instanceof NoGenerations)) throw e
+    return mergeBaseByWalk(commitA, commitB, (h) => loadParents(store, h))
+  }
+}
+
+/**
+ * Each key whose value differs from commit `a` to commit `b`. A
+ * structural diff of the two keysets: subtrees the commits share are
+ * skipped by hash, so the cost follows the size of the change. A key
+ * whose entry differs only in metadata, with the same blob, is not a
+ * change. A null or missing `a` reads as empty.
+ */
+export async function commitChanges(
+  store: KVStore,
+  commitA: string | null,
+  commitB: string,
+): Promise<Map<string, Change>> {
+  const wanted = [commitA, commitB].filter((c): c is string => c !== null).map(COMMIT_ROOT)
+  const found = await store.getMany(wanted)
+  const rootOf = (commit: string | null): string => {
+    if (commit === null) return EMPTY_HASH
+    const raw = found.get(COMMIT_ROOT(commit))
+    const root = raw === undefined ? null : safeLoads(raw)
+    return typeof root === 'string' ? root : EMPTY_HASH
+  }
+  const diff = await Keyset.fromRoot(store, rootOf(commitA)).diff(
+    Keyset.fromRoot(store, rootOf(commitB)),
+  )
+  const changes = new Map<string, Change>()
+  for (const [key, entry] of diff.added) changes.set(key, { old: null, new: entry })
+  for (const [key, entry] of diff.removed) changes.set(key, { old: entry, new: null })
+  for (const [key, [oldEntry, newEntry]] of diff.modified) {
+    if (oldEntry.blob !== newEntry.blob) changes.set(key, { old: oldEntry, new: newEntry })
+  }
+  return changes
 }
 
 /**
@@ -860,57 +1056,41 @@ export class VersionedKV extends VersionedBase {
     return highest + 1
   }
 
+  /**
+   * A commit from a resolved merge: our state with the resolution's
+   * changes applied. An entry carried from either side keeps its own
+   * metadata, which describes its blob; a value a merge function
+   * produced is a new blob, never chunked.
+   */
   protected async createMergeCommit(
     resolution: MergeResolution,
     parents: readonly string[],
     info: CommitInfo | null,
-    theirHead: string,
   ): Promise<string> {
-    const mergedKeyset = new Map(resolution.mergedKeyset)
-    const mergedValues = resolution.mergedValues
-
-    // A value a merge function produced is a new blob, never chunked.
     const writes = new Map<string, Uint8Array>()
-    for (const [key, value] of mergedValues) {
+    const updates = new Map(resolution.updates)
+    for (const [key, value] of resolution.mergedValues) {
       const pointer = await blobKey(value)
       writes.set(pointer, value)
-      mergedKeyset.set(key, pointer)
+      updates.set(key, { blob: pointer, meta: { size: value.length } })
     }
 
-    // An entry carried from either side keeps its own metadata, which
-    // describes its blob. Most come from our in-memory map; the few
-    // only their side has are read pointwise from their keyset (via
-    // `theirHead`: the commit path orders parents [theirs, ours] but
-    // `mergeHeads` orders them [ours, theirs]).
-    const theirKs = Keyset.fromRoot(this.store, await this.rootOf(theirHead))
-    const mergedMeta = new Map<string, MetaEntry>()
-    for (const k of mergedKeyset.keys()) {
-      if (mergedValues.has(k)) {
-        mergedMeta.set(k, { size: (mergedValues.get(k) as Uint8Array).length })
-      } else if (this.meta.has(k) && this.commitKeys.get(k) === mergedKeyset.get(k)) {
-        mergedMeta.set(k, this.meta.get(k) as MetaEntry)
-      } else {
-        const theirEntry = await theirKs.get(k)
-        if (theirEntry !== null) mergedMeta.set(k, theirEntry.meta)
-        else if (this.meta.has(k)) mergedMeta.set(k, this.meta.get(k) as MetaEntry)
-      }
-    }
-
-    // Apply only what changed on top of our HAMT, so structural sharing
-    // keeps every subtree the merge didn't touch.
-    const keysetUpdates: Array<[string, KeysetEntry]> = []
-    for (const [k, blob] of mergedKeyset) {
-      if (this.commitKeys.get(k) !== blob) {
-        keysetUpdates.push([k, { blob, meta: mergedMeta.get(k) as MetaEntry }])
-      }
-    }
-    const keysetRemovals = new Set<string>()
-    for (const k of this.commitKeys.keys()) {
-      if (!mergedKeyset.has(k)) keysetRemovals.add(k)
-    }
+    // Apply the changes on top of our HAMT, so structural sharing keeps
+    // every subtree the merge did not touch.
     const ourKs = Keyset.fromRoot(this.store, await this.rootOf(this.currentCommitHash))
-    const newKs = await ourKs.updated({ updates: keysetUpdates, removals: keysetRemovals })
+    const newKs = await ourKs.updated({ updates, removals: resolution.removals })
     for (const [k, v] of newKs.pending) writes.set(k, v)
+
+    const mergedKeys = new Map(this.commitKeys)
+    const mergedMeta = new Map(this.meta)
+    for (const [key, entry] of updates) {
+      mergedKeys.set(key, entry.blob)
+      mergedMeta.set(key, entry.meta)
+    }
+    for (const key of resolution.removals) {
+      mergedKeys.delete(key)
+      mergedMeta.delete(key)
+    }
 
     const parentGens = await this.parentGenerations(parents)
     const created = this.now()
@@ -924,14 +1104,53 @@ export class VersionedKV extends VersionedBase {
       info,
     })
     for (const [k, v] of records) writes.set(k, v)
-
     await this.store.setMany(writes)
 
-    this.commitKeys = mergedKeyset
+    this.commitKeys = mergedKeys
     this.currentCommitHash = mergeHash
     this.meta = mergedMeta
     this.generations.set(mergeHash, generationOf(parentGens))
     return mergeHash
+  }
+
+  /**
+   * Move HEAD from our head to `theirHead`, a descendant of it, writing
+   * no commit. The write expects HEAD to hold our head: a branch that
+   * moved meanwhile fails it as a merge commit's publish would, and a
+   * deleted one is not recreated.
+   */
+  protected async fastForward(
+    theirHead: string,
+    onConflict: ConflictDisposition,
+  ): Promise<MergeResult> {
+    const ourHead = this.currentCommitHash
+    const carried = [...(await this.changes(ourHead, theirHead)).keys()].sort(compareCodePoints)
+    if ((await this.store.get(COMMIT_ROOT(theirHead))) === null) {
+      throw new UnknownCommitError(theirHead)
+    }
+    if (!(await this.casHead(ourHead, theirHead))) {
+      if ((await this.store.get(BRANCH_HEAD(this.branch))) === null) {
+        throw new UnknownBranchError(this.branch)
+      }
+      if (onConflict === 'abandon') {
+        return {
+          merged: false,
+          commit: null,
+          strategy: 'fast_forward',
+          autoMergedKeys: [],
+          carriedKeys: [],
+        }
+      }
+      throw new ConcurrencyError('HEAD changed during merge. Refresh and retry.')
+    }
+    await this.loadCommitInto(theirHead, true)
+    return {
+      merged: true,
+      commit: theirHead,
+      strategy: 'fast_forward',
+      autoMergedKeys: [],
+      carriedKeys: carried,
+    }
   }
 
   /**
@@ -962,14 +1181,8 @@ export class VersionedKV extends VersionedBase {
     return publish()
   }
 
-  protected async loadKeyset(commitHash: string): Promise<Map<string, string>> {
-    const out = new Map<string, string>()
-    const rootBytes = await this.store.get(COMMIT_ROOT(commitHash))
-    if (rootBytes === null) return out
-    const root = loads(rootBytes) as string
-    const ks = Keyset.fromRoot(this.store, root)
-    for await (const [k, entry] of ks.items()) out.set(k, entry.blob)
-    return out
+  protected async changes(commitA: string | null, commitB: string): Promise<Map<string, Change>> {
+    return commitChanges(this.store, commitA, commitB)
   }
 
   protected async loadParents(commitHash: string): Promise<readonly string[]> {
@@ -977,7 +1190,10 @@ export class VersionedKV extends VersionedBase {
   }
 
   protected async findLca(commitA: string, commitB: string): Promise<string | null> {
-    return lowestCommonAncestor(commitA, commitB, (h) => this.loadParents(h))
+    const found = new Map<string, number>()
+    const base = await mergeBase(this.store, commitA, commitB, found)
+    for (const [c, g] of found) this.generations.set(c, g)
+    return base
   }
 
   protected async readBlob(blobId: string): Promise<Uint8Array | null> {

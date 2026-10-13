@@ -10,7 +10,8 @@ The fixture is what kvgit-ts must reproduce byte for byte:
   fixed clock times, and the whole store after each step, every key and
   every byte. kvgit-ts replays the same steps at the same times and
   must hold the same store. A tag (with a non-ASCII name and info) is
-  one of the steps.
+  one of the steps, and so are a branch merge (a merge function, a
+  prefix ``MergeChoice``), a fast-forward, a cherry-pick and a revert.
 
 Regenerate (kvgit 0.4.x):
 
@@ -26,6 +27,7 @@ from importlib.metadata import version
 import kvgit.versioned.kv as kv_module
 from kvgit.kv.memory import Memory
 from kvgit.versioned.kv import VersionedKV, create_tag
+from kvgit.versioned.protocol import MergeChoice
 
 
 class Clock:
@@ -36,6 +38,11 @@ class Clock:
 
     def time(self) -> float:
         return self.now
+
+
+def keys_of(result) -> dict[str, list[str]]:
+    """What a merge result says it decided and carried."""
+    return {"auto": list(result.auto_merged_keys), "carried": list(result.carried_keys)}
 
 
 def dump_store(store: Memory) -> dict[str, str]:
@@ -127,7 +134,47 @@ def scenario() -> list[dict]:
     record("writer one", clock.now, commit=result.commit)
     clock.now = 1760000005.0
     result = w2.commit(updates={"y": b"from w2"}, info={"merge": True})
-    record("writer two", clock.now, commit=result.commit, strategy=result.strategy)
+    record("writer two", clock.now, commit=result.commit, strategy=result.strategy, keys=keys_of(result))
+
+    # A branch merged back with both sides moved: a key both added (a
+    # merge function joins them), a prefix a MergeChoice hands to theirs,
+    # and a key only they changed.
+    clock.now = 1760000006.0
+    main = VersionedKV(store)
+    side = main.create_branch("side")
+    main.commit(updates={"n": b"main", "cfg/a": b"main", "cfg/b": b"main"})
+    clock.now = 1760000006.5
+    side.commit(updates={"n": b"side", "cfg/a": b"side", "s": b"side"})
+    record("diverge", clock.now)
+
+    clock.now = 1760000007.0
+    result = main.merge_heads(
+        side.current_commit,
+        merge_fns={"n": lambda old, ours, theirs: theirs + b"+" + ours},
+        merge_prefixes={"cfg/": MergeChoice.THEIRS},
+        info={"merge": "side"},
+    )
+    record("merge", clock.now, commit=result.commit, strategy=result.strategy, keys=keys_of(result))
+
+    # A branch whose base is main's head merges as a fast-forward.
+    clock.now = 1760000008.0
+    ff = main.create_branch("ff")
+    ff.commit(updates={"ff": b"1"})
+    result = main.merge_heads(ff.current_commit)
+    record("fast forward", clock.now, commit=result.commit, strategy=result.strategy, keys=keys_of(result))
+
+    # One change from side, picked onto main, then undone.
+    clock.now = 1760000009.0
+    side.commit(updates={"pick": b"picked"}, removals={"s"})
+    picked = side.current_commit
+    parent = side.parents(picked)[0]
+    clock.now = 1760000009.5
+    result = main.apply_change(parent, picked, info={"pick": True})
+    record("cherry-pick", clock.now, commit=result.commit, strategy=result.strategy, keys=keys_of(result))
+
+    clock.now = 1760000010.0
+    result = main.apply_change(picked, parent)
+    record("revert", clock.now, commit=result.commit, strategy=result.strategy, keys=keys_of(result))
     return steps
 
 

@@ -6,7 +6,7 @@ import { SequenceMatcher } from './sequenceMatcher'
  * by construction — same opcodes (`SequenceMatcher`, autojunk off),
  * same `splitlines(keepends=True)` semantics, same grouping rules.
  */
-import type { BytesMergeFn, MergeFn } from './types'
+import type { MergeFn } from './types'
 
 /** Raised instead of returning bytes when a value cannot be marker-merged. */
 export class CantMark extends Error {
@@ -299,6 +299,15 @@ export function textMergeResult(
   return [textEncoder.encode(lines.join('')), conflicted]
 }
 
+/** A bytes merge function that always produces a value (a marker merge
+ *  never answers with a `MergeChoice`); usable wherever a
+ *  `BytesMergeFn` is. */
+export type TextBytesMergeFn = (
+  old: Uint8Array | null,
+  ours: Uint8Array | null,
+  theirs: Uint8Array | null,
+) => Uint8Array
+
 /**
  * Build a marker-merge fn with custom conflict labels. Labels ride
  * git's positions (`<<<<<<< <ours>` / `>>>>>>> <theirs>`); pass branch
@@ -311,7 +320,7 @@ export function textMergeResult(
  * must abort the commit rather than land hunks. The merge machinery
  * files it as an ordinary conflict, same as unmarkable input.
  */
-export function makeTextMerge(opts: TextMergeOptions = {}): BytesMergeFn {
+export function makeTextMerge(opts: TextMergeOptions = {}): TextBytesMergeFn {
   const oursLabel = opts.oursLabel ?? 'ours'
   const theirsLabel = opts.theirsLabel ?? 'theirs'
   const strict = opts.strict ?? false
@@ -329,7 +338,7 @@ export function makeTextMerge(opts: TextMergeOptions = {}): BytesMergeFn {
 }
 
 /** Marker merge with default labels, for use as a `BytesMergeFn`. */
-export const text: BytesMergeFn = makeTextMerge()
+export const text: TextBytesMergeFn = makeTextMerge()
 
 /**
  * Marker merge for decoded `string` values (or raw bytes), for use

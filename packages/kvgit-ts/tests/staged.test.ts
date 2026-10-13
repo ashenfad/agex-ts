@@ -145,11 +145,22 @@ describe('Staged — mergeHeads', () => {
     b.set('b', '2')
     await b.commit()
 
+    // `a` hasn't moved since `b` forked from it, so the merge
+    // fast-forwards.
+    const ff = await a.mergeHeads(b.versioned.currentCommit)
+    expect(ff.strategy).toBe('fast_forward')
+    expect(await a.get('b')).toBe('2')
+
+    // Both sides move: a merge commit.
+    a.set('a', '2')
+    await a.commit()
+    b.set('b', '3')
+    await b.commit()
     const rm = await a.mergeHeads(b.versioned.currentCommit)
     expect(rm.merged).toBe(true)
     expect(rm.strategy).toBe('three_way')
-    expect(await a.get('a')).toBe('1')
-    expect(await a.get('b')).toBe('2')
+    expect(await a.get('a')).toBe('2')
+    expect(await a.get('b')).toBe('3')
   })
 
   it('refuses while the buffer is dirty', async () => {

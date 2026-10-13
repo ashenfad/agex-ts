@@ -4,7 +4,9 @@
  * `VersionedBase` provides:
  * - The `commit()` flow: fast-forward + CAS, three-way merge fallback
  *   on HEAD divergence, snapshot/restore on failed CAS.
- * - History walking, key-level diff, parent lookup, merge fn registry.
+ * - Merging another head (`mergeHeads`) and applying one change
+ *   (`applyChange`, under cherry-pick and revert).
+ * - History walking, key-level diff, parent lookup, merge registry.
  *
  * Subclasses provide storage-specific operations (CAS, commit creation,
  * blob reading, LCA finding). Anything that touches storage layout is
@@ -12,20 +14,23 @@
  */
 
 import {
-  type BytesMergeFn,
+  type ApplyChangeOptions,
   type CommitInfo,
   ConcurrencyError,
   type ConflictDisposition,
   type DiffResult,
   MergeConflict,
   type MergeHeadsOptions,
+  type MergePolicy,
   type MergeResult,
+  type MergeRuleOptions,
+  type PostCheck,
   UnknownBranchError,
   type Versioned,
   type VersionedCommitOptions,
 } from '../types'
-import { diffKeysets, walkHistory } from './helpers'
-import { type MergeResolution, resolveMerge } from './merge'
+import { walkHistory } from './helpers'
+import { type Change, type MergeResolution, changesOurs, resolveMerge } from './merge'
 
 /**
  * Abstract base for versioned KV stores.
@@ -39,8 +44,9 @@ export abstract class VersionedBase implements Versioned {
   protected currentCommitHash: string
   protected baseCommitHash: string
   protected commitKeys: Map<string, string>
-  protected mergeFns: Map<string, BytesMergeFn>
-  protected defaultMergeFn: BytesMergeFn | null
+  protected mergeFns: Map<string, MergePolicy>
+  protected mergePrefixes: Map<string, MergePolicy>
+  protected defaultMergeFn: MergePolicy | null
   lastMergeResult: MergeResult | null
 
   /** Cached on first access; the root commit walking back from HEAD. */
@@ -52,6 +58,7 @@ export abstract class VersionedBase implements Versioned {
     this.baseCommitHash = opts.commitHash
     this.commitKeys = new Map()
     this.mergeFns = new Map()
+    this.mergePrefixes = new Map()
     this.defaultMergeFn = null
     this.lastMergeResult = null
   }
@@ -114,22 +121,47 @@ export abstract class VersionedBase implements Versioned {
     for (const k of this.commitKeys.keys()) yield k
   }
 
-  // --- Merge fn registry ---
+  // --- Merge registry ---
 
-  setMergeFn(key: string, fn: BytesMergeFn): void {
+  /** Register a merge function, or a `MergeChoice`, for one key. */
+  setMergeFn(key: string, fn: MergePolicy): void {
     this.mergeFns.set(key, fn)
   }
 
-  setDefaultMerge(fn: BytesMergeFn): void {
+  /**
+   * Register a merge function, or a `MergeChoice`, under a key prefix,
+   * for keys whose names aren't known up front (`runs/` for
+   * `runs/<id>`). A key takes the most specific registration: its exact
+   * key, else the longest prefix it starts with, else the default.
+   *
+   * A merge function is consulted only where both sides changed a key.
+   * A `MergeChoice` is a standing policy over the whole prefix: it gives
+   * that side every key either side changed under it.
+   */
+  setMergePrefix(prefix: string, fn: MergePolicy): void {
+    this.mergePrefixes.set(prefix, fn)
+  }
+
+  /** Register the merge function, or `MergeChoice`, for keys no other
+   *  registration covers. */
+  setDefaultMerge(fn: MergePolicy): void {
     this.defaultMergeFn = fn
   }
 
   // --- History and diff ---
 
+  /** Keys added, removed and modified going from `commitA` to
+   *  `commitB`. */
   async diff(commitA: string, commitB: string): Promise<DiffResult> {
-    const a = await this.loadKeyset(commitA)
-    const b = await this.loadKeyset(commitB)
-    return diffKeysets(a, b)
+    const added = new Set<string>()
+    const removed = new Set<string>()
+    const modified = new Set<string>()
+    for (const [key, change] of await this.changes(commitA, commitB)) {
+      if (change.old === null) added.add(key)
+      else if (change.new === null) removed.add(key)
+      else modified.add(key)
+    }
+    return { added, removed, modified }
   }
 
   history(commitHash?: string, opts: { allParents?: boolean } = {}): AsyncIterable<string> {
@@ -152,33 +184,27 @@ export abstract class VersionedBase implements Versioned {
 
   // --- Commit orchestration ---
 
+  /**
+   * Commit changes and advance HEAD.
+   *
+   * Fast-forwards when HEAD hasn't moved since this handle's base;
+   * otherwise three-way merges onto it. A HEAD move landing inside the
+   * fast-forward's CAS window goes through that same merge, so a lost
+   * race is never mistaken for a conflict.
+   */
   async commit(opts: VersionedCommitOptions = {}): Promise<MergeResult> {
     const updates = opts.updates ?? null
     const removals = opts.removals ?? null
-    const onConflict: ConflictDisposition = opts.onConflict ?? 'raise'
+    const onConflict = checkDisposition(opts.onConflict)
     const info = opts.info ?? null
 
-    // No-op when nothing was provided. Matching kvgit-py's "nothing to do"
-    // shortcut: a bare commit() with no changes and no info simply
-    // reports the current HEAD, doesn't write anything.
+    // Nothing to do: report the current HEAD and write nothing.
     if (
       (updates === null || updates.size === 0) &&
       (removals === null || removals.size === 0) &&
       info === null
     ) {
-      const result: MergeResult = {
-        merged: true,
-        commit: this.currentCommitHash,
-        strategy: 'no_op',
-        autoMergedKeys: [],
-        carriedKeys: [],
-      }
-      this.lastMergeResult = result
-      return result
-    }
-
-    if (onConflict !== 'raise' && onConflict !== 'skip') {
-      throw new TypeError(`onConflict must be 'raise' or 'skip', got ${String(onConflict)}`)
+      return this.finish(noOp(this.currentCommitHash))
     }
 
     let currentHead = await this.latestHead()
@@ -193,24 +219,14 @@ export abstract class VersionedBase implements Versioned {
         ...(removals !== null && { removals }),
         ...(info !== null && { info }),
       })
-      const ok = await this.casHead(this.baseCommitHash, this.currentCommitHash)
-      if (ok) {
+      if (await this.casHead(this.baseCommitHash, this.currentCommitHash)) {
         this.baseCommitHash = this.currentCommitHash
-        const result: MergeResult = {
-          merged: true,
-          commit: this.currentCommitHash,
-          strategy: 'fast_forward',
-          autoMergedKeys: [],
-          carriedKeys: [...this.commitKeys.keys()],
-        }
-        this.lastMergeResult = result
-        return result
+        return this.finish(landed(this.currentCommitHash, 'fast_forward', [], []))
       }
       // Lost the fast-forward race: another writer advanced HEAD between
-      // our read and our CAS. Re-read HEAD and merge, the way the
-      // base-behind-head case already does — in either mode, so a lost
-      // race is never mistaken for a conflict and the caller never has to
-      // refresh (and drop staged work) just to replay a mergeable commit.
+      // our read and our CAS. Re-read HEAD and merge, as when the base
+      // was already behind, so the caller never has to refresh (and drop
+      // pending work) just to replay a mergeable commit.
       try {
         currentHead = await this.latestHead()
       } catch (e) {
@@ -218,19 +234,16 @@ export abstract class VersionedBase implements Versioned {
         this.restoreState(saved)
         throw e
       }
-      // Keep the commit just built as our side of the merge rather than
-      // restoring and rebuilding it: a rebuild hashes identically but
-      // writes different HAMT nodes, orphaning the first attempt's nodes
-      // where cleanOrphans cannot find them.
+      // Keep the commit just built as our side of the merge: a rebuild
+      // would mint a second commit for the same change (the hash covers
+      // the time) and orphan the first.
       oursBuilt = true
     }
 
     // Three-way merge path: HEAD has moved.
     if (currentHead === null) {
       // A retry that finds its branch gone restores the pre-commit
-      // snapshot, so the failed commit leaves the handle exactly as it
-      // found it. A null first read builds nothing, so only a retry can
-      // have anything to restore.
+      // snapshot. A null first read built nothing to restore.
       if (oursBuilt) this.restoreState(saved)
       throw new UnknownBranchError(this.branch)
     }
@@ -243,150 +256,186 @@ export abstract class VersionedBase implements Versioned {
     }
     return this.threeWayMerge(currentHead, {
       onConflict,
-      ...(opts.mergeFns !== null && opts.mergeFns !== undefined && { mergeFns: opts.mergeFns }),
-      ...(opts.defaultMerge !== null &&
-        opts.defaultMerge !== undefined && { defaultMerge: opts.defaultMerge }),
+      rules: opts,
       ...(info !== null && { info }),
       savedState: saved,
     })
   }
 
   /**
-   * Merge another head into this branch. Finds the lowest common
-   * ancestor with our head, three-way resolves, and creates a
-   * two-parent merge commit, CAS-guarded on our own head (a race
-   * raises `ConcurrencyError` and changes nothing). No common ancestor
-   * raises `ConcurrencyError` likewise without changing anything.
+   * Merge another head (usually another branch's) into this branch.
+   *
+   * A head our history already contains merges as a no-op, provided the
+   * branch is still at our head. When ours is an ancestor of theirs,
+   * the branch fast-forwards: HEAD moves to `theirHead` and no commit is
+   * written, so `info` isn't recorded, unless `fastForward: false`.
+   * Otherwise the lowest common ancestor, a three-way resolve, and a
+   * two-parent merge commit `[ours, theirs]`, CAS-guarded on our head
+   * (a race throws `ConcurrencyError` and changes nothing). No common
+   * ancestor throws `ConcurrencyError` likewise.
    */
   async mergeHeads(theirHead: string, opts: MergeHeadsOptions = {}): Promise<MergeResult> {
-    const onConflict = opts.onConflict ?? 'raise'
-    if (onConflict !== 'raise' && onConflict !== 'skip') {
-      throw new TypeError(`onConflict must be 'raise' or 'skip', got ${String(onConflict)}`)
-    }
+    const onConflict = checkDisposition(opts.onConflict)
     const ourHead = this.currentCommitHash
+    const lca = await this.findLca(ourHead, theirHead)
+    if (lca === theirHead) {
+      // Nothing is written, so no publish guards this answer the way the
+      // other outcomes' CAS on our head does: check the branch is still
+      // where this handle left it.
+      const live = await this.latestHead()
+      if (live === null) throw new UnknownBranchError(this.branch)
+      if (live !== ourHead) {
+        if (onConflict === 'abandon') return this.finish(abandoned('no_op'))
+        throw new ConcurrencyError('HEAD changed during merge. Refresh and retry.')
+      }
+      return this.finish(noOp(ourHead))
+    }
+    if (lca === ourHead && opts.fastForward !== false) {
+      return this.finish(await this.fastForward(theirHead, onConflict))
+    }
     return this.threeWayMerge(theirHead, {
       onConflict,
-      ...(opts.mergeFns !== null && opts.mergeFns !== undefined && { mergeFns: opts.mergeFns }),
-      ...(opts.defaultMerge !== null &&
-        opts.defaultMerge !== undefined && { defaultMerge: opts.defaultMerge }),
+      rules: opts,
       ...(opts.info !== null && opts.info !== undefined && { info: opts.info }),
+      ...(opts.postCheck !== null && opts.postCheck !== undefined && { postCheck: opts.postCheck }),
       savedState: this.snapshotState(),
       casFrom: ourHead,
       parents: [ourHead, theirHead],
+      ancestor: lca,
     })
   }
 
+  /**
+   * Apply the change from `base` to `target` as one commit: a three-way
+   * merge with `base` in place of the common ancestor. What `target`
+   * changed relative to `base` lands on our head, our own changes since
+   * are kept, and conflicts resolve (or throw) as in a merge. The result
+   * is an ordinary single-parent commit, CAS-guarded on our head; a
+   * change already present commits nothing (`no_op`). A cherry-pick is
+   * `applyChange(parent, commit)` and a revert
+   * `applyChange(commit, parent)`.
+   */
+  async applyChange(
+    base: string,
+    target: string,
+    opts: ApplyChangeOptions = {},
+  ): Promise<MergeResult> {
+    const onConflict = checkDisposition(opts.onConflict)
+    const ourHead = this.currentCommitHash
+    return this.threeWayMerge(target, {
+      onConflict,
+      rules: opts,
+      ...(opts.info !== null && opts.info !== undefined && { info: opts.info }),
+      ...(opts.postCheck !== null && opts.postCheck !== undefined && { postCheck: opts.postCheck }),
+      savedState: this.snapshotState(),
+      casFrom: ourHead,
+      parents: [ourHead],
+      base,
+      strategy: 'apply',
+    })
+  }
+
+  /**
+   * Three-way merge `theirHead` into our current commit.
+   *
+   * `theirHead` is any commit: the moved HEAD of our own branch (the
+   * lost-race path) or another branch's head. `casFrom` names the
+   * commit the merge publishes over (default `theirHead`, the lost-race
+   * case). `base` replaces the common ancestor, which is how a change
+   * is applied rather than a history merged; `ancestor` passes in one
+   * already found (null meaning none).
+   */
   private async threeWayMerge(
     theirHead: string,
     opts: {
       onConflict: ConflictDisposition
-      mergeFns?: Map<string, BytesMergeFn>
-      defaultMerge?: BytesMergeFn
+      rules: MergeRuleOptions
       info?: CommitInfo
+      postCheck?: PostCheck
       savedState: unknown
       casFrom?: string
       parents?: readonly string[]
+      base?: string
+      ancestor?: string | null
+      strategy?: 'three_way' | 'apply'
     },
   ): Promise<MergeResult> {
-    const lca = await this.findLca(this.currentCommitHash, theirHead)
+    const strategy = opts.strategy ?? 'three_way'
+    const lca =
+      opts.base !== undefined
+        ? opts.base
+        : opts.ancestor !== undefined
+          ? opts.ancestor
+          : await this.findLca(this.currentCommitHash, theirHead)
     if (lca === null) {
       this.restoreState(opts.savedState)
-      if (opts.onConflict === 'skip') {
-        const result: MergeResult = {
-          merged: false,
-          commit: null,
-          strategy: 'three_way',
-          autoMergedKeys: [],
-          carriedKeys: [],
-        }
-        this.lastMergeResult = result
-        return result
-      }
+      if (opts.onConflict === 'abandon') return this.finish(abandoned(strategy))
       throw new ConcurrencyError('No common ancestor found between current commit and HEAD.')
     }
 
-    // Load each unique commit's keyset exactly once. Skipping this dedup
-    // costs ~3× the round-trips on high-latency stores.
-    const lcaKeyset = await this.loadKeyset(lca)
-    const ourKeyset = await this.loadKeyset(this.currentCommitHash)
-    const theirKeyset = await this.loadKeyset(theirHead)
+    // Each side's changes since the ancestor, as structural diffs:
+    // subtrees the two commits share are never read.
+    const ourChanges = await this.changes(lca, this.currentCommitHash)
+    const theirChanges = await this.changes(lca, theirHead)
 
-    const ourDiff = diffKeysets(lcaKeyset, ourKeyset)
-    const theirDiff = diffKeysets(lcaKeyset, theirKeyset)
-
-    const effectiveFns = new Map(this.mergeFns)
-    if (opts.mergeFns) {
-      for (const [k, v] of opts.mergeFns) effectiveFns.set(k, v)
-    }
-    const effectiveDefault = opts.defaultMerge ?? this.defaultMergeFn
+    const rules = opts.rules
+    const mergeFns = new Map([...this.mergeFns, ...(rules.mergeFns ?? [])])
+    const mergePrefixes = new Map([...this.mergePrefixes, ...(rules.mergePrefixes ?? [])])
+    const defaultMerge = rules.defaultMerge ?? this.defaultMergeFn
 
     let resolution: MergeResolution
     try {
       resolution = await resolveMerge({
-        lcaKeyset,
-        ourKeyset,
-        theirKeyset,
-        ourDiff,
-        theirDiff,
+        ours: ourChanges,
+        theirs: theirChanges,
         blobReader: (id) => this.readBlob(id),
-        mergeFns: effectiveFns,
-        defaultMerge: effectiveDefault,
+        mergeFns,
+        mergePrefixes,
+        defaultMerge,
       })
+      if (opts.postCheck !== undefined) {
+        const refused = new Set<string>()
+        for (const [key, value] of resolution.mergedValues) {
+          if (!opts.postCheck(key, value)) refused.add(key)
+        }
+        if (refused.size > 0) throw new MergeConflict(refused)
+      }
     } catch (e) {
       if (e instanceof MergeConflict) {
         this.restoreState(opts.savedState)
-        if (opts.onConflict === 'skip') {
-          const result: MergeResult = {
-            merged: false,
-            commit: null,
-            strategy: 'three_way',
-            autoMergedKeys: [],
-            carriedKeys: [],
-          }
-          this.lastMergeResult = result
-          return result
-        }
+        if (opts.onConflict === 'abandon') return this.finish(abandoned(strategy))
       }
       throw e
     }
 
-    const parents: readonly string[] = opts.parents ?? [theirHead, this.currentCommitHash]
-    await this.createMergeCommit(resolution, parents, opts.info ?? null, theirHead)
-    const mergeHash = this.currentCommitHash
-    const mergedKeyset = this.commitKeys
+    if (opts.base !== undefined && !changesOurs(resolution)) {
+      // The change is already in our state, or changes nothing.
+      return this.finish(noOp(this.currentCommitHash))
+    }
 
+    // Lost-race default: follow the moved HEAD. Cross-branch callers
+    // pass [ours, theirs] so linear history stays on the merging branch.
+    const parents = opts.parents ?? [theirHead, this.currentCommitHash]
+    await this.createMergeCommit(resolution, parents, opts.info ?? null)
+    const mergeHash = this.currentCommitHash
+
+    // Publish over theirHead on the lost-race path, our own head
+    // otherwise.
     if (await this.casHead(opts.casFrom ?? theirHead, mergeHash)) {
       this.baseCommitHash = mergeHash
-      const carriedKeys: string[] = []
-      for (const k of mergedKeyset.keys()) {
-        if (!resolution.autoMergedKeys.includes(k) && !resolution.mergedValues.has(k)) {
-          carriedKeys.push(k)
-        }
-      }
-      const result: MergeResult = {
-        merged: true,
-        commit: mergeHash,
-        strategy: 'three_way',
-        autoMergedKeys: [...resolution.autoMergedKeys],
-        carriedKeys,
-      }
-      this.lastMergeResult = result
-      return result
+      return this.finish(
+        landed(mergeHash, strategy, resolution.autoMergedKeys, resolution.carriedKeys),
+      )
     }
 
     this.restoreState(opts.savedState)
-    if (opts.onConflict === 'skip') {
-      const result: MergeResult = {
-        merged: false,
-        commit: null,
-        strategy: 'three_way',
-        autoMergedKeys: [],
-        carriedKeys: [],
-      }
-      this.lastMergeResult = result
-      return result
-    }
+    if (opts.onConflict === 'abandon') return this.finish(abandoned(strategy))
     throw new ConcurrencyError('HEAD changed during three-way merge. Refresh and retry.')
+  }
+
+  private finish(result: MergeResult): MergeResult {
+    this.lastMergeResult = result
+    return result
   }
 
   // --- Abstract methods (concrete subclasses provide) ---
@@ -401,6 +450,7 @@ export abstract class VersionedBase implements Versioned {
   abstract resetTo(commitHash: string): Promise<boolean>
   abstract listBranches(): Promise<string[]>
   abstract commitInfo(commitHash?: string): Promise<CommitInfo | null>
+  abstract branchExists(name: string): Promise<boolean>
 
   protected abstract snapshotState(): unknown
   protected abstract restoreState(saved: unknown): void
@@ -409,16 +459,55 @@ export abstract class VersionedBase implements Versioned {
     removals?: Set<string>
     info?: CommitInfo
   }): Promise<string>
+  /** Make a commit from a resolved merge, on `parents`: our state with
+   *  the resolution's changes applied. */
   protected abstract createMergeCommit(
     resolution: MergeResolution,
     parents: readonly string[],
     info: CommitInfo | null,
-    theirHead: string,
   ): Promise<string>
+  /** Move HEAD from our head to `theirHead`, a descendant of it,
+   *  writing no commit. */
+  protected abstract fastForward(
+    theirHead: string,
+    onConflict: ConflictDisposition,
+  ): Promise<MergeResult>
   protected abstract casHead(expected: string, newHead: string): Promise<boolean>
-  protected abstract loadKeyset(commitHash: string): Promise<Map<string, string>>
+  /** Each key whose value differs from `commitA` to `commitB`; a null
+   *  or missing `commitA` reads as empty. */
+  protected abstract changes(commitA: string | null, commitB: string): Promise<Map<string, Change>>
   protected abstract loadParents(commitHash: string): Promise<readonly string[]>
   protected abstract findLca(commitA: string, commitB: string): Promise<string | null>
   protected abstract readBlob(blobId: string): Promise<Uint8Array | null>
-  abstract branchExists(name: string): Promise<boolean>
+}
+
+function checkDisposition(value: ConflictDisposition | undefined): ConflictDisposition {
+  const onConflict = value ?? 'raise'
+  if (onConflict !== 'raise' && onConflict !== 'abandon') {
+    throw new TypeError(`onConflict must be 'raise' or 'abandon', got ${String(onConflict)}`)
+  }
+  return onConflict
+}
+
+function noOp(commit: string): MergeResult {
+  return { merged: true, commit, strategy: 'no_op', autoMergedKeys: [], carriedKeys: [] }
+}
+
+function abandoned(strategy: MergeResult['strategy']): MergeResult {
+  return { merged: false, commit: null, strategy, autoMergedKeys: [], carriedKeys: [] }
+}
+
+function landed(
+  commit: string,
+  strategy: MergeResult['strategy'],
+  autoMergedKeys: readonly string[],
+  carriedKeys: readonly string[],
+): MergeResult {
+  return {
+    merged: true,
+    commit,
+    strategy,
+    autoMergedKeys: [...autoMergedKeys],
+    carriedKeys: [...carriedKeys],
+  }
 }

@@ -15,6 +15,8 @@ export {
   type VersionedKVOptions,
 } from './versioned/kv'
 export {
+  type Change,
+  pickMergePolicy,
   resolveMerge,
   type BlobReader,
   type MergeResolution,
@@ -29,6 +31,7 @@ export {
   text,
   textMerge,
   textMergeResult,
+  type TextBytesMergeFn,
   type TextMergeOptions,
 } from './merges'
 export { walkDelta, type WalkDeltaOptions } from './sync/walk'
@@ -71,5 +74,14 @@ export {
   Snapshot,
   Tags,
 } from './repo'
-export { Status, Worktree, type WorktreeCommitOptions } from './worktree'
+export {
+  type MergeRule,
+  Status,
+  Worktree,
+  type WorktreeApplyOptions,
+  type WorktreeCommitOptions,
+  type WorktreeMergeOptions,
+  type WorktreeMergeRules,
+} from './worktree'
+export { mergeBase } from './versioned/kv'
 export type { TagInfo } from './versioned/refs'

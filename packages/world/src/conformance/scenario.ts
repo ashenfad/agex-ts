@@ -89,6 +89,13 @@ export interface DelegateExp {
   readonly unread: readonly string[]
 }
 
+/** One fold recorded in `__compaction__/`: how many turns it covers,
+ *  and whether it's over a range in the middle (`first` set). */
+export interface FoldExp {
+  readonly runs: number
+  readonly ranged: boolean
+}
+
 export interface Expect {
   readonly turns: readonly TurnExp[]
   readonly files: Readonly<Record<string, string>>
@@ -96,7 +103,7 @@ export interface Expect {
   readonly runs: readonly RunExp[] | null
   readonly commits: readonly CommitExp[] | null
   readonly inbox: { readonly pending: number; readonly delivered: number } | null
-  readonly folds: readonly unknown[] | null
+  readonly folds: readonly FoldExp[] | null
   readonly delegates: Readonly<Record<string, DelegateExp>> | null
 }
 

@@ -35,6 +35,7 @@ import {
 } from './agentgit'
 import { AttachFS, SubtreeFS } from './attach'
 import { WorkspaceCache } from './cache'
+import { WorkspaceCompaction } from './compaction'
 import {
   WorkspaceConversation,
   readIndex,
@@ -274,6 +275,8 @@ export class Workspace {
   readonly tags: WorkspaceTags
   /** The conversation stored in the session (see `Turn`). */
   readonly conversation: WorkspaceConversation
+  /** Compaction's record: the folds a loop made of the conversation. */
+  readonly compaction: WorkspaceCompaction
   /** The agent's own git over the session (see `WorkspaceIndex`). */
   readonly index: WorkspaceIndex
 
@@ -347,6 +350,7 @@ export class Workspace {
     this.files = new WorkspaceFiles(inner, this.#top, (info) => this.autoCommit(info))
     this.tags = new WorkspaceTags(inner)
     this.conversation = new WorkspaceConversation(reader)
+    this.compaction = new WorkspaceCompaction(reader, open)
     this.index = new WorkspaceIndex({
       session,
       store,

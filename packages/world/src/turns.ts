@@ -334,5 +334,16 @@ export type TurnEvent =
       readonly isError: boolean
     }
   | { readonly kind: 'Delivered'; readonly notes: readonly DeliveredNote[] }
+  | {
+      /** A new fold: the turns through message `through` are replaced by
+       *  `summary` in what the model is sent from here on. */
+      readonly kind: 'Compacted'
+      readonly through: string
+      readonly runs?: number
+      readonly summary?: string
+      readonly tokensBefore?: number
+      readonly tokensAfter?: number
+      readonly first?: string | null
+    }
   | { readonly kind: 'Usage'; readonly inputTokens: number; readonly cachedTokens?: number }
   | { readonly kind: 'RunEnded'; readonly status: RunStatus; readonly message: string | null }

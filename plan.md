@@ -474,6 +474,22 @@ it covers) from the generated JSON, and its own suite on memory and idb.
   `HostCall`'s workspace finds it too, and an ask from code passes
   `{call}`.
 
+**Decided for compaction's record (W7, 2026-10-13):**
+- **nontainer's record and helpers, ported:** a `Fold` per key under
+  `__compaction__/fold/`, never rewritten, pending until the turn's
+  next commit; `inForce` by anchor; `Policy`, the summary texts word
+  for word, `reduce`, `transcript`, `chunks`, `estimateTokens`, and the
+  inserted-message mark. The plane's rules (ours in a merge, wiped by a
+  fresh fork) were already in place from W1 and G1.
+- **The algorithm stays each loop's,** as in nontainer: the reference
+  harness folds as nontainer's does, and corpus tier 4 passes on it, so
+  the reference harness passes every scenario.
+- **Where the TS record differs:** camelCase fields (`tokensBefore`),
+  `at` in milliseconds, the mark is `compaction:` rather than
+  nontainer's own name, and the record lives on `ws.compaction` (with
+  `folds`, `inForce`, `record`) rather than module functions over a
+  workspace.
+
 **Decided for values (2026-10-13):**
 - **A declared type is a Standard Schema** (zod, valibot, arktype), as
   agex-ts's tasks already use, not a type system of the world's own:

@@ -1,7 +1,8 @@
 /**
  * agex-ts: an agent loop over `@agex-ts/world`, matching agex's meaning.
  * Rebuilt on the `rebuild` branch, step by step (see the repo's
- * plan.md): this holds the run record and the provider protocol so far.
+ * plan.md): this holds the run record, the provider protocol (with any AI SDK
+ * model as a provider), and agents and sessions so far.
  */
 
 export {
@@ -37,6 +38,16 @@ export {
   aborted,
   toolSpec,
 } from './provider'
+export {
+  AiSdkProvider,
+  RELAYED,
+  TRANSIENT_STATUS,
+  aiSdk,
+  isLanguageModel,
+  reasoningOf,
+  thinkingOptions,
+  toPrompt,
+} from './ai-sdk'
 export { SCRIPTED, ScriptOverloaded, ScriptedProvider, texts } from './scripted'
 export {
   Agent,

@@ -64,7 +64,14 @@ export {
 export { Namespaced, type NamespaceableStore } from './namespaced'
 export { PyFloat, pyDumps, pyLoads, type PyDumpsOptions } from './pyjson'
 export { ROOT_COMMIT, STORAGE_VERSION } from './versioned/layout'
-export { type Codec, bytesCodec, jsonCodec } from './codec'
+export {
+  type Codec,
+  type CodecName,
+  bytesCodec,
+  cborCodec,
+  jsonCodec,
+  resolveCodec,
+} from './codec'
 export {
   Branches,
   type Commit,

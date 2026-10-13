@@ -32,7 +32,7 @@ for await (const c of repo.log({ branch: 'main' })) console.log(c.hash, c.info)
 ```
 
 - **`Repo`** owns the store and the settings every worktree shares: the
-  codec (`bytesCodec` by default, or `jsonCodec`), default merge
+  codec (see "Codecs" below), default merge
   functions, HEAD recovery and the clock. It reads commit records
   (`getCommit`, `log`, `diff`, `mergeBase`), makes snapshots, repairs
   HEADs and runs `gc`.
@@ -74,6 +74,28 @@ for await (const c of repo.log({ branch: 'main' })) console.log(c.hash, c.info)
 
 `Worktree` and `Repo` sit on `VersionedKV`, which stays available (as
 does `Staged`) for the code that still uses it.
+
+## Codecs
+
+A codec turns values into stored bytes and back. It is a setting of the
+`Repo` (`Repo.open(store, { codec })`), not of the store, so every
+reader of a store has to use the codec its writers did. Pass a codec
+(`{ encode, decode }`) or one of three names:
+
+- **`'bytes'`** (the default): values are `Uint8Array`, stored as they
+  are, so any reader in any language can take them.
+- **`'json'`**: anything `JSON.stringify` writes and `JSON.parse` reads
+  back the same.
+- **`'cbor'`**: the polymorphic one, as `pickle` is in Python kvgit, but
+  a standard ([RFC 8949](https://www.rfc-editor.org/rfc/rfc8949)).
+  Values round-trip with their JS types: objects, arrays, strings,
+  numbers, booleans, `null` and `undefined`, `Uint8Array` (a byte
+  string, no base64), bigint, `Map` (any keys), `Set`, `Date` and the
+  other typed arrays. Python reads it with `cbor2`: a `Map` arrives as a
+  tagged map, and an integer Python writes past 32 bits comes back a
+  bigint ([`tests/fixtures/golden-cbor.json`](./tests/fixtures/golden-cbor.json),
+  from [`scripts/golden-cbor.py`](./scripts/golden-cbor.py), checks what
+  TS reads from Python).
 
 ## Storage format
 

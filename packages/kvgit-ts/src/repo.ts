@@ -10,7 +10,7 @@
  * collections.
  */
 
-import { type Codec, bytesCodec } from './codec'
+import { type Codec, type CodecName, bytesCodec, resolveCodec } from './codec'
 import {
   BranchExistsError,
   CorruptHeadError,
@@ -72,9 +72,10 @@ export interface Commit {
 export type Ref = { commit: string } | { branch: string } | { tag: string }
 
 export interface RepoOptions<V> {
-  /** How values become stored bytes. Default {@link bytesCodec}:
-   *  values are `Uint8Array`, stored as they are. */
-  codec?: Codec<V>
+  /** How values become stored bytes: a codec, or the name of one
+   *  (`'bytes'`, `'json'`, `'cbor'`). Default `'bytes'`: values are
+   *  `Uint8Array`, stored as they are, so any reader can take them. */
+  codec?: Codec<V> | CodecName
   /** Merge rules by key that every worktree inherits: a merge
    *  function over decoded values, or a `MergeChoice`. */
   mergeFns?: ReadonlyMap<string, MergeRule<V>>
@@ -117,7 +118,8 @@ export class Repo<V = Uint8Array> {
 
   private constructor(store: KVStore, opts: RepoOptions<V>) {
     this.store = store
-    this.codec = opts.codec ?? (bytesCodec as unknown as Codec<V>)
+    this.codec =
+      opts.codec === undefined ? (bytesCodec as unknown as Codec<V>) : resolveCodec(opts.codec)
     this.mergeFns = new Map(opts.mergeFns ?? [])
     this.mergePrefixes = new Map(opts.mergePrefixes ?? [])
     this.defaultMerge = opts.defaultMerge

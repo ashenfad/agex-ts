@@ -1,7 +1,8 @@
 /**
  * Agents, and the sessions they drive, after Python agex's `agex.agent`.
  *
- * An {@link Agent} is a loop: a model (a {@link Provider}), a primer and
+ * An {@link Agent} is a loop: a model (a {@link Provider}, or an AI SDK
+ * model), a primer and
  * the settings it calls the model with. It holds no state and owns no
  * world. A session gives it one: `agent.session(ws)` drives a workspace
  * turn by turn, its conversation stored in the session's branch, so a
@@ -29,6 +30,8 @@ import {
   toolInstructions,
   worldTools,
 } from '@agex-ts/world'
+import type { LanguageModelV4 } from '@ai-sdk/provider'
+import { AiSdkProvider, isLanguageModel } from './ai-sdk'
 import { type Provider, type Settings, type ToolSpec, toolSpec } from './provider'
 import {
   type Image,
@@ -113,7 +116,9 @@ export interface Outcome {
 }
 
 export interface AgentOptions {
-  readonly model: Provider
+  /** A {@link Provider}, or an AI SDK model (`anthropic('claude-...')`
+   *  and the like), driven through {@link AiSdkProvider}. */
+  readonly model: Provider | LanguageModelV4
   /** Opens every request, ahead of the workspace's own tool
    *  instructions. */
   readonly primer?: string
@@ -136,7 +141,7 @@ export class Agent {
   readonly maxToolCalls: number | null
 
   constructor(opts: AgentOptions) {
-    this.provider = opts.model
+    this.provider = isLanguageModel(opts.model) ? new AiSdkProvider(opts.model) : opts.model
     this.primer = opts.primer ?? ''
     this.settings = opts.settings ?? {}
     this.maxSteps = opts.maxSteps ?? MAX_STEPS

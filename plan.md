@@ -716,6 +716,19 @@ the embedder turns it on, as in Python.
 **Exit:** a smoke run on each provider against a real model (a manual
 script, keyed by the developer, not CI).
 
+Done 2026-10-13: `AiSdkProvider` (`new Agent({ model })` wraps any
+`LanguageModelV4`), and `scripts/smoke.mjs` passes on Anthropic, OpenAI,
+Gemini and OpenRouter: thinking and a tool call in one turn, the run
+read back the next, a session moved from one provider to another, and a
+stop mid-stream. `thinking` is the spec's own `reasoning` effort, which
+each provider resolves per model (adaptive or a budget on Anthropic, a
+level on Gemini 3), with what it doesn't reach added as provider
+options: OpenRouter's own `reasoning`, Gemini's `includeThoughts`, and
+OpenAI's `store: false` with encrypted reasoning, always, since agex
+keeps the conversation. A tool the provider runs itself (a hosted
+search) is left out of the record. Caching is `extra`'s for now
+(Anthropic and Gemini cached nothing on their own in the smoke run).
+
 **A4. Folding.** `agex.compaction` ported:
 - a fold before a model call that would reach the budget, within a run
   too;

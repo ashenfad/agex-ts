@@ -31,7 +31,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { Memory } from '../src/backends/memory'
-import { ConcurrencyError, VersionedKV, repairHead } from '../src/index'
+import { ConcurrencyError, UnknownBranchError, VersionedKV, repairHead } from '../src/index'
 import type { CorruptHeadRecoverer } from '../src/index'
 import {
   BRANCH_HEAD,
@@ -472,7 +472,7 @@ describe('an absent HEAD means the branch is gone, not damaged', () => {
     store.armSet(BRANCH_HEAD_PREV('doomed'), async () => {
       await vk.deleteBranch('doomed')
     })
-    await expect(doomed.commit(one('secret', 'classified-v2'))).rejects.toThrow(/has no HEAD/)
+    await expect(doomed.commit(one('secret', 'classified-v2'))).rejects.toThrow(UnknownBranchError)
 
     expect(await store.get(BRANCH_HEAD('doomed')), 'the delete should have won').toBeNull()
     expect(await store.get(BRANCH_HEAD_PREV('doomed'))).toBeNull()

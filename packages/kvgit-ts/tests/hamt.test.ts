@@ -247,3 +247,41 @@ describe('Hamt — pending semantics', () => {
     expect(text((await staged.get('k')) as Uint8Array)).toBe('v')
   })
 })
+
+describe('Hamt — getMany', () => {
+  it('finds what get finds, across a split tree, with one read per level', async () => {
+    class CountingMemory extends Memory {
+      batches = 0
+      override async getMany(keys: Iterable<string>): Promise<Map<string, Uint8Array>> {
+        this.batches++
+        return super.getMany(keys)
+      }
+    }
+    const store = new CountingMemory()
+    const updates = Array.from({ length: 200 }, (_, i) => [`k${i}`, bytes(`v${i}`)] as const)
+    // A fresh view of the persisted root, so every node comes from the
+    // store rather than the writer's pending map.
+    const h = new Hamt(store, (await (await Hamt.empty(store)).persist({ updates })).root)
+
+    const asked = ['k0', 'k57', 'k199', 'missing', 'k57', 'also-missing']
+    store.batches = 0
+    const found = await h.getMany(asked)
+    expect([...found.keys()].sort()).toEqual(['k0', 'k199', 'k57'])
+    for (const [k, v] of found) expect(text(v)).toBe(text((await h.get(k)) as Uint8Array))
+    // Bounded by the depth of the tree, not the number of keys.
+    expect(store.batches).toBeGreaterThan(1)
+    expect(store.batches).toBeLessThanOrEqual(4)
+  })
+
+  it('reads an empty Hamt without touching the store', async () => {
+    const h = await Hamt.empty(new Memory())
+    expect((await h.getMany(['a', 'b'])).size).toBe(0)
+  })
+
+  it('sees pending nodes', async () => {
+    const h = await (await Hamt.empty(new Memory())).updated({
+      updates: [['a', bytes('1')]],
+    })
+    expect(text((await h.getMany(['a'])).get('a') as Uint8Array)).toBe('1')
+  })
+})

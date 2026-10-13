@@ -15,6 +15,7 @@
  *   `__parent_gens__<commit>`        — each parent's generation
  *   `__commit_time__<commit>`        — wall time, in seconds (a float)
  *   `__info__<commit>`               — optional caller-supplied info
+ *   `__tag_info__<tag>`              — a tag's creation time and info
  *   `kvgit:keyset:<node_hash>`       — HAMT node bytes (via Keyset)
  *   `kvgit:blob:<sha256>`            — blob bytes, keyed by content
  *
@@ -29,6 +30,7 @@
  * the same in the other.
  */
 
+import { StorageVersionError } from '../errors'
 import { PyFloat, pyDumpsBytes, pyLoadsBytes } from '../pyjson'
 import type { KVStore } from '../types'
 
@@ -42,8 +44,18 @@ export const PARENT_COMMIT = (commit: string): string => `__parent_commit__${com
 export const PARENT_GENS = (commit: string): string => `__parent_gens__${commit}`
 export const COMMIT_TIME = (commit: string): string => `__commit_time__${commit}`
 export const INFO_KEY = (commit: string): string => `__info__${commit}`
+export const TAG_INFO_KEY = (tag: string): string => `__tag_info__${tag}`
 export const BRANCH_HEAD_PREFIX = '__branch_head__'
 export const BLOB_PREFIX = 'kvgit:blob:'
+
+/**
+ * The reserved branch-name prefix a tag's commit pointer lives under: a
+ * tag is `__branch_head__refs/tags/<name>`, a branch head in every
+ * respect except that the branch API hides it. Reachability is decided
+ * by walking branch heads, so a tagged commit stays alive under any
+ * kvgit, including one that knows nothing of tags.
+ */
+export const TAG_BRANCH_PREFIX = 'refs/tags/'
 
 /** Remote-tracking state for the sync layer: the last remote commit a
  *  branch is known to be synced to. Reserved here so the layout is
@@ -220,7 +232,7 @@ export async function checkStorageVersion(store: KVStore): Promise<void> {
   if (raw !== null) {
     const version = safeLoads(raw)
     if (version !== STORAGE_VERSION) {
-      throw new Error(
+      throw new StorageVersionError(
         `Store has kvgit storage version ${JSON.stringify(version)}, ` +
           `this code supports ${STORAGE_VERSION}. Use a fresh store.`,
       )
@@ -229,7 +241,7 @@ export async function checkStorageVersion(store: KVStore): Promise<void> {
   }
 
   for await (const _k of store.keys(BRANCH_HEAD_PREFIX)) {
-    throw new Error(
+    throw new StorageVersionError(
       `Store appears to use an older kvgit storage format. This version requires storage v${STORAGE_VERSION}. Use a fresh store.`,
     )
   }

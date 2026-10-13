@@ -9,7 +9,8 @@ The fixture is what kvgit-ts must reproduce byte for byte:
 - ``scenario``: a scripted history run on a fresh in-memory store at
   fixed clock times, and the whole store after each step, every key and
   every byte. kvgit-ts replays the same steps at the same times and
-  must hold the same store.
+  must hold the same store. A tag (with a non-ASCII name and info) is
+  one of the steps.
 
 Regenerate (kvgit 0.4.x):
 
@@ -24,7 +25,7 @@ from importlib.metadata import version
 
 import kvgit.versioned.kv as kv_module
 from kvgit.kv.memory import Memory
-from kvgit.versioned.kv import VersionedKV
+from kvgit.versioned.kv import VersionedKV, create_tag
 
 
 class Clock:
@@ -112,6 +113,10 @@ def scenario() -> list[dict]:
     feature = main.create_branch("feat")
     result = feature.commit(updates={"feat-only": b"f"}, info={"branch": "feat"})
     record("branch", clock.now, commit=result.commit)
+
+    clock.now = 1760000003.5
+    create_tag(store, "v1/ünï", result.commit, {"note": "tagged", "ratio": 0.25})
+    record("tag", clock.now, commit=result.commit)
 
     # Two writers at the same head: the first fast-forwards, the second
     # loses the race and merges (its own commit, then a merge commit).

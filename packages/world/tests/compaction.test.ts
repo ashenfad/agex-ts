@@ -74,6 +74,15 @@ describe('the record', () => {
     expect((await ws.compaction.folds())[0]?.through).toBe('m1')
   })
 
+  it('a workspace that closes while a fold is being recorded stages nothing', async () => {
+    const recording = ws.compaction.record(fold('a'))
+    const closing = ws.close()
+    await expect(recording).rejects.toThrow(ReadOnlyError)
+    await closing
+    const reopened = await store.open('s')
+    expect(await reopened.compaction.folds()).toEqual([])
+  })
+
   it('a frozen workspace records nothing', async () => {
     await ws.files.write('a.txt', 'x')
     await ws.tags.add('v1')

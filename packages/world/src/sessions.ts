@@ -334,7 +334,13 @@ export class Sessions {
   /** Runs whose answer was recorded, until `onAnswer` is told. */
   readonly #recorded = new Set<number>()
   readonly #aborts = new Map<number, AbortController>()
-  readonly #runs = new Map<string, Promise<Answer>>()
+  /** Every run not yet settled, each until its own end (its
+   *  `onAnswer` included): a resume may start on the branch before an
+   *  earlier run has finished announcing. */
+  readonly #runs = new Set<Promise<Answer>>()
+  /** Branches whose remainder is being committed: past the last check
+   *  for a cancel, so a cancel finds the job answering. */
+  readonly #landing = new Set<string>()
   readonly #waiters = new Set<() => void>()
   #running = 0
   readonly #slots: (() => void)[] = []
@@ -567,13 +573,16 @@ export class Sessions {
    * Stop caring about job `name`; returns the job. Its answer is
    * discarded, and its run's signal aborted: the branch is free once
    * the runner has stopped. Nothing is committed for it and nothing
-   * deleted. A job that has already answered comes back unchanged.
+   * deleted. A job that has already answered comes back unchanged, and
+   * so does one whose answer is being landed, its remainder already
+   * being committed: still `running`, about to answer. A cancel either
+   * wins outright or finds the job answering.
    */
   cancel(asked: string): Job {
     const name = this.#resolve(asked)
     let job = this.#jobs.get(name)
     if (job === undefined) throw new SessionsError(this.#unknown(name))
-    if (job.status !== 'running') return job
+    if (job.status !== 'running' || this.#landing.has(name)) return job
     job = { ...job, status: 'cancelled', finished: this.#now() }
     this.#jobs.set(name, job)
     const token = this.#busy.get(name)
@@ -667,7 +676,7 @@ export class Sessions {
     const left = (helpers?.get(this.#ws.session) ?? []).filter((h) => h !== this)
     if (left.length > 0) helpers?.set(this.#ws.session, left)
     else helpers?.delete(this.#ws.session)
-    await Promise.allSettled([...this.#runs.values()])
+    await Promise.allSettled([...this.#runs])
   }
 
   // -- internals ------------------------------------------------------------
@@ -827,7 +836,8 @@ export class Sessions {
     const abort = new AbortController()
     this.#aborts.set(token, abort)
     const run = this.#work(name, job.task, budget, token, opts.runner, abort.signal)
-    this.#runs.set(name, run)
+    this.#runs.add(run)
+    void run.finally(() => this.#runs.delete(run))
     return [job, run]
   }
 
@@ -1042,11 +1052,20 @@ export class Sessions {
       const status = await child.index.status()
       if (status.staged.length === 0 && status.unstaged.length === 0) return
       if (status.mergeUnresolved.length > 0) return
-      if (status.unstaged.length > 0) await child.index.stage(status.unstaged)
-      await child.index.commit(
-        'Work the delegate had not committed when it answered, committed by the delegation mechanism',
-        { info: { committedFor: name } },
-      )
+      // The last check for a cancel, and the guard against one, in one
+      // step: a cancel that came while the branch was being read wins,
+      // and one that comes from here on finds the job answering.
+      if (this.#jobs.get(name)?.status === 'cancelled') return
+      this.#landing.add(name)
+      try {
+        if (status.unstaged.length > 0) await child.index.stage(status.unstaged)
+        await child.index.commit(
+          'Work the delegate had not committed when it answered, committed by the delegation mechanism',
+          { info: { committedFor: name } },
+        )
+      } finally {
+        this.#landing.delete(name)
+      }
     } catch (e) {
       warn(`sessions: could not commit what ${name} left uncommitted`, e)
     }
@@ -1400,6 +1419,11 @@ async function act(
       // The job's own name in what follows: ws-git knows no short one.
       if (action === 'cancel') {
         const job = sessions.cancel(name)
+        if (job.status === 'running') {
+          return ok(
+            `${job.name} is already answering: its work is being landed, so there is nothing to stop.`,
+          )
+        }
         if (job.status !== 'cancelled') {
           return ok(`${job.name} had already finished (${job.status}); nothing to stop.`)
         }

@@ -11,7 +11,6 @@
  */
 
 import type { FileSystem } from '@agex-ts/termish'
-import tsBlankSpace from 'ts-blank-space'
 import type { WorkspaceCache } from '../cache'
 import {
   type CodeSettings,
@@ -33,6 +32,17 @@ import {
 } from './messages'
 import { prepareCode } from './modules'
 import type { UiHarvest } from './ui-values'
+
+/** ts-blank-space, loaded by the first run that needs it: it brings the
+ *  TypeScript compiler, which a host that imports the world without
+ *  running code (or that brings its own transform) shouldn't load. */
+let blankSpace: Promise<(code: string) => string> | null = null
+
+/** TypeScript to JavaScript, types blanked out (the default transform). */
+async function stripTypes(code: string): Promise<string> {
+  blankSpace ??= import('ts-blank-space').then((m) => m.default)
+  return (await blankSpace)(code)
+}
 
 /** What a run gave, before the workspace commits it. */
 export interface KernelOutput {
@@ -131,7 +141,7 @@ export class Kernel {
 
     let prepared: Awaited<ReturnType<typeof prepareCode>>
     try {
-      const transform = this.#settings.transform ?? tsBlankSpace
+      const transform = this.#settings.transform ?? stripTypes
       prepared = await prepareCode(await transform(code), ctx.fs, ctx.fs.getcwd(), transform)
     } catch (e) {
       return failed(e)

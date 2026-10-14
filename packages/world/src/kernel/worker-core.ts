@@ -12,6 +12,8 @@
  * - each host object by name, and all of them as `host` (also
  *   `import { db } from 'host'`): its stub, for one that has one;
  * - each of the profile's values by name, a copy of its own per run;
+ * - `ui`, an empty object for the values to show, when the profile
+ *   asks for it: what the code leaves there is sent back with the run;
  * - `console`: `log` and `info` to stdout, `warn` and `error` to
  *   stderr, images shown as images.
  *
@@ -31,6 +33,7 @@ import {
   type Worker2Host,
   serializeError,
 } from './messages'
+import { type UiHarvest, harvestUi } from './ui-values'
 import type { WorkerPort } from './worker-port'
 
 type RunMessage = Extract<Host2Worker, { type: 'run' }>
@@ -394,6 +397,9 @@ async function run(msg: RunMessage): Promise<void> {
 
   let value: string | null = null
   let error: unknown = null
+  // What `ui` holds when the run ends, read through a getter the code's
+  // function defines, so `ui = {...}` is seen as well as `ui.x = ...`.
+  const uiRef: { get: () => unknown } = { get: () => undefined }
   try {
     // in the try: a stub that throws fails the run, as code would
     const host: Record<string, object> = {}
@@ -413,6 +419,7 @@ async function run(msg: RunMessage): Promise<void> {
       host: Object.freeze(host),
       ...host,
       ...msg.values,
+      ...(msg.ui && { ui: {} }),
     }
     const registered = { host: bindings.host }
     const modules: Record<string, Record<string, unknown>> = {}
@@ -422,25 +429,35 @@ async function run(msg: RunMessage): Promise<void> {
       // module returns that module's).
       modules[m.path] = (await body({}, modules, registered, loader)) as Record<string, unknown>
     }
-    const names = [...Object.keys(bindings), '__modules', '__load']
-    const values = [...Object.values(bindings), modules, loader]
+    const names = [...Object.keys(bindings), '__modules', '__load', '__ui']
+    const values = [...Object.values(bindings), modules, loader, uiRef]
     // An inner function, so the code may declare a name a binding has
-    // (`const { db } = host`).
-    const fn = new AsyncFunction(...names, `return (async () => {${msg.code}\n})()`)
+    // (`const { db } = host`). On the header's line, so the code's
+    // lines keep their numbers.
+    const getter = msg.ui ? '__ui.get = () => ui; ' : ''
+    const fn = new AsyncFunction(...names, `${getter}return (async () => {${msg.code}\n})()`)
     const returned = await fn(...values)
     if (returned !== undefined) value = show(returned)
   } catch (e) {
     error = e
-  } finally {
-    bridge.abandon()
-    current = null
-    fetchBridge = null
   }
+  let ui: UiHarvest | undefined
+  if (msg.ui) {
+    try {
+      ui = await harvestUi(uiRef.get(), /\b(?:const|let|var)\s+ui\b/.test(msg.code))
+    } catch (e) {
+      ui = { entries: [], notes: [`ui could not be read: ${show(e)}`] }
+    }
+  }
+  bridge.abandon()
+  current = null
+  fetchBridge = null
   post({
     type: 'done',
     runId: msg.runId,
     value,
     error: error === null ? null : serializeError(error),
+    ...(ui !== undefined && { ui }),
   })
 }
 

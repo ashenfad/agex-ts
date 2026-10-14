@@ -102,6 +102,19 @@ export {
   DEFAULT_TIMEOUT,
   MAX_IMAGES,
 } from './kernel/kernel'
+export type { UiEntry, UiHarvest } from './kernel/ui-values'
+export {
+  type Artifact,
+  type ArtifactKind,
+  MAX_ARTIFACT_BYTES,
+  artifactKind,
+  artifactsNote,
+  looksLikePlotly,
+  parseArtifactsNote,
+  uiDescription,
+  uiRoot,
+  writeUi,
+} from './ui'
 export { type CurlOptions, curlCommand } from './curl'
 export { type HttpOptions, httpHost } from './http'
 export {

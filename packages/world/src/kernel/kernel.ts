@@ -32,6 +32,7 @@ import {
   serializeError,
 } from './messages'
 import { prepareCode } from './modules'
+import type { UiHarvest } from './ui-values'
 
 /** What a run gave, before the workspace commits it. */
 export interface KernelOutput {
@@ -45,6 +46,9 @@ export interface KernelOutput {
   readonly truncated: boolean
   /** Seconds the run took. */
   readonly duration: number
+  /** What the code put in `ui`, for a profile that binds it; null when
+   *  it doesn't, or the run was stopped. */
+  readonly ui: UiHarvest | null
 }
 
 /** What a run reaches on the host. */
@@ -108,8 +112,11 @@ export class Kernel {
 
   async run(code: string, ctx: RunContext): Promise<KernelOutput> {
     const started = performance.now()
-    const finish = (out: Omit<KernelOutput, 'duration' | 'truncated'>): KernelOutput =>
-      this.#render(out, started, ctx.settings.maxObservation ?? DEFAULT_MAX_OBSERVATION)
+    const finish = (
+      out: Omit<KernelOutput, 'duration' | 'truncated' | 'ui'>,
+      ui: UiHarvest | null = null,
+    ): KernelOutput =>
+      this.#render({ ...out, ui }, started, ctx.settings.maxObservation ?? DEFAULT_MAX_OBSERVATION)
     const failed = (e: unknown) =>
       finish({
         stdout: '',
@@ -147,7 +154,11 @@ export class Kernel {
     return new Promise<KernelOutput>((resolve) => {
       let ended = false
       let timer: ReturnType<typeof setTimeout> | undefined
-      const end = (value: string | null, error: SerializedError | null): void => {
+      const end = (
+        value: string | null,
+        error: SerializedError | null,
+        ui: UiHarvest | null = null,
+      ): void => {
         if (ended) return
         ended = true
         offMessage()
@@ -157,13 +168,16 @@ export class Kernel {
         // The calls the host already took land before the run ends.
         void Promise.allSettled([...answering]).then(() =>
           resolve({
-            ...finish({
-              stdout: output.text('stdout'),
-              stderr: output.text('stderr'),
-              images: output.images,
-              value,
-              error,
-            }),
+            ...finish(
+              {
+                stdout: output.text('stdout'),
+                stderr: output.text('stderr'),
+                images: output.images,
+                value,
+                error,
+              },
+              ui,
+            ),
             ...(output.truncated && { truncated: true }),
           }),
         )
@@ -190,7 +204,11 @@ export class Kernel {
             void answer.finally(resume)
           }
         } else if (msg.type === 'done') {
-          end(msg.value, msg.error === null ? null : userStack(msg.error, codeLines))
+          end(
+            msg.value,
+            msg.error === null ? null : userStack(msg.error, codeLines),
+            msg.ui ?? null,
+          )
         }
       })
       const offError = worker.addErrorListener((err) =>
@@ -257,6 +275,7 @@ export class Kernel {
         hasCache: ctx.cache !== null,
         hasResolver: this.#settings.resolve !== undefined,
         routeFetch: this.#settings.routeFetch ?? false,
+        ui: ctx.settings.ui ?? false,
       }
       worker.postMessage(message)
     })

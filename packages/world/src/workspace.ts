@@ -84,6 +84,7 @@ import { Secrets } from './secrets'
 import { skillFS, skillName, skillsRoot } from './skills'
 import type { Store } from './store'
 import { Turn, TurnInProgressError, type TurnOptions, statusOf } from './turns'
+import { type Artifact, writeUi } from './ui'
 import { VIEW_KEY, ViewFS, encodeView, normalizeView, parseView } from './views'
 
 /** How a workspace is opened. */
@@ -180,6 +181,10 @@ export interface CodeResult {
   /** The commit holding what the code changed; null when it changed
    *  nothing, with autocommit off, or on a frozen workspace. */
   readonly commit: string | null
+  /** The `ui` artifacts the run wrote (with `profile.code.ui` on). */
+  readonly artifacts: readonly Artifact[]
+  /** Why a `ui` value gave no artifact, or not the one meant. */
+  readonly uiNotes: readonly string[]
 }
 
 /** What `terminal` gave. */
@@ -517,6 +522,10 @@ export class Workspace {
    * else carries over between runs: what should outlast one belongs in
    * the files or the cache.
    *
+   * With `profile.code.ui` on, it also has `ui`: the values it leaves
+   * there that render are written under `<root>/ui` before the commit,
+   * and named in `artifacts` (see `ui.ts`).
+   *
    * On a frozen workspace the code runs, and a write fails with
    * `EROFS`.
    */
@@ -535,8 +544,11 @@ export class Workspace {
         call,
         settings: this.#settings.profile.code ?? {},
       })
+      const { ui, ...rest } = out
+      const { artifacts, notes } =
+        ui === null ? { artifacts: [], notes: [] } : await writeUi(this.#top, this.root, ui)
       const commit = this.#wt === null ? null : await this.autoCommit({ tool: 'run_ts' })
-      return { ...out, commit }
+      return { ...rest, commit, artifacts, uiNotes: notes }
     }, this.#reentry)
   }
 

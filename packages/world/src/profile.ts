@@ -184,6 +184,11 @@ export interface CodeSettings {
    *  decorators). A transform should keep every line where it was, as
    *  ts-blank-space does, or errors name the wrong lines. */
   readonly transform?: (code: string) => string | Promise<string>
+  /** Code gets a `ui` object, and the values it puts there that
+   *  render (a chart, a table, cards, an image) are written as files
+   *  under `<root>/ui` when the run ends, each named in the result
+   *  (see `ui.ts`). Default false: without it, `ui` is a free name. */
+  readonly ui?: boolean
   /** Where the kernel's worker runs: a browser Web Worker or Node
    *  `worker_threads` (default: detected), and its script (default:
    *  the package's built worker). */

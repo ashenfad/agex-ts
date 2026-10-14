@@ -4,6 +4,7 @@
  */
 
 import type { SerializedError } from '../kernel/messages'
+import { artifactsNote } from '../ui'
 import type { CodeResult, TerminalResult } from '../workspace'
 
 /** A terminal result: stdout, `[exit code N]`, `[stderr]`, `[output
@@ -19,8 +20,9 @@ export function renderTerminal(r: TerminalResult): string {
 }
 
 /** A run_ts result: stdout, the returned value, `[error]` (with a
- *  `[hint: …]` when one applies), `[stderr]`, `[output truncated]`;
- *  `(no output; success)` when there's nothing. */
+ *  `[hint: …]` when one applies), `[stderr]`, `[output truncated]`,
+ *  then `[ui artifacts: …]` and a `[ui note: …]` for each value that
+ *  gave none; `(no output; success)` when there's nothing. */
 export function renderCode(r: CodeResult, ctx: HintContext = {}): string {
   const parts: string[] = []
   const stdout = r.stdout.replace(/\n+$/, '')
@@ -33,6 +35,9 @@ export function renderCode(r: CodeResult, ctx: HintContext = {}): string {
   }
   if (r.stderr.trim() !== '') parts.push(`[stderr]\n${r.stderr.trimEnd()}`)
   if (r.truncated) parts.push('[output truncated]')
+  const artifacts = artifactsNote(r.artifacts ?? [])
+  if (artifacts !== '') parts.push(artifacts)
+  for (const note of r.uiNotes ?? []) parts.push(`[ui note: ${note}]`)
   return parts.length === 0 ? '(no output; success)' : parts.join('\n')
 }
 

@@ -1,6 +1,7 @@
 /**
- * PackRemote (SPIKE): the kvgit `Remote` over a GitHub repo, one
- * compressed pack per push.
+ * PackRemote: the kvgit `Remote` over a GitHub repo, one compressed
+ * pack per push. The formats are specified in the package README
+ * ("Pack sync").
  *
  * Where `GithubRemote` renders every kvgit commit as a git commit (a
  * tree and a commit per kvgit commit, a blob per large value, all
@@ -54,6 +55,9 @@ export const PACKS_DIR = 'kvgit/packs'
 const ARCHIVED = 'archived/'
 const ZERO_OID = '0000000000000000000000000000000000000000'
 const GET_CHUNK = 16
+/** The most base64 one request may carry: GitHub refuses GraphQL bodies
+ *  over 45MB and has timed out on 40MB; 30MB has landed. */
+const MAX_BODY_BASE64 = 30 * 1024 * 1024
 
 /** One pack as the manifest lists it. */
 export interface PackEntry {
@@ -114,7 +118,12 @@ export interface PackRemoteOptions {
 interface BranchState {
   refId: string
   gitOid: string
+  /** Null for a ref without a manifest file: a creation that never got
+   *  its first commit, which the next creation claims. */
   manifest: PackManifest | null
+  /** Why the manifest there can't be used (unparseable, a format this
+   *  code doesn't know): such a branch is left alone, never claimed. */
+  unreadable?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -464,6 +473,9 @@ export class PackRemote implements Remote {
     if (this.#repoId === null || (st?.manifest?.head ?? null) !== expectedOld) {
       st = await this.#readOne(branch)
     }
+    if (st?.unreadable !== undefined) {
+      throw new Error(`PackRemote.push: branch '${branch}' can't be synced: ${st.unreadable}`)
+    }
     if (expectedOld === null) {
       // A ref without a manifest is a creation that never got its
       // first commit: claim it.
@@ -495,9 +507,31 @@ export class PackRemote implements Remote {
     }
     chunks.push(current)
 
+    // encoded and checked up front, so a push too large to land sends
+    // nothing rather than its first chunks
+    const packs: Uint8Array[] = []
     let base = expectedOld
+    for (const chunk of chunks) {
+      const bytes = await encodePack(chunk, { kernel: this.#kernel, base })
+      if (Math.ceil(bytes.length / 3) * 4 > MAX_BODY_BASE64) {
+        throw new Error(
+          `PackRemote.push: commit ${(chunk.at(-1) as WireCommit).hash.slice(0, 7)} is ${bytes.length} bytes compressed, more than one request can carry`,
+        )
+      }
+      packs.push(bytes)
+      base = (chunk.at(-1) as WireCommit).hash
+    }
+
+    base = expectedOld
     for (const [i, chunk] of chunks.entries()) {
-      const landed = await this.#pushChunk(branch, st, base, chunk, i === chunks.length - 1)
+      const landed = await this.#pushChunk(
+        branch,
+        st,
+        base,
+        chunk,
+        packs[i] as Uint8Array,
+        i === chunks.length - 1,
+      )
       if (landed === null) {
         if (i === 0) return false
         throw new Error(`PackRemote.push: lost the ref after ${i} of ${chunks.length} chunks`)
@@ -514,12 +548,12 @@ export class PackRemote implements Remote {
     st: BranchState | null,
     base: string | null,
     chunk: WireCommit[],
+    bytes: Uint8Array,
     last: boolean,
   ): Promise<BranchState | null> {
     const tip = (chunk.at(-1) as WireCommit).hash
     const prior = st?.manifest ?? null
     const seq = prior?.nextSeq ?? 1
-    const bytes = await encodePack(chunk, { kernel: this.#kernel, base })
     const entry: PackEntry = {
       path: `${PACKS_DIR}/${String(seq).padStart(6, '0')}-${tip.slice(0, 12)}.pack`,
       seq,
@@ -540,7 +574,10 @@ export class PackRemote implements Remote {
     // Fold older packs into one when there are too many.
     if (last && packs.length > this.#maxPacks) {
       const folded = await this.#fold(packs.slice(0, packs.length - this.#keepRecent), nextSeq)
-      if (folded !== null) {
+      // the fold rides this push's request, so both must fit in it; a
+      // fold that doesn't is left for a later, smaller push
+      const body = (n: number): number => Math.ceil(n / 3) * 4
+      if (folded !== null && body(bytes.length) + body(folded.bytes.length) <= MAX_BODY_BASE64) {
         additions.push({ path: folded.entry.path, contents: bytesToBase64(folded.bytes) })
         deletions.push(...folded.replaced.map((p) => ({ path: p.path })))
         const gone = new Set(folded.replaced.map((p) => p.path))
@@ -770,13 +807,15 @@ export class PackRemote implements Remote {
   }
 
   #remember(node: RefNode, branch = node.name): BranchState {
-    const text = node.target.file?.object?.text ?? null
-    let manifest: PackManifest | null = null
-    if (typeof text === 'string') {
-      const parsed = JSON.parse(text) as PackManifest
-      if (parsed.format === PACK_FORMAT) manifest = parsed
+    const file = node.target.file
+    const st: BranchState = { refId: node.id, gitOid: node.target.oid, manifest: null }
+    if (file != null) {
+      // a manifest that is there but unusable is never treated as
+      // absent: the next creation would claim the branch over it
+      const read = readManifest(file.object?.text)
+      if (typeof read === 'string') st.unreadable = read
+      else st.manifest = read
     }
-    const st = { refId: node.id, gitOid: node.target.oid, manifest }
     this.#refs.set(branch, st)
     return st
   }
@@ -806,6 +845,21 @@ export class PackRemote implements Remote {
     }
     return out
   }
+}
+
+/** A manifest from its text, or why it can't be used. */
+function readManifest(text: string | null | undefined): PackManifest | string {
+  if (typeof text !== 'string') return 'its manifest could not be read as text'
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch {
+    return 'its manifest is not JSON'
+  }
+  const format = (parsed as { format?: unknown } | null)?.format
+  if (format !== PACK_FORMAT)
+    return `its manifest is format ${JSON.stringify(format)}, not ${PACK_FORMAT}`
+  return parsed as PackManifest
 }
 
 /** The data, or a throw. A branch without a manifest (`main`, a

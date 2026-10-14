@@ -218,6 +218,40 @@ describe('PackRemote push / fetch', () => {
   })
 })
 
+describe('PackRemote and manifests it cannot use', () => {
+  for (const [what, text] of [
+    ['a newer format', '{"format": 2, "head": "x", "packs": []}'],
+    ['text that is not JSON', '{"format": 1, "head":'],
+  ] as const) {
+    it(`never claims a branch whose manifest is ${what}: the push refuses, the roster skips it`, async () => {
+      const gh = new FakePackGithub()
+      gh.plant(BRANCH, { [MANIFEST_PATH]: text })
+      const before = gh.refs.get(`refs/heads/${BRANCH}`)
+      const a = await device(gh)
+      await commitN(a.store, 1, 'a')
+      await expect(pushBranch(a.store, a.remote, BRANCH)).rejects.toThrow(
+        new RegExp(`branch '${BRANCH}' can't be synced: its manifest`),
+      )
+      expect(gh.refs.get(`refs/heads/${BRANCH}`)).toBe(before)
+      expect(await a.remote.roster()).toEqual([])
+    })
+  }
+
+  it('refuses a commit too large for one request, before sending it', async () => {
+    const gh = new FakePackGithub()
+    const a = await device(gh)
+    const vk = await VersionedKV.open(a.store, { branch: BRANCH })
+    // random bytes don't compress: 24MB stays over the 30MB base64 cap
+    const big = new Uint8Array(24 * 1024 * 1024)
+    for (let i = 0; i < big.length; i += 65536) crypto.getRandomValues(big.subarray(i, i + 65536))
+    await vk.commit({ updates: new Map([['files/big.bin', big]]) })
+    await expect(pushBranch(a.store, a.remote, BRANCH)).rejects.toThrow(
+      /more than one request can carry/,
+    )
+    expect(gh.count('graphql-mutation')).toBe(0)
+  })
+})
+
 describe('PackRemote packs over time', () => {
   it('folds older packs once a push would exceed maxPacks, still one mutation', async () => {
     const gh = new FakePackGithub()

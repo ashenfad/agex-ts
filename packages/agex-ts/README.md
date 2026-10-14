@@ -60,9 +60,12 @@ const factor = agent.task({
 console.log(await factor({ n: 391 })) // [17, 23]
 ```
 
-`examples/quickstart.mjs` is this as a script, and
-`examples/helpers.mjs` has an agent hand work to helpers
-(`pnpm build`, then `node examples/<name>.mjs` with a key set).
+The repository's
+[`examples/`](https://github.com/ashenfad/agex-ts/tree/main/packages/agex-ts/examples)
+has this as a script (`quickstart.mjs`), and one where an agent hands
+work to helpers (`helpers.mjs`). They run from a clone: `pnpm install &&
+pnpm -r build`, then `node examples/<name>.mjs` in `packages/agex-ts`
+with `ANTHROPIC_API_KEY` set.
 
 ## Worlds
 

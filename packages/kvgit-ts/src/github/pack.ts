@@ -3,11 +3,9 @@
  * pack per push. The formats are specified in the package README
  * ("Pack sync").
  *
- * Where `GithubRemote` renders every kvgit commit as a git commit (a
- * tree and a commit per kvgit commit, a blob per large value, all
- * throttled REST writes), this transport ships each push's commits as
- * ONE file and lands it with ONE GraphQL `createCommitOnBranch`, whose
- * `expectedHeadOid` is the compare-and-swap. A session's branch holds:
+ * A push's commits travel as ONE file, landed by ONE GraphQL
+ * `createCommitOnBranch` whose `expectedHeadOid` is the
+ * compare-and-swap. A session's branch holds:
  *
  *   kvgit/manifest.json              head, pack list, caller metadata
  *   kvgit/packs/<seq>-<tip12>.pack   gzip(CBOR) of a run of WireCommits

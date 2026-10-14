@@ -24,7 +24,3 @@ export async function gitBlobSha1(bytes: Uint8Array): Promise<string> {
   }
   return hex
 }
-
-/** SHA-1 of the canonical empty tree — present implicitly in every
- *  git repo; useful for commits whose keyset is empty. */
-export const EMPTY_TREE_SHA = '4b825dc642cb6eb9a060e54bf8d69288fbee4904'

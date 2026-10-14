@@ -163,6 +163,11 @@ export interface CodeSettings {
   /** Seconds a run may take before it is stopped (default 30): the
    *  code's own time, so a host object's call doesn't count. */
   readonly timeout?: number
+  /** Seconds of host objects' calls a run may leave out of its timeout
+   *  (default 600); past them, the clock runs while calls are pending.
+   *  The host can't tell code waiting on a call from code running
+   *  beside one it didn't await, so this is what bounds the second. */
+  readonly hostTime?: number
   /** The most characters of stdout, and of stderr, a result keeps
    *  (default 32,000); the rest is cut and `truncated` set. */
   readonly maxObservation?: number

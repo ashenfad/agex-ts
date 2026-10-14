@@ -99,7 +99,8 @@ const result = await ws.runCode(`
   module reaches the host objects through `import { db } from 'host'`;
   only the code run has them as bare names.
 - **Stopping:** a run longer than the profile's timeout (30 seconds by
-  default, of the code's own time: a host object's call doesn't count)
+  default, of the code's own time: a host object's call doesn't count,
+  up to `hostTime`, 10 minutes by default)
   is stopped with a `TimeoutError`, and `ws.interrupt()` stops
   one with a `CancelledError`. Either way the worker is terminated, what
   the code wrote is committed, and the next run starts a fresh worker.

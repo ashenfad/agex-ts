@@ -67,7 +67,7 @@ const SHOUT = `const shout = agex.task({
 })`
 
 let store: Store
-const opened: Workspace[] = []
+let opened: Workspace[] = []
 const sessions: Session[] = []
 
 beforeEach(async () => {
@@ -342,6 +342,63 @@ try { await held(['nope'])({}) } catch (e) { console.log(e.name + ': ' + e.messa
     const helper = await store.open('lead.shout-1')
     expect((await agent.session(helper).runs())[0]?.status).toBe('cancelled')
     await helper.close()
+  })
+})
+
+describe('a helper’s job', () => {
+  it('takes a name no earlier helper took, after its world is opened again', async () => {
+    const call = runs(`${SHOUT}\nconsole.log(await shout({ word: 'hi' }))`)
+    // both helpers open with the same brief, so share one count of turns
+    const { agent } = routed(
+      [call, says('done'), call, says('done')],
+      Array(2).fill(runs('await task.success(word.toUpperCase())')),
+    )
+    const first = await lead(agent)
+    await first.chat.say('LEAD one')
+    await first.chat.close()
+    await first.ws.close()
+    opened = opened.filter((w) => w !== first.ws)
+    // a new world object, a new agex for it, counting from the start
+    const second = await lead(agent)
+    await second.chat.say('LEAD two')
+    expect(await printed(second.chat)).toContain('HI')
+    expect(second.chat.sessions?.list().map((j) => j.name)).toEqual(['lead.shout-2'])
+  })
+
+  it('a cancel while the helper is forked stops it', async () => {
+    const { agent, briefs } = routed(
+      [runs(`${SHOUT}\nawait shout({ word: 'hi' })`), says('done')],
+      [runs('await task.success(word)')],
+    )
+    const { chat } = await lead(agent)
+    const helper = chat.sessions as NonNullable<typeof chat.sessions>
+    const ask = helper.ask.bind(helper)
+    // the cancel lands after the fork, before the call has the job
+    helper.ask = (async (...args: Parameters<typeof ask>) => {
+      const job = await ask(...args)
+      chat.cancel('stopped')
+      return job
+    }) as typeof helper.ask
+    expect((await chat.say('LEAD go')).status).toBe('cancelled')
+    expect(helper.list().map((j) => j.status)).toEqual(['cancelled'])
+    await chat.close()
+    expect(briefs).toEqual([])
+  })
+
+  it('tells the helper the return type’s output, for a schema that transforms', async () => {
+    const code = `const json = (s) => () => s
+const parsed = { '~standard': { version: 1, vendor: 'mine', validate: (v) => ({ value: Number(v) }), jsonSchema: { input: json({ type: 'string' }), output: json({ type: 'integer' }) } } }
+const count = agex.task({ name: 'count', instructions: 'HELPER Count.', params: { word: parsed }, returns: parsed })
+console.log(await count({ word: '3' }))`
+    const { agent, briefs } = routed(
+      [runs(code), says('done')],
+      [runs('await task.success(word.length)')],
+    )
+    const { chat } = await lead(agent)
+    await chat.say('LEAD go')
+    expect(briefs[0]).toContain('- `word: string` = "3"')
+    expect(briefs[0]).toContain('with a `number`')
+    expect(await printed(chat)).toContain('1')
   })
 })
 

@@ -106,17 +106,17 @@ export const AGEX_STUB = String.raw`(remote) => {
   const IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/
   const isObject = (v) => typeof v === 'object' && v !== null && !Array.isArray(v)
 
-  function jsonSchema(schema, where) {
+  function jsonSchema(schema, where, io) {
     if (schema === undefined || schema === null) {
       throw new TypeError(where + ' has no type: give it a JSON Schema')
     }
     const standard = isObject(schema) ? schema['~standard'] : undefined
     if (standard !== undefined) {
       const convert = standard.jsonSchema
-      if (convert === undefined || typeof convert.input !== 'function') {
+      if (convert === undefined || typeof convert[io] !== 'function') {
         throw new TypeError(where + "'s schema comes from a library that makes no JSON Schema: write it as JSON Schema")
       }
-      return convert.input({ target: 'draft-2020-12' })
+      return convert[io]({ target: 'draft-2020-12' })
     }
     if (schema === true || isObject(schema)) return schema
     throw new TypeError(where + "'s type is a JSON Schema, not " + typeof schema)
@@ -165,9 +165,9 @@ export const AGEX_STUB = String.raw`(remote) => {
       if (!IDENTIFIER.test(param) || RESERVED.includes(param)) {
         throw new TypeError("task '" + name + "' has a parameter named '" + param + "', which its helper's world binds (" + RESERVED.join(', ') + ')')
       }
-      params[param] = jsonSchema(type, "task '" + name + "': parameter '" + param + "'")
+      params[param] = jsonSchema(type, "task '" + name + "': parameter '" + param + "'", 'input')
     }
-    const returns = def.returns === undefined || def.returns === null ? null : jsonSchema(def.returns, "task '" + name + "''s return")
+    const returns = def.returns === undefined || def.returns === null ? null : jsonSchema(def.returns, "task '" + name + "''s return", 'output')
     for (const schema of [...Object.values(params), returns]) {
       const defs = isObject(schema) ? { ...schema.definitions, ...schema.$defs } : {}
       const live = liveIn(schema, defs, new Set())
@@ -344,6 +344,8 @@ async function runHelper(
 export class TaskRun implements SessionRunner {
   reply: CallReply = failed('the helper never ran')
   readonly done: Promise<void>
+  /** Whether `done` has settled. */
+  ended = false
   #finish: () => void = () => {}
 
   constructor(
@@ -352,7 +354,10 @@ export class TaskRun implements SessionRunner {
     readonly origin: Workspace,
   ) {
     this.done = new Promise((resolve) => {
-      this.#finish = resolve
+      this.#finish = () => {
+        this.ended = true
+        resolve()
+      }
     })
   }
 
@@ -497,9 +502,23 @@ export class AgentTasks {
         const name = await this.#ask(helper, run, call)
         this.#jobs.set(name, helper)
         started.push([name, run])
+        // a cancel that came while it forked didn't see it
+        if (this.#stopped) helper.cancel(name)
       }
       for (const [name, run] of started) {
-        await run.done
+        // until it settles: a job cancelled before it ran never runs,
+        // and one that ran settles once its answer has landed (a real
+        // wait: an answer lands through I/O, which a loop on settled
+        // promises would starve)
+        for (;;) {
+          const job = helper.list().find((j) => j.name === name)
+          if (job?.status !== 'running') break
+          await (run.ended ? sleep(10) : Promise.race([run.done, sleep(50)]))
+        }
+        if (helper.list().find((j) => j.name === name)?.status === 'cancelled') {
+          run.reply = failed(CANCELLED)
+          continue
+        }
         // the run is over; its answer is landing
         for (;;) {
           try {
@@ -532,17 +551,25 @@ export class AgentTasks {
       .map(([k, v]) => `${k}=${preview(v, 80)}`)
       .join(', ')})`
     for (let tries = 0; ; tries++) {
-      this.#count += 1
+      // past the names helpers took before this world was opened again
+      let name: string
+      do {
+        this.#count += 1
+        name = `${spec.name}-${this.#count}`
+      } while (await this.#ws.store.exists(`${helper.session}.${name}`))
       try {
         const job = await helper.ask(label, {
-          name: `${spec.name}-${this.#count}`,
+          name,
           paths: [],
           runner: run,
           ...(call !== undefined && { call }),
         })
         return job.name
       } catch (e) {
-        if (!(e instanceof SessionExistsError) || tries >= 8) throw e
+        const taken =
+          e instanceof SessionExistsError ||
+          (e instanceof SessionsError && e.cause instanceof SessionExistsError)
+        if (!taken || tries >= 8) throw e
       }
     }
   }

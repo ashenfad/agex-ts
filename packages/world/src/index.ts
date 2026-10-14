@@ -96,7 +96,12 @@ export {
   jsonSchemaOf,
 } from './values'
 export type { Image, SerializedError } from './kernel/messages'
-export { DEFAULT_MAX_OBSERVATION, DEFAULT_TIMEOUT, MAX_IMAGES } from './kernel/kernel'
+export {
+  DEFAULT_HOST_TIME,
+  DEFAULT_MAX_OBSERVATION,
+  DEFAULT_TIMEOUT,
+  MAX_IMAGES,
+} from './kernel/kernel'
 export { type CurlOptions, curlCommand } from './curl'
 export { type HttpOptions, httpHost } from './http'
 export {

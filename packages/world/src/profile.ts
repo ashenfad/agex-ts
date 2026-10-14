@@ -11,6 +11,7 @@ import { InvalidNameError } from './errors'
 import { type SecretSpec, type Secrets, checkSecrets, secretRef } from './secrets'
 import { type SkillSource, skillName } from './skills'
 import { isSchema } from './values'
+import { describe, inspect } from './values/inspect'
 import type { Workspace } from './workspace'
 
 const FACTORY = Symbol('world.hostFactory')
@@ -196,6 +197,13 @@ export interface Profile {
    *  a member of `host` (`import { db } from 'host'`). */
   readonly hostObjects?: Readonly<Record<string, HostObject>>
   /**
+   * Data code reads by name: each a binding of its own, sent to the
+   * worker by value with each run, so code gets a fresh copy every time
+   * and can't change the host's. Only what crosses by value is taken: a
+   * value with a live part (a function, a class's instance) is refused.
+   */
+  readonly values?: Readonly<Record<string, unknown>>
+  /**
    * Ordinary configuration, public by design (a service's URL, a
    * public key): `env` in code, and the shell's variables.
    */
@@ -250,6 +258,20 @@ export function checkProfile(profile: Profile): Profile {
     const typed = (entry as Partial<TypedHost>)[TYPED]
     if (typed !== undefined && (typed.host as Partial<HostFactory>)[FACTORY] === undefined) {
       hostEntry(name, typed.host, typed.methods)
+    }
+  }
+  for (const [name, value] of Object.entries(profile.values ?? {})) {
+    if (!IDENTIFIER.test(name) || RESERVED.has(name)) {
+      throw new InvalidNameError(
+        `value ${JSON.stringify(name)}: a name is an identifier code doesn't already have`,
+      )
+    }
+    if (profile.hostObjects !== undefined && name in profile.hostObjects) {
+      throw new InvalidNameError(`${name} is both a value and a host object`)
+    }
+    const live = inspect(value, 'cross')
+    if (live !== null) {
+      throw new TypeError(`value ${name} can't be sent to code by value: ${describe(live)}`)
     }
   }
   for (const [name, value] of Object.entries(profile.variables ?? {})) {

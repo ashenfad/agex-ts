@@ -170,6 +170,12 @@ export function codeDescription(ws: Workspace, primer?: string): string {
       `- host objects available by name: ${hostObjects.join(', ')} (live host resources; call their methods with await, do not try to construct them). In a module, import them: \`import { ${hostObjects[0]} } from 'host'\`, which also works at the top level`,
     )
   }
+  const values = Object.keys(profile.values ?? {}).sort()
+  if (values.length > 0) {
+    notes.push(
+      `- values bound by name: ${values.join(', ')} (data, a fresh copy in every call; change a copy freely)`,
+    )
+  }
   const variables = Object.keys(profile.variables ?? {}).sort()
   if (variables.length > 0) {
     notes.push(`- env: configuration, e.g. env.${variables[0]} (${variables.join(', ')})`)

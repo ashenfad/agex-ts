@@ -69,6 +69,7 @@ import {
 import { staleRecords, threeWay, threeWayRules } from './merging'
 import { checkSessionName, checkTagName } from './names'
 import { dirname, normalize, resolve, within } from './path'
+import { WorkspacePlane } from './planes'
 import {
   type HostCall,
   type HostEntry,
@@ -278,6 +279,11 @@ export class Workspace {
   readonly conversation: WorkspaceConversation
   /** Compaction's record: the folds a loop made of the conversation. */
   readonly compaction: WorkspaceCompaction
+  /** Plane `name`: a harness's own records in the session, which code
+   *  and tools never see (see `planes.ts`). */
+  plane(name: string): WorkspacePlane {
+    return new WorkspacePlane(name, this.#reader, () => !this.#closed)
+  }
   /** The agent's own git over the session (see `WorkspaceIndex`). */
   readonly index: WorkspaceIndex
 
@@ -295,6 +301,7 @@ export class Workspace {
   readonly #cache: WorkspaceCache | null
   readonly #queue = new Queue()
   readonly #hostObjects: Map<string, HostEntry>
+  readonly #reader: KeyReader
   readonly #commands: Map<string, CommandHandler>
   /** Stops the shell script running, while one is. */
   #shell: AbortController | null = null
@@ -352,6 +359,7 @@ export class Workspace {
     this.tags = new WorkspaceTags(inner)
     this.conversation = new WorkspaceConversation(reader)
     this.compaction = new WorkspaceCompaction(reader, open)
+    this.#reader = reader
     this.index = new WorkspaceIndex({
       session,
       store,
@@ -523,6 +531,7 @@ export class Workspace {
         env: this.#settings.profile.variables ?? {},
         secrets: this.#secrets.names(),
         hostObjects: this.#hostObjects,
+        values: this.#settings.profile.values ?? {},
         call,
         settings: this.#settings.profile.code ?? {},
       })

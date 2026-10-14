@@ -7,9 +7,9 @@ tasks, with code as the action space. The TypeScript counterpart of
 > **Status:** being rewritten on the `rebuild` branch, step by step (the
 > repo's `plan.md`, "Then agex-ts"). So far: the session loop, the run
 > record, the provider protocol with a scripted provider, any AI SDK
-> model as a provider, folding, delegation, and agex's shape corpus
-> (`agex-ts/conformance`). Tasks come next. The published 0.5.x is the
-> previous design, which this replaces.
+> model as a provider, folding, delegation, tasks, and agex's corpora
+> (`agex-ts/conformance`). Agent-defined tasks come next. The published
+> 0.5.x is the previous design, which this replaces.
 
 ## Sessions
 
@@ -94,6 +94,50 @@ session of the asking agent.
   parent's settings and profile, and nothing more.
 - A `Sessions` of your own (`{ sessions: helper }`) runs every ask on
   its own runner.
+
+## Tasks
+
+```ts
+const rank = agent.task({
+  name: 'rank',
+  instructions: 'Rank the scores, best first.',
+  params: { scores: z.array(Score) }, // Standard Schemas: zod, valibot, arktype
+  returns: Ranking,
+})
+
+const ranking = await rank({ scores }) // the value, or TaskFailed / NeedsInput / TaskInterrupted
+const out = await rank.run({ scores }, { world: ws, keep: true }) // an Outcome: .value, .ref
+const next = await out.resume?.('by total') // a task that asked carries on from the answer
+```
+
+A task runs the agent on a world of its own and hands back a typed
+value. The caller's world is never touched.
+
+- **Its world:** a scratch world built from the agent's `profile`, or a
+  fork of `world`'s last commit, deleted when the task ends unless
+  `keep`. Scratch worlds go on a memory store, or on
+  `new Agent({ scratch: store })`.
+- **Inside it,** agent code sees each input by name and `task`:
+  `await task.success(value)`, `task.fail(reason)` and
+  `task.needsInput(question)`. A value that doesn't fit the return type
+  is a `TypeError` at the call, which the agent can fix. The call that
+  settles the task ends the script it's in.
+- **Inputs are checked at the call** and reach the code as a copy each
+  run. A `live()` input is an object on the host whose methods the code
+  calls; data with a live part in it is refused, as is a live return
+  type.
+- **The model reads TypeScript,** never a schema: the brief shows each
+  input's type and a preview of it, the declarations of the types they
+  name, and a live input's methods.
+- **A task that asks** keeps its world, and its `__task__` plane holds
+  what it is, its inputs and how it stands. It resumes through the
+  outcome, or by ref with `rank.resume(ref, answer, { world })`, after
+  a restart too where its store persists (a live input is passed again).
+- **A model that stops without finishing** is sent back twice, then the
+  task fails.
+
+`fromJsonSchema(schema)` makes a Standard Schema of a JSON Schema
+literal, for types written that way.
 
 ## Models
 

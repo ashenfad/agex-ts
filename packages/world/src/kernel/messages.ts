@@ -46,6 +46,8 @@ export type Host2Worker =
       /** World modules the code imports, dependencies first. */
       readonly modules: readonly CompiledModule[]
       readonly hostObjects: readonly HostObjectSurface[]
+      /** The profile's values, each bound by name: a copy per run. */
+      readonly values: Readonly<Record<string, unknown>>
       readonly env: Readonly<Record<string, string>>
       /** The profile's secrets' names (never their values), for
        *  `secret(name)`. */

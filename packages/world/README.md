@@ -115,6 +115,7 @@ const ws = await store.open('alice', {
       db: myDatabase, // its public methods, callable from code
       sessions: hostFactory((ws) => new Delegation(ws)), // made per world
     },
+    values: { scores: [{ student: 'ada', total: 7 }] }, // data, bound by name
     variables: { SUPABASE_URL: 'https://…' }, // env in code
     secrets: { GITHUB_TOKEN: '…' }, // never in the world: host commands only
     code: { timeout: 60, resolve: (name) => `https://esm.sh/${name}` },
@@ -131,6 +132,9 @@ const ws = await store.open('alice', {
   back.
 - **`hostFactory(make)`** makes an object per world (`make(ws)` as each
   workspace opens, forks included), so it knows which session it serves.
+- **Values** are data code reads by name, sent with each run, so every
+  run gets a fresh copy and none can change the host's. A value with a
+  live part is refused when the session opens.
 - **`withCall(fn)`** declares a method that receives a `HostCall` first:
   its `ws` is the calling workspace as part of the code's call, so the
   method can fork or commit without waiting behind the call that's
@@ -314,6 +318,21 @@ await ws.compaction.record({ through: lastFoldedId, summary, runs: 4 }) // lands
   summarise in one request, `estimateTokens`, and `COMPACTION_MARK` /
   `isOurs` for the ids of inserted messages.
 - **The event:** a new fold is streamed as `Compacted`.
+
+## Planes
+
+A harness's own records in the session, beside the files and the
+conversation, under `__plane__/<name>/`: code and tools never see them,
+and a commit, a fork or a checkout carries them with everything else.
+A write lands with the next commit. agex keeps a task's spec, inputs,
+state and value on its `__task__` plane.
+
+```ts
+const plane = ws.plane('__task__')
+plane.set('state', { status: 'running' }) // lands with the next commit
+await plane.get('state') // pending writes included; null for none
+await plane.keys() // sorted
+```
 
 ## The agent's git
 
@@ -503,6 +522,7 @@ that harness through `untilSettled`.
 | `__cwd__` | the working directory |
 | `__cache__/<key>` | a cache entry |
 | `__conversation__/…`, `__compaction__/…` | the turn's records |
+| `__plane__/<name>/…` | a harness's own records (`ws.plane(name)`) |
 | `__ws_git__` | the agent's git: index, head, merge, tags |
 | `__ws_view__` | a narrowed fork's view and seed |
 

@@ -91,6 +91,44 @@ describe('the record', () => {
   })
 })
 
+describe('a plane', () => {
+  it('holds a harness’s records, carried by the next commit, a fork and a checkout', async () => {
+    const plane = ws.plane('__task__')
+    plane.set('spec', { name: 'grade' })
+    plane.set('state', { status: 'running' })
+    expect(await plane.keys()).toEqual(['spec', 'state'])
+    expect(await plane.get('spec')).toEqual({ name: 'grade' })
+    expect(await plane.get('missing')).toBeNull()
+    await ws.files.write('a.txt', 'x') // the commit carries the plane too
+    const first = ws.head
+    plane.set('state', { status: 'success' })
+    await ws.files.write('b.txt', 'y')
+    const child = await ws.fork('child')
+    expect(await child.plane('__task__').get('state')).toEqual({ status: 'success' })
+    await child.close()
+    await ws.checkout(first)
+    expect(await ws.plane('__task__').get('state')).toEqual({ status: 'running' })
+    expect(await ws.plane('other').keys()).toEqual([])
+    // nothing a file or code sees
+    expect((await ws.files.list('/')).some((p) => p.includes('plane'))).toBe(false)
+  })
+
+  it('deletes, clears, refuses a bad name, and writes nothing frozen', async () => {
+    const plane = ws.plane('p')
+    plane.set('a', 1)
+    plane.set('b', 2)
+    expect(await plane.delete('a')).toBe(true)
+    expect(await plane.keys()).toEqual(['b'])
+    await plane.clear()
+    expect(await plane.keys()).toEqual([])
+    expect(() => ws.plane('a/b')).toThrow(/a name is letters/)
+    await ws.files.write('a.txt', 'x')
+    await ws.tags.add('v1')
+    const frozen = await ws.tags.at('v1')
+    expect(() => frozen.plane('p').set('a', 1)).toThrow(ReadOnlyError)
+  })
+})
+
 describe('the fold in force', () => {
   it('is the latest whose anchor is present', () => {
     const recorded = [fold('a', 'one'), fold('b', 'two'), fold('c', 'three')]

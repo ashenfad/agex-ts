@@ -9,7 +9,8 @@
  * calls go back to the provider within the turn), and one that asks
  * about it (so the stored run goes back across turns); then a session
  * whose second turn is over a small budget, so it folds the first; then
- * a session that delegates writing a file and waits for the answer. Then
+ * a session that delegates writing a file and waits for the answer; then
+ * a task that hands back a typed value, and one that asks and resumes. Then
  * one session moves from the first provider to another
  * mid-conversation, and one turn is stopped mid-stream.
  *
@@ -26,6 +27,7 @@ import { createAnthropic } from '@ai-sdk/anthropic'
 import { createGoogleGenerativeAI } from '@ai-sdk/google'
 import { createOpenAI } from '@ai-sdk/openai'
 import { createOpenRouter } from '@openrouter/ai-sdk-provider'
+import { z } from 'zod'
 import { Agent, Policy, runUsage } from '../dist/index.js'
 
 const env = process.env
@@ -150,6 +152,47 @@ for (const [key, model] of models) {
     } finally {
       await session.close()
     }
+  } catch (error) {
+    check('ran', false, String(error?.message ?? error))
+  }
+}
+
+for (const [key, model] of models) {
+  console.log(`${key}, tasks`)
+  try {
+    const agent = new Agent({ model, settings })
+    const factor = agent.task({
+      name: 'factor',
+      instructions: 'Factor each number into primes, smallest first.',
+      params: { numbers: z.array(z.number().int()) },
+      returns: z.array(z.object({ n: z.number().int(), primes: z.array(z.number().int()) })),
+    })
+    const out = await factor.run({ numbers: [391, 403] })
+    const got = JSON.stringify(out.value)
+    check(
+      'hands back a typed value',
+      out.status === 'success' &&
+        got ===
+          JSON.stringify([
+            { n: 391, primes: [17, 23] },
+            { n: 403, primes: [13, 31] },
+          ]),
+      `${out.status}${out.message ? ` (${out.message})` : ''}: ${got}`,
+    )
+    const pick = agent.task({
+      name: 'pick',
+      instructions:
+        "Pick a colour for the team's logo. You can't know their taste: ask them first with task.needsInput, then hand back their answer, lower case.",
+      returns: z.string(),
+    })
+    const asked = await pick.run({})
+    check('asks', asked.status === 'needs_input', `${asked.status}: ${asked.message}`)
+    const done = await asked.resume?.('Teal, please.')
+    check(
+      'resumes from the answer',
+      done?.value === 'teal',
+      `${done?.status}: ${JSON.stringify(done?.value)}`,
+    )
   } catch (error) {
     check('ran', false, String(error?.message ?? error))
   }

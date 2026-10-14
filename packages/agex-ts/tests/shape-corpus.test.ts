@@ -1,8 +1,20 @@
-/** agex's shape corpus, vendored: what applies to agex-ts. Running it
- *  comes with tasks (A6) and agent-defined tasks (A7). */
+/** agex's shape corpus, vendored: what applies to agex-ts. The task
+ *  scenarios run here; the code scenarios come with agent-defined tasks
+ *  (A7). */
 
 import { describe, expect, it } from 'vitest'
-import { AGEX_COMMIT, CODE_SCENARIOS, TASK_SCENARIOS, appliesToTs } from '../src/conformance/index'
+import {
+  AGEX_COMMIT,
+  AgexTasks,
+  CODE_SCENARIOS,
+  TASK_SCENARIOS,
+  appliesToTs,
+  checkTaskScenario,
+  runTaskScenario,
+} from '../src/conformance/index'
+
+const WORKER = new URL('../../world/dist/worker.node.js', import.meta.url)
+const harness = new AgexTasks({ profile: { code: { worker: { target: 'node', url: WORKER } } } })
 
 describe("agex's shape corpus", () => {
   it('holds the task and code scenarios, by name', () => {
@@ -24,4 +36,13 @@ describe("agex's shape corpus", () => {
       'code-gets-tables-arrays-and-bytes-back (tables, arrays)',
     ])
   })
+})
+
+describe("agex's task scenarios on agex-ts", () => {
+  for (const scenario of TASK_SCENARIOS.filter((s) => appliesToTs(s))) {
+    it(scenario.name, async () => {
+      const failures = checkTaskScenario(scenario, await runTaskScenario(scenario, harness))
+      expect(Object.fromEntries(failures)).toEqual({})
+    })
+  }
 })

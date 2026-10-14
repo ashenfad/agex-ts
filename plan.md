@@ -805,6 +805,20 @@ helper was closed opens another for its next turn.
 
 **Exit:** the shape corpus's task scenarios that apply.
 
+Done 2026-10-13: `agent.task(...)`, and all 16 task scenarios that apply
+pass on `AgexTasks` (`agex-ts/conformance`, a port of agex's
+`conformance/tasks.py`), with Python's task and resume tests ported
+where they apply. The smoke script runs a typed task, and one that asks
+and resumes, on each real provider. Three additions to the world carry
+it: `Profile.values` (data bound by name in code, a copy per run), for a
+task's inputs; `ws.plane(name)`, a harness's own records in the branch,
+for the `__task__` plane; and a task's `success`/`fail`/`needsInput`
+ending the script by interrupting the run, since nothing in JS is
+uncatchable. `fromJsonSchema` makes a Standard Schema of a JSON Schema
+literal (the corpus's types, and A7's). A live input is `live({name,
+description, methods})`; the brief shows types as TypeScript rendered
+from JSON Schema (`typeText`, `declarations`).
+
 **A7. Agent-defined tasks.**
 - **The `agex` host object,** made per world (`hostFactory`) and
   declared `withCall`, so a helper forks from inside the calling code's

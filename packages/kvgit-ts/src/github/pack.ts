@@ -19,7 +19,7 @@
  * - `push`: one GraphQL request (creation folds `createRef` into the
  *   same document). The manifest the push builds on comes from the
  *   `listRefs` the sync layer just made.
- * - `fetch`: one REST raw read per needed pack, concurrently. The
+ * - `fetch`: one raw blob read per needed pack, concurrently. The
  *   manifest says which packs a receiver needs: walking back from the
  *   newest, until a pack's base is a commit the receiver has.
  * - `archiveBranch` / `restoreBranch` / `emptyTrash`: one atomic,
@@ -46,6 +46,7 @@ import { PARENT_COMMIT, safeLoads, sha256Hex } from '../versioned/layout'
 import { bytesToBase64 } from './base64'
 import type { GithubClient, GraphqlError, GraphqlResult } from './client'
 import { GithubError } from './errors'
+import { gitBlobSha1 } from './git-hash'
 
 export const PACK_FORMAT = 1
 export const MANIFEST_PATH = 'kvgit/manifest.json'
@@ -67,6 +68,8 @@ export interface PackEntry {
   bytes: number
   /** SHA-256 of the stored bytes. */
   sha256: string
+  /** git blob SHA-1 of the stored bytes: fetch reads the blob by it. */
+  blob: string
 }
 
 export interface PackManifest {
@@ -396,7 +399,7 @@ export class PackRemote implements Remote {
     if (found === null) {
       throw new Error(`PackRemote.fetch: no branch at kvgit head ${want.slice(0, 7)}`)
     }
-    const { gitOid, manifest } = found
+    const { manifest } = found
     const haveSet = await this.#expandLocalAncestors(have)
     if (haveSet.has(want)) return
 
@@ -419,7 +422,7 @@ export class PackRemote implements Remote {
       stored.push(
         ...(await Promise.all(
           part.map(async (pack) => {
-            const bytes = await this.client.getRaw(pack.path, gitOid)
+            const bytes = await this.client.getBlobRaw(pack.blob)
             if (bytes === null) throw new Error(`PackRemote.fetch: ${pack.path} missing`)
             if ((await sha256Hex(bytes)) !== pack.sha256) {
               throw new Error(`PackRemote.fetch: ${pack.path} fails its checksum`)
@@ -525,6 +528,7 @@ export class PackRemote implements Remote {
       commits: chunk.length,
       bytes: bytes.length,
       sha256: await sha256Hex(bytes),
+      blob: await gitBlobSha1(bytes),
     }
     const additions: Array<{ path: string; contents: string }> = [
       { path: entry.path, contents: bytesToBase64(bytes) },
@@ -579,11 +583,7 @@ export class PackRemote implements Remote {
     )
     const landed = res.data?.commit ?? null
     if (landed === null) {
-      const lost = res.errors.some(
-        (e) =>
-          e.type === 'STALE_DATA' ||
-          (e.path?.[0] === 'create' && /already exists/i.test(e.message)),
-      )
+      const lost = res.errors.some(lostRace)
       if (lost) return null
       throw graphqlFailure('push', res.errors)
     }
@@ -625,6 +625,7 @@ export class PackRemote implements Remote {
       commits: commits.length,
       bytes: bytes.length,
       sha256: await sha256Hex(bytes),
+      blob: await gitBlobSha1(bytes),
     }
     return { entry, bytes, replaced }
   }
@@ -653,6 +654,7 @@ export class PackRemote implements Remote {
       commits: commits.length,
       bytes: bytes.length,
       sha256: await sha256Hex(bytes),
+      blob: await gitBlobSha1(bytes),
     }
     const next: PackManifest = { ...manifest, packs: [entry], nextSeq: seq + 1 }
     const res = await this.client.graphql<{
@@ -675,7 +677,7 @@ export class PackRemote implements Remote {
     )
     const landed = res.data?.commit ?? null
     if (landed === null) {
-      if (res.errors.some((e) => e.type === 'STALE_DATA')) return false
+      if (res.errors.some(lostRace)) return false
       throw graphqlFailure('repack', res.errors)
     }
     this.#refs.set(branch, { refId: landed.ref.id, gitOid: landed.commit.oid, manifest: next })
@@ -806,9 +808,28 @@ export class PackRemote implements Remote {
   }
 }
 
+/** The data, or a throw. A branch without a manifest (`main`, a
+ *  creation that never got its commit) reports NOT_FOUND on its
+ *  `file` field beside the data; that one is expected. */
 function expectData<T>(res: { data: T | null; errors: GraphqlError[] }, what: string): T {
-  if (res.data === null || res.errors.length > 0) throw graphqlFailure(what, res.errors)
+  const errors = res.errors.filter((e) => !(e.type === 'NOT_FOUND' && e.path?.at(-1) === 'file'))
+  if (res.data === null || errors.length > 0) throw graphqlFailure(what, errors)
   return res.data
+}
+
+/**
+ * Whether an error from a commit mutation means the CAS lost. GitHub
+ * says so two ways: `STALE_DATA` when the branch had already moved
+ * when the request was checked, and `FORBIDDEN` "is at X but expected
+ * Y" when it moved while the request ran (a true race; observed live).
+ * A creation that finds its ref already made has lost too.
+ */
+function lostRace(e: GraphqlError): boolean {
+  if (e.type === 'STALE_DATA') return true
+  if (e.type === 'FORBIDDEN' && /is at [0-9a-f]{40} but expected [0-9a-f]{40}/.test(e.message)) {
+    return true
+  }
+  return e.path?.[0] === 'create' && /already exists/i.test(e.message)
 }
 
 function graphqlFailure(what: string, errors: GraphqlError[]): GithubError {

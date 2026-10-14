@@ -2,13 +2,14 @@
  * An in-memory stand-in for the slice of GitHub the pack transport
  * uses: the GraphQL documents `PackRemote` sends (roster / one-ref
  * queries, `createRef` + `createCommitOnBranch`, `updateRefs`) and the
- * contents API's raw reads. Commits are flat path → bytes snapshots;
+ * raw blob reads. Commits are flat path → bytes snapshots;
  * oids are hashes of their own records, not git's.
  *
  * Dispatch is by the operation's shape (which root fields the document
  * names), which is enough for the documents the transport sends.
  */
 
+import { gitBlobSha1 } from '../src/github/git-hash'
 import { GithubClient } from '../src/github/index'
 
 interface Commit {
@@ -35,8 +36,15 @@ export class FakePackGithub {
   /** Full ref name (`refs/heads/x`) → oid. */
   readonly refs = new Map<string, string>()
   readonly calls: FakeCall[] = []
+  /** git blob SHA-1 → bytes, for every file ever committed. */
+  readonly blobs = new Map<string, Uint8Array>()
+  private pending: Uint8Array[] = []
   /** Called before a mutation applies: lets a test move refs under it. */
   beforeMutation: (() => void) | null = null
+  /** Report a lost CAS as GitHub does when the ref moves while the
+   *  request runs (FORBIDDEN "is at X but expected Y"), rather than
+   *  when it had already moved (STALE_DATA). */
+  raceStyle: 'stale' | 'forbidden' = 'stale'
 
   constructor() {
     const root: Commit = {
@@ -71,6 +79,7 @@ export class FakePackGithub {
   }
 
   private async handle(url: string, init?: RequestInit): Promise<Response> {
+    for (const bytes of this.pending.splice(0)) this.blobs.set(await gitBlobSha1(bytes), bytes)
     if (url.endsWith('/graphql')) {
       const { query, variables } = JSON.parse(init?.body as string) as {
         query: string
@@ -78,14 +87,12 @@ export class FakePackGithub {
       }
       return json(200, this.graphql(query, variables))
     }
-    const m = /\/repos\/o\/r\/contents\/(.+)\?ref=(.+)$/.exec(url)
+    const m = /\/repos\/o\/r\/git\/blobs\/([0-9a-f]{40})$/.exec(url)
     if (m !== null) {
-      const path = decodeURIComponent(m[1] as string)
-      const ref = decodeURIComponent(m[2] as string)
-      this.calls.push({ kind: 'raw', detail: path })
-      const bytes = this.commits.get(ref)?.files.get(path)
+      this.calls.push({ kind: 'raw', detail: m[1] as string })
+      const bytes = this.blobs.get(m[1] as string)
       if (bytes === undefined) return json(404, { message: 'Not Found' })
-      return new Response(bytes, { status: 200 })
+      return new Response(bytes as Uint8Array<ArrayBuffer>, { status: 200 })
     }
     return json(404, { message: `no route for ${url}` })
   }
@@ -112,25 +119,55 @@ export class FakePackGithub {
             refs: { pageInfo: { hasNextPage: false, endCursor: 'x' }, nodes },
           },
         },
+        ...this.missingManifests(nodes, (i) => [
+          'repository',
+          'refs',
+          'nodes',
+          i,
+          'target',
+          'file',
+        ]),
       }
     }
     if (query.includes('ref(qualifiedName')) {
       this.calls.push({ kind: 'graphql-query', detail: 'ref' })
       const name = vars.q as string
       const oid = this.refs.get(name)
+      const node = oid === undefined ? null : this.refNode(name, oid)
       return {
-        data: {
-          repository: {
-            ...this.header(),
-            ref: oid === undefined ? null : this.refNode(name, oid),
-          },
-        },
+        data: { repository: { ...this.header(), ref: node } },
+        ...this.missingManifests(node === null ? [] : [node], () => [
+          'repository',
+          'ref',
+          'target',
+          'file',
+        ]),
       }
     }
     throw new Error(`FakePackGithub: unhandled query ${query.slice(0, 80)}`)
   }
 
-  private header(): unknown {
+  /** GitHub reports a missing `Commit.file` as a NOT_FOUND error
+   *  beside the data. */
+  private missingManifests(
+    nodes: unknown[],
+    pathOf: (i: number) => Array<string | number>,
+  ): { errors?: unknown[] } {
+    const errors = nodes.flatMap((node, i) =>
+      (node as { target: { file: unknown } }).target.file === null
+        ? [
+            {
+              type: 'NOT_FOUND',
+              path: pathOf(i),
+              message: "Could not resolve file for path 'kvgit/manifest.json'.",
+            },
+          ]
+        : [],
+    )
+    return errors.length > 0 ? { errors } : {}
+  }
+
+  private header(): Record<string, unknown> {
     return { id: 'R_1', defaultBranchRef: { target: { oid: this.refs.get('refs/heads/main') } } }
   }
 
@@ -166,18 +203,28 @@ export class FakePackGithub {
     const ref = `refs/heads/${vars.branch as string}`
     const head = this.refs.get(ref)
     if (head === undefined || head !== vars.oid) {
-      errors.push({
-        type: 'STALE_DATA',
-        path: ['commit'],
-        message: `Expected branch to point to "${vars.oid as string}" but it did not.  Pull and try again.`,
-      })
+      errors.push(
+        this.raceStyle === 'forbidden' && head !== undefined
+          ? {
+              type: 'FORBIDDEN',
+              path: ['commit'],
+              message: `is at ${head} but expected ${vars.oid as string}`,
+            }
+          : {
+              type: 'STALE_DATA',
+              path: ['commit'],
+              message: `Expected branch to point to "${vars.oid as string}" but it did not.  Pull and try again.`,
+            },
+      )
       data.commit = null
       return { data, errors }
     }
     const files = new Map((this.commits.get(head) as Commit).files)
     for (const d of (vars.deletions ?? []) as Array<{ path: string }>) files.delete(d.path)
     for (const a of (vars.additions ?? []) as Array<{ path: string; contents: string }>) {
-      files.set(a.path, fromB64(a.contents))
+      const bytes = fromB64(a.contents)
+      files.set(a.path, bytes)
+      this.pending.push(bytes)
     }
     const commit: Commit = { oid: nextOid(), parent: head, files }
     this.commits.set(commit.oid, commit)

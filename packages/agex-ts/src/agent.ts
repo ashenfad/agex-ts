@@ -658,7 +658,9 @@ export class Session {
   /** What the tool returned. A tool the model made up, or one that
    *  throws, is a failed call the model reads, not an error out of the
    *  turn. A stop while it runs interrupts it and ends the turn at once;
-   *  the call's own end follows on the workspace's queue. */
+   *  the call's own end follows on the workspace's queue, and one that
+   *  waits on something else (a delegate) stops waiting on the turn's
+   *  signal. */
   async #call(call: ToolCall, signal: AbortSignal): Promise<ToolOutput> {
     const tool = this.#tools.get(call.name)
     if (tool === undefined) {
@@ -670,7 +672,7 @@ export class Session {
       }
     }
     const running = tool
-      .call(call.args)
+      .call(call.args, { signal })
       .catch((e): ToolOutput => ({ text: describe(e), images: [], isError: true }))
     this.#calling = running
     running.then(() => {

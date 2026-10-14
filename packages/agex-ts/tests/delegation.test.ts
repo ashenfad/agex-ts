@@ -193,6 +193,29 @@ describe('delegation', () => {
   })
 })
 
+describe('a cancel', () => {
+  it('stops waiting on a delegate, which runs on and answers the next turn', async () => {
+    const hold = held(says('found it'))
+    const { agent } = routed({
+      LEAD: [ask('scout', 'SCOUT take your time', { wait: true }), says('heard')],
+      SCOUT: [hold.step],
+    })
+    const chat = delegating(agent)
+    const running = chat.say('LEAD start it')
+    await hold.started
+    chat.cancel('stopped by the person')
+    const outcome = await running
+    expect([outcome.status, outcome.message]).toEqual(['cancelled', 'stopped by the person'])
+    expect(chat.sessions?.list()[0]?.status).toBe('running')
+    hold.release()
+    expect(await chat.sessions?.wait(10_000)).toEqual(['lead.scout'])
+    const woken = await chat.wake()
+    expect(woken.text).toBe('heard')
+    const opening = messageText((await chat.runs()).at(-1)?.messages[0] as never)
+    expect(opening).toMatch(/found it/)
+  })
+})
+
 describe('across agents', () => {
   it('new delegates run on the agent asking, and those in flight on theirs', async () => {
     const hold = held(says('one done'))

@@ -224,6 +224,27 @@ function firstLine(text: string): string {
   return 'delegated work'
 }
 
+/** `work`, unless `signal` aborts first: then the signal's reason,
+ *  thrown, and `work` left to go on. */
+function untilAborted<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (signal === undefined) return work
+  if (signal.aborted) return Promise.reject(signal.reason)
+  return new Promise<T>((resolve, reject) => {
+    const stop = () => reject(signal.reason)
+    signal.addEventListener('abort', stop, { once: true })
+    work.then(
+      (value) => {
+        signal.removeEventListener('abort', stop)
+        resolve(value)
+      },
+      (e) => {
+        signal.removeEventListener('abort', stop)
+        reject(e)
+      },
+    )
+  })
+}
+
 /** A runner's failure as the caller reads it: the error, named, and no
  *  stack (the frames are the embedder's loop). */
 function errorText(e: unknown): string {
@@ -287,6 +308,10 @@ export interface AskOptions {
   readonly resume?: string
   /** Wait for the answer and return it, rather than the job. */
   readonly wait?: boolean
+  /** Stop waiting: an aborted wait throws the signal's reason, and the
+   *  job runs on, its answer collected later as an ask's without
+   *  `wait` is. */
+  readonly signal?: AbortSignal
   /** This ask's budget, over the helper's. */
   readonly budget?: unknown
   /** Run this job on another runner. */
@@ -345,6 +370,7 @@ export class Sessions {
   #running = 0
   readonly #slots: (() => void)[] = []
   #closed = false
+  #closing: Promise<void> | null = null
 
   constructor(ws: Workspace, runner: SessionRunner, opts: SessionsOptions = {}) {
     this.#ws = ws
@@ -456,7 +482,7 @@ export class Sessions {
       runner,
     })
     if (opts.wait === true) {
-      await run
+      await untilAborted(run, opts.signal)
       return this.result(name)
     }
     return installed
@@ -667,9 +693,13 @@ export class Sessions {
   }
 
   /** Stop taking asks and wait for the runs in flight. The branches
-   *  stay. */
-  async close(): Promise<void> {
-    if (this.#closed) return
+   *  stay. Every call waits, a second as well as the first. */
+  close(): Promise<void> {
+    this.#closing ??= this.#close()
+    return this.#closing
+  }
+
+  async #close(): Promise<void> {
     this.#closed = true
     this.#notify()
     const helpers = OPEN.get(this.#ws.store)
@@ -1363,6 +1393,9 @@ export interface ActionOptions {
    *  embedder whose loop changes between turns hands the current one,
    *  so new delegates run on it and those in flight finish on theirs. */
   readonly runner?: SessionRunner
+  /** The call's turn ending: an ask that waits stops waiting, and its
+   *  delegate runs on (see `AskOptions.signal`). */
+  readonly signal?: AbortSignal
 }
 
 /**
@@ -1421,6 +1454,7 @@ async function act(
         ...(resume !== '' && { resume }),
         wait: args.wait === true,
         ...(opts.runner !== undefined && { runner: opts.runner }),
+        ...(opts.signal !== undefined && { signal: opts.signal }),
       })
       return ok('task' in out ? renderJob(out) : renderAnswer(out))
     }
@@ -1479,8 +1513,10 @@ export function sessionsTool(sessions: Sessions, opts: ActionOptions = {}): Tool
       },
       required: ['action'],
     },
-    async call(args): Promise<ToolOutput> {
-      return { ...(await act(sessions, args as unknown as SessionsArgs, opts)), images: [] }
+    async call(args, call = {}): Promise<ToolOutput> {
+      const signal = call.signal ?? opts.signal
+      const given = signal !== undefined ? { ...opts, signal } : opts
+      return { ...(await act(sessions, args as unknown as SessionsArgs, given)), images: [] }
     },
   }
 }

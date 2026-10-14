@@ -639,13 +639,19 @@ describe('cancel, keep and close', () => {
     const closing = sessions.close().then(() => {
       closed = true
     })
+    // a second close waits too
+    let again = false
+    const closingAgain = sessions.close().then(() => {
+      again = true
+    })
     await settle()
-    expect(closed).toBe(false)
+    expect([closed, again]).toEqual([false, false])
     expect(sessions.closed).toBe(true)
     expect(Sessions.of(parent)).toBeNull()
     await expect(sessions.ask('more')).rejects.toThrow(/is closed/)
     runner.release()
-    await closing
+    await Promise.all([closing, closingAgain])
+    expect(again).toBe(true)
     expect(await store.exists(job.name)).toBe(true)
     expect(sessions.result(job.name).status).toBe('answered')
   })
@@ -1191,6 +1197,28 @@ describe('the sessions tool', () => {
     await runAction(sessions, { action: 'resume', name: 'a', task: 'two', wait: true })
     expect(await runAction(sessions, { action: 'result', name: 'a' })).toMatch(/^the helper’s\n/)
     expect([own.seen.length, brought.seen.length]).toEqual([1, 1])
+    await sessions.close()
+  })
+
+  it('stops waiting when the call’s turn ends, and the delegate runs on', async () => {
+    const runner = new Held()
+    const sessions = new Sessions(parent, runner)
+    const tool = sessionsTool(sessions)
+    const turn = new AbortController()
+    const waiting = tool.call(
+      { action: 'ask', task: 'slow', name: 'slow', wait: true },
+      { signal: turn.signal },
+    )
+    while (runner.started.length === 0) await new Promise((resolve) => setTimeout(resolve, 5))
+    turn.abort(new Error('the turn ended'))
+    await expect(waiting).rejects.toThrow('the turn ended')
+    expect(sessions.list()[0]?.status).toBe('running')
+    runner.release()
+    await sessions.wait()
+    // collected as an ask's without wait is
+    expect(sessions.take().map(([name, answer]) => [name, answer.text])).toEqual([
+      ['analyst.slow', 'did slow'],
+    ])
     await sessions.close()
   })
 

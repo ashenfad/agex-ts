@@ -81,6 +81,7 @@ export async function harvestUi(ui: unknown, declared: boolean): Promise<UiHarve
     }
     return { entries, notes }
   }
+  const taken = new Set<string>()
   for (const raw of keys.slice(0, MAX_UI_ENTRIES)) {
     const value = named[raw]
     // A near-miss is a card row with a mistake in it, not a table or
@@ -90,7 +91,7 @@ export async function harvestUi(ui: unknown, declared: boolean): Promise<UiHarve
       notes.push(nearMiss)
       continue
     }
-    const name = artifactName(raw)
+    const name = unique(artifactName(raw), taken)
     try {
       const entry = await materialize(name, value)
       const size = typeof entry === 'object' && 'data' in entry ? byteLength(entry.data) : 0
@@ -121,6 +122,15 @@ export async function harvestUi(ui: unknown, declared: boolean): Promise<UiHarve
  *  dots and dashes become one dash. */
 export function artifactName(raw: string): string {
   return raw.replace(/[^\w.-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '') || 'artifact'
+}
+
+/** `name`, or the first of `name-2`, `name-3`, … not yet taken (two
+ *  keys can sanitize to one name); taken from then on. */
+function unique(name: string, taken: Set<string>): string {
+  let out = name
+  for (let n = 2; taken.has(out); n++) out = `${name}-${n}`
+  taken.add(out)
+  return out
 }
 
 async function materialize(name: string, value: unknown): Promise<UiEntry> {

@@ -170,12 +170,15 @@ export class GithubClient {
     return { data: raw?.data ?? null, errors: raw?.errors ?? [] }
   }
 
-  /** A file's raw bytes at a ref (the contents API's raw media type,
-   *  which serves files up to 100MB in one response), or null when
-   *  the path doesn't exist there. */
-  async getRaw(path: string, ref: string): Promise<Uint8Array | null> {
-    const encoded = path.split('/').map(encodeURIComponent).join('/')
-    const url = `${this.#apiBase}/repos/${this.repo}/contents/${encoded}?ref=${encodeURIComponent(ref)}`
+  /**
+   * A blob's bytes by its git SHA, raw (no base64, up to 100MB), or
+   * null when the repo doesn't have it. The blobs endpoint returns the
+   * bytes as stored; the contents API does not always: it transcodes a
+   * non-UTF-8 file it takes for text (both as JSON and raw), so a value
+   * that is mostly text with a binary header comes back altered.
+   */
+  async getBlobRaw(sha: string): Promise<Uint8Array | null> {
+    const url = `${this.#apiBase}/repos/${this.repo}/git/blobs/${sha}`
     try {
       return await this.#attempt<Uint8Array>('GET', url, undefined, 'raw')
     } catch (err) {

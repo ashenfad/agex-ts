@@ -180,6 +180,22 @@ describe('PackRemote push / fetch', () => {
     expect(ok).toBe(false)
   })
 
+  it('the FORBIDDEN shape of a lost race (ref moved mid-request) is a lost CAS too', async () => {
+    const gh = new FakePackGithub()
+    gh.raceStyle = 'forbidden'
+    const a = await device(gh)
+    const old = (await commitN(a.store, 1, 'a')).currentCommit
+    await pushBranch(a.store, a.remote, BRANCH)
+    await a.remote.listRefs()
+    const head = (await commitN(a.store, 1, 'x')).currentCommit
+    gh.beforeMutation = () => {
+      gh.refs.set(`refs/heads/${BRANCH}`, gh.refs.get('refs/heads/main') as string)
+      gh.beforeMutation = null
+    }
+    const pushed = a.remote.push(BRANCH, old, head, walkDelta(a.store, { want: head, have: [old] }))
+    expect(await pushed).toBe(false)
+  })
+
   it('creation races: the second device to create loses', async () => {
     const gh = new FakePackGithub()
     const a = await device(gh)

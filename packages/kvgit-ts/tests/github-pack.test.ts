@@ -252,6 +252,32 @@ describe('PackRemote and manifests it cannot use', () => {
   })
 })
 
+describe('PackRemote and branches that are not sessions', () => {
+  it("never pushes onto the default branch, or a branch of the repo's own", async () => {
+    const gh = new FakePackGithub()
+    gh.plant('feature', { 'notes.md': 'mine' })
+    for (const branch of ['main', 'feature']) {
+      const store = new Memory()
+      const vk = await VersionedKV.open(store, { branch })
+      await vk.commit({ updates: new Map([['k', bytes('v')]]) })
+      const before = gh.refs.get(`refs/heads/${branch}`)
+      await expect(pushBranch(store, new PackRemote(gh.client(), store), branch)).rejects.toThrow(
+        `branch '${branch}' exists in the repo but isn't a kvgit session`,
+      )
+      expect(gh.refs.get(`refs/heads/${branch}`)).toBe(before)
+    }
+  })
+
+  it('claims a creation that never got its first commit (a ref at main)', async () => {
+    const gh = new FakePackGithub()
+    gh.setRef(BRANCH, gh.refs.get('refs/heads/main') as string)
+    const a = await device(gh)
+    await commitN(a.store, 1, 'a')
+    expect((await pushBranch(a.store, a.remote, BRANCH)).status).toBe('created')
+    expect(gh.filesAt(BRANCH)).toContain(MANIFEST_PATH)
+  })
+})
+
 describe('PackRemote packs over time', () => {
   it('folds older packs once a push would exceed maxPacks, still one mutation', async () => {
     const gh = new FakePackGithub()
@@ -293,7 +319,39 @@ describe('PackRemote packs over time', () => {
   })
 })
 
+describe('PackRemote.repack and its request size', () => {
+  it('refuses a history too large for one request, before sending it', async () => {
+    const gh = new FakePackGithub()
+    const a = await device(gh)
+    const vk = await VersionedKV.open(a.store, { branch: BRANCH })
+    // random bytes don't compress: two 12MB pushes fit, one 24MB pack doesn't
+    for (const name of ['one', 'two']) {
+      const big = new Uint8Array(12 * 1024 * 1024)
+      for (let i = 0; i < big.length; i += 65536) crypto.getRandomValues(big.subarray(i, i + 65536))
+      await vk.commit({ updates: new Map([[`files/${name}.bin`, big]]) })
+      expect((await pushBranch(a.store, a.remote, BRANCH)).status).not.toBe('diverged')
+    }
+    const mutations = gh.count('graphql-mutation')
+    await expect(a.remote.repack(BRANCH)).rejects.toThrow(/more than one request can carry/)
+    expect(gh.count('graphql-mutation')).toBe(mutations)
+  })
+})
+
 describe('PackRemote roster and lifecycle', () => {
+  it('throws a lifecycle error that is not a lost race, rather than reporting one', async () => {
+    const gh = new FakePackGithub()
+    const a = await device(gh)
+    await commitN(a.store, 1, 'a')
+    await pushBranch(a.store, a.remote, BRANCH)
+    gh.updateRefsError = 'Resource not accessible by personal access token'
+    await expect(a.remote.archiveBranch(BRANCH)).rejects.toThrow(/Resource not accessible/)
+    await expect(a.remote.emptyTrash()).resolves.toBe(0) // nothing archived: no request
+    gh.updateRefsError = null
+    expect(await a.remote.archiveBranch(BRANCH)).toBe(true)
+    gh.updateRefsError = 'Resource not accessible by personal access token'
+    await expect(a.remote.emptyTrash()).rejects.toThrow(/Resource not accessible/)
+  })
+
   it('roster carries stub metadata from the manifest, in one query', async () => {
     const gh = new FakePackGithub()
     const a = await device(gh, { meta: (branch) => ({ title: `Title of ${branch}` }) })

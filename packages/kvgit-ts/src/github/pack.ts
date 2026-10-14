@@ -250,7 +250,7 @@ const REF_FIELDS = `id name target { oid ... on Commit { file(path: "${MANIFEST_
 const ROSTER_QUERY = `query($owner: String!, $name: String!, $after: String) {
   repository(owner: $owner, name: $name) {
     id
-    defaultBranchRef { target { oid } }
+    defaultBranchRef { name target { oid } }
     refs(refPrefix: "refs/heads/", first: 100, after: $after) {
       pageInfo { hasNextPage endCursor }
       nodes { ${REF_FIELDS} }
@@ -261,7 +261,7 @@ const ROSTER_QUERY = `query($owner: String!, $name: String!, $after: String) {
 const ONE_REF_QUERY = `query($owner: String!, $name: String!, $q: String!) {
   repository(owner: $owner, name: $name) {
     id
-    defaultBranchRef { target { oid } }
+    defaultBranchRef { name target { oid } }
     ref(qualifiedName: $q) { ${REF_FIELDS} }
   }
 }`
@@ -299,7 +299,7 @@ interface RosterData {
 
 interface RepoHeader {
   id: string
-  defaultBranchRef: { target: { oid: string } } | null
+  defaultBranchRef: { name: string; target: { oid: string } } | null
 }
 
 // ---------------------------------------------------------------------------
@@ -319,6 +319,7 @@ export class PackRemote implements Remote {
 
   #repoId: string | null = null
   #defaultOid: string | null = null
+  #defaultName: string | null = null
   /** Branch (archived ones under `archived/`) → its last-observed ref. */
   readonly #refs = new Map<string, BranchState>()
 
@@ -475,9 +476,16 @@ export class PackRemote implements Remote {
       throw new Error(`PackRemote.push: branch '${branch}' can't be synced: ${st.unreadable}`)
     }
     if (expectedOld === null) {
-      // A ref without a manifest is a creation that never got its
-      // first commit: claim it.
       if (st !== null && st.manifest !== null) return false
+      // A ref without a manifest is claimed only as a creation that
+      // never got its first commit: such a ref sits where creation
+      // starts one, at the default branch's commit. Any other (the
+      // default branch, a branch of the repo's own) isn't a session.
+      if (st !== null && (branch === this.#defaultName || st.gitOid !== this.#defaultOid)) {
+        throw new Error(
+          `PackRemote.push: branch '${branch}' exists in the repo but isn't a kvgit session; push under another name`,
+        )
+      }
     } else if (st === null || st.manifest === null || st.manifest.head !== expectedOld) {
       return false
     }
@@ -511,7 +519,7 @@ export class PackRemote implements Remote {
     let base = expectedOld
     for (const chunk of chunks) {
       const bytes = await encodePack(chunk, { kernel: this.#kernel, base })
-      if (Math.ceil(bytes.length / 3) * 4 > MAX_BODY_BASE64) {
+      if (base64Length(bytes.length) > MAX_BODY_BASE64) {
         throw new Error(
           `PackRemote.push: commit ${(chunk.at(-1) as WireCommit).hash.slice(0, 7)} is ${bytes.length} bytes compressed, more than one request can carry`,
         )
@@ -574,8 +582,10 @@ export class PackRemote implements Remote {
       const folded = await this.#fold(packs.slice(0, packs.length - this.#keepRecent), nextSeq)
       // the fold rides this push's request, so both must fit in it; a
       // fold that doesn't is left for a later, smaller push
-      const body = (n: number): number => Math.ceil(n / 3) * 4
-      if (folded !== null && body(bytes.length) + body(folded.bytes.length) <= MAX_BODY_BASE64) {
+      if (
+        folded !== null &&
+        base64Length(bytes.length) + base64Length(folded.bytes.length) <= MAX_BODY_BASE64
+      ) {
         additions.push({ path: folded.entry.path, contents: bytesToBase64(folded.bytes) })
         deletions.push(...folded.replaced.map((p) => ({ path: p.path })))
         const gone = new Set(folded.replaced.map((p) => p.path))
@@ -680,6 +690,11 @@ export class PackRemote implements Remote {
     const commits: WireCommit[] = []
     for await (const wc of walkDelta(this.#store, { want: manifest.head })) commits.push(wc)
     const bytes = await encodePack(commits, { kernel: this.#kernel, base: null })
+    if (base64Length(bytes.length) > MAX_BODY_BASE64) {
+      throw new Error(
+        `PackRemote.repack: '${branch}' is ${bytes.length} bytes as one pack, more than one request can carry`,
+      )
+    }
     const seq = manifest.nextSeq
     const entry: PackEntry = {
       path: `${PACKS_DIR}/${String(seq).padStart(6, '0')}-${manifest.head.slice(0, 12)}.pack`,
@@ -766,9 +781,11 @@ export class PackRemote implements Remote {
     return ok
   }
 
-  /** Apply ref updates atomically. GitHub reports a rejected batch
-   *  with a generic error, so any error is read as a lost race; the
-   *  caller re-reads. */
+  /** Apply ref updates atomically: false when a ref wasn't where it
+   *  was expected (a lost race; the caller re-reads). GitHub reports a
+   *  rejected batch with a generic error, so an error is read as a lost
+   *  race only if a re-read shows one of the refs moved; any other
+   *  (a token's permission, a malformed request) throws. */
   async #updateRefs(
     updates: Array<{ name: string; beforeOid: string; afterOid: string }>,
   ): Promise<boolean> {
@@ -778,7 +795,12 @@ export class PackRemote implements Remote {
       { repoId: this.#repoId, updates },
       { mutation: true },
     )
-    return res.errors.length === 0
+    if (res.errors.length === 0) return true
+    for (const u of updates) {
+      const st = await this.#readOne(u.name.slice('refs/heads/'.length))
+      if ((st?.gitOid ?? ZERO_OID) !== u.beforeOid) return false
+    }
+    throw graphqlFailure('updateRefs', res.errors)
   }
 
   // -------------------------------------------------------------------------
@@ -802,6 +824,7 @@ export class PackRemote implements Remote {
   #repoHeader(repo: RepoHeader): void {
     this.#repoId = repo.id
     this.#defaultOid = repo.defaultBranchRef?.target.oid ?? null
+    this.#defaultName = repo.defaultBranchRef?.name ?? null
   }
 
   #remember(node: RefNode, branch = node.name): BranchState {
@@ -890,3 +913,6 @@ function graphqlFailure(what: string, errors: GraphqlError[]): GithubError {
 }
 
 const utf8 = (text: string): Uint8Array => new TextEncoder().encode(text)
+
+/** How long `n` bytes are as base64. */
+const base64Length = (n: number): number => Math.ceil(n / 3) * 4

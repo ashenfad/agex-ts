@@ -45,6 +45,9 @@ export class FakePackGithub {
    *  request runs (FORBIDDEN "is at X but expected Y"), rather than
    *  when it had already moved (STALE_DATA). */
   raceStyle: 'stale' | 'forbidden' = 'stale'
+  /** An error `updateRefs` answers with, refs unchanged (a token
+   *  without the permission, say), in place of applying it. */
+  updateRefsError: string | null = null
 
   constructor() {
     const root: Commit = {
@@ -66,6 +69,11 @@ export class FakePackGithub {
       writeIntervalMs: 0,
       sleeper: async () => {},
     })
+  }
+
+  /** Point `branch` at `oid` (a ref made by hand). */
+  setRef(branch: string, oid: string): void {
+    this.refs.set(`refs/heads/${branch}`, oid)
   }
 
   /** Put a commit holding `files` (text) on `branch`, as another
@@ -180,7 +188,10 @@ export class FakePackGithub {
   }
 
   private header(): Record<string, unknown> {
-    return { id: 'R_1', defaultBranchRef: { target: { oid: this.refs.get('refs/heads/main') } } }
+    return {
+      id: 'R_1',
+      defaultBranchRef: { name: 'main', target: { oid: this.refs.get('refs/heads/main') } },
+    }
   }
 
   private refNode(name: string, oid: string): unknown {
@@ -246,6 +257,9 @@ export class FakePackGithub {
   }
 
   private updateRefs(updates: Array<Record<string, string>>): unknown {
+    if (this.updateRefsError !== null) {
+      return { errors: [{ type: 'FORBIDDEN', message: this.updateRefsError }] }
+    }
     for (const u of updates) {
       const current = this.refs.get(u.name as string) ?? ZERO
       if (current !== u.beforeOid) {

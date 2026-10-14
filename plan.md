@@ -776,6 +776,15 @@ latest reply's.
 
 **Exit:** tier 5.
 
+Done 2026-10-13: `agent.session(ws, { sessions: true })`, and every
+scenario of tiers 0 to 5 passes on `agexHarness`; Python's
+`test_delegation.py` is ported (less its event-loop tests, which have no
+counterpart here), and the smoke script delegates a file's writing on
+each real provider. `runAction` and `sessionsTool` take a `runner`
+(`ActionOptions`), as does `worldTools` (`ToolOptions.runner`). A
+delegate opens its fork with its parent's settings. A session whose
+helper was closed opens another for its next turn.
+
 **A6. Tasks.**
 - `agent.task(...)` with Standard Schemas, its arguments checked at the
   call.

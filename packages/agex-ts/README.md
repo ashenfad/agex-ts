@@ -7,8 +7,8 @@ tasks, with code as the action space. The TypeScript counterpart of
 > **Status:** being rewritten on the `rebuild` branch, step by step (the
 > repo's `plan.md`, "Then agex-ts"). So far: the session loop, the run
 > record, the provider protocol with a scripted provider, any AI SDK
-> model as a provider, folding, and agex's shape corpus
-> (`agex-ts/conformance`). Delegation and tasks come next. The published 0.5.x is the
+> model as a provider, folding, delegation, and agex's shape corpus
+> (`agex-ts/conformance`). Tasks come next. The published 0.5.x is the
 > previous design, which this replaces.
 
 ## Sessions
@@ -65,6 +65,35 @@ runs are never rewritten: the person still sees everything.
 
 Set the budget well above what no fold can take out (the system prompt,
 the tools, the opening message).
+
+## Delegation
+
+```ts
+const chat = agent.session(ws, { sessions: true })
+await chat.say('ask a delegate to write the tests while you fix the bug')
+chat.sessions?.list() // the jobs: running, answered, failed...
+await chat.close() // done with the workspace: waits for the delegates
+```
+
+With `sessions: true` the model gets the world's `sessions` tool: each
+ask forks the session, and a delegate works on its own branch, as a
+session of the asking agent.
+
+- **A delegate runs until it has nothing outstanding.** Its task is its
+  first turn. If it ends that turn waiting on delegates of its own, or
+  with a note unread, it is woken when they come in. Its reply then is
+  its answer, and a turn that doesn't complete answers `failed`.
+- **Answers come back like notes.** One that lands during a turn rides
+  the next tool result; one that lands between turns waits for the
+  next, and `wake()` runs a turn that opens with it.
+- **The jobs are the workspace's, not the agent's.** A new `Agent` for
+  the next turn finds the same helper (`Sessions.of(ws)`): its new
+  delegates run on it, and those in flight finish on the agent that
+  asked. Close the session only when done with the workspace.
+- **A delegate holds what its parent holds:** its fork opens with the
+  parent's settings and profile, and nothing more.
+- A `Sessions` of your own (`{ sessions: helper }`) runs every ask on
+  its own runner.
 
 ## Models
 

@@ -168,6 +168,7 @@ export {
   split as splitNotes,
 } from './inbox'
 export {
+  type ActionOptions,
   type Answer,
   type AnswerStatus,
   type AskOptions,

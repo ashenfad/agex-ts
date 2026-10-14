@@ -1179,6 +1179,21 @@ describe('the sessions tool', () => {
     await sessions.close()
   })
 
+  it('runs an ask on the runner the call brings', async () => {
+    const own = new Scripted({}, 'the helper’s')
+    const brought = new Scripted({}, 'the call’s')
+    const sessions = new Sessions(parent, own)
+    const tool = worldTools(parent, { sessions, runner: brought }).find(
+      (t) => t.name === 'sessions',
+    )
+    const asked = await tool?.call({ action: 'ask', task: 'one', name: 'a', wait: true })
+    expect(asked?.text).toMatch(/^the call’s\n/)
+    await runAction(sessions, { action: 'resume', name: 'a', task: 'two', wait: true })
+    expect(await runAction(sessions, { action: 'result', name: 'a' })).toMatch(/^the helper’s\n/)
+    expect([own.seen.length, brought.seen.length]).toEqual([1, 1])
+    await sessions.close()
+  })
+
   it('says what an ask cannot do, as an error result', async () => {
     const sessions = new Sessions(parent, new Scripted({}))
     const tool = sessionsTool(sessions)

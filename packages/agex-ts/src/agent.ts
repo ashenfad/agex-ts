@@ -22,18 +22,22 @@ import {
   Inbox,
   type Policy,
   type RunStatus,
+  Sessions,
   type Tool,
   type ToolOptions,
   type ToolOutput,
   type TurnEvent,
   type Workspace,
+  answerNotes,
   deliveredNote,
+  sessionsTool,
   toolInstructions,
   worldTools,
 } from '@agex-ts/world'
 import type { LanguageModelV4 } from '@ai-sdk/provider'
 import { AiSdkProvider, isLanguageModel } from './ai-sdk'
 import { prepare } from './compaction'
+import { Runner } from './delegation'
 import { type Provider, type Settings, type ToolSpec, toolSpec } from './provider'
 import {
   type Image,
@@ -177,6 +181,16 @@ export interface SessionOptions {
   readonly tools?: readonly Tool[]
   /** How the world's tools are offered (`vision` is off unless given). */
   readonly toolOptions?: ToolOptions
+  /**
+   * Let the agent delegate, through the `sessions` tool. `true` asks
+   * through the workspace's helper (the open one `Sessions.of(ws)`
+   * finds, or a new one), and each ask runs its delegate as a session
+   * of this agent ({@link Runner}): a new agent for the next turn finds
+   * the same jobs, its delegates run on it, and those in flight finish
+   * on theirs. Or pass a `Sessions` of your own, whose runner runs
+   * every ask.
+   */
+  readonly sessions?: boolean | Sessions
 }
 
 /**
@@ -202,6 +216,11 @@ export class Session {
   readonly #tools: Map<string, Tool>
   readonly #specs: ToolSpec[]
   readonly #vision: boolean
+  /** What each ask runs on, for `sessions: true`. */
+  readonly #runner: Runner | null = null
+  /** The names of the embedder's own tools, which no tool replaces. */
+  readonly #embedded: ReadonlySet<string>
+  #helper: Sessions | null = null
   #turn: TurnState | null = null
   /** The tool call running now, settling when it's done. */
   #calling: Promise<unknown> | null = null
@@ -211,9 +230,17 @@ export class Session {
     this.ws = ws
     this.inbox = opts.inbox ?? new Inbox()
     this.#vision = opts.toolOptions?.vision ?? false
+    if (opts.sessions === true) this.#runner = new Runner(agent, ws)
+    else if (opts.sessions instanceof Sessions) this.#helper = opts.sessions
+    this.#embedded = new Set((opts.tools ?? []).map((t) => t.name))
     this.#tools = new Map(
-      worldTools(ws, { ...opts.toolOptions, vision: this.#vision }).map((t) => [t.name, t]),
+      worldTools(ws, {
+        ...opts.toolOptions,
+        vision: this.#vision,
+        ...(this.#helper !== null && { sessions: this.#helper }),
+      }).map((t) => [t.name, t]),
     )
+    this.#delegation()
     for (const tool of opts.tools ?? []) this.#tools.set(tool.name, tool)
     this.#specs = [...this.#tools.values()].map(toolSpec)
   }
@@ -225,6 +252,35 @@ export class Session {
   /** Whether a turn is running. */
   get running(): boolean {
     return this.#turn !== null
+  }
+
+  /** The helper the agent delegates through, if it can. */
+  get sessions(): Sessions | null {
+    return this.#helper
+  }
+
+  /**
+   * Close the helper the agent delegates through, which waits for its
+   * delegates' runs; one passed in is its owner's to close. For when
+   * the workspace is done with, not between agents: a session for the
+   * next turn finds the helper open, its jobs with it.
+   */
+  async close(): Promise<void> {
+    if (this.#runner !== null) await this.#helper?.close()
+  }
+
+  /** The helper for the turn starting, with `sessions: true`: the
+   *  workspace's, or a new one once it was closed. Each ask runs on this
+   *  agent. */
+  #delegation(): Sessions | null {
+    if (this.#runner === null) return this.#helper
+    if (this.#helper === null || this.#helper.closed) {
+      this.#helper = Sessions.of(this.ws) ?? new Sessions(this.ws, this.#runner)
+      if (!this.#embedded.has('sessions')) {
+        this.#tools.set('sessions', sessionsTool(this.#helper, { runner: this.#runner }))
+      }
+    }
+    return this.#helper
   }
 
   /** The runs the workspace holds, oldest first. */
@@ -385,10 +441,15 @@ export class Session {
     // the call running now, whose result is cut off if the turn ends
     let cutting: ToolCall | null = null
     let inRequest = false
+    const helper = this.#delegation()
     const turn = await this.ws.turn(runId, {
       ...(opts.resume === true && { resume: true }),
       inbox: this.inbox,
       harness: HARNESS,
+      // a delegate's answer that lands mid-turn rides the next tool
+      // result, as a note does; one that lands between turns waits for
+      // the next
+      ...(helper !== null && { sources: [(inbox: Inbox) => answerNotes(helper, inbox)] }),
     })
     const checkCancel = () => {
       if (signal.aborted) throw new Cancelled()

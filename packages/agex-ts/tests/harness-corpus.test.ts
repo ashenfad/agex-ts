@@ -1,7 +1,6 @@
 /**
  * nontainer's harness corpus, run against agex-ts's session loop: every
- * scenario its capabilities cover passes. Delegation (tier 5) comes
- * with the sessions tool.
+ * scenario its capabilities cover passes: every tier, 0 to 5.
  */
 
 import { SCENARIOS, applies, check, runScenario } from '@agex-ts/world/conformance'
@@ -11,7 +10,7 @@ import { agexHarness } from '../src/conformance/index'
 const covered = SCENARIOS.filter((s) => applies(s, agexHarness))
 
 describe("nontainer's harness corpus on agex-ts", () => {
-  it('covers tiers 0 to 4', () => {
+  it('covers tiers 0 to 5', () => {
     expect(covered.map((s) => s.name)).toEqual([
       'a-turn-that-writes-a-file',
       'a-cancel-after-a-tool-keeps-the-run',
@@ -30,6 +29,10 @@ describe("nontainer's harness corpus on agex-ts", () => {
       'a-fold-stays-in-force-without-another-summary',
       'a-request-over-budget-folds-the-earlier-turns',
       'a-second-fold-takes-in-the-first',
+      'a-delegate-hears-from-its-own-delegate-before-answering',
+      'a-delegate-out-of-wakes-names-who-it-did-not-hear-from',
+      'a-delegates-answer-is-delivered-once-on-the-next-tool-result',
+      'a-note-left-for-a-delegate-is-read-before-it-answers',
     ])
   })
 

@@ -127,15 +127,22 @@ export function artifactsNote(artifacts: readonly Artifact[]): string {
   return `[ui artifacts: ${artifacts.map((a) => `${a.name} -> ${a.path}`).join(', ')}]`
 }
 
+/** `text` with any line that would read as the artifacts line, or a
+ *  ui note, indented a space: what code printed or returned, so only
+ *  the result's own lines are read as them. */
+export function guardUiLines(text: string): string {
+  return text.replace(/^(?=\[ui (?:artifacts|note):)/gm, ' ')
+}
+
 /** The artifacts a result's text names, from its `[ui artifacts: …]`
- *  line; empty for none. */
+ *  line (a whole line, the last one); empty for none. A path runs to
+ *  the next `, name -> /`, so it may hold spaces. */
 export function parseArtifactsNote(text: string): Artifact[] {
-  const m = /\[ui artifacts: (.*?)\]/.exec(text)
-  if (m === null) return []
+  const body = [...text.matchAll(/^\[ui artifacts: (.*)\]$/gm)].at(-1)?.[1]
+  if (body === undefined) return []
   const out: Artifact[] = []
-  for (const seg of (m[1] as string).split(', ')) {
-    const pair = /^([\w.-]+) -> (\/\S+)$/.exec(seg)
-    if (pair !== null) out.push({ name: pair[1] as string, path: pair[2] as string })
+  for (const m of body.matchAll(/([\w.-]+) -> (\/.*?)(?=, [\w.-]+ -> \/|$)/g)) {
+    out.push({ name: m[1] as string, path: m[2] as string })
   }
   return out
 }

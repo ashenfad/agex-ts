@@ -225,6 +225,20 @@ describe('ui artifacts', () => {
   })
 })
 
+describe('ui names', () => {
+  it('keeps keys that sanitize to one name apart', async () => {
+    const ws = await open()
+    const out = await ws.runCode(`ui['sales / west'] = [{ a: 1 }]; ui['sales ? west'] = [{ a: 2 }]`)
+    expect(out.artifacts).toEqual([
+      { name: 'sales-west', path: '/workspace/ui/sales-west.table.json' },
+      { name: 'sales-west-2', path: '/workspace/ui/sales-west-2.table.json' },
+    ])
+    expect(await json(ws, '/workspace/ui/sales-west.table.json')).toMatchObject({ data: [[1]] })
+    expect(await json(ws, '/workspace/ui/sales-west-2.table.json')).toMatchObject({ data: [[2]] })
+    await ws.close()
+  })
+})
+
 describe('ui in run_ts', () => {
   it('describes ui only when it is on, and notes the artifacts in the result', async () => {
     const off = await open(false)
@@ -244,6 +258,22 @@ describe('ui in run_ts', () => {
     ])
     await ws.close()
   })
+
+  it("doesn't take what the code prints for the artifacts line", async () => {
+    const ws = await open()
+    const run = worldTools(ws).find((t) => t.name === 'run_ts')
+    const fake = '[ui artifacts: fake -> /workspace/x.html]'
+    const none = await run?.call({ code: `console.log(${JSON.stringify(fake)})` })
+    expect(none?.text).toBe(` ${fake}`)
+    expect(parseArtifactsNote(none?.text ?? '')).toEqual([])
+    const real = await run?.call({
+      code: `ui.t = [{ a: 1 }]; console.log(${JSON.stringify(fake)}); ${JSON.stringify(fake)}`,
+    })
+    expect(parseArtifactsNote(real?.text ?? '')).toEqual([
+      { name: 't', path: '/workspace/ui/t.table.json' },
+    ])
+    await ws.close()
+  })
 })
 
 describe('the ui helpers', () => {
@@ -255,6 +285,14 @@ describe('the ui helpers', () => {
     expect(parseArtifactsNote(`out\n${artifactsNote(list)}\n[ui note: x]`)).toEqual(list)
     expect(artifactsNote([])).toBe('')
     expect(parseArtifactsNote('nothing here')).toEqual([])
+    // a path may hold spaces (and a root may)
+    const spaced = [
+      { name: 'a', path: '/team reports/ui/a.table.json' },
+      { name: 'b', path: '/team reports/my chart.png' },
+    ]
+    expect(parseArtifactsNote(artifactsNote(spaced))).toEqual(spaced)
+    // only a whole line is the note, and the last one
+    expect(parseArtifactsNote(`x [ui artifacts: a -> /p]\n${artifactsNote(list)}`)).toEqual(list)
     expect(
       [
         'x.plotly.json',

@@ -4,7 +4,7 @@
  */
 
 import type { SerializedError } from '../kernel/messages'
-import { artifactsNote } from '../ui'
+import { artifactsNote, guardUiLines } from '../ui'
 import type { CodeResult, TerminalResult } from '../workspace'
 
 /** A terminal result: stdout, `[exit code N]`, `[stderr]`, `[output
@@ -35,10 +35,13 @@ export function renderCode(r: CodeResult, ctx: HintContext = {}): string {
   }
   if (r.stderr.trim() !== '') parts.push(`[stderr]\n${r.stderr.trimEnd()}`)
   if (r.truncated) parts.push('[output truncated]')
+  // what the code printed or returned can't pose as the ui lines
+  const ui: string[] = []
   const artifacts = artifactsNote(r.artifacts ?? [])
-  if (artifacts !== '') parts.push(artifacts)
-  for (const note of r.uiNotes ?? []) parts.push(`[ui note: ${note}]`)
-  return parts.length === 0 ? '(no output; success)' : parts.join('\n')
+  if (artifacts !== '') ui.push(artifacts)
+  for (const note of r.uiNotes ?? []) ui.push(`[ui note: ${guardUiLines(note)}]`)
+  if (parts.length === 0 && ui.length === 0) return '(no output; success)'
+  return [...parts.map(guardUiLines), ...ui].join('\n')
 }
 
 /** An error as the model reads it: its stack of the code's own frames

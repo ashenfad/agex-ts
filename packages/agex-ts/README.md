@@ -7,9 +7,9 @@ tasks, with code as the action space. The TypeScript counterpart of
 > **Status:** being rewritten on the `rebuild` branch, step by step (the
 > repo's `plan.md`, "Then agex-ts"). So far: the session loop, the run
 > record, the provider protocol with a scripted provider, any AI SDK
-> model as a provider, folding, delegation, tasks, and agex's corpora
-> (`agex-ts/conformance`). Agent-defined tasks come next. The published
-> 0.5.x is the previous design, which this replaces.
+> model as a provider, folding, delegation, tasks, agent-defined tasks,
+> and agex's corpora (`agex-ts/conformance`). Docs and examples come
+> next. The published 0.5.x is the previous design, which this replaces.
 
 ## Sessions
 
@@ -138,6 +138,49 @@ value. The caller's world is never touched.
 
 `fromJsonSchema(schema)` makes a Standard Schema of a JSON Schema
 literal, for types written that way.
+
+## Agent-defined tasks
+
+Grant `agex` and the agent's own code can hand work to helper agents:
+
+```ts
+const ws = await store.open('lead', {
+  profile: { hostObjects: { agex: agentTasks(agent) } },
+})
+const chat = agent.session(ws, { sessions: true, toolOptions: { codePrimer: AGEX_GUIDE } })
+```
+
+```ts
+// the agent's code, in run_ts
+const factor = agex.task({
+  name: 'factor',
+  instructions: 'Factor n into its primes, smallest first.',
+  params: { n: { type: 'integer' } }, // JSON Schema, or a Standard Schema that makes it
+  returns: { type: 'array', items: { type: 'integer' } },
+})
+const primes = await factor({ n: 391 })
+const all = await factor.map([{ n: 391 }, { n: 403 }]) // at most 4 at once
+```
+
+- **A definition is checked where it's written,** in the worker, by
+  `agex`'s stub: a missing type or instructions, a reserved parameter
+  name or a live type is a `TypeError` there. Inputs are checked at the
+  call, and the value against the return type, as a task's are.
+- **Each call is a helper:** a task run by the calling agent, given the
+  task's `primer` too. A helper that fails throws `agex.TaskFailed` in
+  the calling code, and one that asks throws `agex.TaskNeedsInput`.
+- **Helpers are delegates** of the calling world, forked with an empty
+  view inside the code's call and listed with its other delegates;
+  their answers go to the call, never to the caller's model. A world with
+  no delegation helper open, or `agentTasks(agent, { scratch: true })`,
+  puts them on scratch worlds instead.
+- **A helper holds what its caller holds,** without `agex`; a task's
+  `objects` narrows that to the host objects it names. A helper's time
+  doesn't count against the calling script's timeout, and a cancel of
+  the caller's turn stops its helpers.
+- **`standInTasks(answer?)`** answers every call at once, without a
+  model: by `answer(name, inputs)`, or with the simplest value of the
+  return type, for a page check or a handler test.
 
 ## Models
 

@@ -18,6 +18,7 @@ const FACTORY = Symbol('world.hostFactory')
 const COMMAND = Symbol('world.commandFactory')
 const WANTS_CALL = Symbol('world.withCall')
 const TYPED = Symbol('world.typedHost')
+const STUB = Symbol('world.withStub')
 
 /** What a host object made per world receives beside its workspace. */
 export interface HostWorld {
@@ -72,9 +73,33 @@ export function typedHost(host: object | HostFactory, methods: HostContract): Ty
   return { [TYPED]: { host, methods } }
 }
 
+/** A host object with a stub: see {@link withStub}. */
+export interface StubbedHost {
+  readonly [STUB]: { readonly host: object | HostFactory | TypedHost; readonly stub: string }
+}
+
+/**
+ * A host object with a stub: code's own half of it. `stub` is the
+ * source of a JavaScript function, `(remote) => object`, which runs in
+ * the worker for each run: `remote` is the host object as code would
+ * otherwise get it (its methods, called over messages), and what the
+ * function returns is what code gets instead, by the object's name and
+ * in `host`. A stub gives code what can't cross from the host, such as
+ * functions, classes and errors of its own, and checks or converts
+ * what code passes before it crosses. It runs in the worker alone, so
+ * it can reach nothing of the host's but `remote`.
+ */
+export function withStub(host: object | HostFactory | TypedHost, stub: string): StubbedHost {
+  if (typeof stub !== 'string' || stub.trim() === '') {
+    throw new TypeError("withStub: a stub is a function's source, `(remote) => object`")
+  }
+  return { [STUB]: { host, stub } }
+}
+
 /** A host object: an object whose public methods (not starting with
- *  `_`) code may call, a {@link hostFactory}, or a {@link typedHost}. */
-export type HostObject = object | HostFactory | TypedHost
+ *  `_`) code may call, a {@link hostFactory}, a {@link typedHost}, or
+ *  any of them {@link withStub}. */
+export type HostObject = object | HostFactory | TypedHost | StubbedHost
 
 /** A host object as one workspace holds it: the object, and its
  *  contract when it is typed. */
@@ -83,6 +108,8 @@ export interface HostEntry {
   readonly contract: HostContract | null
   /** The methods code may call, sorted. */
   readonly methods: readonly string[]
+  /** Its stub's source, if it has one (see {@link withStub}). */
+  readonly stub: string | null
 }
 
 /**
@@ -133,7 +160,8 @@ export function callAware(
 }
 
 export interface CodeSettings {
-  /** Seconds a run may take before it is stopped (default 30). */
+  /** Seconds a run may take before it is stopped (default 30): the
+   *  code's own time, so a host object's call doesn't count. */
   readonly timeout?: number
   /** The most characters of stdout, and of stderr, a result keeps
    *  (default 32,000); the rest is cut and `truncated` set. */
@@ -247,12 +275,13 @@ const VARIABLE = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 /** Check a profile's names, and return it. */
 export function checkProfile(profile: Profile): Profile {
-  for (const [name, entry] of Object.entries(profile.hostObjects ?? {})) {
+  for (const [name, given] of Object.entries(profile.hostObjects ?? {})) {
     if (!IDENTIFIER.test(name) || RESERVED.has(name)) {
       throw new InvalidNameError(
         `host object ${JSON.stringify(name)}: a name is an identifier code doesn't already have`,
       )
     }
+    const entry = (given as Partial<StubbedHost>)[STUB]?.host ?? given
     // A typed object (not one a factory makes) has its contract checked
     // against its methods now, not when a workspace opens.
     const typed = (entry as Partial<TypedHost>)[TYPED]
@@ -348,26 +377,28 @@ export function makeHostObjects(
   world: HostWorld,
 ): Map<string, HostEntry> {
   const out = new Map<string, HostEntry>()
-  for (const [name, entry] of Object.entries(profile.hostObjects ?? {})) {
+  for (const [name, given] of Object.entries(profile.hostObjects ?? {})) {
+    const stubbed = (given as Partial<StubbedHost>)[STUB]
+    const entry = stubbed?.host ?? given
     const typed = (entry as Partial<TypedHost>)[TYPED]
     const host = typed === undefined ? entry : typed.host
     const factory = (host as Partial<HostFactory>)[FACTORY]
     const obj = factory === undefined ? host : factory(ws, world)
-    out.set(name, hostEntry(name, obj, typed?.methods ?? null))
+    out.set(name, { ...hostEntry(name, obj, typed?.methods ?? null), stub: stubbed?.stub ?? null })
   }
   return out
 }
 
 function hostEntry(name: string, obj: object, contract: HostContract | null): HostEntry {
   const methods = publicMethods(obj)
-  if (contract === null) return { obj, contract, methods }
+  if (contract === null) return { obj, contract, methods, stub: null }
   const missing = Object.keys(contract).filter((m) => !methods.includes(m))
   if (missing.length > 0) {
     throw new TypeError(
       `host object ${name}: its contract names ${missing.join(', ')}, not among its methods`,
     )
   }
-  return { obj, contract, methods: Object.keys(contract).sort() }
+  return { obj, contract, methods: Object.keys(contract).sort(), stub: null }
 }
 
 function checkContract(what: string, methods: HostContract): void {

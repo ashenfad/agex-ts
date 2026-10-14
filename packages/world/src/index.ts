@@ -71,12 +71,14 @@ export {
   type HostCall,
   type HostFactory,
   type HostContract,
+  type StubbedHost,
   type HostObject,
   type MethodContract,
   type Profile,
   type TypedHost,
   hostFactory,
   typedHost,
+  withStub,
   withCall,
 } from './profile'
 export {

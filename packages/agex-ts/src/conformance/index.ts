@@ -17,3 +17,11 @@ export {
   checkTaskScenario,
   runTaskScenario,
 } from './tasks'
+export {
+  type CodeView,
+  LEAD,
+  MARK,
+  SPELLED,
+  checkCodeScenario,
+  runCodeScenario,
+} from './code-tasks'

@@ -27,6 +27,8 @@ export interface Image {
 export interface HostObjectSurface {
   readonly name: string
   readonly methods: readonly string[]
+  /** Its stub's source: `(remote) => object`, run in the worker. */
+  readonly stub?: string
 }
 
 /** A module from the world's files, compiled for the worker: the body

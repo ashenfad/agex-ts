@@ -285,7 +285,8 @@ function signature(
 
 /** The inputs of a call: data checked and bound by name, live objects
  *  as they are. */
-interface Bound {
+/** @internal */
+export interface Bound {
   readonly data: Record<string, unknown>
   readonly live: Record<string, object>
 }
@@ -431,7 +432,8 @@ export function brief(spec: TaskSpec, bound: Bound): string {
 // The run
 // ---------------------------------------------------------------------------
 
-type Result =
+/** @internal */
+export type Result =
   | readonly ['success', unknown]
   | readonly ['failed', string]
   | readonly ['needs_input', string]
@@ -450,7 +452,7 @@ const text = fromJsonSchema<string>({ type: 'string' })
  * it; the loop reads the record, never the script's error, so a script
  * that catches the stop still ends the task.
  */
-class TaskHost {
+export class TaskHost {
   result: Result | null = null
 
   /** `task` as the task's world binds it. */
@@ -477,7 +479,7 @@ class TaskHost {
 }
 
 /** Record how the task stands once its code has settled it. */
-function settle(plane: WorkspacePlane, result: Result): void {
+export function settle(plane: WorkspacePlane, result: Result): void {
   const [status, detail] = result
   plane.set('state', {
     status,
@@ -496,7 +498,7 @@ function settle(plane: WorkspacePlane, result: Result): void {
 /** Start the plane for a task about to run: what it is, the world it
  *  was forked from (`origin`, null for a scratch world), and each input
  *  sent by value, encoded. What the world held there before goes. */
-async function begin(
+export async function begin(
   plane: WorkspacePlane,
   spec: TaskSpec,
   bound: Bound,
@@ -671,23 +673,6 @@ class TaskRunner {
     readonly spec: TaskSpec,
   ) {}
 
-  async #bind(inputs: Readonly<Record<string, unknown>>): Promise<Bound> {
-    const name = this.spec.name
-    const known = new Set(this.spec.params.map((p) => p.name))
-    const unknown = Object.keys(inputs).filter((k) => !known.has(k))
-    if (unknown.length > 0) {
-      throw new TypeError(`${name}() got inputs it doesn't take: ${unknown.sort().join(', ')}`)
-    }
-    const data: Record<string, unknown> = {}
-    const lives: Record<string, object> = {}
-    for (const p of this.spec.params) {
-      const what = `${name}()'s argument '${p.name}'`
-      if (p.live !== null) lives[p.name] = checkLive(p, inputs[p.name], what)
-      else data[p.name] = await checkInput(this.spec, p, inputs[p.name], what)
-    }
-    return { data, live: lives }
-  }
-
   async run(
     inputs: Readonly<Record<string, unknown>>,
     opts: RunOptions = {},
@@ -697,7 +682,7 @@ class TaskRunner {
         'keep needs world: a scratch world lives in memory, and is gone once the task ends (or give the agent a scratch store)',
       )
     }
-    const bound = await this.#bind(inputs)
+    const bound = await bindInputs(this.spec, inputs)
     return this.#drive(
       (host) => this.#open(opts.world ?? null, bound, host),
       brief(this.spec, bound),
@@ -737,40 +722,6 @@ class TaskRunner {
     )
   }
 
-  /** The task world's profile: `base` with the task's inputs and
-   *  `task`. */
-  #profile(base: Profile, bound: Bound, host: TaskHost): Profile {
-    const taken = [...Object.keys(bound.data), ...Object.keys(bound.live), 'task'].filter(
-      (n) => n in (base.hostObjects ?? {}) || n in (base.values ?? {}),
-    )
-    if (taken.length > 0) {
-      throw new Error(
-        `the world already binds ${taken.join(', ')}, which task '${this.spec.name}' binds too; rename the input`,
-      )
-    }
-    const lives = Object.fromEntries(
-      this.spec.params
-        .filter((p) => p.live !== null)
-        .map((p) => {
-          const obj = bound.live[p.name] as object
-          const methods = (p.live as LiveSpec).methods
-          if (methods === undefined) return [p.name, obj]
-          const contract = Object.fromEntries(
-            Object.entries(methods).map(([m, { args, returns }]) => [
-              m,
-              { ...(args !== undefined && { args }), ...(returns !== undefined && { returns }) },
-            ]),
-          )
-          return [p.name, typedHost(obj, contract)]
-        }),
-    )
-    return {
-      ...base,
-      hostObjects: { ...base.hostObjects, ...lives, task: host.object(this.spec) },
-      values: { ...base.values, ...bound.data },
-    }
-  }
-
   async #open(world: Workspace | null, bound: Bound, host: TaskHost): Promise<Opened> {
     const id = newId().slice(0, 8)
     if (world === null) {
@@ -778,7 +729,7 @@ class TaskRunner {
       const store = own ?? (await Store.open(new Memory()))
       const base = this.agent.profile
       const name = `${this.spec.name}-${id}`
-      const ws = await store.open(name, { profile: this.#profile(base, bound, host) })
+      const ws = await store.open(name, { profile: taskProfile(this.spec, base, bound, host) })
       await begin(ws.plane(PLANE), this.spec, bound, null)
       return {
         ws,
@@ -795,7 +746,7 @@ class TaskRunner {
       }
     }
     const store = world.store
-    const profile = this.#profile(world.settings.profile, bound, host)
+    const profile = taskProfile(this.spec, world.settings.profile, bound, host)
     const name = `${world.session}.${this.spec.name}-${id}`
     // from the last commit, so the caller's branch gains nothing, not
     // even a commit of the writes it has pending
@@ -827,7 +778,7 @@ class TaskRunner {
     bound: Bound,
     host: TaskHost,
   ): Promise<Opened> {
-    const profile = this.#profile(base, bound, host)
+    const profile = taskProfile(this.spec, base, bound, host)
     const ws = await store.open(ref, world === null ? { profile } : { ...world.settings, profile })
     const kept = world === null && this.agent.scratch === null
     return {
@@ -933,26 +884,7 @@ class TaskRunner {
     const host = new TaskHost()
     const opened = await open(host)
     const plane = opened.ws.plane(PLANE)
-    let nudged = 0
-    const hooks: Hooks = {
-      instructions: INSTRUCTIONS,
-      afterCall: (output) => {
-        const result = host.result
-        if (result === null) return output
-        // the turn commits at its end: the plane says how the task
-        // stands in the commit of the run that settled it
-        settle(plane, result)
-        return { text: SAID[result[0]], images: [], isError: false }
-      },
-      done: () => host.result !== null,
-      onStop: (): Message | string => {
-        if (nudged < NUDGES) {
-          nudged += 1
-          return { id: newId(), role: 'user', parts: [{ kind: 'text', text: NUDGE }] }
-        }
-        return `the model stopped ${nudged + 1} times without calling task.success, task.fail or task.needsInput`
-      },
-    }
+    const hooks = taskHooks(host, plane)
     let ran: Outcome | null = null
     let waiting = false
     let kept = false
@@ -976,7 +908,7 @@ class TaskRunner {
       kept = opts.keep === true || waiting
       await opened.putAway(kept)
     }
-    const outcome = this.#outcome(ran, host, kept ? opened.name : null)
+    const outcome = taskOutcome(ran, host, kept ? opened.name : null)
     if (!waiting) return outcome
     const ref = opened.name
     return {
@@ -989,21 +921,103 @@ class TaskRunner {
         }),
     }
   }
+}
 
-  #outcome(ran: Outcome, host: TaskHost, ref: string | null): TaskOutcome {
-    const result = host.result
-    let status = ran.status as Outcome['status']
-    let value: unknown = null
-    let message = ran.message
-    if (result !== null && result[0] === 'success')
-      [status, value, message] = ['success', result[1], null]
-    else if (result !== null && result[0] === 'needs_input')
-      [status, message] = ['needs_input', result[1]]
-    else if (result !== null) [status, message] = ['failed', result[1]]
-    else if (status === 'completed')
-      [status, message] = ['failed', 'the run ended without a result']
-    return { ...ran, status, value, message, ref }
+/** @internal The inputs of a call, checked: data by its schema, live
+ *  objects as objects. */
+export async function bindInputs(
+  spec: TaskSpec,
+  inputs: Readonly<Record<string, unknown>>,
+): Promise<Bound> {
+  const name = spec.name
+  const known = new Set(spec.params.map((p) => p.name))
+  const unknown = Object.keys(inputs).filter((k) => !known.has(k))
+  if (unknown.length > 0) {
+    throw new TypeError(`${name}() got inputs it doesn't take: ${unknown.sort().join(', ')}`)
   }
+  const data: Record<string, unknown> = {}
+  const lives: Record<string, object> = {}
+  for (const p of spec.params) {
+    const what = `${name}()'s argument '${p.name}'`
+    if (p.live !== null) lives[p.name] = checkLive(p, inputs[p.name], what)
+    else data[p.name] = await checkInput(spec, p, inputs[p.name], what)
+  }
+  return { data, live: lives }
+}
+
+/** @internal The task world's profile: `base` with the task's inputs and
+ *  `task`. */
+export function taskProfile(spec: TaskSpec, base: Profile, bound: Bound, host: TaskHost): Profile {
+  const taken = [...Object.keys(bound.data), ...Object.keys(bound.live), 'task'].filter(
+    (n) => n in (base.hostObjects ?? {}) || n in (base.values ?? {}),
+  )
+  if (taken.length > 0) {
+    throw new Error(
+      `the world already binds ${taken.join(', ')}, which task '${spec.name}' binds too; rename the input`,
+    )
+  }
+  const lives = Object.fromEntries(
+    spec.params
+      .filter((p) => p.live !== null)
+      .map((p) => {
+        const obj = bound.live[p.name] as object
+        const methods = (p.live as LiveSpec).methods
+        if (methods === undefined) return [p.name, obj]
+        const contract = Object.fromEntries(
+          Object.entries(methods).map(([m, { args, returns }]) => [
+            m,
+            { ...(args !== undefined && { args }), ...(returns !== undefined && { returns }) },
+          ]),
+        )
+        return [p.name, typedHost(obj, contract)]
+      }),
+  )
+  return {
+    ...base,
+    hostObjects: { ...base.hostObjects, ...lives, task: host.object(spec) },
+    values: { ...base.values, ...bound.data },
+  }
+}
+
+/** @internal How a task's loop differs from a session's: its
+ *  instructions, the result of the call that settles it (recorded on
+ *  its plane), the end of the run there, and the nudges. */
+export function taskHooks(host: TaskHost, plane: WorkspacePlane): Hooks {
+  let nudged = 0
+  return {
+    instructions: INSTRUCTIONS,
+    afterCall: (output) => {
+      const result = host.result
+      if (result === null) return output
+      // the turn commits at its end: the plane says how the task
+      // stands in the commit of the run that settled it
+      settle(plane, result)
+      return { text: SAID[result[0]], images: [], isError: false }
+    },
+    done: () => host.result !== null,
+    onStop: (): Message | string => {
+      if (nudged < NUDGES) {
+        nudged += 1
+        return { id: newId(), role: 'user', parts: [{ kind: 'text', text: NUDGE }] }
+      }
+      return `the model stopped ${nudged + 1} times without calling task.success, task.fail or task.needsInput`
+    },
+  }
+}
+
+/** @internal How a task's run came out, by what its code settled. */
+export function taskOutcome(ran: Outcome, host: TaskHost, ref: string | null): TaskOutcome {
+  const result = host.result
+  let status = ran.status as Outcome['status']
+  let value: unknown = null
+  let message = ran.message
+  if (result !== null && result[0] === 'success')
+    [status, value, message] = ['success', result[1], null]
+  else if (result !== null && result[0] === 'needs_input')
+    [status, message] = ['needs_input', result[1]]
+  else if (result !== null) [status, message] = ['failed', result[1]]
+  else if (status === 'completed') [status, message] = ['failed', 'the run ended without a result']
+  return { ...ran, status, value, message, ref }
 }
 
 interface PlaneRead {

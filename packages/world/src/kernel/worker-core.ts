@@ -10,7 +10,7 @@
  * - `secret(name)`: a reference to one of the profile's secrets, which
  *   a host object fills at a request (the value never comes here);
  * - each host object by name, and all of them as `host` (also
- *   `import { db } from 'host'`);
+ *   `import { db } from 'host'`): its stub, for one that has one;
  * - each of the profile's values by name, a copy of its own per run;
  * - `console`: `log` and `info` to stdout, `warn` and `error` to
  *   stderr, images shown as images.
@@ -365,6 +365,26 @@ function contentType(path: string): string {
 
 let current: Bridge | null = null
 
+/** A host object's stub, run in front of its remote half: what code
+ *  gets by the object's name. */
+function stubbed(name: string, source: string, remote: object): object {
+  let made: unknown
+  try {
+    const make = new Function(`"use strict"; return (${source})`)() as (remote: object) => unknown
+    made = make(remote)
+  } catch (e) {
+    throw new Error(
+      `host object ${name}'s stub failed: ${e instanceof Error ? e.message : String(e)}`,
+    )
+  }
+  if ((typeof made !== 'object' && typeof made !== 'function') || made === null) {
+    throw new Error(
+      `host object ${name}'s stub returned ${made === null ? 'null' : typeof made}, not an object`,
+    )
+  }
+  return made
+}
+
 async function run(msg: RunMessage): Promise<void> {
   const bridge = new Bridge(msg.runId)
   current = bridge
@@ -372,26 +392,29 @@ async function run(msg: RunMessage): Promise<void> {
   fetchRouting = msg.routeFetch
   const loader = (specifier: string): Promise<unknown> => load(bridge, msg.hasResolver, specifier)
 
-  const host: Record<string, object> = {}
-  for (const h of msg.hostObjects) host[h.name] = bridge.stub('host', h.methods, h.name)
-  const bindings: Record<string, unknown> = {
-    fs: wrapAgentFs(bridge.stub('fs', FS_METHODS) as Parameters<typeof wrapAgentFs>[0]),
-    cache: msg.hasCache ? bridge.stub('cache', CACHE_METHODS) : undefined,
-    env: Object.freeze({ ...msg.env }),
-    secret: (name: string): string => {
-      if (!msg.secrets.includes(name)) throw new Error(`no secret named '${name}'`)
-      return `\${${name}}`
-    },
-    console: makeConsole(msg.runId),
-    host: Object.freeze(host),
-    ...host,
-    ...msg.values,
-  }
-  const registered = { host: bindings.host }
-
   let value: string | null = null
   let error: unknown = null
   try {
+    // in the try: a stub that throws fails the run, as code would
+    const host: Record<string, object> = {}
+    for (const h of msg.hostObjects) {
+      const remote = bridge.stub('host', h.methods, h.name)
+      host[h.name] = h.stub === undefined ? remote : stubbed(h.name, h.stub, remote)
+    }
+    const bindings: Record<string, unknown> = {
+      fs: wrapAgentFs(bridge.stub('fs', FS_METHODS) as Parameters<typeof wrapAgentFs>[0]),
+      cache: msg.hasCache ? bridge.stub('cache', CACHE_METHODS) : undefined,
+      env: Object.freeze({ ...msg.env }),
+      secret: (name: string): string => {
+        if (!msg.secrets.includes(name)) throw new Error(`no secret named '${name}'`)
+        return `\${${name}}`
+      },
+      console: makeConsole(msg.runId),
+      host: Object.freeze(host),
+      ...host,
+      ...msg.values,
+    }
+    const registered = { host: bindings.host }
     const modules: Record<string, Record<string, unknown>> = {}
     for (const m of msg.modules) {
       const body = new AsyncFunction('__exports', '__modules', '__registered', '__load', m.body)

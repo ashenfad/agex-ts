@@ -145,6 +145,7 @@ export class Kernel {
 
     return new Promise<KernelOutput>((resolve) => {
       let ended = false
+      let timer: ReturnType<typeof setTimeout> | undefined
       const end = (value: string | null, error: SerializedError | null): void => {
         if (ended) return
         ended = true
@@ -176,6 +177,7 @@ export class Kernel {
         if (msg.type === 'output') {
           output.add(msg.part)
         } else if (msg.type === 'call') {
+          if (msg.target === 'host') pause()
           const answer = this.#answer(worker, msg, ctx)
           // A stopped run waits for the file and cache calls already
           // taken, whose changes its commit must hold, but not for a
@@ -183,6 +185,8 @@ export class Kernel {
           if (msg.target !== 'host') {
             answering.add(answer)
             void answer.finally(() => answering.delete(answer))
+          } else {
+            void answer.finally(resume)
           }
         } else if (msg.type === 'done') {
           end(msg.value, msg.error === null ? null : userStack(msg.error, codeLines))
@@ -191,14 +195,31 @@ export class Kernel {
       const offError = worker.addErrorListener((err) =>
         stop({ name: 'Error', message: `the kernel's worker failed: ${err.message}` }),
       )
-      const timer = setTimeout(
-        () =>
-          stop({
-            name: 'TimeoutError',
-            message: `the run took longer than ${timeout}s and was stopped`,
-          }),
-        Math.min(timeout * 1000, MAX_DELAY_MS),
-      )
+      // The timeout is the code's own time: a host object's call is the
+      // host's (a helper agent's run, say), so the clock stops for it.
+      let used = 0
+      let since = performance.now()
+      let hosting = 0
+      const arm = () =>
+        setTimeout(
+          () =>
+            stop({
+              name: 'TimeoutError',
+              message: `the run took longer than ${timeout}s and was stopped`,
+            }),
+          Math.min(Math.max(timeout * 1000 - used, 0), MAX_DELAY_MS),
+        )
+      timer = arm()
+      const pause = () => {
+        if (hosting++ > 0) return
+        clearTimeout(timer)
+        used += performance.now() - since
+      }
+      const resume = () => {
+        if (--hosting > 0 || ended) return
+        since = performance.now()
+        timer = arm()
+      }
       this.#stop = stop
 
       const message: Host2Worker = {
@@ -209,6 +230,7 @@ export class Kernel {
         hostObjects: [...ctx.hostObjects].map(([name, entry]) => ({
           name,
           methods: entry.methods,
+          ...(entry.stub !== null && { stub: entry.stub }),
         })),
         values: ctx.values,
         env: ctx.env,

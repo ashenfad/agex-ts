@@ -1,6 +1,5 @@
-/** agex's shape corpus, vendored: what applies to agex-ts. The task
- *  scenarios run here; the code scenarios come with agent-defined tasks
- *  (A7). */
+/** agex's shape corpus, vendored: what applies to agex-ts, its task
+ *  scenarios and its code scenarios (tasks agent code defines). */
 
 import { describe, expect, it } from 'vitest'
 import {
@@ -9,12 +8,15 @@ import {
   CODE_SCENARIOS,
   TASK_SCENARIOS,
   appliesToTs,
+  checkCodeScenario,
   checkTaskScenario,
+  runCodeScenario,
   runTaskScenario,
 } from '../src/conformance/index'
 
 const WORKER = new URL('../../world/dist/worker.node.js', import.meta.url)
-const harness = new AgexTasks({ profile: { code: { worker: { target: 'node', url: WORKER } } } })
+const profile = { code: { worker: { target: 'node' as const, url: WORKER } } }
+const harness = new AgexTasks({ profile })
 
 describe("agex's shape corpus", () => {
   it('holds the task and code scenarios, by name', () => {
@@ -42,6 +44,15 @@ describe("agex's task scenarios on agex-ts", () => {
   for (const scenario of TASK_SCENARIOS.filter((s) => appliesToTs(s))) {
     it(scenario.name, async () => {
       const failures = checkTaskScenario(scenario, await runTaskScenario(scenario, harness))
+      expect(Object.fromEntries(failures)).toEqual({})
+    })
+  }
+})
+
+describe("agex's code scenarios on agex-ts", () => {
+  for (const scenario of CODE_SCENARIOS.filter((s) => appliesToTs(s))) {
+    it(scenario.name, async () => {
+      const failures = checkCodeScenario(scenario, await runCodeScenario(scenario, { profile }))
       expect(Object.fromEntries(failures)).toEqual({})
     })
   }

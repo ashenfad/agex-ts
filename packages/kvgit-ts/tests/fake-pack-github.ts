@@ -68,6 +68,18 @@ export class FakePackGithub {
     })
   }
 
+  /** Put a commit holding `files` (text) on `branch`, as another
+   *  writer would: on top of its head, or of main's for a new branch. */
+  plant(branch: string, files: Record<string, string>): void {
+    const ref = `refs/heads/${branch}`
+    const parent = this.refs.get(ref) ?? (this.refs.get('refs/heads/main') as string)
+    const base = (this.commits.get(parent) as Commit).files
+    const commit: Commit = { oid: nextOid(), parent, files: new Map(base) }
+    for (const [path, text] of Object.entries(files)) commit.files.set(path, enc.encode(text))
+    this.commits.set(commit.oid, commit)
+    this.refs.set(ref, commit.oid)
+  }
+
   count(kind: FakeCall['kind']): number {
     return this.calls.filter((c) => c.kind === kind).length
   }

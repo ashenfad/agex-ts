@@ -191,7 +191,8 @@ function planeFits(got: PlaneView | null, want: PlaneExp): boolean {
 }
 
 /** JSON equality: a boolean is no number. */
-function same(a: unknown, b: unknown): boolean {
+/** @internal */
+export function same(a: unknown, b: unknown): boolean {
   if (Array.isArray(a) || Array.isArray(b)) {
     return (
       Array.isArray(a) &&
@@ -256,7 +257,12 @@ function build(
 
 /** A JSON value written as TypeScript that builds it as `schema`'s
  *  type. */
-function written(value: unknown, schema: unknown, defs: Readonly<Record<string, Json>>): string {
+/** @internal */
+export function written(
+  value: unknown,
+  schema: unknown,
+  defs: Readonly<Record<string, Json>>,
+): string {
   const s = resolved(schema, defs)
   if (s['x-kind'] === 'bytes' && typeof value === 'string') {
     return `new Uint8Array([${[...toBytes(value)].join(', ')}])`
@@ -273,7 +279,8 @@ function written(value: unknown, schema: unknown, defs: Readonly<Record<string, 
 }
 
 /** A value as JSON: bytes as base64. */
-function json(value: unknown): unknown {
+/** @internal */
+export function json(value: unknown): unknown {
   if (value instanceof Uint8Array) return fromBytes(value)
   if (Array.isArray(value)) return value.map(json)
   if (typeof value === 'object' && value !== null) {

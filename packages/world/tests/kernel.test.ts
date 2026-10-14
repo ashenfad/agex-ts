@@ -6,6 +6,7 @@
 import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { beforeAll, describe, expect, it } from 'vitest'
+import { z } from 'zod'
 import {
   type CodeSettings,
   InvalidNameError,
@@ -15,7 +16,9 @@ import {
   Store,
   type Workspace,
   hostFactory,
+  typedHost,
   withCall,
+  withStub,
 } from '../src/index'
 import { BACKENDS, newKV, newStore } from './backends'
 
@@ -308,6 +311,72 @@ describe('host objects', () => {
     await expect(store.open('s', { profile: { variables: { 'A-B': 'x' } } })).rejects.toThrow(
       InvalidNameError,
     )
+  })
+})
+
+describe("the code's own time", () => {
+  it('leaves out a host object’s calls', async () => {
+    const slow = { wait: () => new Promise((resolve) => setTimeout(() => resolve('waited'), 1500)) }
+    const ws = await open({ hostObjects: { slow }, code: { timeout: 1 } })
+    const out = await ws.runCode(
+      'const a = await slow.wait()\nconst b = await slow.wait()\nreturn a + b',
+    )
+    expect([out.error, out.value]).toEqual([null, 'waitedwaited'])
+    // the code's own time still counts
+    const spin = await ws.runCode(
+      'await slow.wait()\nconst t = Date.now(); while (Date.now() - t < 1500) {}',
+    )
+    expect(spin.error?.name).toBe('TimeoutError')
+    await ws.close()
+  }, 15_000)
+})
+
+describe('stubs', () => {
+  const STUB = `(remote) => {
+    class Refused extends Error { name = 'Refused' }
+    return {
+      Refused,
+      shout(word) {
+        if (typeof word !== 'string') throw new Refused('a word, please')
+        const loud = async () => (await remote.upper(word)) + '!'
+        loud.twice = async () => (await loud()).repeat(2)
+        return loud
+      },
+    }
+  }`
+
+  it('stand in front of a host object, giving code what can’t cross', async () => {
+    const ws = await open({
+      hostObjects: {
+        words: withStub(
+          typedHost(
+            hostFactory(() => ({ upper: (w: string) => w.toUpperCase() })),
+            {
+              upper: { args: [z.string()], returns: z.string() },
+            },
+          ),
+          STUB,
+        ),
+      },
+    })
+    const out = await ws.runCode(
+      "import { words as same } from 'host'\nconst hi = words.shout('hi')\ntry { same.shout(7) } catch (e) { console.log(e instanceof words.Refused, e.message) }\nreturn [await hi(), await hi.twice()]",
+    )
+    expect(out.error).toBeNull()
+    expect(out.stdout).toBe('true a word, please')
+    expect(out.value).toBe('["HI!","HI!HI!"]')
+    await ws.close()
+  })
+
+  it('a stub that throws fails the run, naming its object', async () => {
+    const ws = await open({
+      hostObjects: { bad: withStub({}, '() => { throw new Error("nope") }') },
+    })
+    const out = await ws.runCode('return 1')
+    expect(out.error?.message).toBe("host object bad's stub failed: nope")
+    expect((await ws.runCode('return 2')).error?.message).toMatch(/stub failed/)
+    await ws.close()
+    expect(() => withStub({}, '')).toThrow(/a stub is a function's source/)
   })
 })
 

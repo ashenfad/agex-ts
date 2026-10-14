@@ -99,7 +99,8 @@ const result = await ws.runCode(`
   module reaches the host objects through `import { db } from 'host'`;
   only the code run has them as bare names.
 - **Stopping:** a run longer than the profile's timeout (30 seconds by
-  default) is stopped with a `TimeoutError`, and `ws.interrupt()` stops
+  default, of the code's own time: a host object's call doesn't count)
+  is stopped with a `TimeoutError`, and `ws.interrupt()` stops
   one with a `CancelledError`. Either way the worker is terminated, what
   the code wrote is committed, and the next run starts a fresh worker.
 
@@ -135,6 +136,11 @@ const ws = await store.open('alice', {
 - **Values** are data code reads by name, sent with each run, so every
   run gets a fresh copy and none can change the host's. A value with a
   live part is refused when the session opens.
+- **`withStub(host, source)`** gives a host object a stub: the source
+  of `(remote) => object`, run in the worker for each run, whose result
+  is what code gets by the object's name. A stub hands code what can't
+  cross (functions, classes, errors of its own) and checks or converts
+  what code passes before it does. agex's `agex` is one.
 - **`withCall(fn)`** declares a method that receives a `HostCall` first:
   its `ws` is the calling workspace as part of the code's call, so the
   method can fork or commit without waiting behind the call that's

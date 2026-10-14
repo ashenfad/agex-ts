@@ -10,7 +10,8 @@
  * about it (so the stored run goes back across turns); then a session
  * whose second turn is over a small budget, so it folds the first; then
  * a session that delegates writing a file and waits for the answer; then
- * a task that hands back a typed value, and one that asks and resumes. Then
+ * a task that hands back a typed value, and one that asks and resumes;
+ * then a session whose own code defines a task with `agex` and calls it. Then
  * one session moves from the first provider to another
  * mid-conversation, and one turn is stopped mid-stream.
  *
@@ -28,7 +29,7 @@ import { createGoogleGenerativeAI } from '@ai-sdk/google'
 import { createOpenAI } from '@ai-sdk/openai'
 import { createOpenRouter } from '@openrouter/ai-sdk-provider'
 import { z } from 'zod'
-import { Agent, Policy, runUsage } from '../dist/index.js'
+import { Agent, Policy, agentTasks, runUsage } from '../dist/index.js'
 
 const env = process.env
 const PROVIDERS = {
@@ -193,6 +194,33 @@ for (const [key, model] of models) {
       done?.value === 'teal',
       `${done?.status}: ${JSON.stringify(done?.value)}`,
     )
+  } catch (error) {
+    check('ran', false, String(error?.message ?? error))
+  }
+}
+
+for (const [key, model] of models) {
+  console.log(`${key}, agent-defined tasks`)
+  try {
+    const agent = new Agent({ model, primer, settings })
+    const store = await Store.open(new Memory())
+    const ws = await store.open('lead', { profile: { hostObjects: { agex: agentTasks(agent) } } })
+    const session = agent.session(ws, { sessions: true })
+    try {
+      const out = await session.say(
+        "In run_ts, use agex.task to define a task named 'factor' that factors a number into its primes (params { n: integer }, returns an array of integers), then map it over 391 and 403 and print what comes back. Reply with the factors.",
+      )
+      check('defines and calls a task', out.status === 'completed', said(out))
+      const jobs = session.sessions?.list() ?? []
+      check(
+        'its helpers answered',
+        jobs.length >= 2 && jobs.every((j) => j.status === 'answered'),
+        jobs.map((j) => `${j.name} ${j.status}`).join(', '),
+      )
+      check('the factors came back', /17/.test(out.text) && /31/.test(out.text), said(out))
+    } finally {
+      await session.close()
+    }
   } catch (error) {
     check('ran', false, String(error?.message ?? error))
   }

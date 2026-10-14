@@ -2,8 +2,8 @@
  * agex-ts: an agent loop over `@agex-ts/world`, matching agex's meaning.
  * Rebuilt on the `rebuild` branch, step by step (see the repo's
  * plan.md): this holds the run record, the provider protocol (with any AI SDK
- * model as a provider), agents and sessions, folding, delegation and
- * tasks so far.
+ * model as a provider), agents and sessions, folding, delegation,
+ * tasks and agent-defined tasks.
  */
 
 export {
@@ -53,6 +53,21 @@ export { type PrepareOptions, type Prepared, prepare } from './compaction'
 /** When to fold: re-exported from the world, which owns the record. */
 export { Policy } from '@agex-ts/world'
 export { MAX_WAKES, Runner } from './delegation'
+export {
+  AGEX_GUIDE,
+  AGEX_STUB,
+  AgentTasks,
+  CANCELLED,
+  type CallReply,
+  MAX_PARALLEL,
+  type StandInAnswer,
+  TASK_FORMAT,
+  TaskRun,
+  agentTasks,
+  cancelTasks,
+  simplest,
+  standInTasks,
+} from './code-tasks'
 export {
   ASKED,
   FINISHED,

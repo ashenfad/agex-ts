@@ -39,6 +39,7 @@ import {
 import type { LanguageModelV4 } from '@ai-sdk/provider'
 import type { StandardSchemaV1 } from '@standard-schema/spec'
 import { AiSdkProvider, isLanguageModel } from './ai-sdk'
+import { cancelTasks } from './code-tasks'
 import { prepare } from './compaction'
 import { Runner } from './delegation'
 import { type Provider, type Settings, type ToolSpec, toolSpec } from './provider'
@@ -185,6 +186,22 @@ export class Agent {
    *  conversation (it continues) or none (it starts one). */
   session(ws: Workspace, opts: SessionOptions = {}): Session {
     return new Session(this, ws, opts)
+  }
+
+  /** @internal This agent with `more` added to its primer: a helper's
+   *  for an agent-defined task. */
+  _primed(more: string): Agent {
+    if (more === '') return this
+    return new Agent({
+      model: this.provider,
+      primer: [this.primer, more].filter((p) => p !== '').join('\n\n'),
+      settings: this.settings,
+      maxSteps: this.maxSteps,
+      maxToolCalls: this.maxToolCalls,
+      compaction: this.compaction,
+      profile: this.profile,
+      scratch: this.scratch,
+    })
   }
 
   /** A task: a typed call that runs this agent on a world of its own
@@ -393,6 +410,8 @@ export class Session {
     if (reason !== undefined && turn.reason === null) turn.reason = reason
     turn.abort.abort()
     this.ws.interrupt()
+    // the helpers its code's agent-defined tasks have running stop too
+    cancelTasks(this.ws)
     return true
   }
 

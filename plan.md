@@ -830,6 +830,23 @@ from JSON Schema (`typeText`, `declarations`).
 
 **Exit:** the shape corpus's code scenarios that apply.
 
+Done 2026-10-13: `agentTasks(agent)` and `standInTasks(answer?)`, and
+all 9 code scenarios that apply pass (`runCodeScenario`, a port of
+agex's `conformance/code_tasks.py`), with Python's agent-task tests
+ported where they apply. The smoke script has each real model's code
+define a task and map it. Two additions to the world carry it:
+`withStub(host, source)`, a host object's code-side half run in the
+worker (Python's `HostObject(stub=...)`), which `agex` is, so code
+gets a callable task with `.map`, its own `TaskFailed` and
+`TaskNeedsInput`, and a definition checked where it's written; and a
+code timeout that counts the code's own time, not a host call's, so a
+helper's run doesn't end its caller's script. A task's types in code
+are JSON Schema literals, or a Standard Schema whose library makes JSON
+Schema, converted in the worker. Two of the corpus's expected names are
+Python's words, mapped in the harness (`SPELLED`: docstring is
+instructions, annotation is type). `AGEX_GUIDE` is the model's how-to,
+for an embedder to add to the code tool's description.
+
 **A8. Docs and examples.**
 - **The README:** sessions, tasks, providers, delegation and folding,
   with the examples rewritten.

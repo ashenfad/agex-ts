@@ -7,6 +7,7 @@
 import { DEFAULT_TIMEOUT } from '../kernel/kernel'
 import { commandDescriptions } from '../profile'
 import { skillCatalog } from '../skills'
+import { uiDescription } from '../ui'
 import type { Workspace } from '../workspace'
 
 const TERMINAL_CORE = `\
@@ -199,6 +200,7 @@ export function codeDescription(ws: Workspace, primer?: string): string {
     `- console.log/info print; console.warn/error go to stderr; each call stops after ${code.timeout ?? DEFAULT_TIMEOUT}s`,
   )
   let out = `${CODE_CORE}\n${notes.join('\n')}`
+  if (code.ui === true) out += `\n\n${uiDescription(ws.root)}`
   if (primer !== undefined && primer !== '') out += `\n\n${primer}`
   return `${out}\n\nMake ONE call per turn; put all the code for a step in a single call.`
 }

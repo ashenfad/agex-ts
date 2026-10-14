@@ -7,6 +7,8 @@
  * worker sent late is recognised and dropped.
  */
 
+import type { UiHarvest } from './ui-values'
+
 /** An error as it crosses the worker boundary. */
 export interface SerializedError {
   readonly name: string
@@ -60,6 +62,8 @@ export type Host2Worker =
       /** `fetch('/path')` reads the world's files: everywhere (true),
        *  under these prefixes, or not at all (false). */
       readonly routeFetch: boolean | readonly string[]
+      /** Bind `ui`, and send back what the code put in it. */
+      readonly ui: boolean
     }
   | {
       readonly type: 'reply'
@@ -103,6 +107,8 @@ export type Worker2Host =
       /** What a top-level `return` gave, shown as text; null for none. */
       readonly value: string | null
       readonly error: SerializedError | null
+      /** What the code put in `ui`, for a run that binds it. */
+      readonly ui?: UiHarvest
     }
 
 /** The filesystem methods code may call, as termish's `FileSystem`

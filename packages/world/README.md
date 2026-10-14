@@ -106,6 +106,31 @@ const result = await ws.runCode(`
   one with a `CancelledError`. Either way the worker is terminated, what
   the code wrote is committed, and the next run starts a fresh worker.
 
+### `ui` artifacts
+
+With `profile.code.ui` on, code also has `ui`, an empty object each
+run, for what it wants shown: `ui.revenue = { data, layout }`. When the
+run ends, each value that renders is written under `<root>/ui` before
+the commit, by kind, and named in `result.artifacts`; why a value gave
+nothing is in `result.uiNotes`. nontainer's convention, with
+JavaScript's values in place of Python's:
+
+| value | file |
+|---|---|
+| a Plotly spec, `{data: [...], layout: {...}}` | `<name>.plotly.json` |
+| an array of row objects, or an Arrow table | `<name>.table.json`: `{columns, data, total, columnTypes}`, 200 rows at most |
+| an array of stat (`{label, value, sublabel?}`) and callout (`{type: 'callout', title, body, tone?}`) cards | `<name>.cards.json`: `{items}` |
+| image bytes, a `data:image` URL, a Blob, an `OffscreenCanvas` | `<name>.png` (or `.jpg`, `.gif`, `.webp`) |
+| the path of a file the code saved | that file |
+
+Anything else is data, and isn't written. run_ts's result ends with
+`[ui artifacts: revenue -> /workspace/ui/revenue.plotly.json]` and a
+`[ui note: …]` per problem, and its description tells the agent to
+embed an artifact in its reply as
+`![revenue](/workspace/ui/revenue.plotly.json)`. A harness renders one
+by `artifactKind(path)`, finds a result's with `parseArtifactsNote`, and
+shows after the reply the ones the reply doesn't embed.
+
 ## The profile
 
 What the host grants a session, given to `store.open(id, {profile})`,

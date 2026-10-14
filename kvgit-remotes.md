@@ -1,5 +1,7 @@
 # kvgit remotes: git-native session sync
 
+> **Superseded (2026-10):** this per-commit design shipped as `GithubRemote`, which is gone. Sessions now sync as one pack per push: see "Pack sync over GitHub" in [packages/kvgit-ts/README.md](./packages/kvgit-ts/README.md).
+
 > **Status:** ephemeral design doc, June 2026. Not yet implemented. Supersedes
 > nothing; informed by a live API spike against a scratch repo (2026-06-11).
 

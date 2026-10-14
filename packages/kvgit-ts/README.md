@@ -286,68 +286,85 @@ source of truth shared by `VersionedKV` and the sync layer. If you
 change the layout or hash inputs, both move together and the storage
 version sentinel must bump.
 
-### GitHub transport (`@agex-ts/kvgit/github`)
+### Pack sync over GitHub (`@agex-ts/kvgit/github`)
 
-The first real transport syncs through a plain GitHub repo — no
-backend, no git protocol (GitHub's smart-HTTP endpoints don't send
-CORS headers), just the CORS-friendly Git Data REST API with a
-user-supplied PAT. Designed for a fine-grained token scoped to one
-dedicated sync repo with Contents read/write — least privilege for a
-token that lives in browser storage. A repo, not a gist: gists lack
-the Git Data API and CAS-able refs.
+`PackRemote` syncs through a plain GitHub repo, with no backend and no
+git protocol (GitHub's smart-HTTP endpoints don't send CORS headers):
+GraphQL and one REST read, on a token that lives in the browser. A
+fine-grained token scoped to one sync repo, with **Contents: read and
+write**, is enough. A push is one request whatever the number of
+commits, a pull is one query plus one read per pack, and the session
+list with each session's head and metadata is one query.
 
-What's in the subpath ([`src/github/`](./src/github)):
+```ts
+import { GithubClient, PackRemote } from '@agex-ts/kvgit/github'
+import { pushBranch, pullBranch } from '@agex-ts/kvgit'
 
-- **`GithubClient`** — throttled, retrying REST client scoped to one
-  repo. Mutations are serialized with minimum spacing
-  (`writeIntervalMs`, default 750ms ≈ GitHub's ~80 content-writes/min
-  secondary limit); reads run free against the 5,000/hr primary
-  limit. `server`/`rate-limit`/network failures retry with backoff
-  honoring `Retry-After`; `auth`/`permission`/`validation` never
-  retry (see the `GithubError` taxonomy in
-  [`src/github/errors.ts`](./src/github/errors.ts)). Git Data
-  primitives: binary-safe blobs, trees with `base_tree` + nested
-  paths, commits with explicit dates (deterministic SHAs → resumable
-  pushes), refs with CAS semantics (`createRef`/`updateRef` return
-  `false` on lost races only).
-- **`GithubRemote`** — the `Remote` implementation. Push renders each
-  kvgit commit as a real git commit (blobs → `base_tree` trees →
-  commits with deterministic dates → one trailing ref CAS); fetch
-  walks the commits list back to the receiver's frontier, reads
-  sidecars + blobs via the contents API, and reassembles
-  `WireCommit`s. Incremental pushes need per-branch **transport
-  state** (frontier tree + key→path assignments), persisted locally
-  under `__ghsync__<repo>__<branch>`; fetch rebuilds it
-  opportunistically as it walks, and `rebuildTransportState(branch)`
-  recovers it from remote sidecars alone. Verified live end to end:
-  two stores ping-ponging a session through a real repo, incremental
-  deltas both directions, interrupted-push resume, lost-state
-  recovery.
-- **Each value crosses once.** Values are keyed by content, so a
-  sidecar records each changed value's hash. A push references a value
-  the repo already holds by its git SHA instead of sending it again,
-  and sends the bytes after all if the repo has since collected that
-  blob. What the repo holds comes from a local index of every value
-  this store has pushed or fetched there, on any branch and at any
-  point in history (`__ghsync_blob__<repo>__<hash>`): a rename, a copy,
-  a revert, or what a merge took from another branch. A fetch
-  reads a value the local store already holds instead of downloading
-  it, and downloads a value several fetched commits share once.
-- **Roster ops** — the session-lifecycle layer over the ref
-  namespace: `archiveBranch` / `restoreBranch` (ref renames between
-  `refs/heads/*` and `archived/*`), `deleteForever` / `emptyTrash`
-  (tombstone pruning; GitHub GC reclaims objects), `listArchivedRefs`
-  (the trash view), and `readKeyAtTip` (one key's bytes at a tip
-  without materializing — the cloud-stub primitive; probes the
-  natural path then the relocation slot). Concurrent archives
-  collapse benignly; restore suffixes on a retaken name.
-- **`gitBlobSha1`** — local git blob hashing (WebCrypto SHA-1);
-  knowing a blob's SHA before upload is the push-side dedup
-  primitive. Verified live: the local SHA predicts the remote one.
-- **Live verification suite**
-  ([`tests/github-live.test.ts`](./tests/github-live.test.ts)) —
-  env-gated (`KVGIT_GH_TOKEN` + `KVGIT_GH_REPO`, scratch repo);
-  pins the API behaviors the design rests on: nested-path tree
-  synthesis, exact dates, multi-parent commits, topological-order
-  rejection, empty-tree commits, `force:false` CAS, commits-list
-  pagination, and `archived/*` rename tombstone mechanics.
+const client = new GithubClient({ token, repo: 'me/agex-sync' })
+const remote = new PackRemote(client, kv, { meta: (branch, head) => ({ title }) })
+await pushBranch(kv, remote, 'chat-1') // fast-forward only: 'pushed', 'diverged', …
+await remote.roster() // every session: head, meta, packs, archived
+```
+
+- **`GithubClient`**: GraphQL (`graphql`), raw blob reads by SHA
+  (`getBlobRaw`) and REST (`request`), scoped to one repo. Mutations
+  run one at a time, spaced by `writeIntervalMs`; `server`,
+  `rate-limit` and network failures retry with backoff, honoring
+  `Retry-After`, and `auth`, `permission` and `validation` don't (see
+  `GithubError`).
+- **`PackRemote`**: the `Remote`. `push` lands one pack per request,
+  `fetch` reads the packs a receiver lacks, `roster` lists every
+  session, live and archived. `archiveBranch`, `restoreBranch` and
+  `emptyTrash` are one atomic, CAS-checked `updateRefs` each. `repack`
+  folds a session's packs into one.
+- **Lost races are results, not throws:** a push whose expected head
+  moved returns false (the sync layer reports `'diverged'`), with
+  nothing written.
+
+#### The format
+
+Each session is one git branch; archived ones (the trash) are
+`archived/<session>`. A branch holds two kinds of file:
+
+- **`kvgit/manifest.json`**, JSON: `{format: 1, kernel, branch, head,
+  packs, nextSeq, meta}`. `head` is the session's kvgit head; `meta` is
+  what the pusher's `meta(branch, head)` gave (a title, say); `packs`
+  lists the packs oldest first, each `{path, seq, base, tip, commits,
+  bytes, sha256, blob}`: the kvgit commit its delta builds on (`base`,
+  null from the root), its last commit (`tip`), and the stored file's
+  size, SHA-256 and git blob SHA-1 (what a fetch reads it by). Each
+  pack's `base` is the previous pack's `tip`. A manifest that isn't
+  JSON, or has another `format`, makes the branch unusable here: it is
+  never pushed over.
+- **`kvgit/packs/<seq>-<tip12>.pack`**: gzip of CBOR `{format: 1,
+  kernel, base, tip, values, commits}`. `values` is a table of distinct
+  byte strings (each value once, ordered by key, so versions of a file
+  compress against each other); `commits` is parents first, each
+  `[record, updates]`, where `record` is the commit as kvgit hashes it
+  (Python-style JSON bytes of `{hash, parents, parentGens, time,
+  info, removals}`, `time` a float) and `updates` is `[key,
+  valueIndex]` pairs. A receiver recomputes every hash (`applyWire`).
+
+Each push is one git commit on the session's branch, headlined `kvgit
+<session> @ <head7> (+N)` with a `Kvgit-Head: <head>` trailer, made by
+`createCommitOnBranch` with `expectedHeadOid` as the compare-and-swap.
+A new session's branch starts from the default branch's commit, its
+`createRef` in the same request. A fetch walks the manifest's packs
+from the newest back to one whose `base` the receiver has, and reads
+them by blob SHA (`GET git/blobs/<sha>`, raw: the contents API alters
+bytes it takes for text).
+
+#### Limits
+
+- A push larger than `maxPackBytes` (16 MiB of values) lands as
+  several packs, each its own compare-and-swap. A single commit too
+  large for one request (about 22 MB compressed) is refused before
+  anything is sent.
+- Past `maxPacks` (16), a push also folds all but the newest
+  `keepRecent` (4) into one pack, re-encoded from the local store, in
+  the same request.
+- Packs are opaque to git, so a repo grows with what is pushed (a
+  small multiple of each session's size, with folding).
+- Live tests ([`tests/github-pack-live.test.ts`](./tests/github-pack-live.test.ts))
+  run against a scratch repo when `KVGIT_GH_TOKEN` and `KVGIT_GH_REPO`
+  are set.

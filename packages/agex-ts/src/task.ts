@@ -860,10 +860,14 @@ class TaskRunner {
         `'${ref}' isn't a world of this task: it holds ${held}, and this task is ${this.spec.contract}`,
       )
     }
+    // a fork is reopened with its world's settings, so it resumes
+    // through that world, and a scratch world through none
     const origin = spec.world ?? null
-    if (world !== null && origin !== world.session) {
+    if (origin !== (world?.session ?? null)) {
+      const ran = origin === null ? 'a scratch world' : `world '${String(origin)}'`
+      const given = world === null ? 'no world' : `world '${world.session}'`
       throw new Error(
-        `task '${this.spec.name}' at '${ref}' ran on world ${origin === null ? 'none (a scratch world)' : `'${String(origin)}'`}, not '${world.session}': resume it through the world it ran on`,
+        `task '${this.spec.name}' at '${ref}' ran on ${ran}, and was given ${given}: resume it through the world it ran on`,
       )
     }
     const status = plane.state?.status
@@ -955,9 +959,12 @@ class TaskRunner {
     const session = this.agent.session(opened.ws, { hooks })
     const stop = () => session.cancel('the task was stopped')
     try {
+      // the turn is there to cancel from the moment it starts, so a
+      // signal already aborted stops it before any model call
+      const running = session.stream(prompt).wait()
       opts.signal?.addEventListener('abort', stop, { once: true })
       if (opts.signal?.aborted === true) stop()
-      ran = await session.stream(prompt).wait()
+      ran = await running
     } finally {
       opts.signal?.removeEventListener('abort', stop)
       const result = host.result

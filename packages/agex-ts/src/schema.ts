@@ -225,7 +225,11 @@ function issues(
   const members = (schema.anyOf ?? schema.oneOf) as unknown
   if (Array.isArray(members)) {
     const each = members.map((m) => issues(m, value, path, defs))
-    if (each.some((found) => found.length === 0)) return []
+    const fits = each.filter((found) => found.length === 0).length
+    if (fits > 1 && schema.anyOf === undefined) {
+      return [{ message: 'fits more than one of its types, where oneOf takes exactly one', path }]
+    }
+    if (fits > 0) return []
     // the member that got furthest says what's wrong
     const deepest = each.reduce((a, b) =>
       Math.max(...b.map((i) => i.path.length)) > Math.max(...a.map((i) => i.path.length)) ? b : a,

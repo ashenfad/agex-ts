@@ -55,6 +55,16 @@ describe('fromJsonSchema', () => {
     )
   })
 
+  it('takes oneOf as exactly one', async () => {
+    const t = fromJsonSchema({ oneOf: [{ type: 'number' }, { type: 'integer' }] })
+    expect(await check(1.5, t)).toBe(1.5)
+    await expect(check(2, t)).rejects.toThrow(
+      'fits more than one of its types, where oneOf takes exactly one',
+    )
+    const any = fromJsonSchema({ anyOf: [{ type: 'number' }, { type: 'integer' }] })
+    expect(await check(2, any)).toBe(2)
+  })
+
   it('gives its schema, with the definitions it names, as its JSON Schema', () => {
     expect(scores['~standard'].jsonSchema.input({ target: 'draft-2020-12' })).toEqual({
       type: 'array',

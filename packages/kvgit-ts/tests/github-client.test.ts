@@ -70,18 +70,20 @@ describe('request shaping', () => {
     const { client, sleeps } = makeClient(
       [
         { status: 201, body: { sha: 'a' } },
-        { status: 201, body: { sha: 'b' } },
+        { status: 200, body: { data: {} } },
         { status: 200, body: {} },
+        { status: 200, body: { data: {} } },
       ],
       { writeIntervalMs: 750 },
     )
-    await client.createBlob(new Uint8Array([1]))
-    await client.createBlob(new Uint8Array([2]))
+    await client.request('POST', 'git/blobs', {})
+    await client.graphql('mutation { a }', {}, { mutation: true })
     // Exactly one throttle wait, of the full interval (clock advances
     // only via sleeps, so the second write sees zero elapsed time).
     expect(sleeps).toEqual([750])
     await client.request('GET', 'git/trees/x')
-    expect(sleeps).toEqual([750]) // GET added no waits
+    await client.graphql('query { b }')
+    expect(sleeps).toEqual([750]) // a GET and a query added no waits
   })
 })
 
@@ -92,7 +94,7 @@ describe('retry and taxonomy', () => {
       { status: 502, body: { message: 'bad gateway' } },
       { status: 200, body: { object: { sha: 'abc' } } },
     ])
-    expect(await client.getRef('main')).toBe('abc')
+    expect(await client.request('GET', 'git/ref/heads/main')).toEqual({ object: { sha: 'abc' } })
     expect(calls.length).toBe(3)
     expect(sleeps).toEqual([100, 200])
   })
@@ -106,7 +108,7 @@ describe('retry and taxonomy', () => {
       },
       { status: 200, body: { object: { sha: 'abc' } } },
     ])
-    expect(await client.getRef('main')).toBe('abc')
+    expect(await client.request('GET', 'git/ref/heads/main')).toEqual({ object: { sha: 'abc' } })
     expect(sleeps).toEqual([2000])
   })
 
@@ -139,86 +141,26 @@ describe('retry and taxonomy', () => {
   })
 })
 
-describe('ref CAS semantics', () => {
-  it('getRef returns null on 404', async () => {
-    const { client } = makeClient([{ status: 404, body: { message: 'Not Found' } }])
-    expect(await client.getRef('missing')).toBeNull()
-  })
-
-  it('createRef returns false when the ref already exists', async () => {
-    const { client } = makeClient([{ status: 422, body: { message: 'Reference already exists' } }])
-    expect(await client.createRef('chat-x', 'a'.repeat(40))).toBe(false)
-  })
-
-  it('createRef throws on other validation failures', async () => {
-    const { client } = makeClient([{ status: 422, body: { message: 'Object does not exist' } }])
-    await expect(client.createRef('chat-x', 'a'.repeat(40))).rejects.toThrow(/does not exist/)
-  })
-
-  it('updateRef returns false only on the non-fast-forward rejection', async () => {
-    const { client } = makeClient([
-      { status: 422, body: { message: 'Update is not a fast forward' } },
-    ])
-    expect(await client.updateRef('chat-x', 'a'.repeat(40))).toBe(false)
-  })
-
-  it('deleteRef tolerates an already-gone ref', async () => {
-    const { client } = makeClient([{ status: 422, body: { message: 'Reference does not exist' } }])
-    expect(await client.deleteRef('chat-x')).toBe(false)
-  })
-
-  it('encodes slashed branch names as path segments', async () => {
-    const { client, calls } = makeClient([{ status: 200, body: { object: { sha: 'x' } } }])
-    await client.getRef('archived/chat-ab12')
-    expect(calls[0]?.url).toContain('/git/ref/heads/archived/chat-ab12')
-  })
-})
-
-describe('blob round-trip plumbing', () => {
-  it('createBlob posts base64; getBlob decodes newline-wrapped base64', async () => {
-    const bytes = new Uint8Array([104, 105, 0, 1])
+describe('graphql and raw blobs', () => {
+  it('posts a GraphQL document and returns its data beside its errors', async () => {
     const { client, calls } = makeClient([
-      { status: 201, body: { sha: 'deadbeef' } },
-      { status: 200, body: { content: 'aGk\nAAQ==\n', encoding: 'base64' } },
+      { status: 200, body: { data: { a: 1 }, errors: [{ type: 'NOT_FOUND', message: 'x' }] } },
     ])
-    await client.createBlob(bytes)
-    expect((calls[0]?.body as { encoding: string }).encoding).toBe('base64')
-    const back = await client.getBlob('deadbeef')
-    expect(back).toEqual(bytes)
+    const res = await client.graphql<{ a: number }>('query($v: Int) { a }', { v: 2 })
+    expect(res).toEqual({ data: { a: 1 }, errors: [{ type: 'NOT_FOUND', message: 'x' }] })
+    expect(calls[0]?.url).toBe('https://api.github.com/graphql')
+    expect(calls[0]?.body).toEqual({ query: 'query($v: Int) { a }', variables: { v: 2 } })
   })
-})
 
-describe('getContent', () => {
-  it('decodes inline base64 and URL-encodes path segments (keeping slashes)', async () => {
+  it('reads a blob raw by its SHA, and null when the repo lacks it', async () => {
     const { client, calls } = makeClient([
-      { status: 200, body: { content: 'aGVsbG8=', encoding: 'base64', sha: 's', size: 5 } },
-    ])
-    const out = await client.getContent('.kvgit/commit 1.json', 'abc123')
-    expect(new TextDecoder().decode(out as Uint8Array)).toBe('hello')
-    expect(calls[0]?.url).toContain('/contents/.kvgit/commit%201.json?ref=abc123')
-  })
-
-  it('falls back to the blob endpoint when content is truncated (>1MB)', async () => {
-    const { client, calls } = makeClient([
-      { status: 200, body: { content: '', encoding: 'none', sha: 'bigsha', size: 2_000_000 } },
-      { status: 200, body: { content: 'aGk=', encoding: 'base64' } },
-    ])
-    const out = await client.getContent('files/big.bin', 'abc123')
-    expect(new TextDecoder().decode(out as Uint8Array)).toBe('hi')
-    expect(calls[1]?.url).toContain('/git/blobs/bigsha')
-  })
-
-  it('returns null for missing paths, distinguishes empty files', async () => {
-    const { client } = makeClient([
+      { status: 200, body: 'raw' },
       { status: 404, body: { message: 'Not Found' } },
-      { status: 200, body: { content: '', encoding: 'base64', sha: 's', size: 0 } },
     ])
-    expect(await client.getContent('nope', 'ref')).toBeNull()
-    expect(await client.getContent('empty', 'ref')).toEqual(new Uint8Array(0))
-  })
-
-  it('returns null for directory listings (no FILE at the path)', async () => {
-    const { client } = makeClient([{ status: 200, body: [{ name: 'child.txt', type: 'file' }] }])
-    expect(await client.getContent('some/dir', 'ref')).toBeNull()
+    const bytes = await client.getBlobRaw('a'.repeat(40))
+    expect(new TextDecoder().decode(bytes as Uint8Array)).toBe('"raw"')
+    expect(calls[0]?.url).toBe(`https://api.github.com/repos/o/r/git/blobs/${'a'.repeat(40)}`)
+    expect(calls[0]?.headers.accept).toBe('application/vnd.github.raw+json')
+    expect(await client.getBlobRaw('b'.repeat(40))).toBeNull()
   })
 })

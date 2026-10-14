@@ -36,8 +36,11 @@ describe.runIf(LIVE)('PackRemote (live)', () => {
   afterAll(async () => {
     const cleanup = device()
     for (const b of branches) {
-      await cleanup.remote.client.deleteRef(b)
-      await cleanup.remote.client.deleteRef(`archived/${b}`)
+      for (const ref of [b, `archived/${b}`]) {
+        await cleanup.remote.client
+          .request('DELETE', `git/refs/heads/${ref}`)
+          .catch(() => undefined)
+      }
     }
   })
 

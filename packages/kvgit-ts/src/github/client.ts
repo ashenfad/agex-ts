@@ -1,8 +1,9 @@
 /**
- * Throttled, retrying GitHub REST client scoped to one repo.
+ * Throttled, retrying GitHub client scoped to one repo: GraphQL, raw
+ * blob reads and REST requests.
  *
- * Three concerns live here so the transport layers above (push /
- * fetch / roster) stay pure mapping logic:
+ * Three concerns live here so the transport above stays mapping
+ * logic:
  *
  * 1. **Mutation throttling.** GitHub's secondary rate limits cap
  *    content-creating requests (documented ~80/min) and dislike
@@ -16,15 +17,8 @@
  *    present. `auth` / `permission` / `validation` never retry.
  * 3. **Error taxonomy.** Failures surface as `GithubError` with a
  *    `kind` callers can branch on (see `errors.ts`).
- *
- * The Git Data API surface is exposed as thin typed methods
- * (blobs/trees/commits/refs) — the kvgit↔git mapping happens above
- * this layer. Ref CAS semantics: `createRef`/`updateRef` return
- * `false` for the lost-race cases ("already exists" / "not a fast
- * forward") and throw for everything else.
  */
 
-import { base64ToBytes, bytesToBase64 } from './base64'
 import { GithubError, classify, errorMessage } from './errors'
 
 export interface GithubClientOptions {
@@ -43,32 +37,6 @@ export interface GithubClientOptions {
   fetchImpl?: typeof fetch
   sleeper?: (ms: number) => Promise<void>
   now?: () => number
-}
-
-export interface TreeEntry {
-  path: string
-  mode: '100644' | '100755' | '040000' | '160000' | '120000'
-  type: 'blob' | 'tree' | 'commit'
-  /** Blob/tree SHA; `null` deletes the path (with `base_tree`). */
-  sha?: string | null
-  /** Inline UTF-8 content (small text files only; blobs go via createBlob). */
-  content?: string
-}
-
-export interface GitPerson {
-  name: string
-  email: string
-  /** ISO 8601. */
-  date: string
-}
-
-export interface GitCommit {
-  sha: string
-  tree: string
-  parents: string[]
-  message: string
-  authorDate: string
-  committerDate: string
 }
 
 /** One entry of a GraphQL response's `errors`. `type` is GitHub's
@@ -239,252 +207,6 @@ export class GithubClient {
   #backoff(attempt: number): number {
     return this.#retryBaseMs * 2 ** attempt
   }
-
-  // -------------------------------------------------------------------------
-  // Git Data API
-  // -------------------------------------------------------------------------
-
-  /** Store a blob (binary-safe via base64); returns its git SHA. */
-  async createBlob(bytes: Uint8Array): Promise<string> {
-    const data = await this.request<{ sha: string }>('POST', 'git/blobs', {
-      content: bytesToBase64(bytes),
-      encoding: 'base64',
-    })
-    return data.sha
-  }
-
-  /** Fetch a blob's bytes (handles GitHub's newline-wrapped base64). */
-  async getBlob(sha: string): Promise<Uint8Array> {
-    const data = await this.request<{ content: string; encoding: string }>(
-      'GET',
-      `git/blobs/${sha}`,
-    )
-    if (data.encoding !== 'base64') {
-      throw new GithubError('validation', 200, `unexpected blob encoding: ${data.encoding}`)
-    }
-    return base64ToBytes(data.content)
-  }
-
-  /** Create a tree, optionally layered on `baseTree`. Nested `a/b/c`
-   *  paths are accepted (intermediate trees are synthesized). */
-  async createTree(entries: TreeEntry[], baseTree?: string): Promise<string> {
-    const data = await this.request<{ sha: string }>('POST', 'git/trees', {
-      tree: entries,
-      ...(baseTree !== undefined && { base_tree: baseTree }),
-    })
-    return data.sha
-  }
-
-  async getTree(
-    sha: string,
-    opts: { recursive?: boolean } = {},
-  ): Promise<{ entries: Array<{ path: string; type: string; sha: string }>; truncated: boolean }> {
-    const suffix = opts.recursive ? '?recursive=1' : ''
-    const data = await this.request<{
-      tree: Array<{ path: string; type: string; sha: string }>
-      truncated: boolean
-    }>('GET', `git/trees/${sha}${suffix}`)
-    return { entries: data.tree, truncated: data.truncated }
-  }
-
-  /** Create a commit. Explicit dates keep git SHAs deterministic —
-   *  the property push resumability rests on. Parents must exist. */
-  async createCommit(opts: {
-    message: string
-    tree: string
-    parents: string[]
-    author: GitPerson
-    committer: GitPerson
-  }): Promise<string> {
-    const data = await this.request<{ sha: string }>('POST', 'git/commits', opts)
-    return data.sha
-  }
-
-  async getCommit(sha: string): Promise<GitCommit> {
-    const data = await this.request<{
-      sha: string
-      tree: { sha: string }
-      parents: Array<{ sha: string }>
-      message: string
-      author: { date: string }
-      committer: { date: string }
-    }>('GET', `git/commits/${sha}`)
-    return {
-      sha: data.sha,
-      tree: data.tree.sha,
-      parents: data.parents.map((p) => p.sha),
-      message: data.message,
-      authorDate: data.author.date,
-      committerDate: data.committer.date,
-    }
-  }
-
-  /** One page of the commits list walking back from `sha` —
-   *  parents, messages (Kvgit-Hash trailers), tree SHAs, and dates
-   *  included; 1-indexed pages. The walk-back primitive for fetch and
-   *  for kvgit↔git SHA resolution. */
-  async listCommits(opts: {
-    sha: string
-    perPage?: number
-    page?: number
-  }): Promise<
-    Array<{ sha: string; parents: string[]; message: string; treeSha: string; date: string }>
-  > {
-    const perPage = opts.perPage ?? 100
-    const page = opts.page ?? 1
-    const data = await this.request<
-      Array<{
-        sha: string
-        parents: Array<{ sha: string }>
-        commit: { message: string; tree: { sha: string }; committer: { date: string } }
-      }>
-    >('GET', `commits?sha=${encodeURIComponent(opts.sha)}&per_page=${perPage}&page=${page}`)
-    return data.map((c) => ({
-      sha: c.sha,
-      parents: c.parents.map((p) => p.sha),
-      message: c.commit.message,
-      treeSha: c.commit.tree.sha,
-      date: c.commit.committer.date,
-    }))
-  }
-
-  /**
-   * A file's bytes at a ref, in one request via the contents API
-   * (inline base64 up to ~1MB; larger files arrive truncated with
-   * `encoding: "none"` and fall back to the blob endpoint, which
-   * serves up to 100MB). Returns null when the path doesn't exist at
-   * that ref.
-   */
-  async getContent(path: string, ref: string): Promise<Uint8Array | null> {
-    const encoded = path.split('/').map(encodeURIComponent).join('/')
-    interface ContentResponse {
-      content?: string
-      encoding?: string
-      sha: string
-      size: number
-    }
-    let data: ContentResponse
-    try {
-      data = await this.request<ContentResponse>(
-        'GET',
-        `contents/${encoded}?ref=${encodeURIComponent(ref)}`,
-      )
-    } catch (err) {
-      if (err instanceof GithubError && err.kind === 'not-found') return null
-      throw err
-    }
-    // Boundary guard: request<T> casts blindly, and a pathological
-    // response would otherwise escape as a raw TypeError instead of a
-    // classified error.
-    if (data === null || typeof data !== 'object') {
-      throw new GithubError('validation', 200, `getContent: unexpected response shape for ${path}`)
-    }
-    // A directory listing means "no FILE at this path" — null, like a
-    // 404. (Load-bearing for two-probe key reads: a key relocated
-    // because its natural path became a directory must fall through
-    // to its `_kv/` slot rather than throw.)
-    if (Array.isArray(data)) return null
-    if (data.encoding === 'base64' && typeof data.content === 'string') {
-      if (data.content.length > 0 || data.size === 0) return base64ToBytes(data.content)
-    }
-    // Truncated (>1MB) or unexpected encoding — fetch via blob SHA.
-    return this.getBlob(data.sha)
-  }
-
-  // -------------------------------------------------------------------------
-  // Refs
-  // -------------------------------------------------------------------------
-
-  /** Branch tip SHA, or null if the ref doesn't exist. */
-  async getRef(branch: string): Promise<string | null> {
-    try {
-      const data = await this.request<{ object: { sha: string } }>(
-        'GET',
-        `git/ref/${refPath(branch)}`,
-      )
-      return data.object.sha
-    } catch (err) {
-      if (err instanceof GithubError && err.kind === 'not-found') return null
-      throw err
-    }
-  }
-
-  /** All refs under `heads/` (paginated). Branch names may contain
-   *  slashes (`archived/chat-x`). */
-  async listBranchRefs(): Promise<Array<{ branch: string; sha: string }>> {
-    const out: Array<{ branch: string; sha: string }> = []
-    for (let page = 1; ; page++) {
-      const data = await this.request<Array<{ ref: string; object: { sha: string } }>>(
-        'GET',
-        `git/matching-refs/heads/?per_page=100&page=${page}`,
-      )
-      for (const r of data) {
-        out.push({ branch: r.ref.slice('refs/heads/'.length), sha: r.object.sha })
-      }
-      if (data.length < 100) return out
-    }
-  }
-
-  /** CAS "branch must not exist": false if it already does. */
-  async createRef(branch: string, sha: string): Promise<boolean> {
-    try {
-      await this.request('POST', 'git/refs', { ref: `refs/heads/${branch}`, sha })
-      return true
-    } catch (err) {
-      if (
-        err instanceof GithubError &&
-        err.kind === 'validation' &&
-        /already exists/i.test(err.message)
-      ) {
-        return false
-      }
-      throw err
-    }
-  }
-
-  /** CAS fast-forward (`force: false`): false on the non-fast-forward
-   *  rejection, i.e. the ref moved under us. */
-  async updateRef(branch: string, sha: string, opts: { force?: boolean } = {}): Promise<boolean> {
-    try {
-      await this.request('PATCH', `git/refs/${refPath(branch)}`, {
-        sha,
-        force: opts.force ?? false,
-      })
-      return true
-    } catch (err) {
-      if (
-        err instanceof GithubError &&
-        err.kind === 'validation' &&
-        /fast forward/i.test(err.message)
-      ) {
-        return false
-      }
-      throw err
-    }
-  }
-
-  /** Delete a ref; false if it was already gone. */
-  async deleteRef(branch: string): Promise<boolean> {
-    try {
-      await this.request('DELETE', `git/refs/${refPath(branch)}`)
-      return true
-    } catch (err) {
-      if (
-        err instanceof GithubError &&
-        (err.kind === 'not-found' ||
-          (err.kind === 'validation' && /does not exist/i.test(err.message)))
-      ) {
-        return false
-      }
-      throw err
-    }
-  }
-}
-
-/** Encode a branch name for a ref URL path, preserving `/` segments
- *  (branch names like `archived/chat-x` are path-structured refs). */
-function refPath(branch: string): string {
-  return `heads/${branch.split('/').map(encodeURIComponent).join('/')}`
 }
 
 /** Server-hinted retry delay: `Retry-After` (seconds) or

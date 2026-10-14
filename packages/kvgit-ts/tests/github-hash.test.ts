@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { EMPTY_TREE_SHA, base64ToBytes, bytesToBase64, gitBlobSha1 } from '../src/github/index'
+import { base64ToBytes, bytesToBase64, gitBlobSha1 } from '../src/github/index'
 
 const enc = new TextEncoder()
 
@@ -18,10 +18,6 @@ describe('gitBlobSha1', () => {
   it('matches git hash-object on binary content with NUL bytes', async () => {
     const bytes = new Uint8Array([0x62, 0x69, 0x6e, 0x00, 0x01, 0x02]) // "bin\0\x01\x02"
     expect(await gitBlobSha1(bytes)).toBe('e158ec5208bacda2ca76214f4a18bd2ce2ffee46')
-  })
-
-  it('exports the canonical empty-tree SHA', () => {
-    expect(EMPTY_TREE_SHA).toBe('4b825dc642cb6eb9a060e54bf8d69288fbee4904')
   })
 })
 

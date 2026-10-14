@@ -855,6 +855,18 @@ for an embedder to add to the code tool's description.
   applicable shape scenario pass on the scripted provider, and a real
   model runs a session and a task end to end in Node.
 
+Done 2026-10-13: agex-ts's README is written for a first reader
+(install, a quick start, then each part), with `examples/quickstart.mjs`
+(a session and a task) and `examples/helpers.mjs` (agent-defined tasks)
+run end to end on a real model in Node; the root, world and release
+docs are brought up to date. The pending changesets cover every
+package: agex-ts 0.6.0, `@agex-ts/world` 0.1.0, `@agex-ts/kvgit` 0.2.0
+and `@agex-ts/termish` 0.3.0 when versioned. The phase's exit holds:
+every tier of the harness corpus (0 to 5) and every applicable shape
+scenario (16 task, 9 code) pass on the scripted provider, and the smoke
+script and examples run sessions, tasks and agent-defined tasks on real
+models.
+
 ### Decided for the redesign (2026-10-13)
 
 1. **Compaction is one large fold now; chapters are folds later.** Basic

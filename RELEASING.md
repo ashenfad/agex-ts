@@ -1,6 +1,6 @@
 # Releasing
 
-This monorepo uses [Changesets](https://github.com/changesets/changesets) to manage versioning and per-package CHANGELOGs across its 8 published packages, and publishes from GitHub Actions with npm OIDC provenance (see `.github/workflows/release.yml`). Each user-visible change ships with a markdown file in `.changeset/` describing what changed and how to bump the affected packages' versions.
+This monorepo uses [Changesets](https://github.com/changesets/changesets) to manage versioning and per-package CHANGELOGs across its 4 published packages (`agex-ts`, `@agex-ts/world`, `@agex-ts/kvgit`, `@agex-ts/termish`), and publishes from GitHub Actions with npm OIDC provenance (see `.github/workflows/release.yml`). Each user-visible change ships with a markdown file in `.changeset/` describing what changed and how to bump the affected packages' versions.
 
 ## Day-to-day: adding a changeset to a PR
 

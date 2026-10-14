@@ -7,8 +7,8 @@ counterpart of [nontainer](https://github.com/ashenfad/nontainer)'s
 store and workspace, with the same semantics and its own storage
 layout.
 
-> **Status:** Pre-alpha, on the agex-ts `rebuild` branch, and complete
-> as a world: the agex-ts loop is rebuilt on it next.
+> **Status:** Pre-alpha. Public API is unstable; pin a specific minor
+> version. [`agex-ts`](../agex-ts) is the loop built on it.
 
 ## Use
 
@@ -90,7 +90,8 @@ const result = await ws.runCode(`
 - **Its bindings:** `fs` (the session's files, every method async, with
   `read(path, 'utf8')` and string writes), `cache`, `env` (the
   profile's variables), `console` (`log`/`info` to stdout, `warn`/
-  `error` to stderr, images shown as images), and the host objects.
+  `error` to stderr, images shown as images), the profile's values (a
+  copy each run), and the host objects.
 - **Nothing carries over between runs** but the files and the cache,
   as in nontainer: each run gets a fresh scope.
 - **Imports:** the world's own modules by path (relative to the working

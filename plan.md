@@ -915,7 +915,12 @@ models.
 
 ## Then agex-studio
 
-Rebuilt on the new agex-ts, with its apps ported by hand. Decided and open there:
+Rebuilt on the new agex-ts, with its apps ported by hand. The studio's
+plan is its own: agex-studio's
+[`roadmap/rebuild.md`](https://github.com/ashenfad/agex-studio/blob/main/roadmap/rebuild.md)
+(decided 2026-10-13: a clean break with no migration, agex-ts by pnpm
+`link:` until the switch, rich replies as `ui` artifacts, gist
+publishing with version tags in the store). Decided and open there:
 - **A full rewrite is allowed** (decided 2026-10-13), where it is
   simpler on the new foundation than a migration: with one kernel, the
   `KernelAdapter` layer and the translation of events into the Python

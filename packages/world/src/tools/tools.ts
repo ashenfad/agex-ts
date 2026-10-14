@@ -49,7 +49,15 @@ export interface Tool {
   readonly description: string
   /** JSON Schema of the arguments. */
   readonly parameters: Readonly<Record<string, unknown>>
-  call(args: Readonly<Record<string, unknown>>): Promise<ToolOutput>
+  call(args: Readonly<Record<string, unknown>>, opts?: CallOptions): Promise<ToolOutput>
+}
+
+/** What a harness hands a tool call beside its arguments. */
+export interface CallOptions {
+  /** Aborted when the call's turn ends: a tool that waits on something
+   *  outside the workspace (a delegate, say) stops waiting. Code and
+   *  commands are stopped through the workspace (`ws.interrupt()`). */
+  readonly signal?: AbortSignal
 }
 
 export interface ToolOptions {

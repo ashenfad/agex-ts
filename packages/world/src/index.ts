@@ -125,6 +125,7 @@ export {
 } from './tools/descriptions'
 export { type HintContext, errorHint, errorText, renderCode, renderTerminal } from './tools/render'
 export {
+  type CallOptions,
   MAX_VIEW_IMAGE_BYTES,
   type McpContent,
   type Tool,

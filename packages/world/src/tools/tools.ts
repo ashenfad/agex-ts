@@ -13,7 +13,7 @@
 
 import { FsError, describeFsError } from '@agex-ts/termish'
 import { EditError } from '../editing'
-import { type Sessions, sessionsTool } from '../sessions'
+import { type SessionRunner, type Sessions, sessionsTool } from '../sessions'
 import type { Workspace } from '../workspace'
 import {
   FILE_EDIT_DESCRIPTION,
@@ -62,6 +62,9 @@ export interface ToolOptions {
   /** Offer `sessions`, delegating through this helper. No helper, no
    *  tool: an agent that can't delegate is never told about it. */
   readonly sessions?: Sessions
+  /** What runs the delegates `sessions` asks for, over the helper's
+   *  own (see `ActionOptions.runner`). */
+  readonly runner?: SessionRunner
 }
 
 /** The largest image `view_image` returns, in bytes. */
@@ -229,7 +232,11 @@ export function worldTools(ws: Workspace, opts: ToolOptions = {}): Tool[] {
       }
     }),
   })
-  if (opts.sessions !== undefined) tools.push(sessionsTool(opts.sessions))
+  if (opts.sessions !== undefined) {
+    tools.push(
+      sessionsTool(opts.sessions, opts.runner !== undefined ? { runner: opts.runner } : {}),
+    )
+  }
   return tools
 }
 

@@ -10,12 +10,13 @@
 
 import type { CommitInfo } from '@agex-ts/kvgit'
 import { Policy, type TurnEvent, type Workspace } from '@agex-ts/world'
-import type {
-  Clock,
-  Harness,
-  HarnessSession,
-  OpenOptions,
-  RunView,
+import {
+  type Clock,
+  CorpusDelegates,
+  type Harness,
+  type HarnessSession,
+  type OpenOptions,
+  type RunView,
 } from '@agex-ts/world/conformance'
 import { Agent, CLOSING_NOTE, type Session } from '../agent'
 import { type Run, messageText } from '../record'
@@ -43,7 +44,9 @@ export class AgexHarnessSession implements HarnessSession {
       model: new ScriptedProvider((sent) => clock.next(sent)),
       compaction: opts.budget === undefined ? null : new Policy(opts.budget),
     })
-    this.session = agent.session(ws)
+    this.session = agent.session(ws, {
+      ...(opts.sessions !== undefined && { sessions: opts.sessions }),
+    })
   }
 
   get inbox() {
@@ -90,8 +93,12 @@ export class AgexHarnessSession implements HarnessSession {
 /** agex-ts as a conformance harness. */
 export const agexHarness: Harness = {
   name: 'agex',
-  capabilities: new Set(['resume', 'keeps-aborted-runs', 'compaction']),
+  capabilities: new Set(['resume', 'keeps-aborted-runs', 'compaction', 'delegation']),
   async open(ws, clock, opts) {
     return new AgexHarnessSession(ws, clock, opts)
+  },
+  /** What runs a scenario's delegates: agex sessions too. */
+  delegation(store, scenario) {
+    return new CorpusDelegates(agexHarness, store, scenario)
   },
 }

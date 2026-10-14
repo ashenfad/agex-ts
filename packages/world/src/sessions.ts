@@ -1357,13 +1357,25 @@ export interface SessionsArgs {
   readonly wait?: boolean
 }
 
+/** How a `sessions` tool call is run, beside its arguments. */
+export interface ActionOptions {
+  /** What runs the delegates this call asks for, over the helper's: an
+   *  embedder whose loop changes between turns hands the current one,
+   *  so new delegates run on it and those in flight finish on theirs. */
+  readonly runner?: SessionRunner
+}
+
 /**
  * Dispatch one `sessions` tool call and render its result. Every
  * refusal is text rather than an error: "no job named x" is something
  * a model can act on.
  */
-export async function runAction(sessions: Sessions, args: SessionsArgs): Promise<string> {
-  return (await act(sessions, args)).text
+export async function runAction(
+  sessions: Sessions,
+  args: SessionsArgs,
+  opts: ActionOptions = {},
+): Promise<string> {
+  return (await act(sessions, args, opts)).text
 }
 
 /** {@link runAction}, saying whether the call was refused. A job with
@@ -1371,6 +1383,7 @@ export async function runAction(sessions: Sessions, args: SessionsArgs): Promise
 async function act(
   sessions: Sessions,
   args: SessionsArgs,
+  opts: ActionOptions,
 ): Promise<{ text: string; isError: boolean }> {
   const ok = (text: string) => ({ text, isError: false })
   const refused = (text: string) => ({ text, isError: true })
@@ -1407,6 +1420,7 @@ async function act(
         ...(forkFrom !== '' && { forkFrom }),
         ...(resume !== '' && { resume }),
         wait: args.wait === true,
+        ...(opts.runner !== undefined && { runner: opts.runner }),
       })
       return ok('task' in out ? renderJob(out) : renderAnswer(out))
     }
@@ -1446,7 +1460,7 @@ async function act(
 
 /** The `sessions` tool over a helper: one tool with an `action`, as
  *  nontainer's adapters expose it. */
-export function sessionsTool(sessions: Sessions): Tool {
+export function sessionsTool(sessions: Sessions, opts: ActionOptions = {}): Tool {
   const string = { type: 'string' }
   return {
     name: 'sessions',
@@ -1466,7 +1480,7 @@ export function sessionsTool(sessions: Sessions): Tool {
       required: ['action'],
     },
     async call(args): Promise<ToolOutput> {
-      return { ...(await act(sessions, args as unknown as SessionsArgs)), images: [] }
+      return { ...(await act(sessions, args as unknown as SessionsArgs, opts)), images: [] }
     },
   }
 }

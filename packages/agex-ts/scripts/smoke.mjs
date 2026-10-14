@@ -8,7 +8,8 @@
  * that writes a file through a tool (so the reply's reasoning and tool
  * calls go back to the provider within the turn), and one that asks
  * about it (so the stored run goes back across turns); then a session
- * whose second turn is over a small budget, so it folds the first. Then
+ * whose second turn is over a small budget, so it folds the first; then
+ * a session that delegates writing a file and waits for the answer. Then
  * one session moves from the first provider to another
  * mid-conversation, and one turn is stopped mid-stream.
  *
@@ -114,12 +115,41 @@ for (const [key, model] of models) {
       model,
       primer,
       settings,
-      compaction: new Policy(first + 100),
+      compaction: new Policy(first + 10),
     }).session(ws)
     const out = await session.say('What was the code word? Answer from memory, no tools.')
     const folds = out.events.filter((e) => e.kind === 'Compacted').length
-    check('folds', folds > 0, `${folds} fold(s), budget ${first + 100}`)
+    check('folds', folds > 0, `${folds} fold(s), budget ${first + 10}`)
     check('remembers through the fold', /PELICAN/i.test(out.text), said(out))
+  } catch (error) {
+    check('ran', false, String(error?.message ?? error))
+  }
+}
+
+for (const [key, model] of models) {
+  console.log(`${key}, delegating`)
+  try {
+    const ws = await workspace()
+    const session = new Agent({ model, primer, settings }).session(ws, { sessions: true })
+    try {
+      const out = await session.say(
+        'Delegate this with the sessions tool, waiting for the answer: write the word OTTER to /workspace/d.txt. Then reply with what the delegate said.',
+      )
+      check('asks and hears back', out.status === 'completed', said(out))
+      const jobs = session.sessions?.list() ?? []
+      check(
+        'a delegate answered',
+        jobs.some((j) => j.status === 'answered'),
+        jobs.map((j) => `${j.name} ${j.status}`).join(', '),
+      )
+      const name = jobs[0]?.name
+      const child = name === undefined ? null : await ws.store.open(name)
+      const content = await child?.files.readText('/workspace/d.txt').catch(() => null)
+      await child?.close()
+      check('the delegate wrote it', content?.trim() === 'OTTER', JSON.stringify(content))
+    } finally {
+      await session.close()
+    }
   } catch (error) {
     check('ran', false, String(error?.message ?? error))
   }

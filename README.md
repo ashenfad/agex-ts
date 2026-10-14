@@ -9,21 +9,39 @@ fork is O(1). The TypeScript counterpart of
 them on meaning rather than bytes, and browser-native: code runs in a
 Web Worker, storage is IndexedDB.
 
-> **Status:** being rebuilt on the `rebuild` branch, step by step:
-> [`plan.md`](plan.md) is the plan and its decisions. The foundation is
-> done (termish-ts, kvgit-ts, the world); agex-ts, the loop, is being
-> rewritten over it. Nothing releases until the rebuild is done, when
-> every package releases at once. `main` and the published 0.x packages
-> are the previous design.
+> **Status:** pre-alpha, rebuilt on the `rebuild` branch
+> ([`plan.md`](plan.md) is the plan and its decisions): termish-ts,
+> kvgit-ts, the world and agex-ts are done, and release together. The
+> published 0.5.x packages are the previous design.
 
 ## Packages
 
 | Package | Purpose |
 |---|---|
-| [`agex-ts`](packages/agex-ts) | The loop: sessions and typed tasks over a world. Being rewritten. |
+| [`agex-ts`](packages/agex-ts) | The loop: sessions, typed tasks, agent-defined tasks, delegation and folding over a world, on any AI SDK model. |
 | [`@agex-ts/world`](packages/world) | The world: sessions as branches, the workspace, the code kernel, the tools, the turn, the inbox, delegation, the agent's git (`ws-git`), skills, compaction's record. nontainer's semantics. |
 | [`@agex-ts/kvgit`](packages/kvgit-ts) | Versioned key-value storage with branches, merges and sync; Python kvgit's v4 format, byte for byte. |
 | [`@agex-ts/termish`](packages/termish-ts) | A shell interpreter over an async filesystem protocol. |
+
+## A taste
+
+```ts
+const store = await Store.open(new Memory())
+const ws = await store.open('notes')
+const agent = new Agent({ model: anthropic('claude-haiku-5-5') })
+
+await agent.session(ws).say('Write a haiku about rivers to /workspace/haiku.txt')
+const factor = agent.task({
+  name: 'factor',
+  instructions: 'Factor n into its primes, smallest first.',
+  params: { n: z.number().int() },
+  returns: z.array(z.number().int()),
+})
+await factor({ n: 391 }) // [17, 23]
+```
+
+[`packages/agex-ts`](packages/agex-ts) has the rest, and its `examples/`
+run end to end.
 
 ## Working from a clone
 

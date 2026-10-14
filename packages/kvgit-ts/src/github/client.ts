@@ -71,6 +71,20 @@ export interface GitCommit {
   committerDate: string
 }
 
+/** One entry of a GraphQL response's `errors`. `type` is GitHub's
+ *  classification (`STALE_DATA` for a lost `expectedHeadOid` race,
+ *  `UNPROCESSABLE`, `NOT_FOUND`, …); `path` names the field. */
+export interface GraphqlError {
+  type?: string
+  path?: Array<string | number>
+  message: string
+}
+
+export interface GraphqlResult<T> {
+  data: T | null
+  errors: GraphqlError[]
+}
+
 const MAX_BACKOFF_MS = 60_000
 
 const defaultSleeper = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
@@ -111,28 +125,75 @@ export class GithubClient {
    * mutations are serialized and spaced by `writeIntervalMs`.
    */
   async request<T = unknown>(method: string, path: string, body?: unknown): Promise<T> {
-    if (method === 'GET') return this.#attempt<T>(method, path, body)
+    const url = `${this.#apiBase}/repos/${this.repo}/${path}`
+    if (method === 'GET') return this.#attempt<T>(method, url, body)
+    return this.#serialized(() => this.#attempt<T>(method, url, body))
+  }
 
+  /** Run a mutation on the write chain: one at a time, spaced by
+   *  `writeIntervalMs`. */
+  #serialized<T>(fn: () => Promise<T>): Promise<T> {
     const run = this.#writeChain.then(async () => {
       const wait = this.#writeIntervalMs - (this.#now() - this.#lastWriteAt)
       if (wait > 0) await this.#sleep(wait)
       try {
-        return await this.#attempt<T>(method, path, body)
+        return await fn()
       } finally {
         this.#lastWriteAt = this.#now()
       }
     })
     // Keep the chain alive through failures; errors surface via `run`.
     this.#writeChain = run.catch(() => undefined)
-    return run as Promise<T>
+    return run
   }
 
-  async #attempt<T>(method: string, path: string, body?: unknown): Promise<T> {
-    const url = `${this.#apiBase}/repos/${this.repo}/${path}`
+  /**
+   * One GraphQL request. Queries run immediately; mutations
+   * (`opts.mutation`) go through the write chain like REST writes.
+   * HTTP-level failures throw `GithubError` (retrying the retryable
+   * ones); GraphQL errors arrive with a 200 and are returned beside
+   * whatever data the request did produce, since a document with
+   * several mutations can partly succeed.
+   */
+  async graphql<T = unknown>(
+    query: string,
+    variables: Record<string, unknown> = {},
+    opts: { mutation?: boolean } = {},
+  ): Promise<GraphqlResult<T>> {
+    const url = `${this.#apiBase}/graphql`
+    const send = () =>
+      this.#attempt<{ data?: T | null; errors?: GraphqlError[] }>('POST', url, {
+        query,
+        variables,
+      })
+    const raw = opts.mutation === true ? await this.#serialized(send) : await send()
+    return { data: raw?.data ?? null, errors: raw?.errors ?? [] }
+  }
+
+  /** A file's raw bytes at a ref (the contents API's raw media type,
+   *  which serves files up to 100MB in one response), or null when
+   *  the path doesn't exist there. */
+  async getRaw(path: string, ref: string): Promise<Uint8Array | null> {
+    const encoded = path.split('/').map(encodeURIComponent).join('/')
+    const url = `${this.#apiBase}/repos/${this.repo}/contents/${encoded}?ref=${encodeURIComponent(ref)}`
+    try {
+      return await this.#attempt<Uint8Array>('GET', url, undefined, 'raw')
+    } catch (err) {
+      if (err instanceof GithubError && err.kind === 'not-found') return null
+      throw err
+    }
+  }
+
+  async #attempt<T>(
+    method: string,
+    url: string,
+    body?: unknown,
+    mode: 'json' | 'raw' = 'json',
+  ): Promise<T> {
     const init: RequestInit = {
       method,
       headers: {
-        Accept: 'application/vnd.github+json',
+        Accept: mode === 'raw' ? 'application/vnd.github.raw+json' : 'application/vnd.github+json',
         Authorization: `Bearer ${this.#token}`,
         'X-GitHub-Api-Version': '2022-11-28',
         ...(body !== undefined && { 'Content-Type': 'application/json' }),
@@ -155,6 +216,7 @@ export class GithubClient {
 
       if (resp.ok) {
         if (resp.status === 204) return undefined as T
+        if (mode === 'raw') return new Uint8Array(await resp.arrayBuffer()) as T
         return (await resp.json()) as T
       }
 

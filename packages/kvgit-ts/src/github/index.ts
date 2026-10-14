@@ -4,6 +4,8 @@ export {
   type GitCommit,
   type GitPerson,
   type GithubClientOptions,
+  type GraphqlError,
+  type GraphqlResult,
   type TreeEntry,
 } from './client'
 export { GithubError, type GithubErrorKind } from './errors'
@@ -28,3 +30,16 @@ export {
   wireFromSidecar,
   type DecodedSidecar,
 } from './sidecar'
+export {
+  MANIFEST_PATH,
+  PACK_FORMAT,
+  PACKS_DIR,
+  PackRemote,
+  decodePack,
+  encodePack,
+  type DecodedPack,
+  type PackEntry,
+  type PackManifest,
+  type PackRemoteOptions,
+  type RosterEntry,
+} from './pack'

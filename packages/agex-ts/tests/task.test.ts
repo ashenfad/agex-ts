@@ -197,6 +197,13 @@ describe('a task', () => {
     expect((await rankTask(b).run({ scores: SCORES })).status).toBe('failed')
   })
 
+  it('stops before any model call when its signal is already aborted', async () => {
+    const { agent: a, provider } = agent([code(RANKS)])
+    const out = await rankTask(a).run({ scores: SCORES }, { signal: AbortSignal.abort() })
+    expect([out.status, out.message]).toEqual(['cancelled', 'the task was stopped'])
+    expect(provider.seen).toHaveLength(0)
+  })
+
   it('stops when its caller does, and a kept fork keeps the run', async () => {
     let reached: () => void = () => {}
     const asked = new Promise<void>((resolve) => {
@@ -536,7 +543,12 @@ describe('a task that asks', () => {
     )
     const elsewhere = await store.open('elsewhere', { profile: CODE })
     await expect(rank.resume(ref, 'x', { world: elsewhere })).rejects.toThrow(
-      "ran on world 'main', not 'elsewhere'",
+      "ran on world 'main', and was given world 'elsewhere'",
+    )
+    // found through the agent's scratch store, it still needs its world
+    const { agent: scratchy } = agent([], { scratch: store })
+    await expect(rankTask(scratchy).resume(ref, 'x')).rejects.toThrow(
+      "ran on world 'main', and was given no world",
     )
     const other = a.task({
       name: 'rank',

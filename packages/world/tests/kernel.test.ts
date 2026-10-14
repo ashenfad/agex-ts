@@ -329,6 +329,16 @@ describe("the code's own time", () => {
     expect(spin.error?.name).toBe('TimeoutError')
     await ws.close()
   }, 15_000)
+
+  it('counts again past hostTime, so code beside a call it never awaits still stops', async () => {
+    const never = { wait: () => new Promise(() => {}) }
+    const ws = await open({ hostObjects: { never }, code: { timeout: 1, hostTime: 1 } })
+    const started = Date.now()
+    const out = await ws.runCode('never.wait()\nwhile (true) {}')
+    expect(out.error?.name).toBe('TimeoutError')
+    expect(Date.now() - started).toBeLessThan(4000)
+    await ws.close()
+  }, 15_000)
 })
 
 describe('stubs', () => {

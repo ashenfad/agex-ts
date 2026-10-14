@@ -63,6 +63,7 @@ export interface RunContext {
 }
 
 export const DEFAULT_TIMEOUT = 30
+export const DEFAULT_HOST_TIME = 600
 export const DEFAULT_MAX_OBSERVATION = 32_000
 
 /** `setTimeout`'s longest delay, so `Infinity` means no timeout. */
@@ -197,9 +198,16 @@ export class Kernel {
       )
       // The timeout is the code's own time: a host object's call is the
       // host's (a helper agent's run, say), so the clock stops for it.
+      // The host can't tell code waiting on a call from code computing
+      // beside one it didn't await, so the time off is capped: past
+      // `hostTime`, the clock runs whatever is pending.
+      const hostMs = (this.#settings.hostTime ?? DEFAULT_HOST_TIME) * 1000
       let used = 0
       let since = performance.now()
       let hosting = 0
+      let hostUsed = 0
+      let pausedAt = 0
+      let spent = false
       const arm = () =>
         setTimeout(
           () =>
@@ -211,12 +219,23 @@ export class Kernel {
         )
       timer = arm()
       const pause = () => {
-        if (hosting++ > 0) return
+        if (hosting++ > 0 || spent) return
         clearTimeout(timer)
         used += performance.now() - since
+        pausedAt = performance.now()
+        timer = setTimeout(
+          () => {
+            spent = true
+            since = performance.now()
+            timer = arm()
+          },
+          Math.min(Math.max(hostMs - hostUsed, 0), MAX_DELAY_MS),
+        )
       }
       const resume = () => {
-        if (--hosting > 0 || ended) return
+        if (--hosting > 0 || ended || spent) return
+        clearTimeout(timer)
+        hostUsed += performance.now() - pausedAt
         since = performance.now()
         timer = arm()
       }

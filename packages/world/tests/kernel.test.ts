@@ -311,6 +311,32 @@ describe('host objects', () => {
   })
 })
 
+describe('values', () => {
+  it('are bindings, a fresh copy in every run', async () => {
+    const scores = [{ student: 'ada', total: 7 }]
+    const ws = await open({ values: { scores, bytes: new Uint8Array([0, 1, 255]) } })
+    const first = await ws.runCode('scores[0].total = 99; return scores[0].total')
+    expect(first.value).toBe('99')
+    const second = await ws.runCode('return [scores[0].total, bytes instanceof Uint8Array]')
+    expect(second.value).toBe('[7,true]')
+    expect(scores[0]?.total).toBe(7) // the host's is never changed
+    await ws.close()
+  })
+
+  it('refuses a live part, a name code has, and a name a host object takes', async () => {
+    const store = await Store.open(await newKV())
+    await expect(
+      store.open('s', { profile: { values: { client: { send: () => 1 } } } }),
+    ).rejects.toThrow(/value client can't be sent to code by value/)
+    await expect(store.open('s', { profile: { values: { fs: 1 } } })).rejects.toThrow(
+      InvalidNameError,
+    )
+    await expect(
+      store.open('s', { profile: { values: { db: 1 }, hostObjects: { db: {} } } }),
+    ).rejects.toThrow(/both a value and a host object/)
+  })
+})
+
 describe('imports', () => {
   it("loads the world's modules relative to the cwd and to each other", async () => {
     const ws = await open()

@@ -21,8 +21,10 @@ import {
   HarnessMismatchError,
   Inbox,
   type Policy,
+  type Profile,
   type RunStatus,
   Sessions,
+  type Store,
   type Tool,
   type ToolOptions,
   type ToolOutput,
@@ -35,6 +37,7 @@ import {
   worldTools,
 } from '@agex-ts/world'
 import type { LanguageModelV4 } from '@ai-sdk/provider'
+import type { StandardSchemaV1 } from '@standard-schema/spec'
 import { AiSdkProvider, isLanguageModel } from './ai-sdk'
 import { prepare } from './compaction'
 import { Runner } from './delegation'
@@ -52,6 +55,7 @@ import {
   messageText,
   newId,
 } from './record'
+import { type Params, type Task, type TaskOptions, makeTask } from './task'
 
 /** The name agex's conversations are stored under, in the workspace's
  *  conversation index. */
@@ -140,6 +144,14 @@ export interface AgentOptions {
    *  (see `compaction.ts`); without one, nothing is folded, though a
    *  fold already recorded is still sent. */
   readonly compaction?: Policy | null
+  /** What the worlds the agent makes for itself are given: a task's
+   *  scratch world. */
+  readonly profile?: Profile
+  /** Where a task's scratch worlds go: a store of the embedder's, where
+   *  a task that asks resumes by ref after a restart too (on a store
+   *  that persists). Without one, each goes on a memory store of its
+   *  own, and resumes only in this process. */
+  readonly scratch?: Store | null
 }
 
 /** A loop over a model. It holds no state: a change of model or primer
@@ -151,6 +163,8 @@ export class Agent {
   readonly maxSteps: number
   readonly maxToolCalls: number | null
   readonly compaction: Policy | null
+  readonly profile: Profile
+  readonly scratch: Store | null
 
   constructor(opts: AgentOptions) {
     this.provider = isLanguageModel(opts.model) ? new AiSdkProvider(opts.model) : opts.model
@@ -159,6 +173,8 @@ export class Agent {
     this.maxSteps = opts.maxSteps ?? MAX_STEPS
     this.maxToolCalls = opts.maxToolCalls ?? null
     this.compaction = opts.compaction ?? null
+    this.profile = opts.profile ?? {}
+    this.scratch = opts.scratch ?? null
   }
 
   toString(): string {
@@ -169,6 +185,14 @@ export class Agent {
    *  conversation (it continues) or none (it starts one). */
   session(ws: Workspace, opts: SessionOptions = {}): Session {
     return new Session(this, ws, opts)
+  }
+
+  /** A task: a typed call that runs this agent on a world of its own
+   *  (see `task.ts`). */
+  task<P extends Params = Record<never, never>, R extends StandardSchemaV1 | undefined = undefined>(
+    opts: TaskOptions<P, R>,
+  ): Task<P, R> {
+    return makeTask(this, opts)
   }
 }
 
@@ -191,6 +215,23 @@ export interface SessionOptions {
    * every ask.
    */
   readonly sessions?: boolean | Sessions
+  /** @internal How a task's loop differs from a session's. */
+  readonly hooks?: Hooks
+}
+
+/** @internal Where a run may end, as a task's loop decides it. */
+export interface Hooks {
+  /** Appended to the system message. */
+  readonly instructions?: string
+  /** A tool call's result as the model will read it. */
+  afterCall?(output: ToolOutput): ToolOutput
+  /** Whether the run is over once the call just made returns, leaving
+   *  any calls after it in the same reply unrun. */
+  done?(): boolean
+  /** What follows a reply that calls no tool: null ends the run
+   *  completed, a message goes back to the model and the run goes on,
+   *  and text fails the run, saying why. */
+  onStop?(reply: Message): Message | string | null
 }
 
 /**
@@ -221,6 +262,7 @@ export class Session {
   /** The names of the embedder's own tools, which no tool replaces. */
   readonly #embedded: ReadonlySet<string>
   #helper: Sessions | null = null
+  readonly #hooks: Hooks
   #turn: TurnState | null = null
   /** The tool call running now, settling when it's done. */
   #calling: Promise<unknown> | null = null
@@ -230,6 +272,7 @@ export class Session {
     this.ws = ws
     this.inbox = opts.inbox ?? new Inbox()
     this.#vision = opts.toolOptions?.vision ?? false
+    this.#hooks = opts.hooks ?? {}
     if (opts.sessions === true) this.#runner = new Runner(agent, ws)
     else if (opts.sessions instanceof Sessions) this.#helper = opts.sessions
     this.#embedded = new Set((opts.tools ?? []).map((t) => t.name))
@@ -365,7 +408,9 @@ export class Session {
 
   async #system(): Promise<Message> {
     const instructions = await toolInstructions(this.ws)
-    const text = [this.agent.primer, instructions].filter((t) => t !== '').join('\n\n')
+    const text = [this.agent.primer, instructions, this.#hooks.instructions ?? '']
+      .filter((t) => t !== '')
+      .join('\n\n')
     return { id: 'system', role: 'system', parts: [{ kind: 'text', text }] }
   }
 
@@ -528,10 +573,20 @@ export class Session {
         calls = reply.parts.filter((p): p is ToolCall => p.kind === 'tool_call')
         if (calls.length === 0) {
           text = messageText(reply)
+          const after = this.#hooks.onStop?.(reply) ?? null
+          if (typeof after === 'object' && after !== null) {
+            messages.push(after)
+            continue
+          }
+          if (typeof after === 'string') {
+            status = 'failed'
+            message = after
+          }
           finished = true
           break
         }
         results = []
+        let done = false
         for (const call of calls) {
           checkCancel()
           push({
@@ -555,6 +610,7 @@ export class Session {
             spent += 1
             called = await this.#call(call, signal)
           }
+          if (this.#hooks.afterCall !== undefined) called = this.#hooks.afterCall(called)
           cutting = null
           // the tool ran, and may have changed the workspace: its result
           // stands from here, however the turn ends
@@ -583,6 +639,14 @@ export class Session {
           }
           push(unended)
           unended = null
+          done = this.#hooks.done?.() ?? false
+          if (done) break
+        }
+        if (done) {
+          // the calls left in `calls` get their results as the run
+          // ends, as a cut-short run's do
+          finished = true
+          break
         }
         if (afterNotice) {
           status = 'failed'

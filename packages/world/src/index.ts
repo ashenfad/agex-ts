@@ -42,6 +42,7 @@ export {
   GIT_KEY,
   VIEW_KEY,
   META_PREFIX,
+  PLANE_PREFIX,
   fileKey,
   metaKey,
 } from './layout'
@@ -198,6 +199,7 @@ export {
   sessionsTool,
   untilSettled,
 } from './sessions'
+export { WorkspacePlane, planePrefix } from './planes'
 export {
   ACK,
   FOLD_PREFIX,

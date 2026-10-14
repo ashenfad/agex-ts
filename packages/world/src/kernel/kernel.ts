@@ -55,6 +55,8 @@ export interface RunContext {
   /** The secrets' names, never their values. */
   readonly secrets: readonly string[]
   readonly hostObjects: ReadonlyMap<string, HostEntry>
+  /** Data bound by name, sent with each run. */
+  readonly values: Readonly<Record<string, unknown>>
   /** Given to host methods declared `withCall`. */
   readonly call: HostCall
   readonly settings: CodeSettings
@@ -208,6 +210,7 @@ export class Kernel {
           name,
           methods: entry.methods,
         })),
+        values: ctx.values,
         env: ctx.env,
         secrets: ctx.secrets,
         hasCache: ctx.cache !== null,

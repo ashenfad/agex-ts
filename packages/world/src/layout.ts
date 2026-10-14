@@ -13,6 +13,7 @@
  * | `__cache__/<key>` | a cache entry, any value the codec holds |
  * | `__conversation__/…` | the conversation (written by the turn) |
  * | `__compaction__/…` | compaction's record (written by the turn) |
+ * | `__plane__/<name>/…` | a harness's own records (`ws.plane(name)`) |
  * | `__ws_git__` | the agent's git: its index, head, merge and tags |
  * | `__ws_view__` | a narrowed fork's view: what it sees, and was given |
  *
@@ -30,6 +31,8 @@ export const CWD_KEY = '__cwd__'
 export const CACHE_PREFIX = '__cache__/'
 export const CONVERSATION_PREFIX = '__conversation__/'
 export const COMPACTION_PREFIX = '__compaction__/'
+/** The planes harnesses keep their own records on (see `ws.plane`). */
+export const PLANE_PREFIX = '__plane__/'
 /** The agent's git (see `ws.index`). */
 export const GIT_KEY = '__ws_git__'
 /** A narrowed session's view (see `ViewFS`). */

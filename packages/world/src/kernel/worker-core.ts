@@ -11,6 +11,7 @@
  *   a host object fills at a request (the value never comes here);
  * - each host object by name, and all of them as `host` (also
  *   `import { db } from 'host'`);
+ * - each of the profile's values by name, a copy of its own per run;
  * - `console`: `log` and `info` to stdout, `warn` and `error` to
  *   stderr, images shown as images.
  *
@@ -384,6 +385,7 @@ async function run(msg: RunMessage): Promise<void> {
     console: makeConsole(msg.runId),
     host: Object.freeze(host),
     ...host,
+    ...msg.values,
   }
   const registered = { host: bindings.host }
 

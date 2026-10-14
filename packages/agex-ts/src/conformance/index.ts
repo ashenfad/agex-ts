@@ -6,3 +6,14 @@
 export { AGEX_COMMIT, CODE_SCENARIOS, TASK_SCENARIOS } from './corpus/index'
 export * from './shape'
 export { AgexHarnessSession, agexHarness } from './harness'
+export {
+  AgexTasks,
+  type Observed,
+  OpenedScenario,
+  type OutcomeView,
+  type PlaneView,
+  RAN_OUT,
+  Script,
+  checkTaskScenario,
+  runTaskScenario,
+} from './tasks'

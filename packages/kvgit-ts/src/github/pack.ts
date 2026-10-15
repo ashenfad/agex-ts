@@ -309,7 +309,9 @@ interface RepoHeader {
 export class PackRemote implements Remote {
   readonly client: GithubClient
   /** `github:<owner>/<name>` (GitHub's names ignore case, so lowered),
-   *  with the API's root before the repo when it isn't github.com's. */
+   *  with the API's root before the repo when it isn't github.com's: its
+   *  scheme and host lowered, its path as given, which a server may
+   *  read case and all. */
   readonly id: string
   readonly #store: KVStore
   readonly #kernel: string
@@ -334,9 +336,8 @@ export class PackRemote implements Remote {
     this.#maxPacks = opts.maxPacks ?? 16
     this.#keepRecent = opts.keepRecent ?? 4
     this.#maxPackBytes = opts.maxPackBytes ?? 16 * 1024 * 1024
-    const api = client.apiBase.replace(/\/+$/, '')
-    this.id =
-      `github:${api === 'https://api.github.com' ? '' : `${api}/`}${client.repo}`.toLowerCase()
+    const api = apiRoot(client.apiBase)
+    this.id = `github:${api === 'https://api.github.com' ? '' : `${api}/`}${client.repo.toLowerCase()}`
     const [owner, name] = client.repo.split('/') as [string, string]
     this.#owner = owner
     this.#name = name
@@ -922,3 +923,16 @@ const utf8 = (text: string): Uint8Array => new TextEncoder().encode(text)
 
 /** How long `n` bytes are as base64. */
 const base64Length = (n: number): number => Math.ceil(n / 3) * 4
+
+/** `apiBase` with its scheme and host lowered (they ignore case) and no
+ *  trailing slash; its path as given. */
+function apiRoot(apiBase: string): string {
+  let root = apiBase
+  try {
+    const url = new URL(apiBase)
+    root = `${url.protocol}//${url.host}${url.pathname}`
+  } catch {
+    // not a URL: as given
+  }
+  return root.replace(/\/+$/, '')
+}

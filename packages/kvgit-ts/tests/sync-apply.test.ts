@@ -9,6 +9,7 @@ import {
   setSyncHead,
   walkDelta,
 } from '../src/index'
+import { claimSyncHead } from '../src/sync/apply'
 import { IN_FLIGHT_PREFIX, ROOT_COMMIT } from '../src/versioned/layout'
 
 const enc = new TextEncoder()
@@ -287,6 +288,22 @@ describe('sync heads', () => {
     expect(await getSyncHead(store, 'chat', 'r1')).toBe('b'.repeat(40))
     expect(await getSyncHead(store, 'chat', 'r2')).toBeNull()
     expect(await getSyncHead(store, 'chat')).toBe('b'.repeat(40))
+  })
+
+  it('gives a head kept before per-remote records to one remote, when two claim it at once', async () => {
+    const store = new Memory()
+    await setSyncHead(store, 'chat', 'a'.repeat(40)) // as an older kvgit kept it
+    const [one, two] = await Promise.all([
+      claimSyncHead(store, 'chat', 'r1'),
+      claimSyncHead(store, 'chat', 'r2'),
+    ])
+    expect([one, two].filter((h) => h !== null)).toEqual(['a'.repeat(40)])
+    const owner = one !== null ? 'r1' : 'r2'
+    const other = one !== null ? 'r2' : 'r1'
+    expect(await getSyncHead(store, 'chat', owner)).toBe('a'.repeat(40))
+    expect(await getSyncHead(store, 'chat', other)).toBeNull()
+    // and claimed again, it's still that remote's
+    expect(await claimSyncHead(store, 'chat', owner)).toBe('a'.repeat(40))
   })
 
   it('keeps the shared head for a remote without an id', async () => {

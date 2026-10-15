@@ -59,6 +59,8 @@ const defaultSleeper = (ms: number): Promise<void> => new Promise((r) => setTime
 
 export class GithubClient {
   readonly repo: string
+  /** The API's root URL (`https://api.github.com` unless set). */
+  readonly apiBase: string
   readonly #token: string
   readonly #apiBase: string
   readonly #writeIntervalMs: number
@@ -75,6 +77,7 @@ export class GithubClient {
     this.repo = opts.repo
     this.#token = opts.token
     this.#apiBase = opts.apiBase ?? 'https://api.github.com'
+    this.apiBase = this.#apiBase
     this.#writeIntervalMs = opts.writeIntervalMs ?? 750
     this.#maxRetries = opts.maxRetries ?? 3
     this.#retryBaseMs = opts.retryBaseMs ?? 1000

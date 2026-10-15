@@ -5,7 +5,13 @@
 
 import { describe, expect, it } from 'vitest'
 import { Memory } from '../src/backends/memory'
-import { MANIFEST_PATH, PackRemote, decodePack, encodePack } from '../src/github/index'
+import {
+  GithubClient,
+  MANIFEST_PATH,
+  PackRemote,
+  decodePack,
+  encodePack,
+} from '../src/github/index'
 import { VersionedKV, applyWire, pullBranch, pushBranch, walkDelta } from '../src/index'
 import type { WireCommit } from '../src/types'
 import { FakePackGithub } from './fake-pack-github'
@@ -22,6 +28,21 @@ async function device(gh: FakePackGithub, opts: ConstructorParameters<typeof Pac
   const remote = new PackRemote(gh.client(), store, opts)
   return { store, remote }
 }
+
+describe('PackRemote id', () => {
+  it('names the repo, case aside, and the API when not github.com', () => {
+    const gh = new FakePackGithub()
+    expect(new PackRemote(gh.client(), new Memory()).id).toBe('github:o/r')
+    const client = new GithubClient({
+      token: 't',
+      repo: 'Owner/Repo',
+      apiBase: 'https://ghe.example/api/v3/',
+    })
+    expect(new PackRemote(client, new Memory()).id).toBe(
+      'github:https://ghe.example/api/v3/owner/repo',
+    )
+  })
+})
 
 async function commitN(store: Memory, n: number, prefix: string): Promise<VersionedKV> {
   const vk = await VersionedKV.open(store, { branch: BRANCH })

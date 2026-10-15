@@ -275,10 +275,18 @@ this layer:
   `parents[1]` "ours"; a branch merge has `[ours, theirs]`, so linear
   history stays on the merging branch. Wire deltas diff against
   `parents[0]`.
-- `__sync_head__<branch>` holds remote-tracking state (which remote
-  commit a branch was last synced to) via `getSyncHead` /
-  `setSyncHead` / `clearSyncHead` in
-  [`src/sync/apply.ts`](./src/sync/apply.ts).
+- Remote-tracking state (which remote commit a branch was last synced
+  to) is kept per remote: a `Remote` with an `id` (a `PackRemote`'s is
+  `github:<owner>/<name>`) keeps its own record per branch, so one
+  branch synced with two remotes, or with a remote swapped for another,
+  never takes one's head for the other's. Remotes without an `id` share
+  one record per branch, `__sync_head__<branch>`, which is also where
+  stores synced by earlier versions kept it: the first remote with an
+  `id` to sync the branch takes that record up as its own. Read and
+  write it with `getSyncHead` / `setSyncHead` / `clearSyncHead` in
+  [`src/sync/apply.ts`](./src/sync/apply.ts), naming the remote;
+  without one, `getSyncHead` answers with the branch's only sync head
+  and `clearSyncHead` forgets them all.
 
 The storage layout and commit-identity primitives live in
 [`src/versioned/layout.ts`](./src/versioned/layout.ts) — the single

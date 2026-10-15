@@ -278,3 +278,74 @@ describe('races and lifecycle', () => {
     expect(await bStore.get(`__branch_head__${BRANCH}`)).toBeNull()
   })
 })
+
+describe('one branch, two remotes', () => {
+  it('keeps what each remote last synced to apart', async () => {
+    const one = new MemoryRemote(new Memory(), { id: 'one' })
+    const two = new MemoryRemote(new Memory(), { id: 'two' })
+    const a = await device()
+    await a.vk.commit({ updates: new Map([['k', bytes('1')]]) })
+    expect((await syncBranch(a.store, one, BRANCH)).status).toBe('created')
+    const first = a.vk.currentCommit
+
+    // the second remote has never seen the branch: created there, not
+    // taken for one where it was deleted since
+    await a.vk.commit({ updates: new Map([['k', bytes('2')]]) })
+    expect((await syncBranch(a.store, two, BRANCH)).status).toBe('created')
+    expect(await getSyncHead(a.store, BRANCH, one)).toBe(first)
+    expect(await getSyncHead(a.store, BRANCH, two)).toBe(a.vk.currentCommit)
+
+    // and the first still takes only what it lacks
+    const pushed = await syncBranch(a.store, one, BRANCH)
+    expect(pushed.status).toBe('pushed')
+    expect(pushed.push?.transferred).toBe(1)
+    expect(await getSyncHead(a.store, BRANCH, one)).toBe(a.vk.currentCommit)
+  })
+
+  it("reports a branch gone from one remote without the other's head standing in", async () => {
+    const one = new MemoryRemote(new Memory(), { id: 'one' })
+    const two = new MemoryRemote(new Memory(), { id: 'two' })
+    const a = await device()
+    await a.vk.commit({ updates: new Map([['k', bytes('1')]]) })
+    await syncBranch(a.store, one, BRANCH)
+    expect((await pullBranch(a.store, two, BRANCH)).status).toBe('up-to-date')
+  })
+
+  it('carries on from a head kept before per-remote records', async () => {
+    const remote = new MemoryRemote(new Memory(), { id: 'one' })
+    const a = await device()
+    await a.vk.commit({ updates: new Map([['k', bytes('1')]]) })
+    // synced with an older kvgit, which kept the head per branch
+    await pushBranch(a.store, new MemoryRemote(remote.store), BRANCH)
+    expect(await getSyncHead(a.store, BRANCH)).toBe(a.vk.currentCommit)
+
+    await a.vk.commit({ updates: new Map([['k', bytes('2')]]) })
+    const out = await syncBranch(a.store, remote, BRANCH)
+    expect(out.status).toBe('pushed')
+    expect(out.push?.transferred).toBe(1)
+    expect(await getSyncHead(a.store, BRANCH, remote)).toBe(a.vk.currentCommit)
+
+    // taken up by that remote: another doesn't read it
+    expect(await getSyncHead(a.store, BRANCH, 'two')).toBeNull()
+  })
+
+  it('takes up the old head on first use even when nothing moves', async () => {
+    const remote = new MemoryRemote(new Memory(), { id: 'one' })
+    const a = await device()
+    await a.vk.commit({ updates: new Map([['k', bytes('1')]]) })
+    await pushBranch(a.store, new MemoryRemote(remote.store), BRANCH)
+    // gone from the remote since: still a lifecycle conflict, as before
+    await remote.store.remove(`__branch_head__${BRANCH}`)
+    expect((await pullBranch(a.store, remote, BRANCH)).status).toBe('remote-gone')
+    expect(await getSyncHead(a.store, BRANCH, 'two')).toBeNull()
+    expect(await getSyncHead(a.store, BRANCH, remote)).toBe(a.vk.currentCommit)
+  })
+
+  it('still shares one head between remotes without an id', async () => {
+    const store = new Memory()
+    const a = await device()
+    await a.vk.commit({ updates: new Map([['k', bytes('1')]]) })
+    await pushBranch(a.store, new MemoryRemote(store), BRANCH)
+    expect(await getSyncHead(a.store, BRANCH, new MemoryRemote(store))).toBe(a.vk.currentCommit)
+  })
+})

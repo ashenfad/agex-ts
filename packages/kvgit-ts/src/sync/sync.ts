@@ -16,10 +16,10 @@
  *   the benign case (someone else pushed commits we already have),
  *   anything else is `'diverged'`.
  *
- * Remote-tracking (`__sync_head__<branch>`) records the last head
- * known shared with the remote. It advances on successful syncs and
- * is the `have` frontier for delta computation; it never advances on
- * divergence.
+ * Remote-tracking (`getSyncHead`) records the last head known shared
+ * with the remote, per remote when it has an `id`. It advances on
+ * successful syncs and is the `have` frontier for delta computation;
+ * it never advances on divergence.
  *
  * Note: a fast-forwarded local ref does not refresh live `VersionedKV`
  * instances — callers holding one should `refresh()` after a pull
@@ -36,7 +36,7 @@ import {
   readBranchHead,
   safeLoads,
 } from '../versioned/layout'
-import { applyWire, getSyncHead, publishHead, setSyncHead } from './apply'
+import { applyWire, claimSyncHead, publishHead, setSyncHead } from './apply'
 import type { Remote } from './remote'
 import { walkDelta } from './walk'
 
@@ -79,7 +79,7 @@ export async function pullBranch(
 ): Promise<SyncResult> {
   const remoteHead = await readRemoteHead(remote, branch)
   const localHead = await readBranchHead(store, branch)
-  const syncHead = await getSyncHead(store, branch)
+  const syncHead = await claimSyncHead(store, branch, remote)
   const result = (status: SyncStatus, transferred = 0): SyncResult => ({
     status,
     branch,
@@ -94,7 +94,7 @@ export async function pullBranch(
     return syncHead !== null ? result('remote-gone') : result('up-to-date')
   }
   if (remoteHead === localHead) {
-    if (syncHead !== remoteHead) await setSyncHead(store, branch, remoteHead)
+    if (syncHead !== remoteHead) await setSyncHead(store, branch, remoteHead, remote)
     return result('up-to-date')
   }
 
@@ -107,7 +107,7 @@ export async function pullBranch(
     (await store.get(COMMIT_ROOT(remoteHead))) !== null &&
     (await isAncestor(store, remoteHead, localHead))
   ) {
-    if (syncHead !== remoteHead) await setSyncHead(store, branch, remoteHead)
+    if (syncHead !== remoteHead) await setSyncHead(store, branch, remoteHead, remote)
     return result('up-to-date')
   }
 
@@ -129,7 +129,7 @@ export async function pullBranch(
   if (localHead === null) {
     const ok = await publishHead(store, branch, null, remoteHead, publish)
     if (!ok) return result('diverged', applied.applied) // local creation race
-    await setSyncHead(store, branch, remoteHead)
+    await setSyncHead(store, branch, remoteHead, remote)
     return { ...result('created', applied.applied), localHead: remoteHead }
   }
 
@@ -139,7 +139,7 @@ export async function pullBranch(
     // local writer changes nothing.
     const ok = await publishHead(store, branch, localHead, remoteHead, publish)
     if (!ok) return result('diverged', applied.applied) // local writer race
-    await setSyncHead(store, branch, remoteHead)
+    await setSyncHead(store, branch, remoteHead, remote)
     return { ...result('fast-forwarded', applied.applied), localHead: remoteHead }
   }
 
@@ -161,7 +161,7 @@ export async function pushBranch(
   if (localHead === null) {
     throw new Error(`pushBranch: local branch '${branch}' does not exist`)
   }
-  const syncHead = await getSyncHead(store, branch)
+  const syncHead = await claimSyncHead(store, branch, remote)
 
   // One retry: a lost CAS means the remote moved under us; re-observe
   // and re-classify once before declaring divergence. Hoisted so the
@@ -179,7 +179,7 @@ export async function pushBranch(
     })
 
     if (remoteHead === localHead) {
-      if (syncHead !== localHead) await setSyncHead(store, branch, localHead)
+      if (syncHead !== localHead) await setSyncHead(store, branch, localHead, remote)
       return result('up-to-date')
     }
 
@@ -193,7 +193,7 @@ export async function pushBranch(
         counted(walkDelta(store, { want: localHead }), counter),
       )
       if (ok) {
-        await setSyncHead(store, branch, localHead)
+        await setSyncHead(store, branch, localHead, remote)
         return result('created', counter.n)
       }
       continue // creation race — re-classify
@@ -214,7 +214,7 @@ export async function pushBranch(
         counted(walkDelta(store, { want: localHead, have: [remoteHead] }), counter),
       )
       if (ok) {
-        await setSyncHead(store, branch, localHead)
+        await setSyncHead(store, branch, localHead, remote)
         return result('pushed', counter.n)
       }
       continue // CAS race — re-classify

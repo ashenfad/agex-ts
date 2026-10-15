@@ -45,6 +45,7 @@ export {
   StreamError,
   TRANSIENT_STATUS,
   aiSdk,
+  streamError,
   isLanguageModel,
   reasoningOf,
   thinkingOptions,

@@ -23,6 +23,7 @@ import {
   isLanguageModel,
   newId,
   reasoningOf,
+  streamError,
   thinkingOptions,
   toPrompt,
 } from '../src/index'
@@ -574,6 +575,33 @@ describe('an agent over an AI SDK model', () => {
     expect(out.message).toBe(
       'the model provider refused the request mid-reply: invalid_request_error: max_tokens is too large',
     )
+  })
+
+  it("reads OpenRouter's mid-stream errors: code as the status, a relayed one transient", () => {
+    const openrouter = new AiSdkProvider(new Fake('openrouter.chat', 'some/model', []))
+    const anthropic = new AiSdkProvider(new Fake('anthropic.messages', 'claude-x', []))
+    // what @openrouter/ai-sdk-provider hands on: the chunk's `error`
+    const limited = streamError({
+      code: 429,
+      message: 'Rate limit exceeded',
+      type: null,
+      param: null,
+    })
+    expect(limited).toMatchObject({ statusCode: 429, isRetryable: null })
+    expect(openrouter.transient(limited)).toBe(true)
+    expect(openrouter.transient(streamError({ code: '502', message: 'Bad gateway' }))).toBe(true)
+    expect(openrouter.transient(streamError({ code: 400, message: 'Invalid model' }))).toBe(false)
+    const relayed = streamError({
+      code: 400,
+      message: 'Provider returned error',
+      metadata: { provider_name: 'X' },
+    })
+    expect(openrouter.transient(relayed)).toBe(true)
+    expect(anthropic.transient(relayed)).toBe(false)
+    // a code that isn't an HTTP status isn't read as one
+    expect(streamError({ code: 'context_length_exceeded', message: 'too long' })).toMatchObject({
+      statusCode: null,
+    })
   })
 
   it('says what a thrown non-Error holds, never [object Object]', async () => {

@@ -121,7 +121,14 @@ export function streamError(raw: unknown): Error {
   const str = (v: unknown) => (typeof v === 'string' && v !== '' ? v : null)
   const type = str(pick('type')) === 'error' ? str(inner.type) : str(pick('type'))
   const message = str(pick('message')) ?? str(inner.message) ?? bounded(raw)
-  const statusCode = typeof pick('statusCode') === 'number' ? (pick('statusCode') as number) : null
+  // OpenRouter's stream errors give their HTTP status as `code` (a number,
+  // or digits); other codes (a string kind, say) aren't a status
+  const status = (v: unknown) => {
+    const n =
+      typeof v === 'number' ? v : typeof v === 'string' && /^\d{3}$/.test(v) ? Number(v) : null
+    return n !== null && n >= 100 && n <= 599 ? n : null
+  }
+  const statusCode = status(pick('statusCode')) ?? status(pick('code'))
   const isRetryable =
     typeof pick('isRetryable') === 'boolean' ? (pick('isRetryable') as boolean) : null
   return new StreamError(
@@ -302,7 +309,10 @@ export class AiSdkProvider implements Provider {
   transient(error: unknown): boolean {
     if (isAbort(error)) return false
     if (error instanceof StreamError) {
-      // mid-reply: the provider's own word, else its status, as for HTTP
+      // mid-reply: as for HTTP, through OpenRouter a relayed error is
+      // transient whatever its code; else the provider's own word, else
+      // its status
+      if (this.key === 'openrouter' && relayedStream(error)) return true
       if (error.isRetryable !== null) return error.isRetryable
       const code = error.statusCode
       return code !== null && (TRANSIENT_STATUS.has(code) || code >= 500)
@@ -602,6 +612,15 @@ function relayed(error: APICallError): boolean {
     e.message === RELAYED ||
     (typeof e.metadata === 'object' && e.metadata !== null && 'provider_name' in e.metadata)
   )
+}
+
+/** Whether OpenRouter relayed a mid-stream error from the upstream
+ *  provider: its wording, or the upstream's name in its metadata. */
+function relayedStream(error: StreamError): boolean {
+  if (error.message.trim() === RELAYED || error.message.endsWith(`: ${RELAYED}`)) return true
+  const data = error.data as { metadata?: unknown; error?: { metadata?: unknown } } | null
+  const metadata = data?.metadata ?? data?.error?.metadata
+  return typeof metadata === 'object' && metadata !== null && 'provider_name' in metadata
 }
 
 function bodyMessage(responseBody: string | undefined): string | null {

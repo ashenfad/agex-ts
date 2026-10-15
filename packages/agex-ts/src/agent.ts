@@ -18,6 +18,7 @@
  */
 
 import {
+  type Fold,
   HarnessMismatchError,
   Inbox,
   type Policy,
@@ -40,7 +41,7 @@ import type { LanguageModelV4 } from '@ai-sdk/provider'
 import type { StandardSchemaV1 } from '@standard-schema/spec'
 import { AiSdkProvider, isLanguageModel } from './ai-sdk'
 import { cancelTasks } from './code-tasks'
-import { prepare } from './compaction'
+import { measureContext, prepare } from './compaction'
 import { Runner } from './delegation'
 import { type Provider, type Settings, type ToolSpec, toolSpec } from './provider'
 import {
@@ -351,6 +352,88 @@ export class Session {
     return index.runs.filter((id) => bodies.has(id)).map((id) => loadRun(bodies.get(id)))
   }
 
+  /**
+   * The context the next turn starts from: the size of its first
+   * request in tokens, measured as a fold's policy measures it (the
+   * provider's count for the latest reply, adjusted for any fold since,
+   * plus an estimate for what came after), and the fold in force.
+   */
+  async context(): Promise<{ tokens: number; fold: Fold | null }> {
+    const runs = await this.runs()
+    return measureContext({
+      ws: this.ws,
+      specs: this.#specs,
+      system: await this.#system(),
+      earlier: runs.map((run) => run.messages.map((m) => this.#sendable(m))),
+      current: [],
+    })
+  }
+
+  /**
+   * Fold the conversation so far into a summary now, between turns,
+   * whatever the budget: the next turn's requests start from the
+   * summary. The fold is made as one past the budget is (the agent's
+   * model writes it; see `compaction.ts`), recorded, emitted as
+   * `Compacted` to `onEvent`, and committed (`{ tool: 'fold' }`), so a
+   * checkout before it takes it back. `cancel` stops it.
+   *
+   * Returns the fold and the summary calls' usage, or null when there
+   * was nothing to fold (no turn since the last fold) or the summary
+   * couldn't be written.
+   *
+   * @throws Error while a turn runs, or when the last turn was
+   *   interrupted (resume or abandon it first).
+   */
+  async fold(
+    opts: { signal?: AbortSignal; onEvent?: (event: TurnEvent) => void } = {},
+  ): Promise<{ fold: Fold; usage: Usage | null } | null> {
+    if (this.#turn !== null)
+      throw new Error('a turn is running on this session: fold between turns')
+    // holds the turn's place: no turn starts meanwhile, and cancel stops it
+    const state: TurnState = { abort: new AbortController(), reason: null }
+    this.#turn = state
+    const stop = () => state.abort.abort()
+    opts.signal?.addEventListener('abort', stop, { once: true })
+    try {
+      if (opts.signal?.aborted) stop()
+      const runs = await this.runs()
+      if (runs.at(-1)?.status === 'interrupted') {
+        throw new Error('the last turn was interrupted: resume or abandon it before folding')
+      }
+      const before = (await this.ws.compaction.folds()).length
+      let made: Fold | null = null
+      const prepared = await prepare({
+        ws: this.ws,
+        policy: this.agent.compaction,
+        provider: this.agent.provider,
+        specs: this.#specs,
+        settings: this.agent.settings,
+        system: await this.#system(),
+        earlier: runs.map((run) => run.messages.map((m) => this.#sendable(m))),
+        current: [],
+        emit: (event) => opts.onEvent?.(event),
+        // no request follows: every call may go to the summary
+        spare: this.agent.maxSteps,
+        signal: state.abort.signal,
+        force: true,
+      })
+      const folds = await this.ws.compaction.folds()
+      if (folds.length > before) made = folds.at(-1) ?? null
+      if (made === null || made.through !== prepared.fold) return null
+      await this.ws.commit({ tool: 'fold', through: made.through, runs: made.runs })
+      return { fold: made, usage: prepared.usage }
+    } finally {
+      opts.signal?.removeEventListener('abort', stop)
+      this.#turn = null
+    }
+  }
+
+  /** A message as the model is sent it: without images, for a model
+   *  that doesn't see them. */
+  #sendable(m: Message): Message {
+    return this.#vision ? m : withoutImages(m)
+  }
+
   /** Run one turn; its outcome. */
   say(prompt: string, opts: { onEvent?: (event: TurnEvent) => void } = {}): Promise<Outcome> {
     return this.stream(prompt, opts).wait()
@@ -545,7 +628,7 @@ export class Session {
         checkCancel()
         let reply: Message | null = null
         inRequest = true
-        const sendable = (m: Message) => (this.#vision ? m : withoutImages(m))
+        const sendable = (m: Message) => this.#sendable(m)
         const prepared = await prepare({
           ws: this.ws,
           policy: this.agent.compaction,

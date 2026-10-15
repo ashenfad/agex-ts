@@ -46,7 +46,7 @@ import {
   type Fold,
   type Item,
   COMPACTION_MARK as MARK,
-  type Policy,
+  Policy,
   type TurnEvent,
   type Workspace,
   chunks,
@@ -375,6 +375,29 @@ export interface PrepareOptions {
   /** The model calls a fold may make for its summary. */
   readonly spare: number
   readonly signal?: AbortSignal
+  /** Fold now, whatever the budget (and with no policy): a fold the
+   *  embedder asked for between turns. */
+  readonly force?: boolean
+}
+
+/**
+ * The size of the next request, in tokens, as a fold's policy measures
+ * it, and the fold in force: what an embedder shows of the context.
+ */
+export async function measureContext(opts: {
+  readonly ws: Workspace
+  readonly specs: readonly ToolSpec[]
+  readonly system: Message
+  readonly earlier: readonly (readonly Message[])[]
+  readonly current: readonly Message[]
+}): Promise<{ tokens: number; fold: Fold | null }> {
+  const seq = new Seq(opts.earlier, opts.current)
+  const recorded = await opts.ws.compaction.folds()
+  const fold = inForce(
+    recorded,
+    seq.messages.map((m) => m.id),
+  )
+  return { tokens: measure(seq, fold, recorded, opts.system, opts.specs), fold }
 }
 
 /**
@@ -392,13 +415,16 @@ export async function prepare(opts: PrepareOptions): Promise<Prepared> {
     recorded,
     seq.messages.map((m) => m.id),
   )
-  if (policy !== null) {
+  if (policy !== null || opts.force === true) {
     const tokens = measure(seq, fold, recorded, system, specs)
     const end = seq.cut()
     const start = fold === null ? null : seq.index(fold.through)
-    if (policy.due(tokens) && end !== null && (start === null || end > start)) {
+    const due = opts.force === true || (policy as Policy).due(tokens)
+    if (due && end !== null && (start === null || end > start)) {
       const prefix = view(seq, fold, end)
-      const summary = await summarize(calls, policy, specs, system, prefix, tokens)
+      // a forced fold with no policy summarizes as one whose budget it reached
+      const using = policy ?? new Policy(Math.max(1, tokens))
+      const summary = await summarize(calls, using, specs, system, prefix, tokens)
       if (summary !== '') {
         const through = (seq.messages[end] as Message).id
         const gone = seq.removed({ through, first: null })

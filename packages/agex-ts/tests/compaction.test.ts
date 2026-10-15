@@ -299,3 +299,73 @@ describe('a fold over a range', () => {
     ])
   })
 })
+
+describe('folding now', () => {
+  it('folds the turns so far into a summary, whatever the budget, and commits it', async () => {
+    // replies long enough that a summary is the smaller
+    const long = (word: string) => `${word} `.repeat(500)
+    const { agent: a } = agent([says(long('one'), 300), says(long('two'), 1800)], { budget: null })
+    const session = a.session(ws)
+    await session.say('First.')
+    await session.say('Second.')
+    const before = await session.context()
+    expect(before).toEqual({ tokens: expect.any(Number), fold: null })
+    expect(before.tokens).toBeGreaterThanOrEqual(1800)
+
+    const { agent: folder } = agent([summarizes(SUMMARY, 450)], { budget: null })
+    const events: string[] = []
+    const out = await folder.session(ws).fold({ onEvent: (e) => events.push(e.kind) })
+    expect(out?.fold.summary).toBe(SUMMARY)
+    expect(out?.fold.runs).toBe(2)
+    expect(out?.usage?.inputTokens).toBe(450)
+    expect(events).toEqual(['Usage', 'Compacted'])
+    expect((await ws.log({ limit: 1 }))[0]?.info).toMatchObject({ tool: 'fold' })
+
+    const after = await folder.session(ws).context()
+    expect(after.fold?.through).toBe(out?.fold.through)
+    expect(after.tokens).toBeLessThan(before.tokens)
+
+    // the next turn starts from the summary
+    const { agent: next, provider } = agent([says('three')], { budget: null })
+    await next.session(ws).say('Third.')
+    const sent = (provider.seen.at(-1) ?? []).slice(1).map((m) => messageText(m))
+    expect(sent).toEqual([
+      expect.stringContaining(SUMMARY),
+      "Understood. I'll continue from this summary.",
+      'Third.',
+    ])
+  })
+
+  it('folds nothing with no turn since the last fold, or none at all', async () => {
+    const { agent: a } = agent([summarizes(SUMMARY)], { budget: null })
+    expect(await a.session(ws).fold()).toBeNull()
+    const { agent: b } = agent([says('one'), summarizes(SUMMARY), summarizes('AGAIN')], {
+      budget: null,
+    })
+    const session = b.session(ws)
+    await session.say('First.')
+    expect(await session.fold()).not.toBeNull()
+    expect(await session.fold()).toBeNull()
+    expect(await ws.compaction.folds()).toHaveLength(1)
+  })
+
+  it('is taken back by a checkout before it', async () => {
+    const { agent: a } = agent([says('one'), summarizes(SUMMARY)], { budget: null })
+    const session = a.session(ws)
+    await session.say('First.')
+    const head = (await ws.log({ limit: 1 }))[0]?.hash as string
+    await session.fold()
+    expect(await ws.compaction.folds()).toHaveLength(1)
+    await ws.checkout(head)
+    expect(await ws.compaction.folds()).toEqual([])
+  })
+
+  it('waits for no turn: one running refuses it', async () => {
+    const { agent: a } = agent([echo('WORK'), says('done')], { budget: null })
+    const session = a.session(ws)
+    const turn = session.stream('Work.')
+    const running = turn.wait()
+    await expect(session.fold()).rejects.toThrow(/a turn is running/)
+    await running
+  })
+})

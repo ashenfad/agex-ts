@@ -19,6 +19,7 @@ import {
   AiSdkProvider,
   type Message,
   type ProviderEvent,
+  StreamError,
   isLanguageModel,
   newId,
   reasoningOf,
@@ -524,5 +525,65 @@ describe('an agent over an AI SDK model', () => {
     const failed = await session.say('again')
     expect(failed.status).toBe('failed')
     expect(failed.message).toBe('the model provider refused the request (400): bad request')
+  })
+
+  // what @ai-sdk/anthropic hands on for an `error` event mid-stream: a
+  // plain object (createProviderStreamError), not an Error
+  const overloaded = {
+    message: 'Overloaded',
+    type: 'overloaded_error',
+    statusCode: 529,
+    isRetryable: true,
+    data: { type: 'overloaded_error', message: 'Overloaded' },
+  }
+
+  it("judges an error the stream carried by the provider's word, else its status", () => {
+    const anthropic = new AiSdkProvider(new Fake('anthropic.messages', 'claude-x', []))
+    const e = new StreamError('x', { isRetryable: true })
+    expect(anthropic.transient(e)).toBe(true)
+    expect(anthropic.transient(new StreamError('x', { statusCode: 529 }))).toBe(true)
+    expect(anthropic.transient(new StreamError('x', { statusCode: 400 }))).toBe(false)
+    expect(anthropic.transient(new StreamError('x'))).toBe(false)
+  })
+
+  it('ends a turn whose stream errored mid-reply interrupted, saying what the provider said', async () => {
+    const store = await Store.open(new Memory())
+    const ws = await store.open('main')
+    const model = new Fake('anthropic.messages', 'claude-x', [
+      [...text('t1', 'Writing the vid'), { type: 'error', error: overloaded }],
+      [...text('t2', 'Done.'), finish()],
+    ])
+    const session = new Agent({ model }).session(ws)
+    const out = await session.say('Make the video.')
+    expect(out.status).toBe('interrupted')
+    expect(out.message).toBe('the model provider failed mid-reply: overloaded_error: Overloaded')
+    expect(out.message).not.toContain('[object Object]')
+    expect((await session.resume()).status).toBe('completed')
+  })
+
+  it('fails a turn on a stream error the provider says not to retry, in its words', async () => {
+    const store = await Store.open(new Memory())
+    const ws = await store.open('main')
+    const refused = {
+      type: 'error',
+      error: { type: 'invalid_request_error', message: 'max_tokens is too large' },
+    }
+    const model = new Fake('anthropic.messages', 'claude-x', [[{ type: 'error', error: refused }]])
+    const out = await new Agent({ model }).session(ws).say('Go.')
+    expect(out.status).toBe('failed')
+    expect(out.message).toBe(
+      'the model provider refused the request mid-reply: invalid_request_error: max_tokens is too large',
+    )
+  })
+
+  it('says what a thrown non-Error holds, never [object Object]', async () => {
+    const store = await Store.open(new Memory())
+    const ws = await store.open('main')
+    const model = new Fake('anthropic.messages', 'claude-x', [
+      [{ type: 'error', error: { code: 7 } }],
+    ])
+    const out = await new Agent({ model }).session(ws).say('Go.')
+    expect(out.status).toBe('failed')
+    expect(out.message).toContain('{"code":7}')
   })
 })

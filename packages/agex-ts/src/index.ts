@@ -42,6 +42,7 @@ export {
 export {
   AiSdkProvider,
   RELAYED,
+  StreamError,
   TRANSIENT_STATUS,
   aiSdk,
   isLanguageModel,

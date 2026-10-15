@@ -68,6 +68,84 @@ export const RELAYED = 'Provider returned error'
 /** A part streamed in deltas. */
 type Streamed = Text | Thinking
 
+/**
+ * An error the model's stream reported mid-reply. The AI SDK hands one
+ * on as whatever the provider sent, which is often a plain object, not
+ * an Error: an Anthropic-style endpoint's `error` event arrives as
+ * `{ message, type, statusCode, isRetryable, data }` (an overloaded or
+ * API error marked retryable). This keeps those facts, as an Error.
+ */
+export class StreamError extends Error {
+  override readonly name = 'StreamError'
+  /** The provider's kind of error (`overloaded_error`), if it said. */
+  readonly type: string | null
+  readonly statusCode: number | null
+  /** Whether the provider said a retry may get past it; null: unsaid. */
+  readonly isRetryable: boolean | null
+  /** What the stream carried, as it came. */
+  readonly data: unknown
+
+  constructor(
+    message: string,
+    facts: {
+      type?: string | null
+      statusCode?: number | null
+      isRetryable?: boolean | null
+      data?: unknown
+    } = {},
+  ) {
+    super(message)
+    this.type = facts.type ?? null
+    this.statusCode = facts.statusCode ?? null
+    this.isRetryable = facts.isRetryable ?? null
+    this.data = facts.data
+  }
+}
+
+/** What a stream's error part carried, as an Error: an Error as it is,
+ *  anything else as a {@link StreamError} saying what it could read. */
+export function streamError(raw: unknown): Error {
+  if (raw instanceof Error) return raw
+  if (typeof raw !== 'object' || raw === null) {
+    return new StreamError(raw === undefined ? 'the stream reported an error' : String(raw), {
+      data: raw,
+    })
+  }
+  // the fields, on the object or on an `error` inside it (an API's own body)
+  const outer = raw as Record<string, unknown>
+  const inner =
+    typeof outer.error === 'object' && outer.error !== null
+      ? (outer.error as Record<string, unknown>)
+      : {}
+  const pick = (key: string) => (outer[key] !== undefined ? outer[key] : inner[key])
+  const str = (v: unknown) => (typeof v === 'string' && v !== '' ? v : null)
+  const type = str(pick('type')) === 'error' ? str(inner.type) : str(pick('type'))
+  const message = str(pick('message')) ?? str(inner.message) ?? bounded(raw)
+  const statusCode = typeof pick('statusCode') === 'number' ? (pick('statusCode') as number) : null
+  const isRetryable =
+    typeof pick('isRetryable') === 'boolean' ? (pick('isRetryable') as boolean) : null
+  return new StreamError(
+    type !== null && !message.startsWith(type) ? `${type}: ${message}` : message,
+    {
+      type,
+      statusCode,
+      isRetryable,
+      data: raw,
+    },
+  )
+}
+
+/** A value as JSON, cut short: for an error with nothing better to say. */
+function bounded(value: unknown, max = 300): string {
+  let text: string
+  try {
+    text = JSON.stringify(value) ?? String(value)
+  } catch {
+    text = String(value)
+  }
+  return text.length > max ? `${text.slice(0, max)}…` : text
+}
+
 /** An AI SDK model, driven as agex drives a provider. */
 export class AiSdkProvider implements Provider {
   readonly model: LanguageModelV4
@@ -188,7 +266,7 @@ export class AiSdkProvider implements Provider {
             usage = usageOf(part.usage)
             break
           case 'error':
-            throw part.error
+            throw streamError(part.error)
           default:
             break
         }
@@ -223,6 +301,12 @@ export class AiSdkProvider implements Provider {
    */
   transient(error: unknown): boolean {
     if (isAbort(error)) return false
+    if (error instanceof StreamError) {
+      // mid-reply: the provider's own word, else its status, as for HTTP
+      if (error.isRetryable !== null) return error.isRetryable
+      const code = error.statusCode
+      return code !== null && (TRANSIENT_STATUS.has(code) || code >= 500)
+    }
     if (APICallError.isInstance(error)) {
       if (this.key === 'openrouter' && relayed(error)) return true
       const code = error.statusCode
@@ -232,8 +316,13 @@ export class AiSdkProvider implements Provider {
   }
 
   /** An HTTP error in words a person reads: refused or failed, its
-   *  status, and the provider's own message. Null for anything else. */
+   *  status, and the provider's own message; an error mid-reply, the
+   *  same way. Null for anything else. */
   describe(error: unknown): string | null {
+    if (error instanceof StreamError) {
+      const verdict = this.transient(error) ? 'failed' : 'refused the request'
+      return `the model provider ${verdict} mid-reply: ${error.message}`
+    }
     if (!APICallError.isInstance(error)) return null
     const detail = bodyMessage(error.responseBody) ?? error.message
     const verdict = this.transient(error) ? 'failed' : 'refused the request'

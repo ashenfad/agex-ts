@@ -1176,10 +1176,15 @@ function floatBody(x: number, conv: string, prec: number | null, alt: boolean): 
   return stripZeros(body)
 }
 
-/** An integer conversion's body (no sign): `d i u o x X`. */
+const TWO_64 = 1n << 64n
+
+/** An integer conversion's body (no sign): `d i u o x X`. A negative
+ *  number under `o u x X` is read as unsigned, 64 bits, as C reads it. */
 function intBody(n: number, conv: string, prec: number | null, alt: boolean): string {
   if (!Number.isFinite(n)) return Number.isNaN(n) ? 'nan' : 'inf'
-  const mag = BigInt(Math.trunc(Math.abs(n)))
+  const whole = BigInt(Math.trunc(n))
+  const signed = conv === 'd' || conv === 'i'
+  const mag = signed ? (whole < 0n ? -whole : whole) : ((whole % TWO_64) + TWO_64) % TWO_64
   let digits =
     conv === 'o'
       ? mag.toString(8)
@@ -1254,17 +1259,20 @@ function formatPrintf(fmt: string, args: readonly Val[], convfmt = '%.6g'): stri
     }
     i++
     const left = flags.includes('-')
+    // widths count characters, not UTF-16 units
     const pad = (body: string, sign: string, zero: boolean): string => {
-      const len = sign.length + body.length
-      if (width === null || len >= width) return sign + body
-      if (left) return (sign + body).padEnd(width)
-      if (zero) return sign + body.padStart(width - sign.length, '0')
-      return (sign + body).padStart(width)
+      const room = width === null ? 0 : width - [...sign].length - [...body].length
+      if (room <= 0) return sign + body
+      if (left) return sign + body + ' '.repeat(room)
+      if (zero) return sign + '0'.repeat(room) + body
+      return ' '.repeat(room) + sign + body
     }
+    // `0` pads strings and characters with zeros too, as C's printf does
+    const zeroText = flags.includes('0') && !left
     if (conv === 's') {
       let s = valToStr(nextArg(), convfmt)
-      if (prec !== null) s = s.slice(0, prec)
-      out += pad(s, '', false)
+      if (prec !== null) s = [...s].slice(0, prec).join('')
+      out += pad(s, '', zeroText)
       continue
     }
     if (conv === 'c') {
@@ -1272,18 +1280,19 @@ function formatPrintf(fmt: string, args: readonly Val[], convfmt = '%.6g'): stri
       let s: string
       if (typeof v === 'number' || (v instanceof StrNum && looksNumeric(v))) {
         const code = Math.trunc(toNum(v))
-        s = code >= 0 && code <= 0x10ffff ? String.fromCodePoint(code) : ''
-      } else s = valToStr(v, convfmt).slice(0, 1)
-      out += pad(s, '', false)
+        const ok = code >= 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff)
+        s = ok ? String.fromCodePoint(code) : ''
+      } else s = [...valToStr(v, convfmt)][0] ?? ''
+      out += pad(s, '', zeroText)
       continue
     }
     const n = toNum(nextArg())
     const plus = flags.includes('+') ? '+' : flags.includes(' ') ? ' ' : ''
     const alt = flags.includes('#')
     if ('diouxX'.includes(conv)) {
-      // o u x X print a negative number as its magnitude after a `-`
       const signed = conv === 'd' || conv === 'i'
-      const intSign = Math.trunc(n) < 0 ? '-' : signed && !Number.isNaN(n) ? plus : ''
+      const negative = signed ? Math.trunc(n) < 0 : n === Number.NEGATIVE_INFINITY
+      const intSign = negative ? '-' : signed && !Number.isNaN(n) ? plus : ''
       let body = intBody(n, conv, prec, alt)
       let prefix = ''
       if (
@@ -1295,10 +1304,7 @@ function formatPrintf(fmt: string, args: readonly Val[], convfmt = '%.6g'): stri
         prefix = conv === 'x' ? '0x' : '0X'
       }
       const zero = flags.includes('0') && !left && prec === null && Number.isFinite(n)
-      if (zero && width !== null) {
-        const room = width - intSign.length - prefix.length
-        body = body.padStart(room, '0')
-      }
+      if (zero && width !== null) body = body.padStart(width - intSign.length - prefix.length, '0')
       out += pad(prefix + body, intSign, false)
       continue
     }

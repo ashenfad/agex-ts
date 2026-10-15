@@ -1,0 +1,705 @@
+[
+  {
+    "name": "print a field",
+    "script": "awk '{print $2}' data.txt",
+    "files": {
+      "data.txt": "alice 30 eng\nbob 25 ops\ncarol 35 eng\ndave 40 sales\n"
+    },
+    "stdout": "30\n25\n35\n40\n"
+  },
+  {
+    "name": "print several fields",
+    "script": "awk '{print $1, $3}' data.txt",
+    "files": {
+      "data.txt": "alice 30 eng\nbob 25 ops\ncarol 35 eng\ndave 40 sales\n"
+    },
+    "stdout": "alice eng\nbob ops\ncarol eng\ndave sales\n"
+  },
+  {
+    "name": "whole record",
+    "script": "awk '{print}' words.txt",
+    "files": {
+      "words.txt": "the cat\nthe dog\na cat\nthe end\n"
+    },
+    "stdout": "the cat\nthe dog\na cat\nthe end\n"
+  },
+  {
+    "name": "stdin",
+    "script": "printf 'a b c\\nd e f\\n' | awk '{print $3}'",
+    "stdout": "c\nf\n"
+  },
+  {
+    "name": "-F comma",
+    "script": "awk -F, '{print $1}' nums.csv",
+    "files": {
+      "nums.csv": "name,qty,price\npen,3,1.50\nbook,1,12.25\ncup,4,3.00\n"
+    },
+    "stdout": "name\npen\nbook\ncup\n"
+  },
+  {
+    "name": "-F with space",
+    "script": "awk -F , 'NR>1 {print $2}' nums.csv",
+    "files": {
+      "nums.csv": "name,qty,price\npen,3,1.50\nbook,1,12.25\ncup,4,3.00\n"
+    },
+    "stdout": "3\n1\n4\n"
+  },
+  {
+    "name": "-F tab escape",
+    "script": "printf 'a\\tb c\\td\\n' | awk -F'\\t' '{print $2}'",
+    "stdout": "b c\n"
+  },
+  {
+    "name": "-F regex",
+    "script": "echo 'a1b22c333d' | awk -F'[0-9]+' '{print $1 $2 $3 $4}'",
+    "stdout": "abcd\n"
+  },
+  {
+    "name": "FS in BEGIN",
+    "script": "awk 'BEGIN {FS=\",\"} {print $3}' nums.csv",
+    "files": {
+      "nums.csv": "name,qty,price\npen,3,1.50\nbook,1,12.25\ncup,4,3.00\n"
+    },
+    "stdout": "price\n1.50\n12.25\n3.00\n"
+  },
+  {
+    "name": "sum a column",
+    "script": "awk '{s+=$2} END {print s}' data.txt",
+    "files": {
+      "data.txt": "alice 30 eng\nbob 25 ops\ncarol 35 eng\ndave 40 sales\n"
+    },
+    "stdout": "130\n"
+  },
+  {
+    "name": "average",
+    "script": "awk '{s+=$2} END {print s/NR}' data.txt",
+    "files": {
+      "data.txt": "alice 30 eng\nbob 25 ops\ncarol 35 eng\ndave 40 sales\n"
+    },
+    "stdout": "32.5\n"
+  },
+  {
+    "name": "NR and NF",
+    "script": "awk '{print NR, NF}' lines.txt",
+    "files": {
+      "lines.txt": "short\na much longer line here\nmid length\n"
+    },
+    "stdout": "1 1\n2 5\n3 2\n"
+  },
+  {
+    "name": "last field",
+    "script": "awk '{print $NF}' data.txt",
+    "files": {
+      "data.txt": "alice 30 eng\nbob 25 ops\ncarol 35 eng\ndave 40 sales\n"
+    },
+    "stdout": "eng\nops\neng\nsales\n"
+  },
+  {
+    "name": "field before last",
+    "script": "awk '{print $(NF-1)}' data.txt",
+    "files": {
+      "data.txt": "alice 30 eng\nbob 25 ops\ncarol 35 eng\ndave 40 sales\n"
+    },
+    "stdout": "30\n25\n35\n40\n"
+  },
+  {
+    "name": "skip header",
+    "script": "awk -F, 'NR>1' nums.csv",
+    "files": {
+      "nums.csv": "name,qty,price\npen,3,1.50\nbook,1,12.25\ncup,4,3.00\n"
+    },
+    "stdout": "pen,3,1.50\nbook,1,12.25\ncup,4,3.00\n"
+  },
+  {
+    "name": "regex guard",
+    "script": "awk '/ERROR|WARN/' log.txt",
+    "files": {
+      "log.txt": "INFO start\nWARN disk 91%\nINFO tick\nERROR boom\nINFO stop\n"
+    },
+    "stdout": "WARN disk 91%\nERROR boom\n"
+  },
+  {
+    "name": "negated regex",
+    "script": "awk '!/INFO/' log.txt",
+    "files": {
+      "log.txt": "INFO start\nWARN disk 91%\nINFO tick\nERROR boom\nINFO stop\n"
+    },
+    "stdout": "WARN disk 91%\nERROR boom\n"
+  },
+  {
+    "name": "field match",
+    "script": "awk '$3 ~ /^e/ {print $1}' data.txt",
+    "files": {
+      "data.txt": "alice 30 eng\nbob 25 ops\ncarol 35 eng\ndave 40 sales\n"
+    },
+    "stdout": "alice\ncarol\n"
+  },
+  {
+    "name": "field not match",
+    "script": "awk '$3 !~ \"eng\" {print $1}' data.txt",
+    "files": {
+      "data.txt": "alice 30 eng\nbob 25 ops\ncarol 35 eng\ndave 40 sales\n"
+    },
+    "stdout": "bob\ndave\n"
+  },
+  {
+    "name": "numeric compare",
+    "script": "awk '$2 > 28 {print $1}' data.txt",
+    "files": {
+      "data.txt": "alice 30 eng\nbob 25 ops\ncarol 35 eng\ndave 40 sales\n"
+    },
+    "stdout": "alice\ncarol\ndave\n"
+  },
+  {
+    "name": "string compare",
+    "script": "awk '$1 == \"bob\" {print $2}' data.txt",
+    "files": {
+      "data.txt": "alice 30 eng\nbob 25 ops\ncarol 35 eng\ndave 40 sales\n"
+    },
+    "stdout": "25\n"
+  },
+  {
+    "name": "and or",
+    "script": "awk '$2 > 26 && $3 == \"eng\" || $1 == \"dave\" {print $1}' data.txt",
+    "files": {
+      "data.txt": "alice 30 eng\nbob 25 ops\ncarol 35 eng\ndave 40 sales\n"
+    },
+    "stdout": "alice\ncarol\ndave\n"
+  },
+  {
+    "name": "printf",
+    "script": "awk -F, 'NR>1 {printf \"%-6s %3d %8.2f\\n\", $1, $2, $2*$3}' nums.csv",
+    "files": {
+      "nums.csv": "name,qty,price\npen,3,1.50\nbook,1,12.25\ncup,4,3.00\n"
+    },
+    "stdout": "pen      3     4.50\nbook     1    12.25\ncup      4    12.00\n"
+  },
+  {
+    "name": "printf conversions",
+    "script": "awk 'BEGIN {printf \"%d|%i|%5.1f|%e|%g|%x|%X|%o|%c|%c|%s|%%\\n\", 3.9, -3.9, 2.25, 1234.5, 0.0001234, 255, 255, 8, 65, \"hi\", \"str\"}'",
+    "stdout": "3|-3|  2.2|1.234500e+03|0.0001234|ff|FF|10|A|h|str|%\n"
+  },
+  {
+    "name": "printf flags",
+    "script": "awk 'BEGIN {printf \"[%5s][%-5s][%05d][%+d][% d][%.3s][%#o][%#x]\\n\", \"ab\", \"ab\", 42, 7, 7, \"abcdef\", 8, 255}'",
+    "stdout": "[   ab][ab   ][00042][+7][ 7][abc][010][0xff]\n"
+  },
+  {
+    "name": "printf star width",
+    "script": "awk 'BEGIN {printf \"[%*d][%-*d]\\n\", 5, 1, 4, 2}'",
+    "stdout": "[    1][2   ]\n"
+  },
+  {
+    "name": "printf rounding half even",
+    "script": "awk 'BEGIN {printf \"%.2f %.0f %.0f %.1f\\n\", 0.125, 2.5, 3.5, 0.05}'",
+    "stdout": "0.12 2 4 0.1\n"
+  },
+  {
+    "name": "count with array",
+    "script": "awk '{n[$1]++} END {for (w in n) print w, n[w]}' words.txt | sort",
+    "files": {
+      "words.txt": "the cat\nthe dog\na cat\nthe end\n"
+    },
+    "stdout": "a 1\nthe 3\n"
+  },
+  {
+    "name": "group sum",
+    "script": "awk '{s[$3]+=$2} END {for (k in s) print k, s[k]}' data.txt | sort",
+    "files": {
+      "data.txt": "alice 30 eng\nbob 25 ops\ncarol 35 eng\ndave 40 sales\n"
+    },
+    "stdout": "eng 65\nops 25\nsales 40\n"
+  },
+  {
+    "name": "length filter",
+    "script": "awk 'length > 6' lines.txt",
+    "files": {
+      "lines.txt": "short\na much longer line here\nmid length\n"
+    },
+    "stdout": "a much longer line here\nmid length\n"
+  },
+  {
+    "name": "length of field",
+    "script": "awk '{print length($1)}' data.txt",
+    "files": {
+      "data.txt": "alice 30 eng\nbob 25 ops\ncarol 35 eng\ndave 40 sales\n"
+    },
+    "stdout": "5\n3\n5\n4\n"
+  },
+  {
+    "name": "uninitialized",
+    "script": "awk 'BEGIN {print x + 0, \"[\" x \"]\", length(x)}'",
+    "stdout": "0 [] 0\n"
+  },
+  {
+    "name": "string number duality",
+    "script": "echo '10 9' | awk '{print ($1 > $2), (\"10\" > \"9\")}'",
+    "stdout": "1 0\n"
+  },
+  {
+    "name": "concatenation",
+    "script": "awk 'BEGIN {x = 1; y = 2; print x y, x \" \" y}'",
+    "stdout": "12 1 2\n"
+  },
+  {
+    "name": "number output",
+    "script": "awk 'BEGIN {print 0.1 + 0.2, 1/3, 100000 * 100000, 2^53, 1e6, 123456789.123}'",
+    "stdout": "0.3 0.333333 10000000000 9007199254740992 1000000 1.23457e+08\n"
+  },
+  {
+    "name": "integer division",
+    "script": "awk 'BEGIN {print 7/2, int(7/2), -7 % 3, 2^10, 2**3}'",
+    "stdout": "3.5 3 -1 1024 8\n"
+  },
+  {
+    "name": "assign ops",
+    "script": "awk 'BEGIN {x = 10; x += 5; x -= 3; x *= 2; x /= 4; x %= 4; x ^= 3; print x; y = 5; print y++, y, ++y, y--, --y}'",
+    "stdout": "8\n5 6 7 7 5\n"
+  },
+  {
+    "name": "ternary",
+    "script": "awk '{print $1, ($2 >= 30 ? \"senior\" : \"junior\")}' data.txt",
+    "files": {
+      "data.txt": "alice 30 eng\nbob 25 ops\ncarol 35 eng\ndave 40 sales\n"
+    },
+    "stdout": "alice senior\nbob junior\ncarol senior\ndave senior\n"
+  },
+  {
+    "name": "if else",
+    "script": "awk '{ if ($2 > 30) print $1, \"old\"; else if ($2 > 26) print $1, \"mid\"; else print $1, \"young\" }' data.txt",
+    "files": {
+      "data.txt": "alice 30 eng\nbob 25 ops\ncarol 35 eng\ndave 40 sales\n"
+    },
+    "stdout": "alice mid\nbob young\ncarol old\ndave old\n"
+  },
+  {
+    "name": "while loop",
+    "script": "awk 'BEGIN { i = 1; while (i <= 3) { print i; i++ } }'",
+    "stdout": "1\n2\n3\n"
+  },
+  {
+    "name": "do while",
+    "script": "awk 'BEGIN { i = 5; do { print i; i++ } while (i < 3) }'",
+    "stdout": "5\n"
+  },
+  {
+    "name": "for loop",
+    "script": "awk 'BEGIN { for (i = 3; i > 0; i--) printf \"%d \", i; print \"\" }'",
+    "stdout": "3 2 1 \n"
+  },
+  {
+    "name": "break and continue",
+    "script": "awk 'BEGIN { for (i = 1; i <= 10; i++) { if (i % 2) continue; if (i > 6) break; print i } }'",
+    "stdout": "2\n4\n6\n"
+  },
+  {
+    "name": "next",
+    "script": "awk '/INFO/ {next} {print NR\": \"$0}' log.txt",
+    "files": {
+      "log.txt": "INFO start\nWARN disk 91%\nINFO tick\nERROR boom\nINFO stop\n"
+    },
+    "stdout": "2: WARN disk 91%\n4: ERROR boom\n"
+  },
+  {
+    "name": "exit with status",
+    "script": "awk 'NR==2 {exit 3} {print} END {print \"end\"}' words.txt",
+    "files": {
+      "words.txt": "the cat\nthe dog\na cat\nthe end\n"
+    },
+    "stdout": "the cat\nend\n",
+    "exitCode": 3
+  },
+  {
+    "name": "exit in BEGIN skips input",
+    "script": "awk 'BEGIN {print \"b\"; exit} {print} END {print \"e\"}' words.txt",
+    "files": {
+      "words.txt": "the cat\nthe dog\na cat\nthe end\n"
+    },
+    "stdout": "b\ne\n"
+  },
+  {
+    "name": "delete and in",
+    "script": "awk 'BEGIN { a[1]; a[2]; delete a[1]; print (1 in a), (2 in a), length(a); delete a; print length(a) }'",
+    "stdout": "0 1 1\n0\n"
+  },
+  {
+    "name": "multi subscripts",
+    "script": "awk 'BEGIN { a[1,2] = 3; for (k in a) { split(k, p, SUBSEP); print p[1], p[2], a[k] }; print ((1,2) in a) }'",
+    "stdout": "1 2 3\n1\n"
+  },
+  {
+    "name": "split",
+    "script": "awk 'BEGIN { n = split(\"a:b:c\", arr, \":\"); print n, arr[1], arr[3]; n = split(\"  x  y \", w); print n, w[1], w[2] }'",
+    "stdout": "3 a c\n2 x y\n"
+  },
+  {
+    "name": "split regex",
+    "script": "awk 'BEGIN { n = split(\"a1b22c\", arr, /[0-9]+/); print n, arr[1], arr[2], arr[3] }'",
+    "stdout": "3 a b c\n"
+  },
+  {
+    "name": "substr and index",
+    "script": "awk 'BEGIN { s = \"hello world\"; print substr(s, 7), substr(s, 1, 5), substr(s, 0, 2), substr(s, -1, 3), index(s, \"o\"), index(s, \"z\") }'",
+    "stdout": "world hello h h 5 0\n"
+  },
+  {
+    "name": "sub and gsub",
+    "script": "awk '{ gsub(/the/, \"THE\"); sub(/a/, \"[&]\"); print }' words.txt",
+    "files": {
+      "words.txt": "the cat\nthe dog\na cat\nthe end\n"
+    },
+    "stdout": "THE c[a]t\nTHE dog\n[a] cat\nTHE end\n"
+  },
+  {
+    "name": "gsub on a field",
+    "script": "awk '{ n = gsub(/[aeiou]/, \"_\", $1); print n, $0 }' data.txt",
+    "files": {
+      "data.txt": "alice 30 eng\nbob 25 ops\ncarol 35 eng\ndave 40 sales\n"
+    },
+    "stdout": "3 _l_c_ 30 eng\n1 b_b 25 ops\n2 c_r_l 35 eng\n2 d_v_ 40 sales\n"
+  },
+  {
+    "name": "gsub empty matches",
+    "script": "awk 'BEGIN { s = \"abc\"; gsub(/x*/, \"-\", s); print s }'",
+    "stdout": "-a-b-c-\n"
+  },
+  {
+    "name": "sub literal ampersand",
+    "script": "awk 'BEGIN { s = \"a&b\"; sub(/&/, \"\\\\&\\\\&\", s); print s }'",
+    "stdout": "a&&b\n"
+  },
+  {
+    "name": "match",
+    "script": "awk 'BEGIN { if (match(\"foobar123\", /[0-9]+/)) print RSTART, RLENGTH, substr(\"foobar123\", RSTART, RLENGTH); print match(\"abc\", /z/), RSTART, RLENGTH }'",
+    "stdout": "7 3 123\n0 0 -1\n"
+  },
+  {
+    "name": "tolower toupper",
+    "script": "awk '{print toupper($1), tolower(\"MiXeD\")}' data.txt",
+    "files": {
+      "data.txt": "alice 30 eng\nbob 25 ops\ncarol 35 eng\ndave 40 sales\n"
+    },
+    "stdout": "ALICE mixed\nBOB mixed\nCAROL mixed\nDAVE mixed\n"
+  },
+  {
+    "name": "sprintf",
+    "script": "awk 'BEGIN { s = sprintf(\"%05.1f|%s\", 3.14159, \"x\"); print s, length(s) }'",
+    "stdout": "003.1|x 7\n"
+  },
+  {
+    "name": "math",
+    "script": "awk 'BEGIN { printf \"%.4f %.4f %.4f %.4f %.4f %.4f %d\\n\", sqrt(2), exp(1), log(10), sin(1), cos(0), atan2(1, 1) * 4, int(-3.7) }'",
+    "stdout": "1.4142 2.7183 2.3026 0.8415 1.0000 3.1416 -3\n"
+  },
+  {
+    "name": "assign a field rebuilds the record",
+    "script": "echo 'a b c' | awk '{ $2 = \"X\"; print; print NF }'",
+    "stdout": "a X c\n3\n"
+  },
+  {
+    "name": "assign past NF",
+    "script": "echo 'a b' | awk '{ $5 = \"e\"; print; print NF }'",
+    "stdout": "a b   e\n5\n"
+  },
+  {
+    "name": "OFS rebuild",
+    "script": "echo 'a b c' | awk 'BEGIN { OFS = \"-\" } { $1 = $1; print }'",
+    "stdout": "a-b-c\n"
+  },
+  {
+    "name": "set NF",
+    "script": "echo 'a b c d' | awk '{ NF = 2; print }'",
+    "stdout": "a b\n"
+  },
+  {
+    "name": "assign $0",
+    "script": "echo 'a b' | awk '{ $0 = \"x y z\"; print NF, $3 }'",
+    "stdout": "3 z\n"
+  },
+  {
+    "name": "OFS and ORS",
+    "script": "awk 'BEGIN { OFS = \":\"; ORS = \";\" } { print $1, $2 } END { printf \"\\n\" }' data.txt",
+    "files": {
+      "data.txt": "alice 30 eng\nbob 25 ops\ncarol 35 eng\ndave 40 sales\n"
+    },
+    "stdout": "alice:30;bob:25;carol:35;dave:40;\n"
+  },
+  {
+    "name": "FNR and FILENAME",
+    "script": "awk 'FNR == 1 { print FILENAME, NR }' words.txt lines.txt",
+    "files": {
+      "words.txt": "the cat\nthe dog\na cat\nthe end\n",
+      "lines.txt": "short\na much longer line here\nmid length\n"
+    },
+    "stdout": "words.txt 1\nlines.txt 5\n"
+  },
+  {
+    "name": "-v variable",
+    "script": "awk -v n=2 -v greeting='hi\\tthere' 'BEGIN { print n * 3, greeting }'",
+    "stdout": "6 hi\tthere\n"
+  },
+  {
+    "name": "operand assignment",
+    "script": "awk '{ print x, $1 }' x=1 words.txt x=2 lines.txt",
+    "files": {
+      "words.txt": "the cat\nthe dog\na cat\nthe end\n",
+      "lines.txt": "short\na much longer line here\nmid length\n"
+    },
+    "stdout": "1 the\n1 the\n1 a\n1 the\n2 short\n2 a\n2 mid\n"
+  },
+  {
+    "name": "range pattern",
+    "script": "awk '/WARN/, /ERROR/ { print NR }' log.txt",
+    "files": {
+      "log.txt": "INFO start\nWARN disk 91%\nINFO tick\nERROR boom\nINFO stop\n"
+    },
+    "stdout": "2\n3\n4\n"
+  },
+  {
+    "name": "ENVIRON",
+    "script": "awk 'BEGIN { print ENVIRON[\"GREETING\"] }'",
+    "env": {
+      "GREETING": "hello"
+    },
+    "stdout": "hello\n"
+  },
+  {
+    "name": "printf without newline",
+    "script": "awk 'BEGIN { printf \"a\"; printf \"b\" }'",
+    "stdout": "ab"
+  },
+  {
+    "name": "print to a file",
+    "script": "awk '{ print $1 > \"names.txt\" } END { close(\"names.txt\") }' data.txt && cat names.txt",
+    "files": {
+      "data.txt": "alice 30 eng\nbob 25 ops\ncarol 35 eng\ndave 40 sales\n"
+    },
+    "stdout": "alice\nbob\ncarol\ndave\n"
+  },
+  {
+    "name": "append to a file",
+    "script": "echo first > out.txt && awk 'BEGIN { print \"second\" >> \"out.txt\" }' && cat out.txt",
+    "stdout": "first\nsecond\n"
+  },
+  {
+    "name": "print to stderr",
+    "script": "awk 'BEGIN { print \"oops\" > \"/dev/stderr\"; print \"ok\" }' 2>/dev/null",
+    "stdout": "ok\n"
+  },
+  {
+    "name": "semicolons and newlines",
+    "script": "awk 'BEGIN {\n  x = 1\n  y = 2;\n  if (x < y)\n    print \"lt\"\n  else\n    print \"ge\"\n}'",
+    "stdout": "lt\n"
+  },
+  {
+    "name": "comments",
+    "script": "awk 'BEGIN { # a comment\n  print \"ok\" # another\n}'",
+    "stdout": "ok\n"
+  },
+  {
+    "name": "regex dynamic",
+    "script": "awk 'BEGIN { re = \"^[a-c]\" } $1 ~ re { print $1 }' data.txt",
+    "files": {
+      "data.txt": "alice 30 eng\nbob 25 ops\ncarol 35 eng\ndave 40 sales\n"
+    },
+    "stdout": "alice\nbob\ncarol\n"
+  },
+  {
+    "name": "posix class",
+    "script": "echo 'ab12 cd' | awk '{ gsub(/[[:digit:]]/, \"#\"); print }'",
+    "stdout": "ab## cd\n"
+  },
+  {
+    "name": "regex with slash",
+    "script": "echo 'a/b/c' | awk '{ n = gsub(/\\//, \"|\"); print n, $0 }'",
+    "stdout": "2 a|b|c\n"
+  },
+  {
+    "name": "unary minus and power",
+    "script": "awk 'BEGIN { print -2^2, 2^3^2, -3 % 2 }'",
+    "stdout": "-4 512 -1\n"
+  },
+  {
+    "name": "string comparison of fields",
+    "script": "printf 'b\\na\\nc\\n' | awk '$1 > \"a\"'",
+    "stdout": "b\nc\n"
+  },
+  {
+    "name": "empty lines",
+    "script": "printf 'a\\n\\nb\\n' | awk '{ print NF \":\" $0 }'",
+    "stdout": "1:a\n0:\n1:b\n"
+  },
+  {
+    "name": "no trailing newline",
+    "script": "printf 'a b\\nc d' | awk '{ print $2 }'",
+    "stdout": "b\nd\n"
+  },
+  {
+    "name": "dedupe",
+    "script": "awk '!seen[$0]++' dups.txt",
+    "files": {
+      "dups.txt": "b\na\nb\nc\na\n"
+    },
+    "stdout": "b\na\nc\n"
+  },
+  {
+    "name": "join two files",
+    "script": "awk 'NR == FNR { price[$1] = $2; next } $1 in price { print $1, $2, price[$1] }' prices.txt stock.txt",
+    "files": {
+      "prices.txt": "pen 1.50\ncup 3.00\n",
+      "stock.txt": "pen 10\nbook 2\ncup 7\n"
+    },
+    "stdout": "pen 10 1.50\ncup 7 3.00\n"
+  },
+  {
+    "name": "-f program file",
+    "script": "awk -f prog.awk data.txt",
+    "files": {
+      "data.txt": "alice 30 eng\nbob 25 ops\ncarol 35 eng\ndave 40 sales\n",
+      "prog.awk": "{ print $1 }\n"
+    },
+    "stdout": "alice\nbob\ncarol\ndave\n"
+  },
+  {
+    "name": "-F single space",
+    "script": "echo '  a   b  ' | awk -F' ' '{print NF, $2}'",
+    "stdout": "2 b\n"
+  },
+  {
+    "name": "truthiness of fields",
+    "script": "printf '0\\n0.0\\nabc\\n \\n1\\n' | awk '{ print ($1 ? \"t\" : \"f\") }'",
+    "stdout": "f\nf\nt\nf\nt\n"
+  },
+  {
+    "name": "printf %c of a numeric field",
+    "script": "echo 65 | awk '{ printf \"%c\\n\", $1 }'",
+    "stdout": "A\n"
+  },
+  {
+    "name": "record separator",
+    "script": "printf 'a;b;c' | awk 'BEGIN { RS = \";\" } { print NR \": \" $0 }'",
+    "stdout": "1: a\n2: b\n3: c\n"
+  },
+  {
+    "name": "paragraph mode",
+    "script": "printf 'a b\\nc\\n\\n\\nd e\\n' | awk 'BEGIN { RS = \"\" } { print NR \": \" $1 \"-\" $NF \" \" NF }'",
+    "stdout": "1: a-c 3\n2: d-e 2\n"
+  },
+  {
+    "name": "large integers",
+    "script": "awk 'BEGIN { print 2^31, 2^53 + 1, 10^15, -2^40 }'",
+    "stdout": "2147483648 9007199254740992 1000000000000000 -1099511627776\n"
+  },
+  {
+    "name": "uninitialized is both",
+    "script": "awk 'BEGIN { if (x == 0 && x == \"\") print \"both\" }'",
+    "stdout": "both\n"
+  },
+  {
+    "name": "string to number",
+    "script": "awk 'BEGIN { print \"3abc\" + 1, \" 12 \" + 0, \".5\" + 0, \"1e3x\" * 1, \"abc\" + 0, \"-4\" - 1 }'",
+    "stdout": "4 12 0.5 1000 0 -5\n"
+  },
+  {
+    "name": "%s of numbers",
+    "script": "awk 'BEGIN { printf \"%s %s %s %s\\n\", 3.0, 0.1, 1e6, 1/4 }'",
+    "stdout": "3 0.1 1000000 0.25\n"
+  },
+  {
+    "name": "%g forms",
+    "script": "awk 'BEGIN { printf \"%g %g %g %g %G %.3g %#g\\n\", 100000, 1000000, 0.0001, 0.00001, 1e-10, 3.14159, 2 }'",
+    "stdout": "100000 1e+06 0.0001 1e-05 1E-10 3.14 2.00000\n"
+  },
+  {
+    "name": "%e forms",
+    "script": "awk 'BEGIN { printf \"%e %.0e %#.0e %E\\n\", 0, 15, 15, 123.456 }'",
+    "stdout": "0.000000e+00 2e+01 2.e+01 1.234560E+02\n"
+  },
+  {
+    "name": "not",
+    "script": "awk 'BEGIN { print !0, !1, !\"\", !\"a\", !x }'",
+    "stdout": "1 0 1 0 1\n"
+  },
+  {
+    "name": "print grouped to a file",
+    "script": "awk '{ print ($1, $2) > \"o.txt\" } END { close(\"o.txt\") }' data.txt && cat o.txt",
+    "files": {
+      "data.txt": "alice 30 eng\nbob 25 ops\ncarol 35 eng\ndave 40 sales\n"
+    },
+    "stdout": "alice 30\nbob 25\ncarol 35\ndave 40\n"
+  },
+  {
+    "name": "anchors and classes",
+    "script": "awk '/^[a-c][^ ]* [0-9]+ e/' data.txt",
+    "files": {
+      "data.txt": "alice 30 eng\nbob 25 ops\ncarol 35 eng\ndave 40 sales\n"
+    },
+    "stdout": "alice 30 eng\ncarol 35 eng\n"
+  },
+  {
+    "name": "getline from a command refused",
+    "script": "awk 'BEGIN { \"date\" | getline d }'",
+    "error": "getline is not supported",
+    "exitCode": 2
+  },
+  {
+    "name": "too few printf arguments",
+    "script": "awk 'BEGIN { printf \"%s-%d-\\n\", \"a\" }'",
+    "error": "not enough arguments",
+    "exitCode": 2
+  },
+  {
+    "name": "getline refused",
+    "script": "awk '{ getline line < \"f\" }'",
+    "error": "getline is not supported",
+    "exitCode": 2
+  },
+  {
+    "name": "system refused",
+    "script": "awk 'BEGIN { system(\"ls\") }'",
+    "error": "system() is not supported",
+    "exitCode": 2
+  },
+  {
+    "name": "functions refused",
+    "script": "awk 'function f(x) { return x } BEGIN { print f(1) }'",
+    "error": "user-defined functions are not supported",
+    "exitCode": 2
+  },
+  {
+    "name": "pipe refused",
+    "script": "awk '{ print | \"sort\" }'",
+    "error": "pipes in print are not supported",
+    "exitCode": 2
+  },
+  {
+    "name": "syntax error",
+    "script": "awk 'BEGIN { print ( }'",
+    "error": "awk: syntax error at line 1, column 17",
+    "exitCode": 2
+  },
+  {
+    "name": "syntax error line two",
+    "script": "awk 'BEGIN {\n  x = = 1\n}'",
+    "error": "awk: syntax error at line 2, column 7",
+    "exitCode": 2
+  },
+  {
+    "name": "division by zero",
+    "script": "awk 'BEGIN { print 1/0 }'",
+    "error": "division by zero",
+    "exitCode": 2
+  },
+  {
+    "name": "missing file",
+    "script": "awk '{print}' nope.txt",
+    "error": "can't open file nope.txt",
+    "exitCode": 2
+  },
+  {
+    "name": "no program",
+    "script": "awk",
+    "error": "usage: awk",
+    "exitCode": 2
+  }
+]

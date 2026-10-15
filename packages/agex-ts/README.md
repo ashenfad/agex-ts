@@ -282,6 +282,19 @@ runs are never rewritten: the person still sees everything.
 Set the budget well above what no fold can take out (the system prompt,
 the tools, the opening message).
 
+Between turns, an embedder can show and steer it:
+
+```ts
+const { tokens, fold } = await session.context()  // the next request's size, as the policy measures it
+const folded = await session.fold()               // fold the turns so far now, whatever the budget
+```
+
+`fold()` makes the fold a budget would (the same cut, summary and
+fallback), commits it on its own (`{ tool: 'fold' }`, so a checkout
+before it takes it back), emits `Compacted` to `onEvent`, and returns
+it with the summary calls' usage; null when nothing is left to fold.
+It refuses while a turn runs, and `cancel` stops it.
+
 ## In a browser
 
 The same code runs in a browser, with the store on IndexedDB and the

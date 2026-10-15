@@ -236,6 +236,66 @@ describe('sync heads', () => {
     const store = new Memory()
     const vk = await VersionedKV.open(store)
     await setSyncHead(store, 'main', vk.currentCommit)
+    await setSyncHead(store, 'main', vk.currentCommit, 'github:o/r')
     expect(await vk.listBranches()).toEqual(['main'])
+  })
+
+  it('keeps one head per remote', async () => {
+    const store = new Memory()
+    await setSyncHead(store, 'chat', 'a'.repeat(40), 'github:o/one')
+    await setSyncHead(store, 'chat', 'b'.repeat(40), { id: 'github:o/two' })
+    expect(await getSyncHead(store, 'chat', 'github:o/one')).toBe('a'.repeat(40))
+    expect(await getSyncHead(store, 'chat', { id: 'github:o/two' })).toBe('b'.repeat(40))
+    expect(await getSyncHead(store, 'chat', 'github:o/three')).toBeNull()
+    // two remotes hold one: asked without a remote, there's no one answer
+    expect(await getSyncHead(store, 'chat')).toBeNull()
+    await clearSyncHead(store, 'chat', 'github:o/one')
+    expect(await getSyncHead(store, 'chat', 'github:o/one')).toBeNull()
+    expect(await getSyncHead(store, 'chat')).toBe('b'.repeat(40))
+  })
+
+  it("doesn't mix up branches whose names run into each other", async () => {
+    const store = new Memory()
+    await setSyncHead(store, 'a', 'a'.repeat(40), 'r')
+    await setSyncHead(store, 'a/b', 'b'.repeat(40), 'r')
+    await setSyncHead(store, 'a%2Fb', 'c'.repeat(40), 'r')
+    expect(await getSyncHead(store, 'a')).toBe('a'.repeat(40))
+    await clearSyncHead(store, 'a')
+    expect(await getSyncHead(store, 'a/b', 'r')).toBe('b'.repeat(40))
+    expect(await getSyncHead(store, 'a%2Fb', 'r')).toBe('c'.repeat(40))
+  })
+
+  it('clears every remote when none is named', async () => {
+    const store = new Memory()
+    await setSyncHead(store, 'chat', 'a'.repeat(40))
+    await setSyncHead(store, 'other', 'c'.repeat(40), 'r1')
+    await setSyncHead(store, 'chat', 'b'.repeat(40), 'r2')
+    await setSyncHead(store, 'chat', 'b'.repeat(40), 'r1')
+    await clearSyncHead(store, 'chat')
+    expect(await getSyncHead(store, 'chat')).toBeNull()
+    expect(await getSyncHead(store, 'chat', 'r1')).toBeNull()
+    expect(await getSyncHead(store, 'chat', 'r2')).toBeNull()
+    expect(await getSyncHead(store, 'other', 'r1')).toBe('c'.repeat(40))
+  })
+
+  it("reads a head kept before per-remote records, until a remote's own retires it", async () => {
+    const store = new Memory()
+    await setSyncHead(store, 'chat', 'a'.repeat(40)) // as an older kvgit kept it
+    expect(await getSyncHead(store, 'chat')).toBe('a'.repeat(40))
+    expect(await getSyncHead(store, 'chat', 'r1')).toBe('a'.repeat(40))
+    await setSyncHead(store, 'chat', 'b'.repeat(40), 'r1')
+    expect(await getSyncHead(store, 'chat', 'r1')).toBe('b'.repeat(40))
+    expect(await getSyncHead(store, 'chat', 'r2')).toBeNull()
+    expect(await getSyncHead(store, 'chat')).toBe('b'.repeat(40))
+  })
+
+  it('keeps the shared head for a remote without an id', async () => {
+    const store = new Memory()
+    await setSyncHead(store, 'chat', 'a'.repeat(40), {})
+    expect(await getSyncHead(store, 'chat')).toBe('a'.repeat(40))
+    expect(await getSyncHead(store, 'chat', {})).toBe('a'.repeat(40))
+    await setSyncHead(store, 'chat', 'b'.repeat(40), 'r1')
+    // a remote with no id reads only the shared record, which r1 retired
+    expect(await getSyncHead(store, 'chat', {})).toBeNull()
   })
 })

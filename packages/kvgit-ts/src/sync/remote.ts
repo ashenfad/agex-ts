@@ -36,6 +36,15 @@ export interface RemoteRef {
 }
 
 export interface Remote {
+  /**
+   * Who this remote is, the same from one run to the next (a
+   * `PackRemote`'s is its repo): the head each branch last synced to
+   * here is kept under it, apart from any other remote's. A remote
+   * without one shares one such record per branch with every other
+   * remote that has none.
+   */
+  readonly id?: string | undefined
+
   /** Current branch → head pointers on the remote. */
   listRefs(): Promise<RemoteRef[]>
 
@@ -70,9 +79,11 @@ export interface Remote {
  */
 export class MemoryRemote implements Remote {
   readonly store: KVStore
+  readonly id: string | undefined
 
-  constructor(store: KVStore) {
+  constructor(store: KVStore, opts: { id?: string } = {}) {
     this.store = store
+    this.id = opts.id
   }
 
   async listRefs(): Promise<RemoteRef[]> {

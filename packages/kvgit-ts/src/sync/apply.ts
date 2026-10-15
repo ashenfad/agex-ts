@@ -19,9 +19,9 @@
  * a no-op apart from the optional branch creation.
  *
  * Remote-tracking state (`getSyncHead`/`setSyncHead`) lives here too:
- * `__sync_head__<branch>` records the last commit a branch is known to
- * share with its remote. It is bookkeeping for the sync orchestration
- * layer — `applyWire` itself never touches it.
+ * the last commit a branch is known to share with a remote, kept per
+ * remote. It is bookkeeping for the sync orchestration layer —
+ * `applyWire` itself never touches it.
  */
 
 import { EMPTY_HASH } from '../hamt'
@@ -37,6 +37,8 @@ import {
   PARENT_GENS,
   ROOT_COMMIT,
   SYNC_HEAD,
+  SYNC_HEADS_OF,
+  SYNC_HEAD_AT,
   blobKey,
   checkStorageVersion,
   commitHash,
@@ -291,21 +293,116 @@ async function rootAt(store: KVStore, commit: string): Promise<string> {
 // Remote-tracking heads
 // ---------------------------------------------------------------------------
 
-/** Last commit `branch` is known to share with its remote, or null if
- *  the branch has never synced. */
-export async function getSyncHead(store: KVStore, branch: string): Promise<string | null> {
-  const raw = await store.get(SYNC_HEAD(branch))
+/**
+ * Which remote a sync head belongs to: a `Remote` (or anything with its
+ * optional `id`), or the id itself. A remote with an id keeps its own
+ * record per branch, so one branch synced with two remotes, or with a
+ * remote swapped for another, never takes one's head as the other's.
+ * A remote without one shares the branch's single record.
+ */
+export type SyncHeadOwner = string | { readonly id?: string | undefined }
+
+function ownerId(owner: SyncHeadOwner): string | undefined {
+  return typeof owner === 'string' ? owner : owner.id
+}
+
+async function readHead(store: KVStore, key: string): Promise<string | null> {
+  const raw = await store.get(key)
   if (raw === null) return null
   const parsed = safeLoads(raw)
   return typeof parsed === 'string' ? parsed : null
 }
 
-/** Record `commit` as the branch's last-synced remote head. */
-export async function setSyncHead(store: KVStore, branch: string, commit: string): Promise<void> {
-  await store.set(SYNC_HEAD(branch), dumps(commit))
+async function keysUnder(store: KVStore, prefix: string): Promise<string[]> {
+  const out: string[] = []
+  for await (const k of store.keys(prefix)) out.push(k)
+  return out
 }
 
-/** Forget a branch's remote-tracking state (e.g. on remote detach). */
-export async function clearSyncHead(store: KVStore, branch: string): Promise<void> {
+/**
+ * Last commit `branch` is known to share with `remote`, or null if it
+ * has never synced there.
+ *
+ * For a remote with an id, a branch with no record of its own reads the
+ * branch's shared record: a store synced before per-remote records
+ * holds its head there, and the first sync that records a head for the
+ * remote retires it.
+ *
+ * Without `remote`, the answer is the branch's one sync head, whichever
+ * remote it's with: the shared record, or else the per-remote record
+ * when exactly one remote has one; null when none or several do.
+ */
+export async function getSyncHead(
+  store: KVStore,
+  branch: string,
+  remote?: SyncHeadOwner,
+): Promise<string | null> {
+  const id = remote === undefined ? undefined : ownerId(remote)
+  if (id !== undefined) {
+    return (
+      (await readHead(store, SYNC_HEAD_AT(branch, id))) ??
+      (await readHead(store, SYNC_HEAD(branch)))
+    )
+  }
+  const shared = await readHead(store, SYNC_HEAD(branch))
+  if (shared !== null || remote !== undefined) return shared
+  const keys = await keysUnder(store, SYNC_HEADS_OF(branch))
+  return keys.length === 1 ? readHead(store, keys[0] as string) : null
+}
+
+/** Record `commit` as the head `branch` last synced to on `remote`
+ *  (the branch's shared record when it has no id). A remote's own
+ *  record retires the shared one, so another remote can't take it up. */
+export async function setSyncHead(
+  store: KVStore,
+  branch: string,
+  commit: string,
+  remote?: SyncHeadOwner,
+): Promise<void> {
+  const id = remote === undefined ? undefined : ownerId(remote)
+  if (id === undefined) {
+    await store.set(SYNC_HEAD(branch), dumps(commit))
+    return
+  }
+  await store.set(SYNC_HEAD_AT(branch, id), dumps(commit))
+  await store.remove(SYNC_HEAD(branch))
+}
+
+/**
+ * The head `branch` last synced to on `remote`, as the sync layer reads
+ * it: the shared record a store kept from before per-remote records is
+ * taken up as this remote's own the first time it's read, so whichever
+ * remote syncs first after an upgrade (the one it was kept for, in a
+ * store that syncs with one) carries it on, and no other remote reads it.
+ */
+export async function claimSyncHead(
+  store: KVStore,
+  branch: string,
+  remote: SyncHeadOwner,
+): Promise<string | null> {
+  const id = ownerId(remote)
+  if (id === undefined) return readHead(store, SYNC_HEAD(branch))
+  const own = await readHead(store, SYNC_HEAD_AT(branch, id))
+  if (own !== null) return own
+  const shared = await readHead(store, SYNC_HEAD(branch))
+  if (shared !== null) await setSyncHead(store, branch, shared, id)
+  return shared
+}
+
+/**
+ * Forget what `branch` last synced to on `remote` (e.g. on remote
+ * detach), the shared record with it; without `remote`, everything it
+ * last synced to on every remote.
+ */
+export async function clearSyncHead(
+  store: KVStore,
+  branch: string,
+  remote?: SyncHeadOwner,
+): Promise<void> {
+  const id = remote === undefined ? undefined : ownerId(remote)
+  if (id !== undefined) await store.remove(SYNC_HEAD_AT(branch, id))
+  else if (remote === undefined) {
+    for (const k of await keysUnder(store, SYNC_HEADS_OF(branch))) await store.remove(k)
+  }
   await store.remove(SYNC_HEAD(branch))
 }

@@ -43,6 +43,7 @@ export {
   getSyncHead,
   setSyncHead,
   type ApplyWireOptions,
+  type SyncHeadOwner,
   type ApplyWireResult,
 } from './sync/apply'
 export { MemoryRemote, type Remote, type RemoteRef } from './sync/remote'

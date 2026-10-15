@@ -20,6 +20,10 @@ zcat, zip, unzip, mkdir, cp, mv, rm, touch, pwd, cd, basename, dirname,
 file, test. No loops, functions or variable assignments: write those in
 run_ts. cwd persists between calls.
 
+Braces expand ({a,b}, {1..3}). $HOME is the workspace root and $PWD the
+cwd; an unset variable is an error that stops the call (\${NAME:-default}
+gives a default). No $(...) or $((...)): compute values in run_ts.
+
 READING AND SEARCHING FILES IS THIS TOOL'S JOB. To find something:
 \`grep -n 'name' file\` (add -A/-B for context, -r to search a tree). To
 see a region: \`sed -n '120,160p' file\`, or \`cat -n file\` for the whole

@@ -668,7 +668,7 @@ export class Workspace {
       try {
         stdout = await execute(command, this.#top, {
           commands: this.#commands,
-          env: shellEnv(this.#settings.profile),
+          env: shellEnv(this.#settings.profile, this.root),
           signal: controller.signal,
         })
       } catch (e) {

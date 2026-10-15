@@ -4,8 +4,15 @@
  * Walks a `Script` AST: runs each pipeline's commands with one stage's
  * stdout as the next one's stdin, honors redirects (`<`, `<<`, `>`,
  * `>>`, `2>`, `2>>`, `2>&1`, with `/dev/null` as a sink and an empty
- * source), expands `$NAME`, `${NAME}` and `$?`, threads exit codes
- * through `&&` / `||`, and returns the transcript.
+ * source), expands braces, then `$NAME`, `${NAME}` and `$?`, then
+ * globs, threads exit codes through `&&` / `||`, and returns the
+ * transcript.
+ *
+ * `$PWD` is the current directory, whatever the environment says. A
+ * variable that isn't set is an error that stops the script, as under
+ * bash's `set -u`: with no assignment in the language, every variable
+ * comes from the host, so an unset one is a mistake, and `cd $DIR`
+ * or `rm -r $DIR/x` must not run as `cd` or `rm -r /x`.
  *
  * Pipes and redirects carry bytes; the transcript is decoded once, at
  * the end. It is what a terminal would have shown: stdout, plus the
@@ -24,6 +31,7 @@
  */
 
 import type { Pipeline, Redirect, Script } from './ast'
+import { expandBraces } from './brace'
 import { BUILTINS } from './builtins/index'
 import { ByteStdin, ByteStdout, EMPTY, concat, decode, encode } from './bytes'
 import type { CommandContext, CommandHandler, CommandResult } from './context'
@@ -41,7 +49,8 @@ export interface ExecuteOptions {
   commands?: ReadonlyMap<string, CommandHandler> | Readonly<Record<string, CommandHandler>>
   /** Environment variables for `$NAME` expansion. The object is shared
    *  with command handlers as `ctx.env`, so a change a handler makes is
-   *  visible to later commands and to the caller. Default: empty. */
+   *  visible to later commands and to the caller. Default: empty. A
+   *  host should set `HOME`; `$PWD` is always the current directory. */
   env?: Record<string, string>
   /** Cooperative cancellation. Default: never aborts. */
   signal?: AbortSignal
@@ -67,6 +76,14 @@ export const DEV_NULL = '/dev/null'
 const ABORTED = 130
 
 const NEVER_ABORT = new AbortController().signal
+
+/** `$NAME` with `NAME` unset: the command doesn't run, nor anything
+ *  after it. */
+class UnboundVariable extends TerminalError {
+  constructor(name: string) {
+    super(`${name}: unbound variable`)
+  }
+}
 
 /**
  * Convenience: parse + execute. Matches termish-py's top-level
@@ -149,6 +166,12 @@ export async function executeScript(
       lastError = null
       lastExitCode = 0
     } catch (e) {
+      if (e instanceof UnboundVariable) {
+        throw new TerminalError(e.message, {
+          partialOutput: cap(decode(concat(transcript))),
+          exitCode: e.exitCode,
+        })
+      }
       const error =
         e instanceof TerminalError ? e : new TerminalError(`Unexpected error: ${describeError(e)}`)
       lastSucceeded = false
@@ -206,10 +229,11 @@ async function executePipeline(pipeline: Pipeline, run: Run): Promise<void> {
     if (signal.aborted) throw new TerminalError('aborted', { exitCode: ABORTED })
 
     // The name and args expand as one word list, so a name that
-    // expands to nothing shifts away (`$UNSET echo hi` runs `echo hi`).
+    // expands to nothing shifts away (`$EMPTY echo hi` runs `echo hi`).
     // A value with spaces is never split into words: `CMD="echo hi";
     // $CMD` is "echo hi: command not found", never a silent re-parse.
-    const words = await expandArgs([cmd.name, ...cmd.args], fs, env, lastExitCode)
+    const vars = variables(env, fs)
+    const words = await expandArgs([cmd.name, ...cmd.args], fs, vars, lastExitCode)
     if (words.length === 0) {
       // The whole command expanded to nothing: a silent no-op.
       // Its redirects are not processed.
@@ -227,7 +251,7 @@ async function executePipeline(pipeline: Pipeline, run: Run): Promise<void> {
         // Heredoc bodies are always literal: never expanded.
         stdinBytes = encode(inputRedirect.content ?? '')
       } else {
-        const target = expandWord(inputRedirect.target, env, lastExitCode)
+        const target = expandWord(inputRedirect.target, vars, lastExitCode)
         const path = resolve(target, fs.getcwd())
         if (path === DEV_NULL) {
           stdinBytes = EMPTY
@@ -249,7 +273,7 @@ async function executePipeline(pipeline: Pipeline, run: Run): Promise<void> {
     // listing of the tree).
     const writeRedirects = async (data: Uint8Array): Promise<void> => {
       for (const r of outputRedirects) {
-        const target = expandWord(r.target, env, lastExitCode)
+        const target = expandWord(r.target, vars, lastExitCode)
         const path = resolve(target, fs.getcwd())
         if (path === DEV_NULL) continue
         try {
@@ -332,7 +356,7 @@ async function executePipeline(pipeline: Pipeline, run: Run): Promise<void> {
     } else {
       // `2>file` truncates even when nothing was written, as in bash;
       // `2>>file` appends; /dev/null discards.
-      const target = expandWord(stderrRedirect.target, env, lastExitCode)
+      const target = expandWord(stderrRedirect.target, vars, lastExitCode)
       const path = resolve(target, fs.getcwd())
       if (path !== DEV_NULL) {
         try {
@@ -396,19 +420,42 @@ function withNewline(text: string): string {
 // silent mangling. The escapes follow the double-quote rule: a
 // backslash is special only before `\` or `$`, so `\d` in a regex stays
 // `\d`, while `\\$NAME` is a backslash followed by an expansion.
-const VAR_RE = /\\\\|\\\$|\$\?|\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g
+// `${NAME:-word}` and `${NAME-word}` give `word` (itself expanded) for
+// a variable that's unset (`-`), or unset or empty (`:-`): the way to
+// read one that may not be set.
+const VAR_RE =
+  /\\\\|\\\$|\$\?|\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?-)([^}]*))?\}|\$([A-Za-z_][A-Za-z0-9_]*)/g
 
-/** Expand `$?`, `$NAME` and `${NAME}` in `text`. An unset variable is
- *  empty (POSIX); `\$` is a literal `$`, and `\\` a literal backslash. */
-function expandVars(text: string, env: Record<string, string>, lastExitCode: number): string {
+/** A variable's value, or undefined when it isn't set. */
+type Variables = (name: string) => string | undefined
+
+/** The variables one command expands with: `env`'s, with `PWD` the
+ *  current directory. */
+function variables(env: Record<string, string>, fs: FileSystem): Variables {
+  const cwd = fs.getcwd()
+  return (name) => (name === 'PWD' ? cwd : Object.hasOwn(env, name) ? env[name] : undefined)
+}
+
+/** Expand `$?`, `$NAME`, `${NAME}` and `${NAME:-word}` in `text`. An
+ *  unset variable with no default throws `UnboundVariable`; `\$` is a
+ *  literal `$`, and `\\` a literal backslash. */
+function expandVars(text: string, vars: Variables, lastExitCode: number): string {
   if (!text.includes('$') && !text.includes('\\\\')) return text
-  return text.replace(VAR_RE, (match, braced?: string, bare?: string) => {
-    if (match === '\\\\') return '\\'
-    if (match === '\\$') return '$'
-    if (match === '$?') return String(lastExitCode)
-    const value = env[(braced ?? bare) as string]
-    return value ?? ''
-  })
+  return text.replace(
+    VAR_RE,
+    (match, braced?: string, op?: string, fallback?: string, bare?: string) => {
+      if (match === '\\\\') return '\\'
+      if (match === '\\$') return '$'
+      if (match === '$?') return String(lastExitCode)
+      const name = (braced ?? bare) as string
+      const value = vars(name)
+      if (op !== undefined && (value === undefined || (op === ':-' && value === ''))) {
+        return expandVars(fallback ?? '', vars, lastExitCode)
+      }
+      if (value === undefined) throw new UnboundVariable(name)
+      return value
+    },
+  )
 }
 
 /** Variable-expand a quote-masked word: the unquoted part and the
@@ -417,55 +464,71 @@ function expandVars(text: string, env: Record<string, string>, lastExitCode: num
 function expandMasked(
   masked: string,
   map: Map<string, string>,
-  env: Record<string, string>,
+  vars: Variables,
   lastExitCode: number,
 ): string {
-  const expanded = expandVars(masked, env, lastExitCode)
+  const expanded = expandVars(masked, vars, lastExitCode)
   for (const [token, original] of map) {
     if (original[0] === '"') {
-      map.set(token, `"${expandVars(original.slice(1, -1), env, lastExitCode)}"`)
+      map.set(token, `"${expandVars(original.slice(1, -1), vars, lastExitCode)}"`)
     }
   }
   return expanded
 }
 
-/** Expand variables in one word (a redirect target) and strip its
- *  quotes. No globbing, no word removal. */
-function expandWord(word: string, env: Record<string, string>, lastExitCode: number): string {
+/** `masked`'s brace expansion, each word with the placeholders it holds
+ *  (a map of its own, as expansion rewrites the double-quoted ones). */
+function braced(masked: string, map: ReadonlyMap<string, string>): [string, Map<string, string>][] {
+  return expandBraces(masked).map((word) => [
+    word,
+    new Map([...map].filter(([token]) => word.includes(token))),
+  ])
+}
+
+/** Expand braces and variables in one word (a redirect target) and
+ *  strip its quotes. No globbing, no word removal; braces that make
+ *  more than one word are an error, as in bash. */
+function expandWord(word: string, vars: Variables, lastExitCode: number): string {
   const { masked, map } = maskQuotes(word)
-  return unmaskAndUnquote(expandMasked(masked, map, env, lastExitCode), map)
+  const words = braced(masked, map)
+  if (words.length !== 1) throw new TerminalError(`${word}: ambiguous redirect`)
+  const [only, own] = words[0] as [string, Map<string, string>]
+  return unmaskAndUnquote(expandMasked(only, own, vars, lastExitCode), own)
 }
 
 /**
- * Expand variables, then glob. Variables come first, so `$?` never
- * reads as a glob `?`. A fully unquoted word that expands to nothing is
- * removed (`echo a $UNSET b` has two args, not three); one with an
- * unquoted `*`, `?` or `[...]` is expanded as bash does (`./pathglob`),
- * and stays as typed if nothing matches.
+ * Expand braces, then variables, then glob, as bash does. Variables
+ * come before globs, so `$?` never reads as a glob `?`. A fully
+ * unquoted word that expands to nothing is removed (`echo a $EMPTY b`
+ * has two args, not three); one with an unquoted `*`, `?` or `[...]` is
+ * expanded as bash does (`./pathglob`), and stays as typed if nothing
+ * matches.
  */
 async function expandArgs(
   args: readonly string[],
   fs: FileSystem,
-  env: Record<string, string>,
+  vars: Variables,
   lastExitCode: number,
 ): Promise<string[]> {
   const out: string[] = []
   for (const arg of args) {
-    const { masked, map } = maskQuotes(arg)
-    const expanded = expandMasked(masked, map, env, lastExitCode)
-    if (map.size === 0) {
-      if (expanded === '' && arg !== '') continue
-      if (hasMagic(expanded)) {
-        try {
-          const matches = await expandPathname(expanded, fs)
-          out.push(...(matches.length > 0 ? matches : [expanded]))
-        } catch {
-          out.push(expanded)
+    const { masked, map: quoted } = maskQuotes(arg)
+    for (const [word, map] of braced(masked, quoted)) {
+      const expanded = expandMasked(word, map, vars, lastExitCode)
+      if (map.size === 0) {
+        if (expanded === '' && arg !== '') continue
+        if (hasMagic(expanded)) {
+          try {
+            const matches = await expandPathname(expanded, fs)
+            out.push(...(matches.length > 0 ? matches : [expanded]))
+          } catch {
+            out.push(expanded)
+          }
+          continue
         }
-        continue
       }
+      out.push(unmaskAndUnquote(expanded, map))
     }
-    out.push(unmaskAndUnquote(expanded, map))
   }
   return out
 }

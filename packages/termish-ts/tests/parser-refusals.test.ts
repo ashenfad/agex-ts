@@ -1,7 +1,8 @@
 /**
- * What the parser refuses, with one diagnostic that says what to do
- * instead (control flow, function definitions), and comments. Ported from
- * termish-py's test_parser.py and test_heredoc.py.
+ * What the parser refuses, with a diagnostic that says where and what to
+ * do instead (control flow, function definitions, assignments, `$(...)`
+ * and `$((...))`), every one in the script at once, and comments. Ported
+ * from termish-py's test_parser.py and test_heredoc.py.
  */
 
 import { describe, expect, it } from 'vitest'
@@ -34,19 +35,24 @@ describe('control flow', () => {
     ['esac', ''],
   ])('refuses %s in command position', (keyword, advice) => {
     const message = parseError(`${keyword} whatever`).message
-    expect(message.startsWith(`${keyword}: control flow is not supported`)).toBe(true)
+    expect(message.startsWith(`line 1, col 1: ${keyword}: control flow is not supported`)).toBe(
+      true,
+    )
     if (advice) expect(message).toContain(advice)
   })
 
   it('reports a loop once, not once per keyword', () => {
     expect(parseError('for f in a b; do echo $f; done').message).toBe(
-      'for: control flow is not supported; use xargs or find -exec for iteration',
+      'line 1, col 1: for: control flow is not supported; use xargs or find -exec for iteration',
+    )
+    expect(parseError('for f in a b\ndo\n  echo $f\ndone').message).toBe(
+      'line 1, col 1: for: control flow is not supported; use xargs or find -exec for iteration',
     )
   })
 
   it('points a conditional at test and the operators', () => {
     expect(parseError('if [ -f a ]; then echo y; fi').message).toBe(
-      'if: control flow is not supported; test with [ ... ] and branch with && and || instead',
+      'line 1, col 1: if: control flow is not supported; test with [ ... ] and branch with && and || instead',
     )
   })
 
@@ -97,17 +103,60 @@ describe('control flow', () => {
   })
 })
 
+describe('where, and how many', () => {
+  it('names the line and column of each, in order', () => {
+    expect(parseError('echo a\necho $((2+3))\nN=3\necho "x $(date)"').message).toBe(
+      [
+        'line 2, col 6: arithmetic expansion $((...)) is not supported; compute it in run_ts',
+        "line 3, col 1: N=3: variable assignment is not supported; write the value where it's used, or compute it in run_ts",
+        "line 4, col 9: Command substitution '$(...)' is not supported; run the inner command separately",
+      ].join('\n'),
+    )
+  })
+
+  it('counts lines and columns in the script as written', () => {
+    // a continuation, a quoted span and a heredoc body before the problem
+    const script = 'echo "a b" \\\n  c\ncat <<EOF\nbody\nEOF\n  if x'
+    expect(parseError(script).message).toMatch(/^line 6, col 3: if: /)
+  })
+
+  it('reports a structural error with the problems before it', () => {
+    expect(parseError('N=1\necho a | | b').message).toBe(
+      [
+        "line 1, col 1: N=1: variable assignment is not supported; write the value where it's used, or compute it in run_ts",
+        "line 2, col 10: Expected command after '|', got '|'",
+      ].join('\n'),
+    )
+  })
+
+  it('runs nothing when anything is reported', async () => {
+    const fs = new MemoryFS()
+    await expect(execute('echo hi > a.txt\necho $((1))', fs)).rejects.toThrow(ParseError)
+    expect(await fs.exists('/a.txt')).toBe(false)
+  })
+
+  it('sees assignments as a prefix and after a pipe, not as arguments', () => {
+    expect(parseError('N=3 echo hi').message).toContain('N=3: variable assignment')
+    expect(parseError('echo | X="a b" cat').message).toContain('X="a b": variable assignment')
+    expect(() => toScript('echo N=3; env A=1; [ a = b ]')).not.toThrow()
+  })
+
+  it('leaves $(...) and $((...)) alone in single quotes and escaped', () => {
+    expect(() => toScript("echo '$((1))' \\$(x) '$(y)'")).not.toThrow()
+  })
+})
+
 describe('function definitions', () => {
   it('refuses the function keyword', () => {
     expect(parseError('function greet { echo hi; }').message).toMatch(
-      /^function: function definitions/,
+      /^line 1, col 1: function: function definitions/,
     )
   })
 
   it.each(['greet() { echo hi; }', 'greet () { echo hi; }', 'greet( ) { echo hi; }'])(
     'refuses %s',
     (script) => {
-      expect(parseError(script).message).toMatch(/^greet\(\): function definitions/)
+      expect(parseError(script).message).toMatch(/^line 1, col 1: greet\(\): function definitions/)
     },
   )
 

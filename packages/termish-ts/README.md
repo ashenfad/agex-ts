@@ -22,7 +22,13 @@ A virtual terminal that runs inside your application. Parses shell text (`ls -la
   and the transcript so far (`partialOutput`).
 - **Variables:** `$NAME`, `${NAME}` and `$?`, from the `env` passed to
   `execute` and shared with commands as `ctx.env`. Single quotes keep
-  them literal; a value with spaces is never split into words.
+  them literal; a value with spaces is never split into words. An unset
+  variable stops the script (`NAME: unbound variable`), as under bash's
+  `set -u`; `${NAME:-word}` and `${NAME-word}` give a default. `$PWD` is
+  the current directory; a host should pass `HOME`.
+- **Braces:** `{a,b}` lists and `{1..3}`, `{a..e}`, `{01..10}`,
+  `{1..10..2}` sequences expand before variables and globs; a brace
+  with nothing to expand (`{}`, `{x}`) stays literal.
 - **Globbing as bash does it:** `*`, `?` and `[...]` match within one
   path segment, dotfiles only for a pattern starting with a dot, `**`
   across directories, a trailing `/` for directories only. Matches
@@ -35,8 +41,10 @@ A virtual terminal that runs inside your application. Parses shell text (`ls -la
   `\(...\)`, `\|`) unless given `-E`; `grep` exits 1 when nothing
   matches and 2 on an error.
 - **Refused, with advice:** loops, conditionals, `case`, function
-  definitions and `$(...)` are parse errors that say what to use
-  instead (xargs, `find -exec`, `&&` / `||`).
+  definitions, variable assignment, `$(...)` and `$((...))` are parse
+  errors that say where they are (line and column) and what to use
+  instead (xargs, `find -exec`, `&&` / `||`). Every one in a script is
+  reported at once, and nothing runs.
 
 Heredoc bodies are extracted before tokenization, so quotes, pipes, redirects,
 and backslashes inside them are literal. Bare, single-quoted, and double-quoted

@@ -37,6 +37,10 @@ A virtual terminal that runs inside your application. Parses shell text (`ls -la
 - **Comments:** an unquoted `#` at the start of a word.
 - **Conditionals:** `test` and `[` (file, string and integer tests,
   `!`, `-a`, `-o`, parentheses), for branching with `&&` and `||`.
+- **What's here:** `help` lists every command, a host's own included
+  (one describes itself with a `description` string on its handler),
+  and `help NAME` shows how one is used; `which` and `command -v` say
+  whether a command exists.
 - **GNU regexes:** `grep` and `sed` read POSIX BRE (`\+`, `\{n\}`,
   `\(...\)`, `\|`) unless given `-E`; `grep` exits 1 when nothing
   matches and 2 on an error.

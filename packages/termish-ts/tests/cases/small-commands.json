@@ -1,0 +1,473 @@
+[
+  {
+    "name": "seq counts to LAST",
+    "script": "seq 3",
+    "stdout": "1\n2\n3\n"
+  },
+  {
+    "name": "seq from FIRST",
+    "script": "seq 2 4",
+    "stdout": "2\n3\n4\n"
+  },
+  {
+    "name": "seq by INCR",
+    "script": "seq 1 2 7",
+    "stdout": "1\n3\n5\n7\n"
+  },
+  {
+    "name": "seq counts down",
+    "script": "seq 5 -2 1",
+    "stdout": "5\n3\n1\n"
+  },
+  {
+    "name": "seq -s joins",
+    "script": "seq -s , 1 3",
+    "stdout": "1,2,3\n"
+  },
+  {
+    "name": "seq -s attached",
+    "script": "seq -s: 1 3",
+    "stdout": "1:2:3\n"
+  },
+  {
+    "name": "seq -w pads",
+    "script": "seq -w 8 10",
+    "stdout": "08\n09\n10\n"
+  },
+  {
+    "name": "seq -w pads past a sign",
+    "script": "seq -w -1 1",
+    "stdout": "-1\n00\n01\n"
+  },
+  {
+    "name": "seq keeps INCR's decimals",
+    "script": "seq 0 0.25 1",
+    "stdout": "0.00\n0.25\n0.50\n0.75\n1.00\n"
+  },
+  {
+    "name": "seq reaches LAST exactly",
+    "script": "seq 0 0.1 0.3",
+    "stdout": "0.0\n0.1\n0.2\n0.3\n"
+  },
+  {
+    "name": "seq past LAST at once writes nothing",
+    "script": "seq 5 1",
+    "stdout": ""
+  },
+  {
+    "name": "seq refuses a zero increment",
+    "script": "seq 1 0 3",
+    "error": "invalid Zero increment value: '0'",
+    "exitCode": 1
+  },
+  {
+    "name": "seq refuses a non-number",
+    "script": "seq x",
+    "error": "seq: invalid floating point argument: 'x'",
+    "exitCode": 1
+  },
+  {
+    "name": "seq needs an operand",
+    "script": "seq",
+    "error": "seq: missing operand",
+    "exitCode": 1
+  },
+  {
+    "name": "paste joins files by tabs",
+    "script": "paste a b",
+    "files": {
+      "a": "1\n2\n3\n",
+      "b": "x\ny\n"
+    },
+    "stdout": "1\tx\n2\ty\n3\t\n"
+  },
+  {
+    "name": "paste -d",
+    "script": "paste -d , a b",
+    "files": {
+      "a": "1\n2\n3\n",
+      "b": "x\ny\n"
+    },
+    "stdout": "1,x\n2,y\n3,\n"
+  },
+  {
+    "name": "paste -d cycles",
+    "script": "paste -d ',:' a b a",
+    "files": {
+      "a": "1\n2\n3\n",
+      "b": "x\ny\n"
+    },
+    "stdout": "1,x:1\n2,y:2\n3,:3\n"
+  },
+  {
+    "name": "paste -s",
+    "script": "paste -s a",
+    "files": {
+      "a": "1\n2\n3\n",
+      "b": "x\ny\n"
+    },
+    "stdout": "1\t2\t3\n"
+  },
+  {
+    "name": "paste -s per file",
+    "script": "paste -s -d , a b",
+    "files": {
+      "a": "1\n2\n3\n",
+      "b": "x\ny\n"
+    },
+    "stdout": "1,2,3\nx,y\n"
+  },
+  {
+    "name": "paste - - pairs stdin's lines",
+    "script": "printf 'a\\nb\\nc\\nd\\n' | paste - -",
+    "stdout": "a\tb\nc\td\n"
+  },
+  {
+    "name": "comm three columns",
+    "script": "comm f1 f2",
+    "files": {
+      "f1": "a\nb\nd\n",
+      "f2": "b\nc\nd\n"
+    },
+    "stdout": "a\n\t\tb\n\tc\n\t\td\n"
+  },
+  {
+    "name": "comm -12 lines in both",
+    "script": "comm -12 f1 f2",
+    "files": {
+      "f1": "a\nb\nd\n",
+      "f2": "b\nc\nd\n"
+    },
+    "stdout": "b\nd\n"
+  },
+  {
+    "name": "comm -3 lines in one",
+    "script": "comm -3 f1 f2",
+    "files": {
+      "f1": "a\nb\nd\n",
+      "f2": "b\nc\nd\n"
+    },
+    "stdout": "a\n\tc\n"
+  },
+  {
+    "name": "comm reads stdin for -",
+    "script": "printf 'b\\nc\\n' | comm -23 f1 -",
+    "files": {
+      "f1": "a\nb\nd\n",
+      "f2": "b\nc\nd\n"
+    },
+    "stdout": "a\nd\n"
+  },
+  {
+    "name": "comm needs two files",
+    "script": "comm f1",
+    "files": {
+      "f1": "a\nb\nd\n",
+      "f2": "b\nc\nd\n"
+    },
+    "error": "comm: missing operand",
+    "exitCode": 1
+  },
+  {
+    "name": "rev stdin",
+    "script": "echo hello | rev",
+    "stdout": "olleh\n"
+  },
+  {
+    "name": "rev a file",
+    "script": "rev f",
+    "files": {
+      "f": "abc\nxyz\n"
+    },
+    "stdout": "cba\nzyx\n"
+  },
+  {
+    "name": "md5sum a file",
+    "script": "md5sum f",
+    "files": {
+      "f": "hello\n"
+    },
+    "stdout": "b1946ac92492d2347c6235b4d2611184  f\n"
+  },
+  {
+    "name": "md5sum stdin",
+    "script": "printf abc | md5sum",
+    "stdout": "900150983cd24fb0d6963f7d28e17f72  -\n"
+  },
+  {
+    "name": "md5sum empty",
+    "script": "printf '' | md5sum",
+    "stdout": "d41d8cd98f00b204e9800998ecf8427e  -\n"
+  },
+  {
+    "name": "sha256sum a file",
+    "script": "sha256sum f",
+    "files": {
+      "f": "hello\n"
+    },
+    "stdout": "5891b5b522d5df086d0ff0b110fbd9d21bb4fc7163af34d08286a2e846f6be03  f\n"
+  },
+  {
+    "name": "md5sum -c matches",
+    "script": "md5sum f > sums && md5sum -c sums",
+    "files": {
+      "f": "hello\n"
+    },
+    "stdout": "f: OK\n"
+  },
+  {
+    "name": "md5sum -c finds a change",
+    "script": "md5sum -c sums",
+    "files": {
+      "f": "changed\n",
+      "sums": "b1946ac92492d2347c6235b4d2611184  f\n"
+    },
+    "stdout": "f: FAILED\n",
+    "error": "md5sum: WARNING: 1 computed checksum did NOT match",
+    "exitCode": 1
+  },
+  {
+    "name": "md5sum a missing file",
+    "script": "md5sum nope",
+    "error": "md5sum: nope: No such file or directory",
+    "exitCode": 1
+  },
+  {
+    "name": "du sums directories",
+    "script": "du d",
+    "files": {
+      "d/a.txt": "0123456789",
+      "d/sub/b.txt": "abcde"
+    },
+    "stdout": "5\td/sub\n15\td\n"
+  },
+  {
+    "name": "du -a lists files too",
+    "script": "du -a d",
+    "files": {
+      "d/a.txt": "0123456789",
+      "d/sub/b.txt": "abcde"
+    },
+    "stdout": "10\td/a.txt\n5\td/sub/b.txt\n5\td/sub\n15\td\n"
+  },
+  {
+    "name": "du -s summarizes",
+    "script": "du -s d",
+    "files": {
+      "d/a.txt": "0123456789",
+      "d/sub/b.txt": "abcde"
+    },
+    "stdout": "15\td\n"
+  },
+  {
+    "name": "du -sc totals",
+    "script": "du -sc d d/sub",
+    "files": {
+      "d/a.txt": "0123456789",
+      "d/sub/b.txt": "abcde"
+    },
+    "stdout": "15\td\n5\td/sub\n20\ttotal\n"
+  },
+  {
+    "name": "du a file",
+    "script": "du d/a.txt",
+    "files": {
+      "d/a.txt": "0123456789",
+      "d/sub/b.txt": "abcde"
+    },
+    "stdout": "10\td/a.txt\n"
+  },
+  {
+    "name": "du a missing path",
+    "script": "du nope",
+    "error": "du: cannot access 'nope': No such file or directory",
+    "exitCode": 1
+  },
+  {
+    "name": "stat -c name, size, type",
+    "script": "stat -c '%n %s %F' f",
+    "files": {
+      "f": "hello\n"
+    },
+    "stdout": "f 6 regular file\n"
+  },
+  {
+    "name": "stat an empty file's type",
+    "script": "stat -c %F e",
+    "files": {
+      "e": ""
+    },
+    "stdout": "regular empty file\n"
+  },
+  {
+    "name": "stat a directory's type",
+    "script": "stat -c %F d",
+    "files": {
+      "d/a.txt": "0123456789",
+      "d/sub/b.txt": "abcde"
+    },
+    "stdout": "directory\n"
+  },
+  {
+    "name": "stat -c %Y is seconds",
+    "script": "stat -c %Y f",
+    "files": {
+      "f": "hello\n"
+    },
+    "stdoutRegex": "^\\d+\\n$"
+  },
+  {
+    "name": "stat's block",
+    "script": "stat f",
+    "files": {
+      "f": "hello\n"
+    },
+    "stdoutRegex": "^  File: f\\n  Size: 6\\n  Type: regular file\\nModify: \\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d [+-]\\d{4}\\n Birth: \\d{4}-\\d\\d-\\d\\d \\d\\d:\\d\\d:\\d\\d [+-]\\d{4}\\n$"
+  },
+  {
+    "name": "stat a missing path",
+    "script": "stat nope",
+    "error": "stat: cannot stat 'nope': No such file or directory",
+    "exitCode": 1
+  },
+  {
+    "name": "realpath resolves against cwd",
+    "script": "realpath x.txt ../w/./x.txt",
+    "files": {
+      "/w/x.txt": ""
+    },
+    "cwd": "/w",
+    "stdout": "/w/x.txt\n/w/x.txt\n"
+  },
+  {
+    "name": "realpath a new name in a real directory",
+    "script": "realpath new.txt",
+    "files": {
+      "/w/x.txt": ""
+    },
+    "cwd": "/w",
+    "stdout": "/w/new.txt\n"
+  },
+  {
+    "name": "realpath -m needs nothing",
+    "script": "realpath -m /a/b/../c",
+    "stdout": "/a/c\n"
+  },
+  {
+    "name": "realpath refuses a missing directory",
+    "script": "realpath nope/x",
+    "error": "realpath: nope/x: No such file or directory",
+    "exitCode": 1
+  },
+  {
+    "name": "realpath -e refuses a missing path",
+    "script": "realpath -e nope",
+    "error": "realpath: nope: No such file or directory",
+    "exitCode": 1
+  },
+  {
+    "name": "date +FORMAT",
+    "script": "date +%Y",
+    "stdoutRegex": "^\\d{4}\\n$"
+  },
+  {
+    "name": "date -u's offset",
+    "script": "date -u +%H:%M:%S%z",
+    "stdoutRegex": "^\\d\\d:\\d\\d:\\d\\d\\+0000\\n$"
+  },
+  {
+    "name": "date -I",
+    "script": "date -I",
+    "stdoutRegex": "^\\d{4}-\\d\\d-\\d\\d\\n$"
+  },
+  {
+    "name": "date -Iseconds",
+    "script": "date -u -Iseconds",
+    "stdoutRegex": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d\\+00:00\\n$"
+  },
+  {
+    "name": "date --iso-8601=minutes",
+    "script": "date -u --iso-8601=minutes",
+    "stdoutRegex": "^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d\\+00:00\\n$"
+  },
+  {
+    "name": "date's default",
+    "script": "date -u",
+    "stdoutRegex": "^[A-Z][a-z]{2} [A-Z][a-z]{2} [ \\d]\\d \\d\\d:\\d\\d:\\d\\d UTC \\d{4}\\n$"
+  },
+  {
+    "name": "date -R",
+    "script": "date -u -R",
+    "stdoutRegex": "^[A-Z][a-z]{2}, \\d\\d [A-Z][a-z]{2} \\d{4} \\d\\d:\\d\\d:\\d\\d \\+0000\\n$"
+  },
+  {
+    "name": "date %s",
+    "script": "date +%s",
+    "stdoutRegex": "^\\d{10,}\\n$"
+  },
+  {
+    "name": "date keeps an unknown conversion",
+    "script": "date '+%Q %%'",
+    "stdout": "%Q %\n"
+  },
+  {
+    "name": "date refuses -d",
+    "script": "date -d yesterday",
+    "error": "date: -d/--date is not supported",
+    "exitCode": 1
+  },
+  {
+    "name": "date refuses setting the clock",
+    "script": "date 1015",
+    "error": "date: setting the date is not supported",
+    "exitCode": 1
+  },
+  {
+    "name": "which names what exists",
+    "script": "which ls seq",
+    "stdout": "ls\nseq\n"
+  },
+  {
+    "name": "which fails for what doesn't",
+    "script": "which nope",
+    "error": "which: no nope",
+    "exitCode": 1
+  },
+  {
+    "name": "command -v",
+    "script": "command -v cat",
+    "stdout": "cat\n"
+  },
+  {
+    "name": "command -v fails for what doesn't",
+    "script": "command -v nope",
+    "error": "command: nope: not found",
+    "exitCode": 1
+  },
+  {
+    "name": "command -V",
+    "script": "command -V ls",
+    "stdout": "ls is a builtin\n"
+  },
+  {
+    "name": "command runs one",
+    "script": "echo hi | command cat",
+    "stdout": "hi\n"
+  },
+  {
+    "name": "help NAME",
+    "script": "help seq",
+    "stdout": "seq - print a sequence of numbers\nusage: seq [-s SEP] [-w] [FIRST [INCR]] LAST\n"
+  },
+  {
+    "name": "help lists the commands",
+    "script": "help",
+    "stdoutRegex": "^Commands \\(help NAME shows how one is used\\):\\n(.+\\n)*seq +print a sequence of numbers\\n"
+  },
+  {
+    "name": "help for what doesn't exist",
+    "script": "help nope",
+    "error": "help: no such command: nope",
+    "exitCode": 1
+  }
+]

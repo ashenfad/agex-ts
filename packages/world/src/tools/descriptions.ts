@@ -17,7 +17,10 @@ heredocs (cmd <<EOF ... EOF), && || ;, quoting, comments, $NAME
 variables, and these commands: ls, cat, echo, printf, head, tail, tee,
 grep, find, sed, tr, sort, uniq, cut, wc, diff, xargs, tar, gzip, gunzip,
 zcat, zip, unzip, mkdir, cp, mv, rm, touch, pwd, cd, basename, dirname,
-file, test. No loops, functions or variable assignments: write those in
+realpath, stat, du, file, test, seq, paste, comm, rev, md5sum, sha256sum,
+date, which, command, help. \`help\` lists them all; \`help NAME\` shows
+one's usage.
+No loops, functions or variable assignments: write those in
 run_ts. cwd persists between calls.
 
 Braces expand ({a,b}, {1..3}). $HOME is the workspace root and $PWD the

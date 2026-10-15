@@ -9,6 +9,7 @@
 
 import type { CommandHandler } from '../context'
 import { gunzip, gzip, tar, unzip, zcat, zip } from './archive'
+import { awk } from './awk'
 import { md5sum, sha256sum } from './checksum'
 import { date } from './clock'
 import { bracket, test } from './conditional'
@@ -57,6 +58,8 @@ export const BUILTINS: ReadonlyMap<string, CommandHandler> = new Map<string, Com
   ['diff', diff],
   // Sed
   ['sed', sed],
+  // Awk
+  ['awk', awk],
   // Meta
   ['xargs', xargs],
   // Archive

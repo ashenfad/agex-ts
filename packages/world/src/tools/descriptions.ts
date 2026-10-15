@@ -15,7 +15,7 @@ Run shell commands in your persistent workspace (a virtual computer with
 its own filesystem). Supports pipes, redirects (> >> < 2> 2>&1),
 heredocs (cmd <<EOF ... EOF), && || ;, quoting, comments, $NAME
 variables, and these commands: ls, cat, echo, printf, head, tail, tee,
-grep, find, sed, tr, sort, uniq, cut, wc, diff, xargs, tar, gzip, gunzip,
+grep, find, sed, awk, tr, sort, uniq, cut, wc, diff, xargs, tar, gzip, gunzip,
 zcat, zip, unzip, mkdir, cp, mv, rm, touch, pwd, cd, basename, dirname,
 realpath, stat, du, file, test, seq, paste, comm, rev, md5sum, sha256sum,
 date, which, command, help. \`help\` lists them all; \`help NAME\` shows

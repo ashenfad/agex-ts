@@ -41,9 +41,11 @@ export {
 } from './provider'
 export {
   AiSdkProvider,
+  REFUSED_TYPES,
   RELAYED,
   StreamError,
   TRANSIENT_STATUS,
+  TRANSIENT_TYPES,
   aiSdk,
   streamError,
   isLanguageModel,

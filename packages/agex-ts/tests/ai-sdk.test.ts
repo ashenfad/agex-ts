@@ -573,8 +573,86 @@ describe('an agent over an AI SDK model', () => {
     const out = await new Agent({ model }).session(ws).say('Go.')
     expect(out.status).toBe('failed')
     expect(out.message).toBe(
-      'the model provider refused the request mid-reply: invalid_request_error: max_tokens is too large',
+      'the model provider ended the reply with an error: invalid_request_error: max_tokens is too large',
     )
+  })
+
+  // what a local Anthropic-shaped proxy (Meridian) sends when upstream
+  // goes quiet: a timeout with no status or retry flag, then, on the
+  // third stall in a row, a refusal that still mentions the stall
+  const stalled = {
+    type: 'error',
+    error: { type: 'upstream_timeout', message: 'Upstream stalled: no data for 90001ms' },
+  }
+  const stallLimit = {
+    type: 'error',
+    error: {
+      type: 'invalid_request_error',
+      message:
+        'Upstream stalled with no data for 90001ms — the 3rd consecutive stall on this session (limit 90000ms). The retry limit has been reached. Modify or shorten the turn, raise MERIDIAN_UPSTREAM_IDLE_MS, or wait 90 seconds after the last stall before retrying it unchanged.',
+    },
+  }
+
+  it('interrupts a turn whose stream stalled mid-reply, and resumes it', async () => {
+    const store = await Store.open(new Memory())
+    const ws = await store.open('main')
+    const model = new Fake('anthropic.messages', 'claude-x', [
+      [...text('t1', 'Writing the vid'), { type: 'error', error: stalled }],
+      [...text('t2', 'Done.'), finish()],
+    ])
+    const session = new Agent({ model }).session(ws)
+    const out = await session.say('Make the video.')
+    expect(out.status).toBe('interrupted')
+    expect(out.message).toBe(
+      'the model provider failed mid-reply: upstream_timeout: Upstream stalled: no data for 90001ms',
+    )
+    expect((await session.resume()).status).toBe('completed')
+  })
+
+  it('fails a turn on a stall the provider says not to retry', async () => {
+    const store = await Store.open(new Memory())
+    const ws = await store.open('main')
+    const model = new Fake('anthropic.messages', 'claude-x', [
+      [...text('t1', 'Writing the vid'), { type: 'error', error: stallLimit }],
+    ])
+    const out = await new Agent({ model }).session(ws).say('Make the video.')
+    expect(out.status).toBe('failed')
+    expect(out.message).toBe(
+      `the model provider ended the reply with an error: invalid_request_error: ${stallLimit.error.message}`,
+    )
+  })
+
+  it('judges a stream error with no status or retry flag by its kind, then its words', () => {
+    const anthropic = new AiSdkProvider(new Fake('anthropic.messages', 'claude-x', []))
+    const judged = (type: string | null, message: string) =>
+      anthropic.transient(new StreamError(message, { type }))
+    // a known kind decides, whatever the message says
+    expect(judged('invalid_request_error', 'Upstream stalled with no data')).toBe(false)
+    expect(judged('authentication_error', 'timed out checking the key')).toBe(false)
+    expect(judged('overloaded_error', 'Overloaded')).toBe(true)
+    expect(judged('api_error', 'Internal server error')).toBe(true)
+    expect(judged('timeout_error', 'Request timed out')).toBe(true)
+    // a kind that says timeout, else words that say so
+    expect(judged('upstream_timeout', 'no data')).toBe(true)
+    expect(judged('proxy_error', 'Upstream stalled: no data for 90001ms')).toBe(true)
+    expect(judged(null, 'the request Timed Out')).toBe(true)
+    expect(judged('proxy_error', 'something broke')).toBe(false)
+    expect(judged(null, 'something broke')).toBe(false)
+    // a status or retry flag, when given, still decides
+    expect(anthropic.transient(new StreamError('stalled', { statusCode: 400 }))).toBe(false)
+    const flagged = new StreamError('stalled', { type: 'upstream_timeout', isRetryable: false })
+    expect(anthropic.transient(flagged)).toBe(false)
+    // as @ai-sdk/anthropic hands Meridian's payload on: no status, no flag
+    const handed = streamError({
+      message: stalled.error.message,
+      type: 'upstream_timeout',
+      code: undefined,
+      statusCode: undefined,
+      isRetryable: undefined,
+      data: stalled.error,
+    })
+    expect(handed).toMatchObject({ type: 'upstream_timeout', statusCode: null, isRetryable: null })
+    expect(anthropic.transient(handed)).toBe(true)
   })
 
   it("reads OpenRouter's mid-stream errors: code as the status, a relayed one transient", () => {

@@ -359,6 +359,7 @@ export class Session {
    * plus an estimate for what came after), and the fold in force.
    */
   async context(): Promise<{ tokens: number; fold: Fold | null }> {
+    await this.#ownConversation()
     const runs = await this.runs()
     return measureContext({
       ws: this.ws,
@@ -381,14 +382,17 @@ export class Session {
    * was nothing to fold (no turn since the last fold) or the summary
    * couldn't be written.
    *
-   * @throws Error while a turn runs, or when the last turn was
-   *   interrupted (resume or abandon it first).
+   * @throws Error while a turn runs on the workspace (from any
+   *   session), or when the last turn was interrupted (resume or abandon
+   *   it first); HarnessMismatchError when another harness wrote the
+   *   conversation.
    */
   async fold(
     opts: { signal?: AbortSignal; onEvent?: (event: TurnEvent) => void } = {},
   ): Promise<{ fold: Fold; usage: Usage | null } | null> {
-    if (this.#turn !== null)
-      throw new Error('a turn is running on this session: fold between turns')
+    if (this.#turn !== null || this.ws.currentTurn !== null) {
+      throw new Error('a turn is running on this workspace: fold between turns')
+    }
     // holds the turn's place: no turn starts meanwhile, and cancel stops it
     const state: TurnState = { abort: new AbortController(), reason: null }
     this.#turn = state
@@ -396,6 +400,7 @@ export class Session {
     opts.signal?.addEventListener('abort', stop, { once: true })
     try {
       if (opts.signal?.aborted) stop()
+      await this.#ownConversation()
       const runs = await this.runs()
       if (runs.at(-1)?.status === 'interrupted') {
         throw new Error('the last turn was interrupted: resume or abandon it before folding')
@@ -420,11 +425,26 @@ export class Session {
       const folds = await this.ws.compaction.folds()
       if (folds.length > before) made = folds.at(-1) ?? null
       if (made === null || made.through !== prepared.fold) return null
-      await this.ws.commit({ tool: 'fold', through: made.through, runs: made.runs })
+      // a turn another session opened meanwhile commits the fold with its
+      // own work; committing here would put that work under the fold
+      if (this.ws.currentTurn === null) {
+        await this.ws.commit({ tool: 'fold', through: made.through, runs: made.runs })
+      }
       return { fold: made, usage: prepared.usage }
     } finally {
       opts.signal?.removeEventListener('abort', stop)
       this.#turn = null
+    }
+  }
+
+  /** @throws HarnessMismatchError when another harness wrote the
+   *  workspace's conversation: agex reads and writes only its own. */
+  async #ownConversation(): Promise<void> {
+    const index = await this.ws.conversation.index()
+    if (index !== null && index.harness !== HARNESS) {
+      throw new HarnessMismatchError(
+        `session '${this.ws.session}' holds a conversation '${index.harness}' wrote; agex reads only its own`,
+      )
     }
   }
 
@@ -528,12 +548,7 @@ export class Session {
     const state: TurnState = { abort: new AbortController(), reason: null }
     this.#turn = state
     try {
-      const index = await this.ws.conversation.index()
-      if (index !== null && index.harness !== HARNESS) {
-        throw new HarnessMismatchError(
-          `session '${this.ws.session}' holds a conversation '${index.harness}' wrote; agex reads only its own`,
-        )
-      }
+      await this.#ownConversation()
       return await this.#turnBody(opts, emit, state)
     } finally {
       this.#turn = null

@@ -360,6 +360,24 @@ describe('folding now', () => {
     expect(await ws.compaction.folds()).toEqual([])
   })
 
+  it('refuses while the workspace has a turn open, whoever opened it', async () => {
+    const { agent: a } = agent([says('one'), summarizes(SUMMARY)], { budget: null })
+    await a.session(ws).say('First.')
+    // a turn another session of the workspace has open
+    await ws.turn('r-other', { harness: 'agex' })
+    await expect(a.session(ws).fold()).rejects.toThrow(/a turn is running on this workspace/)
+    expect(await ws.compaction.folds()).toEqual([])
+  })
+
+  it("leaves another harness's conversation alone", async () => {
+    const turn = await ws.turn('r1', { harness: 'other' })
+    await turn.end('completed', { body: { said: 'hi' } })
+    const { agent: a } = agent([summarizes(SUMMARY)], { budget: null })
+    await expect(a.session(ws).fold()).rejects.toThrow(/'other' wrote/)
+    await expect(a.session(ws).context()).rejects.toThrow(/'other' wrote/)
+    expect(await ws.compaction.folds()).toEqual([])
+  })
+
   it('waits for no turn: one running refuses it', async () => {
     const { agent: a } = agent([echo('WORK'), says('done')], { budget: null })
     const session = a.session(ws)

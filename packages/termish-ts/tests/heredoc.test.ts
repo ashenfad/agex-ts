@@ -57,7 +57,7 @@ describe('heredoc parsing', () => {
 
   it('rejects a missing delimiter', () => {
     expect(() => toScript('cat <<\nbody\nEOF')).toThrow(
-      new ParseError("Expected delimiter after '<<'"),
+      new ParseError("line 1, col 5: Expected delimiter after '<<'"),
     )
   })
 

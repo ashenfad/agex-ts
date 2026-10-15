@@ -369,13 +369,14 @@ export function commandDescriptions(profile: Profile): Map<string, string | unde
 }
 
 /**
- * The shell's variables for one call: the profile's variables, and each
- * secret as a reference to itself (`$TOKEN` expands to `${TOKEN}`), so
- * a command that takes secrets can find and fill it, and nothing else
- * ever sees its value.
+ * The shell's variables for one call: `HOME`, the session's root (unless
+ * the profile sets it), the profile's variables, and each secret as a
+ * reference to itself (`$TOKEN` expands to `${TOKEN}`), so a command
+ * that takes secrets can find and fill it, and nothing else ever sees
+ * its value. termish sets `$PWD` itself.
  */
-export function shellEnv(profile: Profile): Record<string, string> {
-  const env: Record<string, string> = { ...profile.variables }
+export function shellEnv(profile: Profile, home: string): Record<string, string> {
+  const env: Record<string, string> = { HOME: home, ...profile.variables }
   for (const name of Object.keys(profile.secrets ?? {})) env[name] = secretRef(name)
   return env
 }

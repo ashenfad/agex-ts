@@ -77,12 +77,35 @@ describe('$NAME and ${NAME}', () => {
     expect(await execute("echo '$NAME'", fs, { env: { NAME: 'alice' } })).toBe('$NAME\n')
   })
 
-  it('expand an unset variable to nothing', async () => {
-    expect(await execute('echo "[$UNSET]"', fs)).toBe('[]\n')
+  it('stop the script at an unset variable, as under set -u', async () => {
+    await expect(execute('echo "[$UNSET]"', fs)).rejects.toThrow('UNSET: unbound variable')
+    const err = await execute('echo before; rm -r $UNSET/x; echo after', fs).catch((e) => e)
+    expect(err).toBeInstanceOf(TerminalError)
+    expect(err.message).toBe('UNSET: unbound variable')
+    expect(err.exitCode).toBe(1)
+    expect(err.partialOutput).toBe('before\n')
+    // nothing after it runs, not even a rescue
+    await expect(execute('echo ${UNSET} || echo rescued', fs)).rejects.toThrow('unbound')
+  })
+
+  it('give a default for one that may be unset', async () => {
+    expect(await execute('echo "[${UNSET:-}]"', fs)).toBe('[]\n')
+    expect(await execute('echo ${UNSET:-fallback} ${UNSET-dash}', fs)).toBe('fallback dash\n')
+    const env = { EMPTY: '', NAME: 'alice' }
+    expect(await execute('echo "[${EMPTY:-x}] [${EMPTY-x}]"', fs, { env })).toBe('[x] []\n')
+    expect(await execute('echo ${NAME:-x} ${UNSET:-$NAME}', fs, { env })).toBe('alice alice\n')
   })
 
   it('remove an unquoted word that expands to nothing', async () => {
-    expect(await execute('echo a $UNSET b', fs)).toBe('a b\n')
+    expect(await execute('echo a $EMPTY b', fs, { env: { EMPTY: '' } })).toBe('a b\n')
+  })
+
+  it('have $PWD as the current directory, whatever the env says', async () => {
+    await execute('mkdir -p /w/sub', fs)
+    const env = { PWD: '/elsewhere' }
+    expect(await execute('cd /w; echo $PWD; cd sub && echo "${PWD}"', fs, { env })).toBe(
+      '/w\n/w/sub\n',
+    )
   })
 
   it('follow the double-quote backslash rule', async () => {
@@ -102,12 +125,13 @@ describe('$NAME and ${NAME}', () => {
 
   it('expand in the command name, and an empty name shifts away', async () => {
     expect(await execute('$CMD hello', fs, { env: { CMD: 'echo' } })).toBe('hello\n')
-    expect(await execute('$UNSET echo hi', fs)).toBe('hi\n')
+    expect(await execute('$EMPTY echo hi', fs, { env: { EMPTY: '' } })).toBe('hi\n')
   })
 
   it('make a command of nothing a silent no-op', async () => {
-    expect(await execute('$UNSET', fs)).toBe('')
-    expect(await execute('$UNSET; echo $?', fs)).toBe('0\n')
+    const env = { EMPTY: '' }
+    expect(await execute('$EMPTY', fs, { env })).toBe('')
+    expect(await execute('$EMPTY; echo $?', fs, { env })).toBe('0\n')
   })
 
   it('never split a value with spaces into words', async () => {
@@ -227,5 +251,21 @@ describe('escapes and quotes', () => {
 
   it('an escaped space still joins a word', async () => {
     expect(await execute('echo a\\ b', fs)).toBe('a b\n')
+  })
+})
+
+describe('braces', () => {
+  it('refuse to make more words than the limit', async () => {
+    await expect(execute('echo {1..200000}', fs)).rejects.toThrow('brace expansion: more than')
+    await expect(
+      execute(
+        'echo {a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}',
+        fs,
+      ),
+    ).rejects.toThrow('brace expansion: more than')
+  })
+
+  it('expand in the command name', async () => {
+    expect(await execute('{echo,hi}', fs)).toBe('hi\n')
   })
 })

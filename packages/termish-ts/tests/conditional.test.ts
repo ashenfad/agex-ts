@@ -18,7 +18,7 @@ describe('test and [', () => {
     // the conformance bar
     ['[ -f a.txt ] && echo yes', 'yes\n'],
     ['[ ! -d new ] && mkdir new && echo made', 'made\n'],
-    ['test "$X" = "" && echo empty', 'empty\n'],
+    ['test "${X:-}" = "" && echo empty', 'empty\n'],
     // file tests
     ['[ -e nope ]; echo $?', '1\n'],
     ['[ -s empty.txt ] || echo empty', 'empty\n'],
@@ -27,14 +27,14 @@ describe('test and [', () => {
     ['[ -x a.txt ] || echo not-runnable', 'not-runnable\n'],
     ['[ -r a.txt -a -w a.txt ] && echo rw', 'rw\n'],
     // an empty operand names no path: every file test on it is false
-    ['[ -e "$UNSET" ]; echo $?', '1\n'],
-    ['[ -d "$UNSET" ] || echo no-dir', 'no-dir\n'],
+    ['[ -e "${UNSET:-}" ]; echo $?', '1\n'],
+    ['[ -d "${UNSET:-}" ] || echo no-dir', 'no-dir\n'],
     ['[ -f "" ]; echo $?', '1\n'],
     ['[ -s "" ]; echo $?', '1\n'],
     ['[ -r "" -o -w "" -o -x "" ]; echo $?', '1\n'],
     // strings
-    ['[ -z "$X" ] && echo z', 'z\n'],
-    ['[ -n "$X" ] || echo unset', 'unset\n'],
+    ['[ -z "${X:-}" ] && echo z', 'z\n'],
+    ['[ -n "${X:-}" ] || echo unset', 'unset\n'],
     ['[ a == a ]; echo $?', '0\n'],
     ['[ a != a ]; echo $?', '1\n'],
     ['[ "" ]; echo $?', '1\n'],

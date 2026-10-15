@@ -965,6 +965,17 @@ class Cancelled extends Error {
 
 function describe(e: unknown): string {
   if (e instanceof Error) return e.message === '' ? e.name : `${e.name}: ${e.message}`
+  // a thrown object that isn't an Error: what it says, not "[object Object]"
+  if (typeof e === 'object' && e !== null) {
+    const message = (e as { message?: unknown }).message
+    if (typeof message === 'string' && message !== '') return message
+    try {
+      const text = JSON.stringify(e)
+      if (text !== undefined) return text.length > 300 ? `${text.slice(0, 300)}…` : text
+    } catch {
+      // circular: fall through
+    }
+  }
   return String(e)
 }
 

@@ -195,6 +195,11 @@
     "stdout": "0.12 2 4 0.1\n"
   },
   {
+    "name": "printf as C formats",
+    "script": "awk 'BEGIN { printf \"[%05s][%x][%u][%o]\\n\", \"ab\", -1, -1, -1 }'",
+    "stdout": "[000ab][ffffffffffffffff][18446744073709551615][1777777777777777777777]\n"
+  },
+  {
     "name": "count with array",
     "script": "awk '{n[$1]++} END {for (w in n) print w, n[w]}' words.txt | sort",
     "files": {

@@ -42,6 +42,18 @@ describe('PackRemote id', () => {
       'github:https://ghe.example/api/v3/owner/repo',
     )
   })
+
+  it("lowers the API's scheme and host but keeps its path's case", () => {
+    const at = (apiBase: string) =>
+      new PackRemote(new GithubClient({ token: 't', repo: 'o/r', apiBase }), new Memory()).id
+    expect(at('HTTPS://GHE.Example/GitHub/api/v3')).toBe(
+      'github:https://ghe.example/GitHub/api/v3/o/r',
+    )
+    expect(at('https://ghe.example/GitHub/api/v3')).not.toBe(
+      at('https://ghe.example/github/api/v3'),
+    )
+    expect(at('https://API.GitHub.com/')).toBe('github:o/r')
+  })
 })
 
 async function commitN(store: Memory, n: number, prefix: string): Promise<VersionedKV> {

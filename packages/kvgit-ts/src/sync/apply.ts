@@ -364,8 +364,9 @@ export async function setSyncHead(
     await store.set(SYNC_HEAD(branch), dumps(commit))
     return
   }
-  await store.set(SYNC_HEAD_AT(branch, id), dumps(commit))
-  await store.remove(SYNC_HEAD(branch))
+  await store.casMany(new Map(), new Map([[SYNC_HEAD_AT(branch, id), dumps(commit)]]), [
+    SYNC_HEAD(branch),
+  ])
 }
 
 /**
@@ -374,6 +375,7 @@ export async function setSyncHead(
  * taken up as this remote's own the first time it's read, so whichever
  * remote syncs first after an upgrade (the one it was kept for, in a
  * store that syncs with one) carries it on, and no other remote reads it.
+ * The take is one step: of two remotes reading it at once, one has it.
  */
 export async function claimSyncHead(
   store: KVStore,
@@ -382,11 +384,21 @@ export async function claimSyncHead(
 ): Promise<string | null> {
   const id = ownerId(remote)
   if (id === undefined) return readHead(store, SYNC_HEAD(branch))
-  const own = await readHead(store, SYNC_HEAD_AT(branch, id))
-  if (own !== null) return own
-  const shared = await readHead(store, SYNC_HEAD(branch))
-  if (shared !== null) await setSyncHead(store, branch, shared, id)
-  return shared
+  const ownKey = SYNC_HEAD_AT(branch, id)
+  const sharedKey = SYNC_HEAD(branch)
+  for (;;) {
+    const own = await readHead(store, ownKey)
+    if (own !== null) return own
+    const raw = await store.get(sharedKey)
+    if (raw === null) return null
+    const shared = safeLoads(raw)
+    if (typeof shared !== 'string') return null
+    const expected = new Map<string, Uint8Array | null>([
+      [sharedKey, raw],
+      [ownKey, null],
+    ])
+    if (await store.casMany(expected, new Map([[ownKey, raw]]), [sharedKey])) return shared
+  }
 }
 
 /**

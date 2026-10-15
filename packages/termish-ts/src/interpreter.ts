@@ -430,10 +430,9 @@ const VAR_RE =
 type Variables = (name: string) => string | undefined
 
 /** The variables one command expands with: `env`'s, with `PWD` the
- *  current directory. */
+ *  current directory (asked for only when it's read). */
 function variables(env: Record<string, string>, fs: FileSystem): Variables {
-  const cwd = fs.getcwd()
-  return (name) => (name === 'PWD' ? cwd : Object.hasOwn(env, name) ? env[name] : undefined)
+  return (name) => (name === 'PWD' ? fs.getcwd() : Object.hasOwn(env, name) ? env[name] : undefined)
 }
 
 /** Expand `$?`, `$NAME`, `${NAME}` and `${NAME:-word}` in `text`. An

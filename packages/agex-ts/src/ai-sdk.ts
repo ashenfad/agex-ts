@@ -62,6 +62,27 @@ export function isLanguageModel(value: unknown): value is LanguageModelV4 {
 /** HTTP statuses a provider may get past on the next request. */
 export const TRANSIENT_STATUS: ReadonlySet<number> = new Set([408, 409, 425, 429])
 
+/** Kinds of error (Anthropic's names) a retry may get past: an
+ *  overload, a server error, a rate limit, a timeout, a conflict. */
+export const TRANSIENT_TYPES: ReadonlySet<string> = new Set([
+  'overloaded_error',
+  'api_error',
+  'rate_limit_error',
+  'timeout_error',
+  'conflict_error',
+])
+
+/** Kinds of error (Anthropic's names) a retry won't get past: the
+ *  request, the key, the account or the resource is at fault. */
+export const REFUSED_TYPES: ReadonlySet<string> = new Set([
+  'invalid_request_error',
+  'authentication_error',
+  'permission_error',
+  'not_found_error',
+  'request_too_large',
+  'billing_error',
+])
+
 /** How OpenRouter words an error it passes on from the upstream provider. */
 export const RELAYED = 'Provider returned error'
 
@@ -303,7 +324,9 @@ export class AiSdkProvider implements Provider {
    * included), or a provider that couldn't be reached. Through
    * OpenRouter, an error relayed from the upstream provider is
    * transient whatever its status: the next request may route
-   * elsewhere. Anything else (a refused request, a content filter) is
+   * elsewhere. An error mid-reply with no status or retry flag is
+   * judged by its kind, else by whether it says it timed out or
+   * stalled. Anything else (a refused request, a content filter) is
    * not, and nor is a cancel.
    */
   transient(error: unknown): boolean {
@@ -311,11 +334,12 @@ export class AiSdkProvider implements Provider {
     if (error instanceof StreamError) {
       // mid-reply: as for HTTP, through OpenRouter a relayed error is
       // transient whatever its code; else the provider's own word, else
-      // its status
+      // its status, else its kind or words
       if (this.key === 'openrouter' && relayedStream(error)) return true
       if (error.isRetryable !== null) return error.isRetryable
       const code = error.statusCode
-      return code !== null && (TRANSIENT_STATUS.has(code) || code >= 500)
+      if (code !== null) return TRANSIENT_STATUS.has(code) || code >= 500
+      return transientKind(error)
     }
     if (APICallError.isInstance(error)) {
       if (this.key === 'openrouter' && relayed(error)) return true
@@ -326,12 +350,14 @@ export class AiSdkProvider implements Provider {
   }
 
   /** An HTTP error in words a person reads: refused or failed, its
-   *  status, and the provider's own message; an error mid-reply, the
-   *  same way. Null for anything else. */
+   *  status, and the provider's own message; an error mid-reply as a
+   *  failure or as the reply ended with an error, and the provider's
+   *  message. Null for anything else. */
   describe(error: unknown): string | null {
     if (error instanceof StreamError) {
-      const verdict = this.transient(error) ? 'failed' : 'refused the request'
-      return `the model provider ${verdict} mid-reply: ${error.message}`
+      return this.transient(error)
+        ? `the model provider failed mid-reply: ${error.message}`
+        : `the model provider ended the reply with an error: ${error.message}`
     }
     if (!APICallError.isInstance(error)) return null
     const detail = bodyMessage(error.responseBody) ?? error.message
@@ -612,6 +638,19 @@ function relayed(error: APICallError): boolean {
     e.message === RELAYED ||
     (typeof e.metadata === 'object' && e.metadata !== null && 'provider_name' in e.metadata)
   )
+}
+
+/** Whether an error mid-reply with no status or retry flag is one a
+ *  retry may get past: a known kind decides, whatever the message (a
+ *  refused request that mentions a stall stays refused); else a kind or
+ *  message that says it timed out or stalled. */
+function transientKind(error: StreamError): boolean {
+  const type = error.type
+  if (type !== null) {
+    if (REFUSED_TYPES.has(type)) return false
+    if (TRANSIENT_TYPES.has(type) || /timeout/i.test(type)) return true
+  }
+  return /timeout|timed out|stalled/i.test(`${type ?? ''} ${error.message}`)
 }
 
 /** Whether OpenRouter relayed a mid-stream error from the upstream

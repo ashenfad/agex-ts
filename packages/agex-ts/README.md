@@ -127,9 +127,9 @@ const agent = new Agent({ model, settings: { thinking: 'medium', maxTokens: 8000
   provider alone, so a session can change providers between turns.
 - **`settings.extra`** is provider options, by provider
   (`{ anthropic: { cacheControl: { type: 'ephemeral' } } }`).
-- **Errors:** a rate limit, an overload, a server error or a provider
-  out of reach interrupts the turn (`resume()` continues it); a refused
-  request fails it, in the provider's words.
+- **Errors:** a rate limit, an overload, a timeout or stall, a server
+  error or a provider out of reach interrupts the turn (`resume()`
+  continues it); a refused request fails it, in the provider's words.
 - **A `Provider` of your own** works too: `stream(messages, tools,
   settings, { signal })` yields deltas and one `Reply`. `ScriptedProvider`
   replies from a script, for tests.

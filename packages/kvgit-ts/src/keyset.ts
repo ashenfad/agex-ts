@@ -11,7 +11,7 @@
  * `Keyset` just gives the API a kvgit-friendly shape.
  */
 
-import { Hamt, type HamtOptions } from './hamt'
+import { Hamt, type HamtOptions, type NodeCache } from './hamt'
 import { pyDumpsBytes } from './pyjson'
 import type { KVStore, KeysetDiff, KeysetEntry, MetaEntry } from './types'
 
@@ -47,6 +47,8 @@ export interface KeysetOptions {
   prefix?: string
   bucketMax?: number
   pending?: Map<string, Uint8Array>
+  /** Parsed HAMT nodes to read through before the store. */
+  cache?: NodeCache
 }
 
 export interface KeysetUpdatedOptions {
@@ -165,6 +167,12 @@ export class Keyset {
     yield* this.#hamt.keys()
   }
 
+  /** Every key, one batched store read per tree level; see
+   *  `Hamt.keysBatched`. */
+  keysBatched(chunk?: number): AsyncIterable<string> {
+    return this.#hamt.keysBatched(chunk)
+  }
+
   async *values(): AsyncIterable<KeysetEntry> {
     for await (const [, entry] of this.items()) yield entry
   }
@@ -184,6 +192,18 @@ export class Keyset {
       }
     }
     const newHamt = await this.#hamt.updated({
+      updates: encodedUpdates,
+      ...(opts.removals !== undefined && { removals: opts.removals }),
+    })
+    return new Keyset(newHamt)
+  }
+
+  /** {@link updated} in one pass down the tree; see `Hamt.updatedBatch`. */
+  async updatedBatch(opts: KeysetUpdatedOptions = {}): Promise<Keyset> {
+    const encodedUpdates: Array<readonly [string, Uint8Array]> = []
+    for (const [k, entry] of opts.updates ?? [])
+      encodedUpdates.push([k, encodeEntry(entry)] as const)
+    const newHamt = await this.#hamt.updatedBatch({
       updates: encodedUpdates,
       ...(opts.removals !== undefined && { removals: opts.removals }),
     })
@@ -230,5 +250,6 @@ function hamtOpts(opts: KeysetOptions): HamtOptions {
     prefix: opts.prefix ?? Keyset.DEFAULT_PREFIX,
     ...(opts.bucketMax !== undefined && { bucketMax: opts.bucketMax }),
     ...(opts.pending !== undefined && { pending: opts.pending }),
+    ...(opts.cache !== undefined && { cache: opts.cache }),
   }
 }

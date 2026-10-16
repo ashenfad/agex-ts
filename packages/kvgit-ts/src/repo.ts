@@ -18,12 +18,14 @@ import {
   UnknownCommitError,
   UnknownTagError,
 } from './errors'
+import { NodeCache } from './hamt'
 import { Keyset } from './keyset'
 import type { CommitInfo, DiffResult, KVStore } from './types'
 import { walkHistory } from './versioned/helpers'
 import {
   type CorruptHeadRecoverer,
   type GcOptions,
+  type LazyKeysetOptions,
   VersionedKV,
   createBranchHead,
   deleteBranchHead,
@@ -115,6 +117,7 @@ export class Repo<V = Uint8Array> {
   readonly recover: CorruptHeadRecoverer | undefined
   /** @internal */
   readonly now: () => number
+  #nodeCache: NodeCache | null = null
 
   private constructor(store: KVStore, opts: RepoOptions<V>) {
     this.store = store
@@ -154,13 +157,33 @@ export class Repo<V = Uint8Array> {
   // --- Branches ---
 
   /**
+   * The node cache lazy worktrees share unless given their own. HAMT
+   * nodes are content addressed, so sharing is safe across branches.
+   */
+  get nodeCache(): NodeCache {
+    this.#nodeCache ??= new NodeCache()
+    return this.#nodeCache
+  }
+
+  /**
    * Check out branch `name` for work.
+   *
+   * With `lazy`, the worktree reads its keyset on demand rather than
+   * loading all of it: opening reads only the head's root, reads walk
+   * the tree through a bounded node cache (the repository's, unless
+   * `lazy.cache` names another), and a commit rewrites only the paths
+   * it changes. For keysets of tens of thousands of keys and up. A lazy
+   * worktree keeps no cache of decoded values; `keys()` reads the
+   * whole tree on every call.
    *
    * @throws UnknownBranchError if there is no such branch, unless
    *   `create` is set, which creates it at the empty root commit.
    * @throws CorruptHeadError if its HEAD is damaged beyond recovery.
    */
-  async worktree(name: string, opts: { create?: boolean } = {}): Promise<Worktree<V>> {
+  async worktree(
+    name: string,
+    opts: { create?: boolean; lazy?: boolean | LazyKeysetOptions } = {},
+  ): Promise<Worktree<V>> {
     rejectReservedBranch(name)
     if (opts.create === true && !(await this.branches.has(name))) {
       try {
@@ -170,11 +193,16 @@ export class Repo<V = Uint8Array> {
         if (!(e instanceof BranchExistsError)) throw e
       }
     }
+    const lazy =
+      opts.lazy === undefined || opts.lazy === false
+        ? undefined
+        : { cache: (opts.lazy === true ? undefined : opts.lazy.cache) ?? this.nodeCache }
     const engine = await VersionedKV.open(this.store, {
       branch: name,
       create: false,
       now: this.now,
       ...(this.recover !== undefined && { recoverFromCorruptHead: this.recover }),
+      ...(lazy !== undefined && { lazy }),
     })
     return new Worktree(this, engine)
   }

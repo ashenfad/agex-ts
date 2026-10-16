@@ -1,5 +1,12 @@
 export * from './types'
-export { Hamt, type HamtOptions, type UpdatedOptions } from './hamt'
+export {
+  Hamt,
+  type HamtNode,
+  type HamtOptions,
+  NodeCache,
+  type NodeCacheStats,
+  type UpdatedOptions,
+} from './hamt'
 export {
   Keyset,
   decodeEntry,
@@ -12,6 +19,7 @@ export {
   VersionedKV,
   repairHead,
   type CorruptHeadRecoverer,
+  type LazyKeysetOptions,
   type VersionedKVOptions,
 } from './versioned/kv'
 export {

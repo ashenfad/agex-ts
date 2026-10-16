@@ -72,11 +72,15 @@ row whose key is NULL, and anything outside the main database, so:
 
 - `installGuard(sqlite3, db, { label })` installs an authorizer that
   refuses `ATTACH`, `DETACH`, `VACUUM` and `VACUUM INTO`, virtual
-  tables (FTS5, R*Tree) and `load_extension()`, and keeps callers out
-  of `_kvsql_*` tables. `guard.run(fn)` turns a refusal into a
+  tables (FTS5, R*Tree), `load_extension()`, and setting the pragmas
+  that change how the file is written (`journal_mode`, `locking_mode`,
+  `synchronous`, `writable_schema`, `schema_version`, `page_size`,
+  `auto_vacuum`), and keeps callers out of `_kvsql_*` tables. `guard.run(fn)` turns a refusal into a
   `RefusedError` whose message says what to do instead;
   `guard.trusted(fn)` lifts the refusals for the package's own
-  statements. `guard.schemaChanged` reports DDL on the main database.
+  statements. `guard.schemaChanged` reports DDL on the main database,
+  and setting `PRAGMA user_version` or `application_id`, which the
+  session extension doesn't record either.
 - `checkSchema(db)`, run after a schema change, lists every table
   without a non-null `PRIMARY KEY`, so the transaction can be rolled
   back. `INTEGER PRIMARY KEY` and `WITHOUT ROWID` keys qualify; any

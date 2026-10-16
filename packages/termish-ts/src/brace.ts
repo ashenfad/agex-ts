@@ -6,7 +6,9 @@
  * (`src/{lib,test}` is `src/lib src/test`); lists nest (`{a,b{1,2}}`).
  * It runs before variables and globs, as in bash. A brace with neither
  * a top-level comma nor a sequence inside stays literal (`{}`, `{x}`,
- * so `find -exec cmd {} \;` keeps its `{}`), and so does `${NAME}`.
+ * so `find -exec cmd {} \;` keeps its `{}`), and so does a whole
+ * `${...}` with what's inside it (`${X:-a{b,c}}` gives `a{b,c}`), while
+ * braces after one still expand (`${N}{a,b}`).
  * Quoted text is a placeholder by now, so a brace inside quotes never
  * expands, nor an escaped one (the tokenizer quotes it).
  */
@@ -55,8 +57,15 @@ interface Brace {
 
 /** The leftmost brace that expands: its span and its items. */
 function firstBrace(word: string): Brace | null {
-  for (let start = word.indexOf('{'); start >= 0; start = word.indexOf('{', start + 1)) {
-    if (word[start - 1] === '$') continue
+  for (let start = 0; start < word.length; start++) {
+    if (word[start] === '$' && word[start + 1] === '{') {
+      // A `${...}` never brace-expands, nor anything inside it; one
+      // left open keeps just its own `{` literal.
+      const close = parameterEnd(word, start)
+      start = close >= 0 ? close : start + 1
+      continue
+    }
+    if (word[start] !== '{') continue
     const end = matching(word, start)
     if (end < 0) continue
     const inner = word.slice(start + 1, end)
@@ -66,6 +75,24 @@ function firstBrace(word: string): Brace | null {
     if (seq !== null) return { start, end, items: seq, sequence: true }
   }
   return null
+}
+
+/**
+ * The index of the `}` closing the `${` at `dollar`, or -1. As in bash,
+ * only a nested `${` pairs with a `}` inside one, so `${X:-a{b}c}` ends
+ * after `b`; a backslash keeps the character after it from counting.
+ */
+export function parameterEnd(text: string, dollar: number): number {
+  let depth = 0
+  for (let i = dollar; i < text.length; i++) {
+    const c = text[i]
+    if (c === '\\') i++
+    else if (c === '$' && text[i + 1] === '{') {
+      depth++
+      i++
+    } else if (c === '}' && --depth === 0) return i
+  }
+  return -1
 }
 
 /** The index of the `}` closing the `{` at `open`, or -1. */
@@ -100,34 +127,42 @@ const NUMBERS = /^(-?\d+)\.\.(-?\d+)(?:\.\.(-?\d+))?$/
 const LETTERS = /^([A-Za-z])\.\.([A-Za-z])(?:\.\.(-?\d+))?$/
 
 /** A sequence's items, or null when `inner` isn't one. A step's sign is
- *  ignored, as in bash: the ends say which way it runs. */
+ *  ignored, as in bash: the ends say which way it runs. The ends and the
+ *  step are exact integers, however long. */
 function sequence(inner: string): string[] | null {
   const numbers = NUMBERS.exec(inner)
   if (numbers !== null) {
     const [, a, b, s] = numbers as unknown as [string, string, string, string | undefined]
-    const from = Number(a)
-    const to = Number(b)
-    const step = Math.abs(Number(s ?? 1)) || 1
-    if (Math.abs(to - from) / step + 1 > BRACE_LIMIT) tooMany()
+    const from = BigInt(a)
+    const to = BigInt(b)
+    const step = stepOf(s)
+    if ((to >= from ? to - from : from - to) / step + 1n > BigInt(BRACE_LIMIT)) tooMany()
     // a leading zero on either end pads every item to the wider end
     const width = /^-?0\d/.test(a) || /^-?0\d/.test(b) ? Math.max(a.length, b.length) : 0
-    const pad = (n: number): string => {
-      const digits = String(Math.abs(n)).padStart(n < 0 ? width - 1 : width, '0')
-      return n < 0 ? `-${digits}` : digits
+    const pad = (n: bigint): string => {
+      const digits = String(n < 0n ? -n : n).padStart(n < 0n ? width - 1 : width, '0')
+      return n < 0n ? `-${digits}` : digits
     }
     return range(from, to, step).map(pad)
   }
   const letters = LETTERS.exec(inner)
   if (letters !== null) {
     const [, a, b, s] = letters as unknown as [string, string, string, string | undefined]
-    const step = Math.abs(Number(s ?? 1)) || 1
-    return range(a.charCodeAt(0), b.charCodeAt(0), step).map((c) => String.fromCharCode(c))
+    return range(BigInt(a.charCodeAt(0)), BigInt(b.charCodeAt(0)), stepOf(s)).map((c) =>
+      String.fromCharCode(Number(c)),
+    )
   }
   return null
 }
 
-function range(from: number, to: number, step: number): number[] {
-  const out: number[] = []
+/** A sequence's step: its size, 1 when absent or zero. */
+function stepOf(text: string | undefined): bigint {
+  const step = BigInt(text ?? 1)
+  return step < 0n ? -step : step === 0n ? 1n : step
+}
+
+function range(from: bigint, to: bigint, step: bigint): bigint[] {
+  const out: bigint[] = []
   if (from <= to) for (let n = from; n <= to; n += step) out.push(n)
   else for (let n = from; n >= to; n -= step) out.push(n)
   return out

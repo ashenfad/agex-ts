@@ -31,7 +31,7 @@
  */
 
 import type { Pipeline, Redirect, Script } from './ast'
-import { expandBraces } from './brace'
+import { expandBraces, parameterEnd } from './brace'
 import { BUILTINS } from './builtins/index'
 import { ByteStdin, ByteStdout, EMPTY, concat, decode, encode } from './bytes'
 import type { CommandContext, CommandHandler, CommandResult } from './context'
@@ -243,6 +243,18 @@ async function executePipeline(pipeline: Pipeline, run: Run): Promise<void> {
     }
     const [name, ...args] = words as [string, ...string[]]
 
+    // Every redirect's target is expanded and resolved before the
+    // command runs, as in bash: an unset variable or an ambiguous
+    // target stops it before it can do anything.
+    const paths = new Map<Redirect, { target: string; path: string }>()
+    for (const r of cmd.redirects) {
+      if (r.type === '<<' || r.type === '2>&1') continue
+      const target = expandWord(r.target, vars, lastExitCode)
+      paths.set(r, { target, path: resolve(target, fs.getcwd()) })
+    }
+    const pathOf = (r: Redirect): { target: string; path: string } =>
+      paths.get(r) as { target: string; path: string }
+
     // Input redirect: the last `<` or `<<` wins over the pipe.
     let stdinBytes = currentInput
     const inputRedirect = lastOf(cmd.redirects, ['<', '<<'])
@@ -251,8 +263,7 @@ async function executePipeline(pipeline: Pipeline, run: Run): Promise<void> {
         // Heredoc bodies are always literal: never expanded.
         stdinBytes = encode(inputRedirect.content ?? '')
       } else {
-        const target = expandWord(inputRedirect.target, vars, lastExitCode)
-        const path = resolve(target, fs.getcwd())
+        const { target, path } = pathOf(inputRedirect)
         if (path === DEV_NULL) {
           stdinBytes = EMPTY
         } else {
@@ -273,8 +284,7 @@ async function executePipeline(pipeline: Pipeline, run: Run): Promise<void> {
     // listing of the tree).
     const writeRedirects = async (data: Uint8Array): Promise<void> => {
       for (const r of outputRedirects) {
-        const target = expandWord(r.target, vars, lastExitCode)
-        const path = resolve(target, fs.getcwd())
+        const { path } = pathOf(r)
         if (path === DEV_NULL) continue
         try {
           await fs.write(path, data, r.type === '>>' ? 'a' : 'w')
@@ -356,8 +366,7 @@ async function executePipeline(pipeline: Pipeline, run: Run): Promise<void> {
     } else {
       // `2>file` truncates even when nothing was written, as in bash;
       // `2>>file` appends; /dev/null discards.
-      const target = expandWord(stderrRedirect.target, vars, lastExitCode)
-      const path = resolve(target, fs.getcwd())
+      const { path } = pathOf(stderrRedirect)
       if (path !== DEV_NULL) {
         try {
           await fs.write(path, encode(stderrText), stderrRedirect.type === '2>>' ? 'a' : 'w')
@@ -422,9 +431,10 @@ function withNewline(text: string): string {
 // `\d`, while `\\$NAME` is a backslash followed by an expansion.
 // `${NAME:-word}` and `${NAME-word}` give `word` (itself expanded) for
 // a variable that's unset (`-`), or unset or empty (`:-`): the way to
-// read one that may not be set.
-const VAR_RE =
-  /\\\\|\\\$|\$\?|\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?-)([^}]*))?\}|\$([A-Za-z_][A-Za-z0-9_]*)/g
+// read one that may not be set. `word` runs to the `}` that closes its
+// `${`, as in bash, so it may hold another (`${A:-${B}}`).
+const NAME_RE = /[A-Za-z_][A-Za-z0-9_]*/y
+const BRACED_RE = /\$\{([A-Za-z_][A-Za-z0-9_]*)(?:\}|(:?-))/y
 
 /** A variable's value, or undefined when it isn't set. */
 type Variables = (name: string) => string | undefined
@@ -440,21 +450,73 @@ function variables(env: Record<string, string>, fs: FileSystem): Variables {
  *  literal `$`, and `\\` a literal backslash. */
 function expandVars(text: string, vars: Variables, lastExitCode: number): string {
   if (!text.includes('$') && !text.includes('\\\\')) return text
-  return text.replace(
-    VAR_RE,
-    (match, braced?: string, op?: string, fallback?: string, bare?: string) => {
-      if (match === '\\\\') return '\\'
-      if (match === '\\$') return '$'
-      if (match === '$?') return String(lastExitCode)
-      const name = (braced ?? bare) as string
-      const value = vars(name)
-      if (op !== undefined && (value === undefined || (op === ':-' && value === ''))) {
-        return expandVars(fallback ?? '', vars, lastExitCode)
+  let out = ''
+  let i = 0
+  while (i < text.length) {
+    const c = text[i] as string
+    const next = text[i + 1]
+    if (c === '\\' && (next === '\\' || next === '$')) {
+      out += next
+      i += 2
+    } else if (c !== '$') {
+      out += c
+      i++
+    } else if (next === '?') {
+      out += String(lastExitCode)
+      i += 2
+    } else if (next === '{') {
+      const param = expandParameter(text, i, vars, lastExitCode)
+      if (param === null) {
+        out += c
+        i++
+      } else {
+        out += param.value
+        i = param.next
       }
-      if (value === undefined) throw new UnboundVariable(name)
-      return value
-    },
-  )
+    } else {
+      NAME_RE.lastIndex = i + 1
+      const name = NAME_RE.exec(text)?.[0]
+      if (name === undefined) {
+        out += c
+        i++
+      } else {
+        out += lookup(name, vars)
+        i += 1 + name.length
+      }
+    }
+  }
+  return out
+}
+
+/** The `${NAME}` or `${NAME:-word}` at `at` expanded, and the index
+ *  after it; null for any other `${` form, which stays literal. */
+function expandParameter(
+  text: string,
+  at: number,
+  vars: Variables,
+  lastExitCode: number,
+): { value: string; next: number } | null {
+  BRACED_RE.lastIndex = at
+  const m = BRACED_RE.exec(text)
+  if (m === null) return null
+  const name = m[1] as string
+  const op = m[2]
+  if (op === undefined) return { value: lookup(name, vars), next: at + m[0].length }
+  const end = parameterEnd(text, at)
+  if (end < 0) return null
+  const value = vars(name)
+  if (value === undefined || (op === ':-' && value === '')) {
+    const word = text.slice(at + m[0].length, end)
+    return { value: expandVars(word, vars, lastExitCode), next: end + 1 }
+  }
+  return { value, next: end + 1 }
+}
+
+/** `name`'s value; `UnboundVariable` when it isn't set. */
+function lookup(name: string, vars: Variables): string {
+  const value = vars(name)
+  if (value === undefined) throw new UnboundVariable(name)
+  return value
 }
 
 /** Variable-expand a quote-masked word: the unquoted part and the

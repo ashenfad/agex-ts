@@ -20,6 +20,21 @@
     "stdout": "1 2 3 a b c 01 02 03 1 4 7 10 3 2 1 -1 0 1\n"
   },
   {
+    "name": "a sequence's ends and step are exact integers, past 2**53 too",
+    "script": "echo {9007199254740992..9007199254740993} {-9007199254740993..-9007199254740992} {9007199254740990..9007199254740996..3}",
+    "stdout": "9007199254740992 9007199254740993 -9007199254740993 -9007199254740992 9007199254740990 9007199254740993 9007199254740996\n"
+  },
+  {
+    "name": "a stepped sequence is counted exactly against the limit",
+    "script": "echo {1..200000..2} | wc -w",
+    "stdout": "100000\n"
+  },
+  {
+    "name": "a sequence past the limit is an error",
+    "script": "echo {1..200002..2}",
+    "error": "brace expansion: more than 100000 words"
+  },
+  {
     "name": "a brace with nothing to expand stays literal",
     "script": "echo {} {x} a{b}c {a..} {",
     "stdout": "{} {x} a{b}c {a..} {\n"
@@ -36,22 +51,49 @@
   },
   {
     "name": "find -exec keeps its {}",
-    "files": { "/w/a.txt": "x\n" },
+    "files": {
+      "/w/a.txt": "x\n"
+    },
     "script": "find /w -name '*.txt' -exec cat {} \\;",
     "stdout": "x\n"
   },
   {
     "name": "braces expand before variables",
-    "env": { "N": "n" },
+    "env": {
+      "N": "n"
+    },
     "script": "echo ${N}{a,b}",
     "stdout": "na nb\n"
   },
   {
     "name": "so $N{1,2} names N1 and N2, as in bash",
-    "env": { "N": "n" },
+    "env": {
+      "N": "n"
+    },
     "script": "echo $N{1,2}",
     "error": "N1: unbound variable",
     "exitCode": 1
+  },
+  {
+    "name": "braces inside ${...} stay literal",
+    "script": "echo ${MISSING:-a{b,c}} ${MISSING:-{a,b}}",
+    "stdout": "a{b,c} {a,b}\n"
+  },
+  {
+    "name": "braces after a default still expand",
+    "env": {
+      "N": "n"
+    },
+    "script": "echo ${N:-x}{a,b} ${N}{c,d}",
+    "stdout": "na nb nc nd\n"
+  },
+  {
+    "name": "as in bash, only a nested ${ pairs with a } inside one",
+    "env": {
+      "N": "n"
+    },
+    "script": "echo ${X:-{a,b}c}{d,e} {x,${N:-a,b}}",
+    "stdout": "{a,bc}d {a,bc}e x n\n"
   },
   {
     "name": "a redirect that braces make two of is ambiguous",
@@ -59,21 +101,35 @@
     "error": "ambiguous redirect"
   },
   {
+    "name": "an ambiguous redirect stops its command before it runs",
+    "files": {
+      "/victim": ""
+    },
+    "script": "rm victim > f{1,2}; rm victim 2> g{1,2}; rm victim >> h{1,2}; ls",
+    "stdout": "f{1,2}: ambiguous redirect\ng{1,2}: ambiguous redirect\nh{1,2}: ambiguous redirect\nvictim\n"
+  },
+  {
     "name": "$PWD is the current directory, after each cd",
-    "files": { "/w/sub/f": "" },
+    "files": {
+      "/w/sub/f": ""
+    },
     "cwd": "/w",
     "script": "echo $PWD; cd sub; echo \"$PWD\"",
     "stdout": "/w\n/w/sub\n"
   },
   {
     "name": "$PWD is the current directory, whatever the env says",
-    "env": { "PWD": "/elsewhere" },
+    "env": {
+      "PWD": "/elsewhere"
+    },
     "script": "echo $PWD",
     "stdout": "/\n"
   },
   {
     "name": "$HOME is the host's",
-    "env": { "HOME": "/workspace" },
+    "env": {
+      "HOME": "/workspace"
+    },
     "script": "echo $HOME ${HOME}/x",
     "stdout": "/workspace /workspace/x\n"
   },
@@ -91,16 +147,43 @@
   },
   {
     "name": "rm -r $UNSET/x never runs as rm -r /x, nor its rescue",
-    "files": { "/x/keep": "" },
+    "files": {
+      "/x/keep": ""
+    },
     "script": "rm -r $UNSET/x || echo rescued",
     "stdout": "",
     "error": "UNSET: unbound variable"
   },
   {
     "name": "a default reads one that may be unset",
-    "env": { "EMPTY": "" },
+    "env": {
+      "EMPTY": ""
+    },
     "script": "echo \"${NOPE:-dflt}\" \"[${NOPE-}]\" \"[${EMPTY:-e}]\" \"[${EMPTY-e}]\"",
     "stdout": "dflt [] [e] []\n"
+  },
+  {
+    "name": "a default may hold another expansion",
+    "env": {
+      "INNER": "in",
+      "NAME": "alice"
+    },
+    "script": "echo ${OUTER:-${INNER}} ${UNSET:-x${NAME}y} \"${UNSET:-x${NAME}y}\" ${A:-${B:-${C:-deep}}}",
+    "stdout": "in xalicey xalicey deep\n"
+  },
+  {
+    "name": "a set variable's default is never read",
+    "env": {
+      "OUTER": "out"
+    },
+    "script": "echo ${OUTER:-${INNER}} \"${OUTER:-${NOPE}}\"",
+    "stdout": "out out\n"
+  },
+  {
+    "name": "an unset variable in a default that's read stops the script",
+    "script": "echo ${OUTER:-${NOPE}}",
+    "error": "NOPE: unbound variable",
+    "exitCode": 1
   },
   {
     "name": "single quotes keep a variable literal, set or not",

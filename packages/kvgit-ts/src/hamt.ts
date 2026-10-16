@@ -36,6 +36,107 @@ interface BranchNode {
 
 type Node = LeafNode | BranchNode
 
+/** A parsed HAMT node, as {@link NodeCache} holds it. */
+export type HamtNode = Node
+
+/** Counters a {@link NodeCache} keeps. */
+export interface NodeCacheStats {
+  hits: number
+  misses: number
+  evictions: number
+  /** Nodes held now. */
+  entries: number
+  /** Serialized bytes of the nodes held now. */
+  bytes: number
+}
+
+/**
+ * A bounded LRU of parsed HAMT nodes, by node hash.
+ *
+ * A node is named by the hash of its bytes, so an entry can never go
+ * stale: one cache can serve every keyset in a store, across commits,
+ * branches and handles. The bound is on the nodes' serialized size,
+ * a rough proxy for what they hold in memory.
+ */
+export class NodeCache {
+  readonly maxBytes: number
+  readonly #map = new Map<string, { node: Node; size: number }>()
+  #bytes = 0
+  #hits = 0
+  #misses = 0
+  #evictions = 0
+
+  constructor(opts: { maxBytes?: number } = {}) {
+    this.maxBytes = opts.maxBytes ?? 16 * 1024 * 1024
+  }
+
+  /** The node, marked most recently used; undefined (a miss) if absent. */
+  get(hash: string): Node | undefined {
+    const hit = this.#map.get(hash)
+    if (hit === undefined) {
+      this.#misses++
+      return undefined
+    }
+    this.#hits++
+    this.#map.delete(hash)
+    this.#map.set(hash, hit)
+    return hit.node
+  }
+
+  /** Hold `node` as most recently used, evicting the least recently used
+   *  nodes past the bound. */
+  set(hash: string, node: Node, size: number): void {
+    const prior = this.#map.get(hash)
+    if (prior !== undefined) {
+      this.#map.delete(hash)
+      this.#bytes -= prior.size
+    }
+    if (size > this.maxBytes) return
+    this.#map.set(hash, { node, size })
+    this.#bytes += size
+    while (this.#bytes > this.maxBytes) {
+      const [oldest, entry] = this.#map.entries().next().value as [string, { size: number }]
+      this.#map.delete(oldest)
+      this.#bytes -= entry.size
+      this.#evictions++
+    }
+  }
+
+  /** Parse and hold a node from its stored bytes. */
+  setBytes(hash: string, bytes: Uint8Array): void {
+    this.set(hash, parseNode(bytes), bytes.length)
+  }
+
+  stats(): NodeCacheStats {
+    return {
+      hits: this.#hits,
+      misses: this.#misses,
+      evictions: this.#evictions,
+      entries: this.#map.size,
+      bytes: this.#bytes,
+    }
+  }
+
+  resetStats(): void {
+    this.#hits = 0
+    this.#misses = 0
+    this.#evictions = 0
+  }
+
+  clear(): void {
+    this.#map.clear()
+    this.#bytes = 0
+  }
+}
+
+/** One key's change in a batched update: its new encoded value, or
+ *  null to remove it. */
+interface KeyChange {
+  readonly key: string
+  readonly kh: string
+  readonly value: string | null
+}
+
 const EMPTY_LEAF: LeafNode = { items: {}, kind: 'leaf' }
 
 /**
@@ -124,6 +225,9 @@ export interface HamtOptions {
   bucketMax?: number
   /** Initial pending node bytes (for reconstructing in-progress state). */
   pending?: Map<string, Uint8Array>
+  /** Parsed nodes to read through before the store. Nodes read from the
+   *  store are added to it. */
+  cache?: NodeCache
 }
 
 export interface UpdatedOptions {
@@ -156,6 +260,7 @@ export class Hamt {
   readonly prefix: string
   readonly bucketMax: number
   readonly pending: Map<string, Uint8Array>
+  readonly cache: NodeCache | null
 
   constructor(store: KVStore, root: string, opts: HamtOptions = {}) {
     const bucketMax = opts.bucketMax ?? 8
@@ -167,6 +272,17 @@ export class Hamt {
     this.prefix = opts.prefix ?? 'hamt:'
     this.bucketMax = bucketMax
     this.pending = opts.pending ?? new Map()
+    this.cache = opts.cache ?? null
+  }
+
+  /** Options for a view derived from this one. */
+  private derived(pending?: Map<string, Uint8Array>): HamtOptions {
+    return {
+      prefix: this.prefix,
+      bucketMax: this.bucketMax,
+      ...(pending !== undefined && { pending }),
+      ...(this.cache !== null && { cache: this.cache }),
+    }
   }
 
   /** Construct a fresh, empty HAMT. */
@@ -191,9 +307,13 @@ export class Hamt {
     const prefixed = this.prefix + nodeHash
     const fromPending = pending?.get(prefixed) ?? this.pending.get(prefixed)
     if (fromPending !== undefined) return parseNode(fromPending)
+    const cached = this.cache?.get(nodeHash)
+    if (cached !== undefined) return cached
     const raw = await this.store.get(prefixed)
     if (raw === null) return null
-    return parseNode(raw)
+    const node = parseNode(raw)
+    this.cache?.set(nodeHash, node, raw.length)
+    return node
   }
 
   private async storeLeaf(
@@ -255,10 +375,13 @@ export class Hamt {
     const found = new Map<string, Uint8Array>()
     if (this.root === (await emptyHash())) return found
     let frontier = new Map<string, Array<{ key: string; kh: string }>>()
-    for (const key of new Set(keys)) {
-      const at = frontier.get(this.root) ?? []
-      at.push({ key, kh: await keyHash(key) })
-      frontier.set(this.root, at)
+    const unique = [...new Set(keys)]
+    const hashes = await Promise.all(unique.map(keyHash))
+    if (unique.length > 0) {
+      frontier.set(
+        this.root,
+        unique.map((key, i) => ({ key, kh: hashes[i] as string })),
+      )
     }
     for (let depth = 0; frontier.size > 0; depth++) {
       const nodes = await this.loadMany([...frontier.keys()])
@@ -296,12 +419,20 @@ export class Hamt {
         continue
       }
       const pending = this.pending.get(this.prefix + h)
-      if (pending !== undefined) out.set(h, parseNode(pending))
+      if (pending !== undefined) {
+        out.set(h, parseNode(pending))
+        continue
+      }
+      const cached = this.cache?.get(h)
+      if (cached !== undefined) out.set(h, cached)
       else fetch.push(this.prefix + h)
     }
     if (fetch.length > 0) {
       for (const [k, raw] of await this.store.getMany(fetch)) {
-        out.set(k.slice(this.prefix.length), parseNode(raw))
+        const h = k.slice(this.prefix.length)
+        const node = parseNode(raw)
+        this.cache?.set(h, node, raw.length)
+        out.set(h, node)
       }
     }
     return out
@@ -334,6 +465,43 @@ export class Hamt {
 
   async *keys(): AsyncIterable<string> {
     for await (const [k] of this.items()) yield k
+  }
+
+  /**
+   * Every key, a tree level at a time: one batched store read per
+   * level (in chunks of `chunk` nodes), holding no more than one level's
+   * node hashes. Bypasses the node cache, so a full listing doesn't
+   * evict the nodes point reads use.
+   */
+  async *keysBatched(chunk = 4096): AsyncIterable<string> {
+    const empty = await emptyHash()
+    if (this.root === empty) return
+    let level: string[] = [this.root]
+    while (level.length > 0) {
+      const next: string[] = []
+      for (let i = 0; i < level.length; i += chunk) {
+        const slice = level.slice(i, i + chunk)
+        const fetch: string[] = []
+        const nodes = new Map<string, Node>()
+        for (const h of slice) {
+          const pending = this.pending.get(this.prefix + h)
+          if (pending !== undefined) nodes.set(h, parseNode(pending))
+          else fetch.push(this.prefix + h)
+        }
+        if (fetch.length > 0) {
+          for (const [k, raw] of await this.store.getMany(fetch)) {
+            nodes.set(k.slice(this.prefix.length), parseNode(raw))
+          }
+        }
+        for (const h of slice) {
+          const node = nodes.get(h)
+          if (node === undefined) continue
+          if (node.kind === 'leaf') yield* Object.keys(node.items)
+          else next.push(...Object.values(node.children))
+        }
+      }
+      level = next
+    }
   }
 
   async *values(): AsyncIterable<Uint8Array> {
@@ -440,11 +608,116 @@ export class Hamt {
     // (intermediate nodes superseded by later updates).
     const reachablePending = await this.filterPending(currentRoot, pending)
 
-    return new Hamt(this.store, currentRoot, {
-      prefix: this.prefix,
-      bucketMax: this.bucketMax,
-      pending: reachablePending,
-    })
+    return new Hamt(this.store, currentRoot, this.derived(reachablePending))
+  }
+
+  /**
+   * {@link updated}, with every change applied in one pass down the
+   * tree: the changes are grouped by the nibble they take at each
+   * branch, and each node on their paths is rewritten once, however
+   * many of them pass through it. The result is the same tree, so the
+   * same root, as applying them one at a time; as there, a key both
+   * updated and removed ends up removed.
+   *
+   * Pair it with {@link getMany} over the changed keys first to load
+   * their paths a level at a time; this pass then reads them from the
+   * node cache.
+   */
+  async updatedBatch(opts: UpdatedOptions = {}): Promise<Hamt> {
+    const ops = new Map<string, string | null>()
+    for (const [key, value] of opts.updates ?? []) ops.set(key, encodeValue(value))
+    for (const key of opts.removals ?? []) ops.set(key, null)
+    if (ops.size === 0) return new Hamt(this.store, this.root, this.derived(new Map(this.pending)))
+    const entries = [...ops]
+    const hashes = await Promise.all(entries.map(([key]) => keyHash(key)))
+    const changes: KeyChange[] = entries.map(([key, value], i) => ({
+      key,
+      kh: hashes[i] as string,
+      value,
+    }))
+    const pending = new Map(this.pending)
+    const root = (await this.applyAt(this.root, 0, changes, pending)) ?? (await emptyHash())
+    const reachablePending = await this.filterPending(root, pending)
+    return new Hamt(this.store, root, this.derived(reachablePending))
+  }
+
+  /** Apply `changes` (all under this node) to the subtree at `nodeHash`;
+   *  return its new hash, or null if it is now empty. */
+  private async applyAt(
+    nodeHash: string,
+    depth: number,
+    changes: readonly KeyChange[],
+    pending: Map<string, Uint8Array>,
+  ): Promise<string | null> {
+    const node = await this.load(nodeHash, pending)
+    if (node === null || node.kind === 'leaf') {
+      // A dangling reference reads as an empty leaf, as in `insertAt`.
+      const items: Record<string, string> = { ...(node?.items ?? {}) }
+      let changed = node === null
+      for (const c of changes) {
+        if (c.value === null) {
+          if (c.key in items) {
+            delete items[c.key]
+            changed = true
+          }
+        } else if (items[c.key] !== c.value) {
+          items[c.key] = c.value
+          changed = true
+        }
+      }
+      if (!changed) return nodeHash
+      return this.subtreeOf(items, depth, pending)
+    }
+
+    const groups = new Map<string, KeyChange[]>()
+    for (const c of changes) {
+      const nibble = c.kh[depth] as string
+      const group = groups.get(nibble)
+      if (group === undefined) groups.set(nibble, [c])
+      else group.push(c)
+    }
+    const children: Record<string, string> = { ...node.children }
+    let changed = false
+    let removed = false
+    for (const [nibble, group] of groups) {
+      const child = children[nibble]
+      let next: string | null
+      if (child === undefined) {
+        const items: Record<string, string> = {}
+        for (const c of group) if (c.value !== null) items[c.key] = c.value
+        next = await this.subtreeOf(items, depth + 1, pending)
+        if (next === null) continue
+      } else {
+        next = await this.applyAt(child, depth + 1, group, pending)
+        if (next === child) continue
+      }
+      changed = true
+      if (group.some((c) => c.value === null)) removed = true
+      if (next === null) delete children[nibble]
+      else children[nibble] = next
+    }
+    if (!changed) return nodeHash
+    if (Object.keys(children).length === 0) return null
+    if (removed) {
+      // A subtree that shrank to one bucket is a leaf, whatever path
+      // led there.
+      const collapsed = await this.tryCollapse(children, pending)
+      if (collapsed !== null) return collapsed
+    }
+    return this.storeBranch(children, pending)
+  }
+
+  /** The canonical subtree holding exactly `items` at `depth`: a leaf
+   *  if they fit one bucket, else split by nibble. Null if empty. */
+  private async subtreeOf(
+    items: Record<string, string>,
+    depth: number,
+    pending: Map<string, Uint8Array>,
+  ): Promise<string | null> {
+    const n = Object.keys(items).length
+    if (n === 0) return null
+    if (n <= this.bucketMax) return this.storeLeaf(items, pending)
+    return this.splitLeaf(items, depth, pending)
   }
 
   /**
@@ -456,10 +729,7 @@ export class Hamt {
     if (next.pending.size > 0) {
       await this.store.setMany(next.pending)
     }
-    return new Hamt(this.store, next.root, {
-      prefix: this.prefix,
-      bucketMax: this.bucketMax,
-    })
+    return new Hamt(this.store, next.root, this.derived())
   }
 
   /** Persist any pending node writes. Returns a fresh `Hamt`. */
@@ -467,10 +737,7 @@ export class Hamt {
     if (this.pending.size > 0) {
       await this.store.setMany(this.pending)
     }
-    return new Hamt(this.store, this.root, {
-      prefix: this.prefix,
-      bucketMax: this.bucketMax,
-    })
+    return new Hamt(this.store, this.root, this.derived())
   }
 
   // ---------- Insert ----------

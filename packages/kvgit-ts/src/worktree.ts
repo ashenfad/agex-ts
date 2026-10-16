@@ -4,6 +4,7 @@
  */
 
 import { UnknownCommitError } from './errors'
+import type { NodeCache } from './hamt'
 import type { Ref, Repo } from './repo'
 import {
   type CommitInfo,
@@ -103,6 +104,17 @@ export class Worktree<V = Uint8Array> {
     this.#engine = engine
   }
 
+  /** Whether this worktree reads its keyset on demand (see
+   *  `Repo.worktree`). */
+  get lazy(): boolean {
+    return this.#engine.isLazy
+  }
+
+  /** A lazy worktree's node cache; null for an eager one. */
+  get nodeCache(): NodeCache | null {
+    return this.#engine.keysetCache
+  }
+
   /** The branch this worktree is bound to. */
   get branch(): string {
     return this.#engine.currentBranch
@@ -127,7 +139,9 @@ export class Worktree<V = Uint8Array> {
     const raw = await this.#engine.get(key)
     if (raw === null) return undefined
     const value = this.repo.codec.decode(raw)
-    this.#cache.set(key, value)
+    // A lazy worktree's keyset may be far larger than memory; it keeps
+    // no values, leaving caching to its caller.
+    if (!this.#engine.isLazy) this.#cache.set(key, value)
     return value
   }
 
@@ -142,9 +156,10 @@ export class Worktree<V = Uint8Array> {
       else fetch.push(key)
     }
     if (fetch.length > 0) {
+      const keep = !this.#engine.isLazy
       for (const [key, raw] of await this.#engine.getMany(fetch)) {
         const value = this.repo.codec.decode(raw)
-        this.#cache.set(key, value)
+        if (keep) this.#cache.set(key, value)
         out.set(key, value)
       }
     }

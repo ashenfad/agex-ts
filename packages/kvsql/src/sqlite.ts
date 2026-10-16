@@ -1,0 +1,24 @@
+/**
+ * Loading the SQLite build kvsql is built on: the official
+ * `@sqlite.org/sqlite-wasm`, pinned, because kvsql relies on its VFS
+ * API and its session-extension exports.
+ */
+
+import init, { type Sqlite3Static } from '@sqlite.org/sqlite-wasm'
+
+export type { Sqlite3Static }
+
+let loading: Promise<Sqlite3Static> | null = null
+
+/**
+ * The SQLite build, loaded once and shared by every caller in this
+ * realm (a page or a worker). A load that fails is retried by the next
+ * call.
+ */
+export function loadSqlite(): Promise<Sqlite3Static> {
+  loading ??= init().catch((err: unknown) => {
+    loading = null
+    throw err
+  })
+  return loading
+}

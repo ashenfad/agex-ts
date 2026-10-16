@@ -4,7 +4,7 @@
 
 import type { Database } from '@sqlite.org/sqlite-wasm'
 import type { Directory, SyncFile } from './files'
-import { loadSqlite } from './index'
+import { loadSqlite } from './sqlite'
 import { type KvsqlVfs, kvsqlVfs } from './vfs'
 
 /**

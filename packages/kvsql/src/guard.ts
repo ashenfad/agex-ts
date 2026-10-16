@@ -37,12 +37,16 @@ export interface SchemaGuard {
   /**
    * Whether a statement that changes `main`'s schema has been prepared
    * since the guard was installed or {@link resetSchemaChanged} last
-   * ran: CREATE, DROP or ALTER of a table, index, view or trigger, or
-   * ANALYZE (which writes `sqlite_stat1`, which sessions don't record).
-   * TEMP objects don't count: they aren't in the file.
+   * ran: CREATE, DROP or ALTER of a table, index, view or trigger;
+   * ANALYZE (which writes `sqlite_stat1`, which sessions don't record);
+   * or setting `PRAGMA user_version` or `application_id`, which apps
+   * use to track migrations and sessions don't record either. TEMP
+   * objects don't count: they aren't in the file.
    *
    * It is set when a statement is prepared, so a runner resets it
    * before the statements of a transaction and reads it after them.
+   * A statement prepared but never run (`EXPLAIN CREATE ...`) sets it
+   * too; such a false positive only costs a schema check.
    */
   readonly schemaChanged: boolean
   resetSchemaChanged(): void
@@ -67,6 +71,7 @@ const ANALYZE = 28
 const CREATE_VTABLE = 29
 const DROP_VTABLE = 30
 const FUNCTION = 31
+const PRAGMA = 19
 const SQLITE_AUTH = 23
 
 /** Action codes that change a schema; the database's name is in the third argument. */
@@ -132,6 +137,13 @@ function refusal(code: number, args: readonly (string | 0)[], label: string): st
       return `DETACH isn't available in ${label}: no other database can be attached.`
     case CREATE_VTABLE:
       return `Virtual tables (CREATE VIRTUAL TABLE ... USING ${args[1] || 'a module'}) aren't supported in ${label} yet. For text search use LIKE (or instr) on an ordinary table; for ranges use an ordinary table with an index.`
+    case PRAGMA: {
+      const pragma = pragmaSet(code, args)
+      if (pragma !== undefined && MANAGED_PRAGMAS.has(pragma)) {
+        return `Setting PRAGMA ${pragma} isn't available in ${label}: the database manages its own file (journaling, page layout) and schema. Reading the pragma is fine.`
+      }
+      break
+    }
     case FUNCTION:
       if (typeof args[1] === 'string' && args[1].toLowerCase() === 'load_extension') {
         return `Loading extensions isn't available in ${label}: use SQLite's built-in functions.`
@@ -154,8 +166,38 @@ function isAuthError(err: unknown): boolean {
   return rc === SQLITE_AUTH || err.message.includes('not authorized')
 }
 
+/** Pragmas whose value lives in the file's header, outside any table. */
+const HEADER_PRAGMAS = new Set(['user_version', 'application_id'])
+
+/**
+ * Pragmas that change how the file is written, or that let a caller
+ * write the schema around the record; refused when they set a value.
+ */
+const MANAGED_PRAGMAS = new Set([
+  'journal_mode',
+  'locking_mode',
+  'synchronous',
+  'writable_schema',
+  'schema_version',
+  'page_size',
+  'auto_vacuum',
+])
+
+/** A PRAGMA's name, lowercased, if it sets a value (`PRAGMA x = v` or `PRAGMA x(v)`). */
+function pragmaSet(code: number, args: readonly (string | 0)[]): string | undefined {
+  // The authorizer gets the pragma's name, its argument (null when it
+  // is only read) and the schema it was qualified with (null if none).
+  if (code !== PRAGMA || typeof args[0] !== 'string' || typeof args[1] !== 'string') return
+  return args[0].toLowerCase()
+}
+
 function changesMainSchema(code: number, args: readonly (string | 0)[]): boolean {
   if (code === ALTER_TABLE) return args[0] === 'main'
+  const pragma = pragmaSet(code, args)
+  if (pragma !== undefined) {
+    const schema = typeof args[2] === 'string' ? args[2].toLowerCase() : 'main'
+    return HEADER_PRAGMAS.has(pragma) && schema === 'main'
+  }
   return SCHEMA_CHANGES.has(code) && args[2] === 'main'
 }
 
@@ -169,6 +211,14 @@ function changesMainSchema(code: number, args: readonly (string | 0)[]): boolean
  *   would be recorded as ordinary tables, and replaying them is
  *   untested;
  * - `load_extension()`;
+ * - setting `journal_mode`, `locking_mode`, `synchronous`,
+ *   `writable_schema`, `schema_version`, `page_size` or `auto_vacuum`
+ *   (reading them is fine), in any schema: the file's journaling and
+ *   layout are kvsql's to manage, and a writable schema bypasses the
+ *   record. Per-connection pragmas such as `cache_size` and
+ *   `temp_store` are left alone, and so is `foreign_keys`, which is the
+ *   connection owner's choice (foreign-key conflicts are only detected
+ *   when it is on);
  * - any use of a table, index, view or trigger whose name starts with
  *   {@link INTERNAL_TABLE_PREFIX}.
  */

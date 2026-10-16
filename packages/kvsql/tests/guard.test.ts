@@ -88,6 +88,51 @@ describe('refusals', () => {
     )
   })
 
+  it('setting pragmas that change how the file is written, in any form', () => {
+    const { db, guard } = guarded()
+    const managed = [
+      'journal_mode',
+      'locking_mode',
+      'synchronous',
+      'writable_schema',
+      'schema_version',
+      'page_size',
+      'auto_vacuum',
+    ]
+    const values: Record<string, string> = {
+      journal_mode: 'WAL',
+      locking_mode: 'EXCLUSIVE',
+      synchronous: 'OFF',
+      writable_schema: 'ON',
+      schema_version: '99',
+      page_size: '8192',
+      auto_vacuum: 'FULL',
+    }
+    for (const name of managed) {
+      const v = values[name]
+      for (const sql of [
+        `PRAGMA ${name} = ${v}`,
+        `PRAGMA main.${name} = ${v}`,
+        `PRAGMA ${name.toUpperCase()}(${v})`,
+        `PRAGMA temp.${name} = ${v}`,
+      ]) {
+        expect(refusal(guard, () => db.exec(sql)).message, sql).toBe(
+          `Setting PRAGMA ${name} isn't available in agex.db: the database manages its own file (journaling, page layout) and schema. Reading the pragma is fine.`,
+        )
+      }
+      // Reading stays allowed.
+      guard.run(() => db.exec(`PRAGMA ${name}`))
+      guard.run(() => db.exec(`PRAGMA main.${name}`))
+    }
+    expect(
+      guard.trusted(() => db.exec({ sql: 'PRAGMA journal_mode = OFF', returnValue: 'resultRows' })),
+    ).toEqual([['off']])
+    // Per-connection pragmas are the connection owner's.
+    guard.run(() =>
+      db.exec('PRAGMA foreign_keys = ON; PRAGMA cache_size = -4000; PRAGMA temp_store = MEMORY'),
+    )
+  })
+
   it('names with the reserved prefix', () => {
     const { db, guard } = guarded()
     const expected =
@@ -200,7 +245,17 @@ describe('schema-change detection', () => {
     ['SELECT * FROM t', false],
     ['CREATE TEMP TABLE scratch (x)', false],
     ['CREATE TEMP VIEW tv AS SELECT 1', false],
-    ['PRAGMA user_version = 3', false],
+    ['PRAGMA user_version = 3', true],
+    ['PRAGMA main.user_version = 4', true],
+    ['PRAGMA user_version(5)', true],
+    ['PRAGMA Application_ID = 7', true],
+    ['PRAGMA user_version', false],
+    ['SELECT * FROM pragma_user_version', false],
+    ['PRAGMA application_id', false],
+    ['PRAGMA temp.user_version = 1', false],
+    ['PRAGMA foreign_keys = ON', false],
+    ['PRAGMA cache_size = -4000', false],
+    ['EXPLAIN CREATE TABLE u (id TEXT PRIMARY KEY NOT NULL)', true],
   ]
   for (const [sql, changes] of cases) {
     it(`${changes ? 'detects' : 'ignores'}: ${sql}`, () => {

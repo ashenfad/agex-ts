@@ -476,6 +476,22 @@ describe('replay', () => {
     expect(rows(replica, 'audit')).toHaveLength(3)
   })
 
+  it('refuses to apply on a connection with a TEMP trigger, which SQLite keeps running', () => {
+    const SCHEMA =
+      'CREATE TABLE t (id TEXT PRIMARY KEY NOT NULL); CREATE TABLE log (id INTEGER PRIMARY KEY, v TEXT)'
+    const cs = record(memoryDb(SCHEMA), "INSERT INTO t VALUES ('x')")
+    const replica = memoryDb(SCHEMA)
+    replica.exec(
+      'CREATE TEMP TRIGGER t_log AFTER INSERT ON main.t BEGIN INSERT INTO log (v) VALUES (new.id); END',
+    )
+    expect(() => applyChangeset(sqlite3, replica, cs)).toThrow(/TEMP triggers/)
+    expect(dump(replica)).toEqual({ log: [], t: [] })
+
+    replica.exec('DROP TRIGGER temp.t_log')
+    expect(applyChangeset(sqlite3, replica, cs).applied).toBe(true)
+    expect(dump(replica)).toEqual({ log: [], t: [{ id: 'x' }] })
+  })
+
   it('leaves triggers off if they were off', () => {
     const db = memoryDb('CREATE TABLE t (id TEXT PRIMARY KEY NOT NULL)')
     const cs = record(db, "INSERT INTO t VALUES ('x')")

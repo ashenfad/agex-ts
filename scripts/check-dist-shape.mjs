@@ -47,7 +47,7 @@ const ALLOWLIST = {
 
 // Packages to scan. Anything not listed is skipped (e.g. the monorepo
 // root, examples).
-const PACKAGES = ['agex-ts', 'kvgit-ts', 'termish-ts', 'world']
+const PACKAGES = ['agex-ts', 'kvgit-ts', 'kvsql', 'termish-ts', 'world']
 
 async function* walkJsFiles(dir) {
   for (const entry of await readdir(dir, { withFileTypes: true })) {

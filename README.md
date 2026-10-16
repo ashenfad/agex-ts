@@ -22,6 +22,7 @@ Web Worker, storage is IndexedDB.
 | [`@agex-ts/world`](packages/world) | The world: sessions as branches, the workspace, the code kernel, the tools, the turn, the inbox, delegation, the agent's git (`ws-git`), skills, compaction's record. nontainer's semantics. |
 | [`@agex-ts/kvgit`](packages/kvgit-ts) | Versioned key-value storage with branches, merges and sync; Python kvgit's v4 format, byte for byte. |
 | [`@agex-ts/termish`](packages/termish-ts) | A shell interpreter over an async filesystem protocol. |
+| [`@agex-ts/kvsql`](packages/kvsql) | SQLite in the browser on an OPFS file, with a kvgit changeset log for checkpoints and sync. In development. |
 
 ## A taste
 

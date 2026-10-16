@@ -54,7 +54,7 @@ jobs:
         run: pnpm test
 
   browser:
-    name: Browser tests (real IndexedDB)
+    name: Browser tests (real IndexedDB, OPFS)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -77,4 +77,13 @@ jobs:
 
       - name: kvgit-ts (Chromium + real IndexedDB)
         run: pnpm --filter kvgit-ts test:browser
+
+      - name: Install Playwright Firefox and WebKit (with system deps)
+        run: pnpm --filter kvsql exec playwright install firefox webkit --with-deps
+
+      - name: kvsql (Chromium, Firefox, WebKit)
+        run: |
+          pnpm --filter kvsql test:browser
+          pnpm --filter kvsql test:browser --browser.name=firefox
+          pnpm --filter kvsql test:browser --browser.name=webkit
 

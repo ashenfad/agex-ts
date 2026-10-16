@@ -330,7 +330,8 @@ export interface ApplyResult {
  *
  * Triggers are off while it applies, since a changeset already holds
  * what they wrote when it was recorded; their previous setting is
- * restored afterwards, even on error. Foreign-key actions are off too
+ * restored afterwards, even on error. SQLite can't switch TEMP
+ * triggers off, so a connection with any refuses to apply. Foreign-key actions are off too
  * (`ON DELETE CASCADE` behaves as `NO ACTION`), since the rows they
  * touched are in the changeset; foreign keys are still checked if
  * `PRAGMA foreign_keys` is on.
@@ -353,6 +354,11 @@ export function applyChangeset(
   }
   const conflicts: Conflict[] = []
   if (changeset.byteLength === 0) return { applied: true, conflicts }
+  if (db.selectValue("SELECT count(*) FROM temp.sqlite_schema WHERE type = 'trigger'") !== 0) {
+    throw new KvsqlError(
+      "a changeset can't be applied on a connection with TEMP triggers: SQLite runs them even with triggers switched off, so they would fire again",
+    )
+  }
 
   const { capi } = sqlite3
   const ACTIONS = {

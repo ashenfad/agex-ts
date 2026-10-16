@@ -56,7 +56,8 @@ const { applied, conflicts } = applyChangeset(sqlite3, replica, changeset)
   effect; `changesetOps` lists the rows a changeset touches (table, op,
   column count, key, before and after values).
 - `applyChangeset` runs in a savepoint, with triggers and foreign-key
-  actions off (the changeset already holds what they did). Its conflict
+  actions off (the changeset already holds what they did); SQLite can't
+  switch TEMP triggers off, so it refuses a connection that has any. Its conflict
   policy is `ABORT_ON_CONFLICT` by default: any conflict rolls the whole
   changeset back and returns `applied: false` with the conflicts met.
   `THIS_SIDE_WINS` lets the changeset's values overwrite the database's
@@ -72,7 +73,8 @@ row whose key is NULL, and anything outside the main database, so:
 
 - `installGuard(sqlite3, db, { label })` installs an authorizer that
   refuses `ATTACH`, `DETACH`, `VACUUM` and `VACUUM INTO`, virtual
-  tables (FTS5, R*Tree), `load_extension()`, and setting the pragmas
+  tables (FTS5, R*Tree), TEMP triggers (which would fire again on
+  replay), `load_extension()`, and setting the pragmas
   that change how the file is written (`journal_mode`, `locking_mode`,
   `synchronous`, `writable_schema`, `schema_version`, `page_size`,
   `auto_vacuum`), and keeps callers out of `_kvsql_*` tables. `guard.run(fn)` turns a refusal into a

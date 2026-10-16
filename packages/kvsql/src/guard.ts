@@ -58,6 +58,7 @@ export interface SchemaGuard {
 // table keyed by number reads more plainly here.
 const CREATE_INDEX = 1
 const CREATE_TABLE = 2
+const CREATE_TEMP_TRIGGER = 5
 const CREATE_TRIGGER = 7
 const CREATE_VIEW = 8
 const DROP_INDEX = 10
@@ -135,6 +136,10 @@ function refusal(code: number, args: readonly (string | 0)[], label: string): st
         : `ATTACH and VACUUM aren't available in ${label}: it is a single database, and its file space is managed for you. Keep every table in it.`
     case DETACH:
       return `DETACH isn't available in ${label}: no other database can be attached.`
+    case CREATE_TEMP_TRIGGER:
+      // SQLite runs TEMP triggers even when triggers are switched off,
+      // so one would fire again when recorded changes are replayed.
+      return `TEMP triggers aren't available in ${label}: they would run again when its changes are replayed. Use an ordinary trigger (CREATE TRIGGER), which is part of the database.`
     case CREATE_VTABLE:
       return `Virtual tables (CREATE VIRTUAL TABLE ... USING ${args[1] || 'a module'}) aren't supported in ${label} yet. For text search use LIKE (or instr) on an ordinary table; for ranges use an ordinary table with an index.`
     case PRAGMA: {
@@ -211,6 +216,8 @@ function changesMainSchema(code: number, args: readonly (string | 0)[]): boolean
  *   would be recorded as ordinary tables, and replaying them is
  *   untested;
  * - `load_extension()`;
+ * - `CREATE TEMP TRIGGER`: SQLite runs TEMP triggers even with
+ *   triggers switched off, so one would fire again on replay;
  * - setting `journal_mode`, `locking_mode`, `synchronous`,
  *   `writable_schema`, `schema_version`, `page_size` or `auto_vacuum`
  *   (reading them is fine), in any schema: the file's journaling and

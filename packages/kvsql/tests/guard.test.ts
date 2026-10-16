@@ -61,6 +61,18 @@ describe('refusals', () => {
     expect(dump(db)).toEqual({})
   })
 
+  it('TEMP triggers, which would fire again on replay', () => {
+    const { db, guard } = guarded()
+    db.exec('CREATE TABLE t (id TEXT PRIMARY KEY NOT NULL)')
+    const temp = refusal(guard, () =>
+      db.exec('CREATE TEMP TRIGGER t_ins AFTER INSERT ON main.t BEGIN SELECT 1; END'),
+    )
+    expect(temp.message).toBe(
+      "TEMP triggers aren't available in agex.db: they would run again when its changes are replayed. Use an ordinary trigger (CREATE TRIGGER), which is part of the database.",
+    )
+    guard.run(() => db.exec('CREATE TRIGGER t_ins AFTER INSERT ON t BEGIN SELECT 1; END'))
+  })
+
   it('loading extensions', () => {
     const { db, guard } = guarded()
     // This build has no load_extension(); stand one in, to show the

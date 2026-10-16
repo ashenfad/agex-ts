@@ -117,6 +117,44 @@ describe('Hamt.updatedBatch', () => {
     })
   }
 
+  for (const bucketMax of [1, 8]) {
+    it(`keeps keys named like Object.prototype members (bucketMax ${bucketMax})`, async () => {
+      // `__proto__` assigned on a plain object sets its prototype
+      // instead of adding a key; the tree must hold it like any other.
+      const odd = ['__proto__', 'constructor', 'toString', 'hasOwnProperty']
+      const store = new Memory()
+      const updates: Array<[string, Uint8Array]> = [
+        ...odd.map((k): [string, Uint8Array] => [k, bytes(`v-${k}`)]),
+        ...Array.from({ length: 20 }, (_, i): [string, Uint8Array] => [`k${i}`, bytes(`v${i}`)]),
+      ]
+      const seq = await (await Hamt.empty(store, { bucketMax })).persist({ updates })
+      const batch = await (
+        await (await Hamt.empty(store, { bucketMax })).updatedBatch({ updates })
+      ).flush()
+      expect(batch.root).toBe(seq.root)
+      for (const k of odd) expect(text(await batch.get(k))).toBe(`v-${k}`)
+
+      const seqGone = await seq.persist({ removals: odd })
+      const batchGone = await (await batch.updatedBatch({ removals: odd })).flush()
+      expect(batchGone.root).toBe(seqGone.root)
+      for (const k of odd) expect(await batchGone.get(k)).toBeNull()
+      // Removing keys that aren't there changes nothing.
+      expect((await batchGone.updatedBatch({ removals: odd })).root).toBe(batchGone.root)
+      expect((await seqGone.updated({ removals: odd })).root).toBe(seqGone.root)
+    })
+  }
+
+  it('refuses a chunk size that would never advance', async () => {
+    const tree = await (await Hamt.empty(new Memory())).persist({ updates: [['a', bytes('1')]] })
+    for (const chunk of [0, -1, 1.5, Number.NaN]) {
+      await expect(async () => {
+        for await (const _ of tree.keysBatched(chunk)) {
+          // drain
+        }
+      }).rejects.toThrow(RangeError)
+    }
+  })
+
   it('writes each node on the changed paths once', async () => {
     const store = new Memory()
     const updates: Array<[string, Uint8Array]> = []

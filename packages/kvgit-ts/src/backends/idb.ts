@@ -19,7 +19,9 @@
  *
  * Beyond those, this backend is a thin shim over IDB. Values are
  * stored as `Uint8Array` directly (IDB's structured-clone handles
- * binary natively — no base64).
+ * binary natively — no base64), each in a buffer of exactly its own
+ * bytes: structured clone keeps a view's whole `ArrayBuffer`, so a
+ * view handed in as it is would store every byte of the buffer under it.
  */
 
 import type { KVStore } from '../types'
@@ -157,7 +159,7 @@ export class IndexedDB implements KVStore {
   async set(key: string, value: Uint8Array): Promise<void> {
     const { store, tx } = this.#tx('readwrite')
     return new Promise((resolve, reject) => {
-      const req = store.put(value, key)
+      const req = store.put(ownBuffer(value), key)
       req.onerror = () => reject(req.error)
       tx.oncomplete = () => resolve()
       tx.onerror = () => reject(tx.error)
@@ -171,7 +173,7 @@ export class IndexedDB implements KVStore {
     const { store, tx } = this.#tx('readwrite')
     return new Promise((resolve, reject) => {
       for (const [k, v] of itemArr) {
-        const req = store.put(v, k)
+        const req = store.put(ownBuffer(v), k)
         req.onerror = () => reject(req.error)
       }
       tx.oncomplete = () => resolve()
@@ -230,7 +232,7 @@ export class IndexedDB implements KVStore {
       const apply = (): void => {
         landed = true
         for (const [key, value] of writes) {
-          const req = store.put(value, key)
+          const req = store.put(ownBuffer(value), key)
           req.onerror = () => reject(req.error)
         }
         for (const key of removeList) {
@@ -268,7 +270,7 @@ export class IndexedDB implements KVStore {
       readReq.onsuccess = () => {
         const current = readReq.result === undefined ? null : (readReq.result as Uint8Array)
         if (bytesEqual(current, expected)) {
-          const writeReq = store.put(value, key)
+          const writeReq = store.put(ownBuffer(value), key)
           writeReq.onerror = () => reject(writeReq.error)
           casResult = true
         }
@@ -342,6 +344,18 @@ export class IndexedDB implements KVStore {
       tx.onabort = () => reject(tx.error ?? new Error('IndexedDB transaction aborted'))
     })
   }
+}
+
+/**
+ * The bytes in a buffer of their own size. A view into a larger buffer
+ * (an encoder's scratch space, a `subarray`) is copied, since IDB would
+ * store the whole buffer; a value that already fills its buffer goes
+ * through as it is. `new Uint8Array` copies where `slice` would not:
+ * Node's `Buffer#slice` is a view.
+ */
+function ownBuffer(value: Uint8Array): Uint8Array {
+  if (value.byteOffset === 0 && value.byteLength === value.buffer.byteLength) return value
+  return new Uint8Array(value)
 }
 
 /**

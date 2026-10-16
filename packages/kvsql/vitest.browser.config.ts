@@ -4,6 +4,7 @@
  * WebKit with `--browser.name`. Locally, install the browsers once
  * with `pnpm exec playwright install chromium firefox webkit`.
  */
+import { fileURLToPath } from 'node:url'
 import { defineConfig } from 'vitest/config'
 
 export default defineConfig({
@@ -17,7 +18,9 @@ export default defineConfig({
     globals: false,
     browser: {
       enabled: true,
-      provider: 'playwright',
+      // Playwright with a persistent profile per page: WebKit has no
+      // OPFS in Playwright's default (private) contexts.
+      provider: fileURLToPath(new URL('./vitest.persistent-provider.ts', import.meta.url)),
       name: 'chromium',
       headless: true,
     },

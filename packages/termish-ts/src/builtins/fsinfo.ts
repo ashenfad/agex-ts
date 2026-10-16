@@ -232,11 +232,13 @@ export const stat: CommandHandler = async (ctx) => {
 // ---------------------------------------------------------------------------
 
 /**
- * `realpath [-e | -m] PATH...`
+ * `realpath [-e | -m] [-s] PATH...`
  *
  * Each path made absolute, with `.`, `..` and repeated slashes
  * resolved. By default its directory must exist; `-e` asks the path
- * itself to, `-m` neither. There are no symlinks to follow.
+ * itself to, `-m` neither. Symlinks are never expanded, as with `-s`:
+ * the `FileSystem` protocol has no way to read a link's target, so
+ * `-s` is accepted and changes nothing.
  */
 export const realpath: CommandHandler = async (ctx) => {
   const parsed = parseArgs(

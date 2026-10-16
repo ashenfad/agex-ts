@@ -39,27 +39,43 @@ async function readText(ctx: CommandContext, prog: string, path: string): Promis
 
 const NUMBER_RE = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/
 
-/** A number as an integer count of 10^-`places`, exactly. */
-interface Scaled {
-  value: number
+/** The largest exponent `seq` takes, so `1e999999999` can't build a
+ *  billion-digit number. */
+export const SEQ_MAX_EXPONENT = 1000
+
+/** A number exactly as written: `digits` times 10^`exp`. */
+interface Exact {
+  digits: bigint
+  exp: number
   /** Digits after the decimal point, as written. */
   places: number
 }
 
-function parseNumber(text: string): Scaled {
+function parseNumber(text: string): Exact {
   const m = NUMBER_RE.exec(text)
   if (m === null) throw new TerminalError(`seq: invalid floating point argument: '${text}'`)
   const mantissa = m[1] as string
   const exp = m[2] === undefined ? 0 : Number(m[2].slice(1))
+  if (Math.abs(exp) > SEQ_MAX_EXPONENT) throw new TerminalError(`seq: out of range: '${text}'`)
   const dot = mantissa.indexOf('.')
   const frac = dot === -1 ? 0 : mantissa.length - dot - 1
-  return { value: Number(text), places: Math.max(0, frac - exp) }
+  const magnitude = BigInt(mantissa.replace('.', '') || '0')
+  return {
+    digits: text.startsWith('-') ? -magnitude : magnitude,
+    exp: exp - frac,
+    places: Math.max(0, frac - exp),
+  }
+}
+
+/** `x` as an integer count of 10^-`places`; `places` is at least `x.places`. */
+function scaleTo(x: Exact, places: number): bigint {
+  return x.digits * 10n ** BigInt(x.exp + places)
 }
 
 /** `n` (in units of 10^-`places`) as decimal text. */
-function formatScaled(n: number, places: number): string {
-  const sign = n < 0 ? '-' : ''
-  const digits = String(Math.abs(n)).padStart(places + 1, '0')
+function formatScaled(n: bigint, places: number): string {
+  const sign = n < 0n ? '-' : ''
+  const digits = (n < 0n ? -n : n).toString().padStart(places + 1, '0')
   if (places === 0) return sign + digits
   return `${sign}${digits.slice(0, -places)}.${digits.slice(-places)}`
 }
@@ -99,20 +115,22 @@ export const seq: CommandHandler = async (ctx) => {
   if (operands.length === 0) throw new TerminalError('seq: missing operand')
   if (operands.length > 3) throw new TerminalError(`seq: extra operand '${operands[3]}'`)
   const nums = operands.map(parseNumber)
-  const first = operands.length > 1 ? (nums[0] as Scaled) : { value: 1, places: 0 }
-  const incr = operands.length === 3 ? (nums[1] as Scaled) : { value: 1, places: 0 }
-  const last = nums[nums.length - 1] as Scaled
-  if (incr.value === 0)
+  const one: Exact = { digits: 1n, exp: 0, places: 0 }
+  const first = operands.length > 1 ? (nums[0] as Exact) : one
+  const incr = operands.length === 3 ? (nums[1] as Exact) : one
+  const last = nums[nums.length - 1] as Exact
+  if (incr.digits === 0n)
     throw new TerminalError(`seq: invalid Zero increment value: '${operands[1]}'`)
 
+  // Exact integers in LAST's precision too, so it compares exactly;
+  // shown with FIRST's and INCR's decimals only.
   const places = Math.max(first.places, incr.places)
-  const scale = 10 ** places
-  const start = Math.round(first.value * scale)
-  const step = Math.round(incr.value * scale)
-  const end = last.value * scale
-  // A tolerance below one unit of the last decimal shown, so a LAST
-  // written with fewer decimals than the arithmetic carries still counts.
-  const within = (n: number): boolean => (step > 0 ? n <= end + 1e-9 : n >= end - 1e-9)
+  const exact = Math.max(places, last.places)
+  const unit = 10n ** BigInt(exact - places)
+  const start = scaleTo(first, exact)
+  const step = scaleTo(incr, exact)
+  const end = scaleTo(last, exact)
+  const within = (n: bigint): boolean => (step > 0n ? n <= end : n >= end)
 
   const out: string[] = []
   for (let n = start; within(n); n += step) {
@@ -120,7 +138,7 @@ export const seq: CommandHandler = async (ctx) => {
       throw new TerminalError(`seq: too many numbers (the limit is ${SEQ_MAX})`)
     }
     if (out.length % 10_000 === 0 && ctx.signal.aborted) throw new TerminalError('aborted')
-    out.push(formatScaled(n, places))
+    out.push(formatScaled(n / unit, places))
   }
   if (out.length === 0) return
   if (equal) {
@@ -139,13 +157,15 @@ export const seq: CommandHandler = async (ctx) => {
 // paste
 // ---------------------------------------------------------------------------
 
-/** `-d`'s list, with `\n`, `\t`, `\\` and `\0` (no delimiter) read. */
+/** `-d`'s list, with `\n`, `\t`, `\\` and `\0` (no delimiter) read.
+ *  One delimiter per character, not per UTF-16 unit. */
 function delimiters(spec: string): string[] {
+  const chars = Array.from(spec)
   const out: string[] = []
-  for (let i = 0; i < spec.length; i++) {
-    const ch = spec[i] as string
-    if (ch === '\\' && i + 1 < spec.length) {
-      const next = spec[++i] as string
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i] as string
+    if (ch === '\\' && i + 1 < chars.length) {
+      const next = chars[++i] as string
       out.push(next === 'n' ? '\n' : next === 't' ? '\t' : next === '0' ? '' : next)
     } else out.push(ch)
   }

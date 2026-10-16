@@ -4,13 +4,15 @@
  *
  * A case's `stdout` (or `stdoutRegex`, searched) is what the script
  * wrote, the partial output when it failed; `error` is a substring of
- * the failure's message and stderr; `exitCode` the failure's code.
+ * the failure's message and stderr (a parse error's too); `exitCode` the
+ * failure's code. `files` are written first, and the script runs in
+ * `cwd` with `env`.
  */
 
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { TerminalError } from '../src/errors'
+import { ParseError, TerminalError } from '../src/errors'
 import { MemoryFS } from '../src/fs/memory'
 import { execute } from '../src/interpreter'
 
@@ -29,17 +31,21 @@ interface Case {
 const dir = join(__dirname, 'cases')
 const enc = new TextEncoder()
 
-async function run(c: Case): Promise<{ stdout: string; error: TerminalError | null }> {
+async function run(c: Case): Promise<{ stdout: string; error: TerminalError | ParseError | null }> {
   const fs = new MemoryFS()
   for (const [path, content] of Object.entries(c.files ?? {})) {
     const slash = path.lastIndexOf('/')
     if (slash > 0) await fs.mkdir(path.slice(0, slash), { parents: true, existOk: true })
     await fs.write(path, enc.encode(content))
   }
-  if (c.cwd !== undefined) await fs.chdir(c.cwd)
+  if (c.cwd !== undefined) {
+    await fs.mkdir(c.cwd, { parents: true, existOk: true })
+    await fs.chdir(c.cwd)
+  }
   try {
     return { stdout: await execute(c.script, fs, { env: { ...c.env } }), error: null }
   } catch (e) {
+    if (e instanceof ParseError) return { stdout: '', error: e }
     if (!(e instanceof TerminalError)) throw e
     return { stdout: e.partialOutput, error: e }
   }
@@ -57,9 +63,12 @@ for (const file of readdirSync(dir).filter((f) => f.endsWith('.json'))) {
           expect(error).toBeNull()
         } else {
           expect(error, 'the script should fail').not.toBeNull()
-          expect(`${error?.message}\n${error?.stderr ?? ''}`).toContain(c.error)
+          const stderr = error instanceof TerminalError ? error.stderr : undefined
+          expect(`${error?.message}\n${stderr ?? ''}`).toContain(c.error)
         }
-        if (c.exitCode !== undefined) expect(error?.exitCode ?? 0).toBe(c.exitCode)
+        if (c.exitCode !== undefined) {
+          expect(error instanceof TerminalError ? error.exitCode : 0).toBe(c.exitCode)
+        }
       })
     }
   })

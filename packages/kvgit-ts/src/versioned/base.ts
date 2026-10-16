@@ -54,6 +54,12 @@ export abstract class VersionedBase implements Versioned {
 
   /** Cached on first access; the root commit walking back from HEAD. */
   private cachedInitialCommit: string | null = null
+  /** Iterations still reading the current `commitKeys` map. A change
+   *  made while one runs goes to a copy, so each iteration sees one
+   *  commit's keys from start to finish. */
+  private keyReaders = 0
+  /** Settles when the latest state-changing call on this handle does. */
+  private opTail: Promise<void> = Promise.resolve()
 
   protected constructor(opts: { branch: string; commitHash: string }) {
     this.branch = opts.branch
@@ -121,7 +127,33 @@ export abstract class VersionedBase implements Versioned {
   }
 
   async *keys(): AsyncIterable<string> {
-    for (const k of this.commitKeys.keys()) yield k
+    const map = this.commitKeys
+    this.keyReaders++
+    try {
+      for (const k of map.keys()) yield k
+    } finally {
+      if (this.commitKeys === map) this.keyReaders--
+    }
+  }
+
+  /**
+   * `commitKeys`, ready to change in place. A commit changes the map
+   * rather than rebuilding it, so its cost follows the size of the
+   * change; when an iteration is reading the map, the change goes to a
+   * copy instead and the iteration keeps the map it started on.
+   */
+  protected ownedKeys(): Map<string, string> {
+    if (this.keyReaders > 0) {
+      this.commitKeys = new Map(this.commitKeys)
+      this.keyReaders = 0
+    }
+    return this.commitKeys
+  }
+
+  /** Replace `commitKeys` wholesale, as when loading another commit. */
+  protected replaceKeys(map: Map<string, string>): void {
+    this.commitKeys = map
+    this.keyReaders = 0
   }
 
   // --- Merge registry ---
@@ -203,6 +235,10 @@ export abstract class VersionedBase implements Versioned {
    * nothing reachable.
    */
   async commit(opts: VersionedCommitOptions = {}): Promise<MergeResult> {
+    return this.exclusive(() => this.commitOnce(opts))
+  }
+
+  private async commitOnce(opts: VersionedCommitOptions): Promise<MergeResult> {
     const updates = opts.updates ?? null
     const removals = opts.removals ?? null
     const onConflict = checkDisposition(opts.onConflict)
@@ -312,6 +348,10 @@ export abstract class VersionedBase implements Versioned {
    * ancestor throws `ConcurrencyError` likewise.
    */
   async mergeHeads(theirHead: string, opts: MergeHeadsOptions = {}): Promise<MergeResult> {
+    return this.exclusive(() => this.mergeHeadsOnce(theirHead, opts))
+  }
+
+  private async mergeHeadsOnce(theirHead: string, opts: MergeHeadsOptions): Promise<MergeResult> {
     const onConflict = checkDisposition(opts.onConflict)
     await this.requireCommit(theirHead)
     const ourHead = this.currentCommitHash
@@ -346,6 +386,14 @@ export abstract class VersionedBase implements Versioned {
     base: string,
     target: string,
     opts: ApplyChangeOptions = {},
+  ): Promise<MergeResult> {
+    return this.exclusive(() => this.applyChangeOnce(base, target, opts))
+  }
+
+  private async applyChangeOnce(
+    base: string,
+    target: string,
+    opts: ApplyChangeOptions,
   ): Promise<MergeResult> {
     const onConflict = checkDisposition(opts.onConflict)
     // A missing commit would read as an empty tree, and applying "to
@@ -485,6 +533,30 @@ export abstract class VersionedBase implements Versioned {
     if (!(await this.hasCommit(commit))) throw new UnknownCommitError(commit)
   }
 
+  /**
+   * Run `op` once every earlier state-changing call on this handle has
+   * settled, so two never interleave: each builds on the state the
+   * last one left. One that throws partway is rolled back, leaving the
+   * handle as it found it.
+   */
+  protected async exclusive<T>(op: () => Promise<T>): Promise<T> {
+    const prior = this.opTail
+    let release = (): void => {}
+    this.opTail = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    await prior
+    try {
+      return await op()
+    } catch (e) {
+      this.rollBackAttempt()
+      throw e
+    } finally {
+      this.endAttempt()
+      release()
+    }
+  }
+
   private finish(result: MergeResult): MergeResult {
     this.lastMergeResult = result
     return result
@@ -506,6 +578,11 @@ export abstract class VersionedBase implements Versioned {
 
   protected abstract snapshotState(): unknown
   protected abstract restoreState(saved: unknown): void
+  /** Restore the state an attempt opened by `snapshotState` started
+   *  from, if one is still open: the operation running it threw. */
+  protected rollBackAttempt(): void {}
+  /** Forget the open attempt, if any: the operation running it is over. */
+  protected endAttempt(): void {}
   protected abstract createCommit(opts: {
     updates?: Map<string, Uint8Array>
     removals?: Set<string>

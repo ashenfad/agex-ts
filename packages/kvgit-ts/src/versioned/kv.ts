@@ -930,10 +930,15 @@ export async function loadParents(store: KVStore, commit: string): Promise<reado
   return []
 }
 
-interface SnapshotState {
+/**
+ * A commit attempt: the commit it started from, and the entry each key
+ * it has changed held before (undefined where the key was absent), to
+ * put back if it fails. Restoring costs what the attempt changed, not
+ * the size of the keyset.
+ */
+interface Attempt {
   currentCommit: string
-  commitKeys: Map<string, string>
-  meta: Map<string, MetaEntry>
+  undo: Map<string, { blob: string | undefined; meta: MetaEntry | undefined }>
 }
 
 /**
@@ -947,6 +952,9 @@ interface SnapshotState {
 export class VersionedKV extends VersionedBase {
   readonly store: KVStore
   private meta: Map<string, MetaEntry>
+  /** The commit attempt in progress, if any: what to undo should it
+   *  fail. */
+  private attempt: Attempt | null = null
   private readonly recoverFromCorruptHead: CorruptHeadRecoverer | undefined
   private readonly now: () => number
   /** Generations of commits this handle has written or read. A
@@ -1061,25 +1069,35 @@ export class VersionedKV extends VersionedBase {
     })
   }
 
-  protected snapshotState(): SnapshotState {
-    return {
-      currentCommit: this.currentCommitHash,
-      commitKeys: new Map(this.commitKeys),
-      meta: new Map(this.meta),
-    }
+  /** Open a commit attempt: from here the key maps record what they
+   *  change, so a failure can put it back. */
+  protected snapshotState(): Attempt {
+    this.attempt = { currentCommit: this.currentCommitHash, undo: new Map() }
+    return this.attempt
   }
 
   /**
-   * Restore in-memory state after a failed attempt. The attempt's
-   * commits are abandoned, so their in-flight markers are withdrawn and
-   * they become ordinary orphans. Best effort: a marker left behind
-   * lapses after `IN_FLIGHT_TTL`.
+   * Restore in-memory state after a failed attempt: each key the
+   * attempt changed gets its old entry back. The attempt's commits are
+   * abandoned, so their in-flight markers are withdrawn and they become
+   * ordinary orphans. Best effort: a marker left behind lapses after
+   * `IN_FLIGHT_TTL`.
    */
   protected restoreState(saved: unknown): void {
-    const s = saved as SnapshotState
-    this.currentCommitHash = s.currentCommit
-    this.commitKeys = s.commitKeys
-    this.meta = s.meta
+    const s = saved as Attempt
+    // Only the open attempt is undone. Loading another commit closes
+    // it, and that state is newer than anything the attempt saved.
+    if (this.attempt === s) {
+      const keys = this.ownedKeys()
+      for (const [key, prev] of s.undo) {
+        if (prev.blob === undefined) keys.delete(key)
+        else keys.set(key, prev.blob)
+        if (prev.meta === undefined) this.meta.delete(key)
+        else this.meta.set(key, prev.meta)
+      }
+      this.currentCommitHash = s.currentCommit
+      this.attempt = null
+    }
     if (this.inFlight.size > 0) {
       // Each marker goes only if it still holds the bytes this attempt
       // wrote: another writer that produced the same commit may have
@@ -1090,6 +1108,34 @@ export class VersionedKV extends VersionedBase {
       })
       this.inFlight = new Map()
       Promise.all(withdrawn).catch(() => {})
+    }
+  }
+
+  protected override rollBackAttempt(): void {
+    if (this.attempt !== null) this.restoreState(this.attempt)
+  }
+
+  protected override endAttempt(): void {
+    this.attempt = null
+  }
+
+  /**
+   * Point `key` at `blob`, or remove it (null), in place. The open
+   * attempt records the entry it held first, so a failure can restore
+   * it. Called only once a commit's batch has landed, never while the
+   * attempt can still fail before it.
+   */
+  private setEntry(key: string, entry: { blob: string; meta: MetaEntry } | null): void {
+    const keys = this.ownedKeys()
+    if (this.attempt !== null && !this.attempt.undo.has(key)) {
+      this.attempt.undo.set(key, { blob: keys.get(key), meta: this.meta.get(key) })
+    }
+    if (entry === null) {
+      keys.delete(key)
+      this.meta.delete(key)
+    } else {
+      keys.set(key, entry.blob)
+      this.meta.set(key, entry.meta)
     }
   }
 
@@ -1122,16 +1168,6 @@ export class VersionedKV extends VersionedBase {
     const removals = opts.removals ?? new Set<string>()
     const info = opts.info ?? null
 
-    // Carry forward, apply removals, then point each update at its blob.
-    const newCommitKeys = new Map<string, string>()
-    const newMeta = new Map<string, MetaEntry>()
-    for (const [k, ptr] of this.commitKeys) {
-      if (removals.has(k)) continue
-      newCommitKeys.set(k, ptr)
-      const m = this.meta.get(k)
-      if (m !== undefined) newMeta.set(k, m)
-    }
-
     // Every blob is written, even one already stored: the key is its
     // content, so the rewrite changes nothing but guarantees the batch
     // holds everything its commit needs.
@@ -1140,10 +1176,7 @@ export class VersionedKV extends VersionedBase {
     for (const [key, value] of updates) {
       const pointer = await blobKey(value)
       writes.set(pointer, value)
-      newCommitKeys.set(key, pointer)
-      const meta: MetaEntry = { size: value.length }
-      newMeta.set(key, meta)
-      keysetUpdates.push([key, { blob: pointer, meta }])
+      keysetUpdates.push([key, { blob: pointer, meta: { size: value.length } }])
     }
 
     // Apply the changes to the parent's HAMT: structural sharing reuses
@@ -1171,9 +1204,12 @@ export class VersionedKV extends VersionedBase {
     // One batch, so a crash mid-write doesn't strand a partial commit.
     await this.landBatch(newHash, writes)
 
-    this.commitKeys = newCommitKeys
+    // Landed: change the key maps in place, removals first so an update
+    // to a removed key wins. Nothing between here and the return awaits,
+    // so no reader sees a half-applied commit.
+    for (const key of removals) this.setEntry(key, null)
+    for (const [key, entry] of keysetUpdates) this.setEntry(key, entry)
     this.currentCommitHash = newHash
-    this.meta = newMeta
     this.generations.set(newHash, generationOf(parentGens))
     return newHash
   }
@@ -1245,17 +1281,6 @@ export class VersionedKV extends VersionedBase {
     const newKs = await ourKs.updated({ updates, removals: resolution.removals })
     for (const [k, v] of newKs.pending) writes.set(k, v)
 
-    const mergedKeys = new Map(this.commitKeys)
-    const mergedMeta = new Map(this.meta)
-    for (const [key, entry] of updates) {
-      mergedKeys.set(key, entry.blob)
-      mergedMeta.set(key, entry.meta)
-    }
-    for (const key of resolution.removals) {
-      mergedKeys.delete(key)
-      mergedMeta.delete(key)
-    }
-
     const parentGens = await this.parentGenerations(parents)
     const created = this.now()
     const mergeHash = await commitHash(parents, newKs.root, created, info)
@@ -1270,9 +1295,10 @@ export class VersionedKV extends VersionedBase {
     for (const [k, v] of records) writes.set(k, v)
     await this.landBatch(mergeHash, writes)
 
-    this.commitKeys = mergedKeys
+    // Landed: change the key maps in place, without awaiting.
+    for (const [key, entry] of updates) this.setEntry(key, entry)
+    for (const key of resolution.removals) this.setEntry(key, null)
     this.currentCommitHash = mergeHash
-    this.meta = mergedMeta
     this.generations.set(mergeHash, generationOf(parentGens))
     return mergeHash
   }
@@ -1411,6 +1437,10 @@ export class VersionedKV extends VersionedBase {
   // --- Navigation ---
 
   async refresh(): Promise<void> {
+    return this.exclusive(() => this.refreshOnce())
+  }
+
+  private async refreshOnce(): Promise<void> {
     const head = await resolveHead(this.store, this.branch, {
       ...(this.recoverFromCorruptHead !== undefined && {
         recoverFromCorruptHead: this.recoverFromCorruptHead,
@@ -1455,6 +1485,10 @@ export class VersionedKV extends VersionedBase {
   }
 
   async switchBranch(name: string): Promise<void> {
+    return this.exclusive(() => this.switchBranchOnce(name))
+  }
+
+  private async switchBranchOnce(name: string): Promise<void> {
     rejectReservedBranch(name)
     const head = await resolveHead(this.store, name, {
       ...(this.recoverFromCorruptHead !== undefined && {
@@ -1498,6 +1532,10 @@ export class VersionedKV extends VersionedBase {
    * @throws UnknownBranchError if the branch has no HEAD.
    */
   async resetTo(commitHash: string): Promise<boolean> {
+    return this.exclusive(() => this.resetToOnce(commitHash))
+  }
+
+  private async resetToOnce(commitHash: string): Promise<boolean> {
     const branchKey = BRANCH_HEAD(this.branch)
     // The existence check and the write are decided against one lease
     // record: this either resets onto a commit that loads or reports it
@@ -1613,11 +1651,14 @@ export class VersionedKV extends VersionedBase {
   // --- Internal ---
 
   private async loadCommitInto(commitHash: string, updateBase: boolean): Promise<void> {
+    const { commitKeys, meta } = await populateState(this.store, commitHash)
+    // The commit and its keys change together, after the read, so no
+    // reader sees one commit's hash over another's keys.
     this.currentCommitHash = commitHash
     if (updateBase) this.baseCommitHash = commitHash
-    const { commitKeys, meta } = await populateState(this.store, commitHash)
-    this.commitKeys = commitKeys
+    this.replaceKeys(commitKeys)
     this.meta = meta
+    this.attempt = null
   }
 }
 

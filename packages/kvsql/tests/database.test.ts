@@ -175,6 +175,21 @@ describe('openDatabase on a MemoryDirectory', () => {
 
   it('reports a bad name', async () => {
     await expect(openDatabase(new MemoryDirectory(), 'a/b')).rejects.toThrow(/bad database name/)
+    await expect(openDatabase(new MemoryDirectory(), '')).rejects.toThrow(/bad database name/)
+  })
+
+  it("refuses a name that would share its file with another database's journal", async () => {
+    const dir = new MemoryDirectory()
+    await expect(openDatabase(dir, 'app-journal')).rejects.toThrow(
+      /the suffix of database journals/,
+    )
+    await expect(deleteDatabase(dir, 'app-journal')).rejects.toThrow(
+      /the suffix of database journals/,
+    )
+    expect(await dir.exists('app-journal')).toBe(false)
+    // A name that only contains the suffix is fine.
+    const ok = await openDatabase(dir, 'app-journal-notes')
+    ok.close()
   })
 })
 

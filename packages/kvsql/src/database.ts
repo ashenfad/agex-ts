@@ -37,9 +37,12 @@ export const JOURNAL_MODE = 'persist'
  */
 export const JOURNAL_SIZE_LIMIT = 1 << 20
 
+/** The suffix of a database's rollback journal, beside it in its directory. */
+const JOURNAL_SUFFIX = '-journal'
+
 /** The name of a database's rollback journal in its directory. */
 export function journalName(name: string): string {
-  return `${name}-journal`
+  return `${name}${JOURNAL_SUFFIX}`
 }
 
 const directoryIds = new WeakMap<Directory, number>()
@@ -55,9 +58,19 @@ function vfsPath(dir: Directory, name: string): string {
   return `/${id}/${name}`
 }
 
+/**
+ * A database name is one path segment, and doesn't end in the journal
+ * suffix: database `x-journal` would share its file with database
+ * `x`'s journal, so one would overwrite or delete the other.
+ */
 function checkName(name: string): void {
   if (name === '' || name.includes('/'))
     throw new Error(`bad database name: ${JSON.stringify(name)}`)
+  if (name.endsWith(JOURNAL_SUFFIX)) {
+    throw new Error(
+      `bad database name: ${JSON.stringify(name)} ends in ${JOURNAL_SUFFIX}, the suffix of database journals`,
+    )
+  }
 }
 
 /**

@@ -72,14 +72,13 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Install Playwright Chromium (with system deps)
-        run: pnpm --filter kvgit-ts exec playwright install chromium --with-deps
+      # Every browser in one call: with a second `playwright install`
+      # for Firefox and WebKit, Chromium's headless shell went missing.
+      - name: Install Playwright Chromium, Firefox and WebKit (with system deps)
+        run: pnpm --filter kvgit-ts exec playwright install chromium firefox webkit --with-deps
 
       - name: kvgit-ts (Chromium + real IndexedDB)
         run: pnpm --filter kvgit-ts test:browser
-
-      - name: Install Playwright Firefox and WebKit (with system deps)
-        run: pnpm --filter kvsql exec playwright install firefox webkit --with-deps
 
       - name: kvsql (Chromium, Firefox, WebKit)
         run: |

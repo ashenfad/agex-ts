@@ -46,7 +46,7 @@ for await (const c of repo.log({ branch: 'main' })) console.log(c.hash, c.info)
   writer made. `commit({ onMoved: 'raise' })` lands only as a
   fast-forward from the worktree's head: if the branch moved, before
   the commit or inside the compare-and-swap that publishes it, it
-  throws `BranchMovedError` (a `ConcurrencyError`; `err.head` is the
+  throws `BranchMovedError` (with nothing to commit too) (a `ConcurrencyError`; `err.head` is the
   tip it found), writes nothing reachable and keeps the pending
   changes. `refresh()` then moves to the tip to redo the work.
 - **`Snapshot`** is a read-only view pinned to one commit. It looks

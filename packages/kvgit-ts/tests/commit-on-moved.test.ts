@@ -130,6 +130,23 @@ describe("Worktree.commit — onMoved: 'raise'", () => {
     expect((await repo.getCommit(landed.commit as string)).parents).toEqual([tip])
   })
 
+  it('refuses a commit with nothing to write when the branch moved', async () => {
+    const { repo, a, b } = await twoWriters()
+    // a clean worktree on the head the branch is about to leave
+    const clean = await repo.worktree('main')
+    const first = (await a.commit()).commit as string
+    const err = await clean.commit({ onMoved: 'raise' }).catch((e) => e)
+    expect(err).toBeInstanceOf(BranchMovedError)
+    expect(err.head).toBe(first)
+    // pending changes, none of them selected
+    await expect(b.commit({ keys: [], onMoved: 'raise' })).rejects.toThrow(BranchMovedError)
+    expect(b.status().updated).toEqual(new Set(['b']))
+    // by default, and on an unmoved branch, it is still a no-op
+    expect((await clean.commit()).strategy).toBe('no_op')
+    await clean.refresh()
+    expect((await clean.commit({ onMoved: 'raise' })).strategy).toBe('no_op')
+  })
+
   it('fast-forwards when the branch has not moved', async () => {
     const { repo, base, a } = await twoWriters()
     const result = await a.commit({ onMoved: 'raise' })

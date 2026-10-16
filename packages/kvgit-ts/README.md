@@ -41,6 +41,14 @@ for await (const c of repo.log({ branch: 'main' })) console.log(c.hash, c.info)
   race to another worktree on the same branch merges onto the new tip
   with the effective merge functions (the call's, then the
   worktree's, then the repository's).
+- **Refusing to merge.** Where keys are not independent (pages of one
+  database, say), a merge of two disjoint changes is a state neither
+  writer made. `commit({ onMoved: 'raise' })` lands only as a
+  fast-forward from the worktree's head: if the branch moved, before
+  the commit or inside the compare-and-swap that publishes it, it
+  throws `BranchMovedError` (a `ConcurrencyError`; `err.head` is the
+  tip it found), writes nothing reachable and keeps the pending
+  changes. `refresh()` then moves to the tip to redo the work.
 - **`Snapshot`** is a read-only view pinned to one commit. It looks
   keys up in the tree a batch at a time, so reading a few keys stays
   cheap however many the commit holds; `raw` gives the stored bytes.
@@ -70,7 +78,8 @@ for await (const c of repo.log({ branch: 'main' })) console.log(c.hash, c.info)
 - Errors derive from `KvgitError`: `UnknownBranchError`,
   `UnknownTagError`, `UnknownCommitError`, `BranchExistsError`,
   `TagExistsError`, `CorruptHeadError`, `StorageVersionError`,
-  `MergeConflict` and `ConcurrencyError`.
+  `MergeConflict`, `ConcurrencyError` and its subclass
+  `BranchMovedError`.
 
 `Worktree` and `Repo` sit on `VersionedKV`, which stays available (as
 does `Staged`) for the code that still uses it.

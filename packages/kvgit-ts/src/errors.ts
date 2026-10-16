@@ -22,6 +22,28 @@ export class ConcurrencyError extends KvgitError {
 }
 
 /**
+ * A commit made with `onMoved: 'raise'` found its branch moved: the
+ * branch's head is no longer the commit the handle is based on. Nothing
+ * was published and pending changes are kept; reload from `head` (or
+ * refresh) and retry, or give up.
+ */
+export class BranchMovedError extends ConcurrencyError {
+  override readonly name: string = 'BranchMovedError'
+  readonly branch: string
+  /** The commit the handle is based on, which the branch no longer names. */
+  readonly base: string
+  /** The branch's head as the commit found it. */
+  readonly head: string
+
+  constructor(branch: string, base: string, head: string) {
+    super(`Branch '${branch}' moved from ${base} to ${head}; nothing was committed`)
+    this.branch = branch
+    this.base = base
+    this.head = head
+  }
+}
+
+/**
  * One or more contested keys had no merge function (or their merge fn
  * threw). The merge attempt is aborted; pending changes remain intact
  * for inspection.

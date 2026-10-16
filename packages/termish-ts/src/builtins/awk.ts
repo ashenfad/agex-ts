@@ -1341,17 +1341,69 @@ const POSIX_CLASSES: Record<string, string> = {
   graph: '\\x21-\\x7e',
 }
 
-/** An awk ERE as a JavaScript regex source: POSIX classes such as
- *  `[[:digit:]]` read as their ranges; the rest is already in the
- *  syntax `RegExp` speaks. */
+/** Escapes a `u` regex accepts outside a bracket expression; any other
+ *  letter after a backslash stands for itself. */
+const KEPT_ESCAPES = 'dDwWsSbBnrtfv0123456789cxu'
+/** The same inside a bracket expression, where `\b` is a backspace. */
+const KEPT_CLASS_ESCAPES = 'dDwWsSbnrtfv0cxu'
+const SYNTAX_CHARS = '^$\\.*+?()[]{}|/'
+const QUANTIFIER = /^\{\d+(?:,\d*)?\}/
+
+/** `\X` from an ERE as a `u` regex reads it: kept when it means
+ *  something there, otherwise `X` itself, escaped only if it must be. */
+function escapeToJs(x: string, kept: string, inClass: boolean): string {
+  if (/^[A-Za-z0-9]$/.test(x)) return kept.includes(x) ? `\\${x}` : x
+  if (SYNTAX_CHARS.includes(x) || (inClass && x === '-')) return `\\${x}`
+  return x
+}
+
+/** One past the `]` closing the bracket expression at `src[i]`, scanned
+ *  as `ereToJs` scans it. */
+function bracketEnd(src: string, open: number): number {
+  let i = open + 1
+  if (src.charAt(i) === '^') i++
+  if (src.charAt(i) === ']') i++
+  while (i < src.length && src.charAt(i) !== ']') {
+    if (src.charAt(i) === '[' && src.charAt(i + 1) === ':') {
+      const end = src.indexOf(':]', i + 2)
+      if (end !== -1 && src.slice(i + 2, end) in POSIX_CLASSES) {
+        i = end + 2
+        continue
+      }
+    }
+    i += src.charAt(i) === '\\' && i + 1 < src.length ? 2 : 1
+  }
+  return Math.min(i + 1, src.length)
+}
+
+/** An awk ERE as the source of a `u` regex: POSIX classes such as
+ *  `[[:digit:]]` read as their ranges, and an escape or brace the `u`
+ *  syntax would refuse read as the character it stands for. */
 function ereToJs(src: string): string {
   let out = ''
   let i = 0
   while (i < src.length) {
     const ch = src.charAt(i)
     if (ch === '\\' && i + 1 < src.length) {
-      out += src.slice(i, i + 2)
-      i += 2
+      const x = String.fromCodePoint(src.codePointAt(i + 1) as number)
+      out += escapeToJs(x, KEPT_ESCAPES, false)
+      i += 1 + x.length
+      continue
+    }
+    if (ch === '{' && !QUANTIFIER.test(src.slice(i))) {
+      out += '\\{'
+      i++
+      continue
+    }
+    if (ch === '}' || ch === ']') {
+      out += `\\${ch}`
+      i++
+      continue
+    }
+    if (ch === '{') {
+      const q = (QUANTIFIER.exec(src.slice(i)) as RegExpExecArray)[0]
+      out += q
+      i += q.length
       continue
     }
     if (ch !== '[') {
@@ -1381,8 +1433,9 @@ function ereToJs(src: string): string {
         }
       }
       if (c === '\\' && i + 1 < src.length) {
-        out += src.slice(i, i + 2)
-        i += 2
+        const x = String.fromCodePoint(src.codePointAt(i + 1) as number)
+        out += escapeToJs(x, KEPT_CLASS_ESCAPES, true)
+        i += 1 + x.length
         continue
       }
       out += c === '[' ? '\\[' : c
@@ -1396,6 +1449,341 @@ function ereToJs(src: string): string {
   return out
 }
 
+/** Regex flags: whole characters (`u`), and `.` matching a newline too
+ *  (`s`), as awk's does. */
+const FLAGS = 'su'
+
+/** How many UTF-16 units the character at `s[i]` takes. */
+function charWidth(s: string, i: number): number {
+  const c = s.codePointAt(i)
+  return c !== undefined && c > 0xffff ? 2 : 1
+}
+
+/** How many characters (code points) `s` holds. */
+function charCount(s: string): number {
+  let n = 0
+  for (let i = 0; i < s.length; i += charWidth(s, i)) n++
+  return n
+}
+
+/**
+ * An awk ERE: the compiled regex, and for one with alternation the NFA
+ * that finds where its match ends. The engine takes the first
+ * alternative that matches; awk takes the longest match at the leftmost
+ * start, so `/a|aa/` matches all of "aa".
+ */
+class AwkRegex {
+  readonly #re: RegExp
+  readonly #g: RegExp
+  readonly #nfa: Op[] | null
+  #memoText: string | null = null
+  #memo = new Map<string, number>()
+
+  constructor(src: string) {
+    const js = ereToJs(src)
+    this.#re = new RegExp(js, FLAGS)
+    this.#g = new RegExp(js, `g${FLAGS}`)
+    this.#nfa = nfaFor(src)
+  }
+
+  test(s: string): boolean {
+    return this.#re.test(s)
+  }
+
+  /** The leftmost match in `s` from `from`, the longest one starting
+   *  there: `[start, end]` in UTF-16 units, or null. */
+  search(s: string, from: number): [number, number] | null {
+    this.#g.lastIndex = from
+    const m = this.#g.exec(s)
+    if (m === null) return null
+    const start = m.index
+    let end = start + m[0].length
+    if (this.#nfa !== null) {
+      // successive searches of one text (gsub, split) share what earlier
+      // runs learned about it
+      if (this.#memoText !== s || this.#memo.size > MEMO_LIMIT) {
+        this.#memoText = s
+        this.#memo = new Map()
+      }
+      end = Math.max(end, longestEnd(this.#nfa, s, start, this.#memo))
+    }
+    return [start, end]
+  }
+}
+
+/** NFA instructions, run by `longestEnd`. */
+type Op =
+  | { op: 'char'; test: (c: string) => boolean }
+  | { op: 'split'; x: number; y: number }
+  | { op: 'jmp'; x: number }
+  | { op: 'bol' | 'eol' | 'match' }
+
+type Node =
+  | { t: 'char'; test: (c: string) => boolean }
+  | { t: 'bol' | 'eol' }
+  | { t: 'cat' | 'alt'; nodes: Node[] }
+  | { t: 'rep'; node: Node; lo: number; hi: number | null }
+
+const NFA_LIMIT = 10_000
+const MEMO_LIMIT = 100_000
+const INTERVAL = /^\{(\d+)(,(\d*))?\}/
+const LITERAL_ESCAPES: Record<string, string> = {
+  n: '\n',
+  t: '\t',
+  r: '\r',
+  f: '\f',
+  v: '\v',
+}
+
+/** A construct the NFA doesn't model: the engine's match is kept. */
+class Unsupported extends Error {}
+
+/** An ERE read into a tree of `Node`s. */
+class EreParser {
+  #i = 0
+  hasAlt = false
+
+  constructor(readonly src: string) {}
+
+  parse(): Node {
+    const node = this.#alt()
+    if (this.#i < this.src.length) throw new Unsupported()
+    return node
+  }
+
+  #peek(): string {
+    return this.src.charAt(this.#i)
+  }
+
+  #alt(): Node {
+    const branches = [this.#concat()]
+    while (this.#peek() === '|') {
+      this.#i++
+      this.hasAlt = true
+      branches.push(this.#concat())
+    }
+    return branches.length > 1 ? { t: 'alt', nodes: branches } : (branches[0] as Node)
+  }
+
+  #concat(): Node {
+    const nodes: Node[] = []
+    while (this.#i < this.src.length && this.#peek() !== '|' && this.#peek() !== ')') {
+      nodes.push(this.#repeat())
+    }
+    return { t: 'cat', nodes }
+  }
+
+  #repeat(): Node {
+    let node = this.#atom()
+    for (;;) {
+      const c = this.#peek()
+      if (c === '*' || c === '+' || c === '?') {
+        this.#i++
+        node = { t: 'rep', node, lo: c === '+' ? 1 : 0, hi: c === '?' ? 1 : null }
+      } else if (c === '{') {
+        const m = INTERVAL.exec(this.src.slice(this.#i))
+        if (m === null) throw new Unsupported()
+        const lo = Number(m[1])
+        const hi = m[2] === undefined ? lo : m[3] === '' ? null : Number(m[3])
+        if (hi !== null && hi < lo) throw new Unsupported()
+        this.#i += m[0].length
+        node = { t: 'rep', node, lo, hi }
+      } else return node
+    }
+  }
+
+  #atom(): Node {
+    const src = this.src
+    const c = String.fromCodePoint(src.codePointAt(this.#i) as number)
+    if (c === '(') {
+      if (src.startsWith('(?', this.#i)) throw new Unsupported()
+      this.#i++
+      const node = this.#alt()
+      if (this.#peek() !== ')') throw new Unsupported()
+      this.#i++
+      return node
+    }
+    if ('*+?{)'.includes(c)) throw new Unsupported()
+    if (c === '.') {
+      this.#i++
+      return { t: 'char', test: () => true }
+    }
+    if (c === '^' || c === '$') {
+      this.#i++
+      return { t: c === '^' ? 'bol' : 'eol' }
+    }
+    if (c === '[') {
+      const j = bracketEnd(src, this.#i)
+      const test = charTest(src.slice(this.#i, j))
+      this.#i = j
+      return { t: 'char', test }
+    }
+    if (c === '\\') {
+      const d = src.charAt(this.#i + 1)
+      if (d === '') throw new Unsupported()
+      let node: Node
+      const lit = LITERAL_ESCAPES[d]
+      if (lit !== undefined) node = { t: 'char', test: (x) => x === lit }
+      else if ('dDwWsS'.includes(d)) node = { t: 'char', test: charTest(`\\${d}`) }
+      else if (/^[A-Za-z0-9]$/.test(d)) throw new Unsupported()
+      else {
+        const x = String.fromCodePoint(src.codePointAt(this.#i + 1) as number)
+        node = { t: 'char', test: (y) => y === x }
+        this.#i += x.length - 1
+      }
+      this.#i += 2
+      return node
+    }
+    this.#i += c.length
+    return { t: 'char', test: (x) => x === c }
+  }
+}
+
+/** A one-character ERE (a bracket expression, a class escape) as a test
+ *  of one character, by the same engine the search uses. */
+function charTest(atom: string): (c: string) => boolean {
+  const re = new RegExp(`^(?:${ereToJs(atom)})$`, FLAGS)
+  return (c) => re.test(c)
+}
+
+/** The NFA program for an ERE with alternation; null for one without,
+ *  whose engine match is kept as it is, and for one the NFA can't model. */
+function nfaFor(src: string): Op[] | null {
+  if (!src.includes('|')) return null
+  const parser = new EreParser(src)
+  let tree: Node
+  try {
+    tree = parser.parse()
+  } catch (e) {
+    if (e instanceof Unsupported || e instanceof SyntaxError) return null
+    throw e
+  }
+  if (!parser.hasAlt) return null
+  const ops: Op[] = []
+  const hole: Op = { op: 'match' }
+  const emit = (node: Node): void => {
+    switch (node.t) {
+      case 'char':
+        ops.push({ op: 'char', test: node.test })
+        break
+      case 'bol':
+      case 'eol':
+        ops.push({ op: node.t })
+        break
+      case 'cat':
+        for (const n of node.nodes) emit(n)
+        break
+      case 'alt': {
+        const jumps: number[] = []
+        node.nodes.forEach((b, k) => {
+          if (k === node.nodes.length - 1) {
+            emit(b)
+            return
+          }
+          const split = ops.length
+          ops.push(hole)
+          emit(b)
+          jumps.push(ops.length)
+          ops.push(hole)
+          ops[split] = { op: 'split', x: split + 1, y: ops.length }
+        })
+        for (const j of jumps) ops[j] = { op: 'jmp', x: ops.length }
+        break
+      }
+      case 'rep': {
+        for (let k = 0; k < node.lo; k++) emit(node.node)
+        if (node.hi === null) {
+          const loop = ops.length
+          ops.push(hole)
+          emit(node.node)
+          ops.push({ op: 'jmp', x: loop })
+          ops[loop] = { op: 'split', x: loop + 1, y: ops.length }
+        } else {
+          const holes: number[] = []
+          for (let k = node.lo; k < node.hi; k++) {
+            holes.push(ops.length)
+            ops.push(hole)
+            emit(node.node)
+          }
+          for (const h of holes) ops[h] = { op: 'split', x: h + 1, y: ops.length }
+        }
+        break
+      }
+    }
+    if (ops.length > NFA_LIMIT) throw new Unsupported()
+  }
+  try {
+    emit(tree)
+  } catch (e) {
+    if (e instanceof Unsupported) return null
+    throw e
+  }
+  ops.push({ op: 'match' })
+  return ops
+}
+
+/**
+ * The furthest end of a match of the NFA `ops` starting at `start` in
+ * `s`, or -1. All paths advance together, a character at a time, and the
+ * run stops when none is left. The live set at a position decides
+ * everything after it, so `memo` keeps, for each (live set, position) a
+ * run of `s` passed through, the furthest end from there, and a later run
+ * that reaches one stops at once: searches from many starts in one text
+ * read it about once, not once each.
+ */
+function longestEnd(ops: Op[], s: string, start: number, memo: Map<string, number>): number {
+  const n = s.length
+  const close = (out: number[], seen: Set<number>, from: number, pos: number): void => {
+    const stack = [from]
+    while (stack.length > 0) {
+      const pc = stack.pop() as number
+      if (seen.has(pc)) continue
+      seen.add(pc)
+      const op = ops[pc] as Op
+      if (op.op === 'split') stack.push(op.y, op.x)
+      else if (op.op === 'jmp') stack.push(op.x)
+      else if (op.op === 'bol') {
+        if (pos === 0) stack.push(pc + 1)
+      } else if (op.op === 'eol') {
+        if (pos === n) stack.push(pc + 1)
+      } else out.push(pc)
+    }
+  }
+  const path: [string, number, boolean][] = []
+  let best = -1
+  let live: number[] = []
+  close(live, new Set(), 0, start)
+  let pos = start
+  while (live.length > 0) {
+    const key = `${[...live].sort((a, b) => a - b).join(',')}@${pos}`
+    const known = memo.get(key)
+    if (known !== undefined) {
+      best = known
+      break
+    }
+    const c = pos < n ? String.fromCodePoint(s.codePointAt(pos) as number) : null
+    const next: number[] = []
+    const seen = new Set<number>()
+    let accepts = false
+    for (const pc of live) {
+      const op = ops[pc] as Op
+      if (op.op === 'match') accepts = true
+      else if (c !== null && op.op === 'char' && op.test(c))
+        close(next, seen, pc + 1, pos + c.length)
+    }
+    path.push([key, pos, accepts])
+    if (c === null) break
+    live = next
+    pos += c.length
+  }
+  for (let k = path.length - 1; k >= 0; k--) {
+    const [key, at, accepts] = path[k] as [string, number, boolean]
+    if (accepts && best < at) best = at
+    memo.set(key, best)
+  }
+  return best
+}
+
 // ---------------------------------------------------------------------------
 // Interpreter
 // ---------------------------------------------------------------------------
@@ -1406,13 +1794,19 @@ interface Output {
   open: boolean
 }
 
+/** Where an lvalue points, resolved once for a read-modify-write. */
+type Ref =
+  | { t: 'var'; name: string }
+  | { t: 'idx'; arr: AwkArray; key: string }
+  | { t: 'field'; i: number }
+
 /** How many loop turns or records between yields to the event loop. */
 const YIELD_EVERY = 1024
 
 class Interp {
   readonly #ctx: CommandContext
   readonly #vars = new Map<string, Val | AwkArray>()
-  readonly #regexes = new Map<string, RegExp>()
+  readonly #regexes = new Map<string, AwkRegex>()
   #record = ''
   #fields: string[] = []
   #out = ''
@@ -1540,9 +1934,9 @@ class Interp {
 
   /** `s` split as fields are: on runs of blanks for " ", on a single
    *  character literally, into characters for "", on a regex otherwise. */
-  split(s: string, sep: Val | RegExp): string[] {
+  split(s: string, sep: Val | AwkRegex): string[] {
     if (s === '') return []
-    if (sep instanceof RegExp) return this.#splitRegex(s, sep)
+    if (sep instanceof AwkRegex) return this.#splitRegex(s, sep)
     const fs = this.#str(sep)
     if (fs === ' ')
       return s
@@ -1553,21 +1947,22 @@ class Interp {
     return this.#splitRegex(s, this.#regex(fs))
   }
 
-  #splitRegex(s: string, re: RegExp): string[] {
-    const g = new RegExp(re.source, 'g')
+  /** `s` split at each non-empty match of `rx`; the separators, groups
+   *  and all, are dropped. */
+  #splitRegex(s: string, rx: AwkRegex): string[] {
     const out: string[] = []
     let pos = 0
     let from = 0
     while (from <= s.length) {
-      g.lastIndex = from
-      const m = g.exec(s)
+      const m = rx.search(s, from)
       if (m === null) break
-      if (m[0].length === 0) {
-        from = m.index + 1
+      const [start, end] = m
+      if (end === start) {
+        from = start + charWidth(s, start)
         continue
       }
-      out.push(s.slice(pos, m.index))
-      pos = m.index + m[0].length
+      out.push(s.slice(pos, start))
+      pos = end
       from = pos
     }
     out.push(s.slice(pos))
@@ -1576,35 +1971,50 @@ class Interp {
 
   // -- regexes --------------------------------------------------------------
 
-  #regex(src: string): RegExp {
-    let re = this.#regexes.get(src)
-    if (re === undefined) {
+  #regex(src: string): AwkRegex {
+    let rx = this.#regexes.get(src)
+    if (rx === undefined) {
       try {
-        re = new RegExp(ereToJs(src))
+        rx = new AwkRegex(src)
       } catch {
         throw new AwkRuntimeError(`awk: invalid regex: /${src}/`)
       }
-      this.#regexes.set(src, re)
+      this.#regexes.set(src, rx)
     }
-    return re
+    return rx
   }
 
   /** A regex argument: a `/re/` literal as itself, anything else as the text of one. */
-  #regexOf(e: Expr): RegExp {
+  #regexOf(e: Expr): AwkRegex {
     if (e.t === 'ere') return this.#regex(e.src)
     return this.#regex(this.#str(this.eval(e)))
   }
 
   // -- lvalues --------------------------------------------------------------
 
-  #get(target: Expr): Val {
-    return this.eval(target)
+  /** Where an lvalue points, its subscripts and field number evaluated once. */
+  #ref(target: Expr): Ref {
+    if (target.t === 'idx')
+      return { t: 'idx', arr: this.array(target.name), key: this.#key(target.subs) }
+    if (target.t === 'field') return { t: 'field', i: Math.trunc(toNum(this.eval(target.e))) }
+    return { t: 'var', name: (target as Expr & { name: string }).name }
   }
 
-  #set(target: Expr, v: Val): void {
-    if (target.t === 'var') this.setScalar(target.name, v)
-    else if (target.t === 'idx') this.array(target.name).set(this.#key(target.subs), v)
-    else if (target.t === 'field') this.#setField(Math.trunc(toNum(this.eval(target.e))), v)
+  #load(ref: Ref): Val {
+    if (ref.t === 'idx') {
+      const v = ref.arr.get(ref.key)
+      if (v !== undefined) return v
+      ref.arr.set(ref.key, UNINIT)
+      return UNINIT
+    }
+    if (ref.t === 'field') return this.#getField(ref.i)
+    return this.#scalar(ref.name)
+  }
+
+  #store(ref: Ref, v: Val): void {
+    if (ref.t === 'idx') ref.arr.set(ref.key, v)
+    else if (ref.t === 'field') this.#setField(ref.i, v)
+    else this.setScalar(ref.name, v)
   }
 
   // -- expressions ----------------------------------------------------------
@@ -1632,14 +2042,16 @@ class Interp {
       case 'field':
         return this.#getField(Math.trunc(toNum(this.eval(e.e))))
       case 'assign': {
+        // the target first, then the value, as awk orders them
+        const ref = this.#ref(e.target)
         if (e.op === '=') {
           const v = this.eval(e.e)
-          this.#set(e.target, v)
+          this.#store(ref, v)
           return v
         }
         const rhs = toNum(this.eval(e.e))
-        const n = arith(e.op.slice(0, -1), toNum(this.#get(e.target)), rhs)
-        this.#set(e.target, n)
+        const n = arith(e.op.slice(0, -1), toNum(this.#load(ref)), rhs)
+        this.#store(ref, n)
         return n
       }
       case 'cond':
@@ -1670,9 +2082,10 @@ class Interp {
       case 'not':
         return isTrue(this.eval(e.e)) ? 0 : 1
       case 'incr': {
-        const old = toNum(this.#get(e.target))
+        const ref = this.#ref(e.target)
+        const old = toNum(this.#load(ref))
         const now = e.op === '++' ? old + 1 : old - 1
-        this.#set(e.target, now)
+        this.#store(ref, now)
         return e.prefix ? now : old
       }
       case 'call':
@@ -1712,28 +2125,30 @@ class Interp {
     const num = (i: number): number => toNum(arg(i))
     switch (name) {
       case 'length': {
-        if (args.length === 0) return this.#record.length
+        if (args.length === 0) return charCount(this.#record)
         const a = args[0] as Expr
         if (a.t === 'var' && this.#vars.get(a.name) instanceof Map)
           return (this.#vars.get(a.name) as AwkArray).size
-        return this.#str(arg(0)).length
+        return charCount(this.#str(arg(0)))
       }
       case 'substr': {
-        const s = this.#str(arg(0))
+        // positions count characters, not UTF-16 units
+        const chars = [...this.#str(arg(0))]
         const m = Math.trunc(num(1))
         const start = Math.max(m, 1)
-        let end = s.length + 1
+        let end = chars.length + 1
         if (args.length === 3) end = Math.min(end, m + Math.trunc(num(2)))
-        return end <= start ? '' : s.slice(start - 1, end - 1)
+        return end <= start ? '' : chars.slice(start - 1, end - 1).join('')
       }
       case 'index': {
         const s = this.#str(arg(0))
-        return s.indexOf(this.#str(arg(1))) + 1
+        const at = s.indexOf(this.#str(arg(1)))
+        return at < 0 ? 0 : charCount(s.slice(0, at)) + 1
       }
       case 'split': {
         const s = this.#str(arg(0))
         const target = this.array((args[1] as Expr & { name: string }).name)
-        let sep: Val | RegExp = this.#scalar('FS')
+        let sep: Val | AwkRegex = this.#scalar('FS')
         if (args.length === 3) {
           const a = args[2] as Expr
           sep = a.t === 'ere' ? this.#regex(a.src) : this.eval(a)
@@ -1745,20 +2160,20 @@ class Interp {
       }
       case 'sub':
       case 'gsub': {
-        const re = this.#regexOf(args[0] as Expr)
+        const rx = this.#regexOf(args[0] as Expr)
         const repl = this.#str(arg(1))
-        const target: Expr =
-          args.length === 3 ? (args[2] as Expr) : { t: 'field', e: { t: 'num', v: 0 } }
-        const [text, count] = substitute(re, repl, this.#str(this.#get(target)), name === 'gsub')
-        if (count > 0) this.#set(target, text)
+        const ref: Ref = args.length === 3 ? this.#ref(args[2] as Expr) : { t: 'field', i: 0 }
+        const [text, count] = substitute(rx, repl, this.#str(this.#load(ref)), name === 'gsub')
+        if (count > 0) this.#store(ref, text)
         return count
       }
       case 'match': {
         const s = this.#str(arg(0))
-        const m = this.#regexOf(args[1] as Expr).exec(s)
-        const start = m === null ? 0 : m.index + 1
+        const m = this.#regexOf(args[1] as Expr).search(s, 0)
+        // RSTART and RLENGTH count characters, not UTF-16 units
+        const start = m === null ? 0 : charCount(s.slice(0, m[0])) + 1
         this.#vars.set('RSTART', start)
-        this.#vars.set('RLENGTH', m === null ? -1 : m[0].length)
+        this.#vars.set('RLENGTH', m === null ? -1 : charCount(s.slice(m[0], m[1])))
         return start
       }
       case 'sprintf':
@@ -1946,7 +2361,7 @@ class Interp {
 
     if (code === null && (mains.length > 0 || ends.length > 0)) {
       try {
-        await this.#readInput(mains, operands)
+        await this.#readInput(mains)
       } catch (e) {
         if (!(e instanceof ExitSignal)) throw e
         code = e.code ?? 0
@@ -1969,40 +2384,52 @@ class Interp {
     this.setScalar(a.slice(0, eq), new StrNum(readEscapes(a.slice(eq + 1))))
   }
 
-  async #readInput(mains: Item[], operands: string[]): Promise<void> {
-    // with no file named, stdin is read after the assignments
-    const files = operands.filter((o) => !isAssignment(o))
-    const sources = files.length === 0 ? [...operands, '-'] : operands
-    for (const src of sources) {
+  /** Read the operands in ARGV[1] to ARGV[ARGC-1], as they stand when
+   *  each is reached: a missing or empty one is skipped, `var=value`
+   *  assigns, and stdin is read when none names a file. */
+  async #readInput(mains: Item[]): Promise<void> {
+    let read = false
+    for (let i = 1; i < toNum(this.#scalar('ARGC')); i++) {
+      const v = this.array('ARGV').get(String(i))
+      const src = v === undefined ? '' : this.#str(v)
+      if (src === '') continue
       if (isAssignment(src)) {
         this.#assignArg(src)
         continue
       }
-      let text: string
-      if (src === '-' || src === '/dev/stdin') text = this.#ctx.stdin.text()
-      else {
-        try {
-          text = new TextDecoder().decode(await this.#ctx.fs.read(src))
-        } catch (e) {
-          throw new AwkRuntimeError(`awk: can't open file ${src}: ${describeFsError(e)}`)
-        }
+      read = true
+      await this.#readSource(mains, src, src)
+    }
+    if (!read) await this.#readSource(mains, '-', '')
+  }
+
+  async #readSource(mains: Item[], src: string, filename: string): Promise<void> {
+    let text: string
+    if (src === '-' || src === '/dev/stdin') text = this.#ctx.stdin.text()
+    else {
+      try {
+        text = new TextDecoder().decode(await this.#ctx.fs.read(src))
+      } catch (e) {
+        throw new AwkRuntimeError(`awk: can't open file ${src}: ${describeFsError(e)}`)
       }
-      this.#vars.set('FILENAME', src === '-' ? '' : src)
-      this.#vars.set('FNR', 0)
-      for (const record of this.#records(text)) {
-        await this.tick()
-        this.#vars.set('NR', toNum(this.#scalar('NR')) + 1)
-        this.#vars.set('FNR', toNum(this.#scalar('FNR')) + 1)
-        this.setRecord(record)
-        try {
-          for (const item of mains) {
-            if (!this.#matches(item)) continue
-            if (item.action === null) this.#out += this.#record + this.#str2(this.#scalar('ORS'))
-            else await this.exec(item.action)
-          }
-        } catch (e) {
-          if (!(e instanceof NextSignal)) throw e
+    }
+    // FILENAME is "" for stdin read because no file was named, and the
+    // operand itself, "-" included, otherwise
+    this.#vars.set('FILENAME', filename)
+    this.#vars.set('FNR', 0)
+    for (const record of this.#records(text)) {
+      await this.tick()
+      this.#vars.set('NR', toNum(this.#scalar('NR')) + 1)
+      this.#vars.set('FNR', toNum(this.#scalar('FNR')) + 1)
+      this.setRecord(record)
+      try {
+        for (const item of mains) {
+          if (!this.#matches(item)) continue
+          if (item.action === null) this.#out += this.#record + this.#str2(this.#scalar('ORS'))
+          else await this.exec(item.action)
         }
+      } catch (e) {
+        if (!(e instanceof NextSignal)) throw e
       }
     }
   }
@@ -2017,7 +2444,7 @@ class Interp {
       for (const p of paras) yield p.replace(/\n+$/, '')
       return
     }
-    const parts = rs.length === 1 ? text.split(rs) : text.split(this.#regex(rs))
+    const parts = rs.length === 1 ? text.split(rs) : this.#splitRegex(text, this.#regex(rs))
     if (parts[parts.length - 1] === '') parts.pop()
     yield* parts
   }
@@ -2033,12 +2460,17 @@ class Interp {
     return true
   }
 
-  /** Write what the run printed: stdout, then the files it printed to. */
+  /** Write what the run printed: stdout, then each file it printed to,
+   *  once; a file that can't be written doesn't keep the rest from being
+   *  written, and the first failure is thrown after them. */
   async flush(): Promise<void> {
     if (this.#out !== '') this.#ctx.stdout.write(this.#out)
     this.#out = ''
+    const files = [...this.#files]
+    this.#files.clear()
     const encoder = new TextEncoder()
-    for (const [path, out] of this.#files) {
+    let failure: AwkRuntimeError | null = null
+    for (const [path, out] of files) {
       try {
         await this.#ctx.fs.write(
           path,
@@ -2046,10 +2478,10 @@ class Interp {
           out.base === 'truncate' ? 'w' : 'a',
         )
       } catch (e) {
-        throw new AwkRuntimeError(`awk: can't write to ${path}: ${describeFsError(e)}`)
+        failure ??= new AwkRuntimeError(`awk: can't write to ${path}: ${describeFsError(e)}`)
       }
     }
-    this.#files.clear()
+    if (failure !== null) throw failure
   }
 
   get stderr(): string {
@@ -2081,31 +2513,31 @@ function arith(op: string, a: number, b: number): number {
  * replaced. In `repl`, `&` is the match and `\&` a literal `&`; an empty
  * match right after a replaced one is skipped, as awk skips it.
  */
-function substitute(re: RegExp, repl: string, s: string, global: boolean): [string, number] {
-  const g = new RegExp(re.source, 'g')
+function substitute(rx: AwkRegex, repl: string, s: string, global: boolean): [string, number] {
   let out = ''
   let pos = 0
   let count = 0
   let lastEnd = -1
   while (pos <= s.length) {
-    g.lastIndex = pos
-    const m = g.exec(s)
+    const m = rx.search(s, pos)
     if (m === null) break
-    const at = m.index
-    const len = m[0].length
+    const [at, end] = m
+    const len = end - at
+    // past an empty match by a whole character
+    const step = charWidth(s, at)
     if (len === 0 && at === lastEnd) {
       if (at >= s.length) break
-      out += s.charAt(at)
-      pos = at + 1
+      out += s.slice(at, at + step)
+      pos = at + step
       continue
     }
-    out += s.slice(pos, at) + expandRepl(repl, m[0])
+    out += s.slice(pos, at) + expandRepl(repl, s.slice(at, end))
     count++
-    lastEnd = at + len
+    lastEnd = end
     if (len === 0) {
-      if (at < s.length) out += s.charAt(at)
-      pos = at + 1
-    } else pos = at + len
+      if (at < s.length) out += s.slice(at, at + step)
+      pos = at + step
+    } else pos = end
     if (!global) break
   }
   if (pos <= s.length) out += s.slice(pos)

@@ -25,3 +25,7 @@ export function loadSqlite(): Promise<Sqlite3Static> {
   })
   return loading
 }
+
+export * from './changeset'
+export * from './errors'
+export * from './guard'

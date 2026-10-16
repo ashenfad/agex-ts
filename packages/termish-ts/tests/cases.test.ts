@@ -5,7 +5,8 @@
  * A case's `stdout` (or `stdoutRegex`, searched) is what the script
  * wrote, the partial output when it failed; `error` is a substring of
  * the failure's message and stderr (a parse error's too); `exitCode` the
- * failure's code. `files` are written first, and the script runs in
+ * failure's code (a case with a nonzero one and no `error` fails
+ * quietly). `files` are written first, and the script runs in
  * `cwd` with `env`.
  */
 
@@ -60,7 +61,7 @@ for (const file of readdirSync(dir).filter((f) => f.endsWith('.json'))) {
         if (c.stdout !== undefined) expect(stdout).toBe(c.stdout)
         if (c.stdoutRegex !== undefined) expect(stdout).toMatch(new RegExp(c.stdoutRegex))
         if (c.error === undefined) {
-          expect(error).toBeNull()
+          if ((c.exitCode ?? 0) === 0) expect(error).toBeNull()
         } else {
           expect(error, 'the script should fail').not.toBeNull()
           const stderr = error instanceof TerminalError ? error.stderr : undefined

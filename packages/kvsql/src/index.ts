@@ -2,30 +2,13 @@
  * @agex-ts/kvsql: SQLite on an OPFS file, with every change recorded
  * in a kvgit log for checkpoints and sync between devices.
  *
- * So far it loads the SQLite build the rest is built on: the official
- * `@sqlite.org/sqlite-wasm`, pinned, because it carries the session
- * extension the log is made of.
+ * The database is a file in a `Directory` (OPFS in a browser worker,
+ * or in memory), opened through kvsql's own SQLite VFS. Its changes are
+ * recorded as changesets with SQLite's session extension, behind a
+ * schema guard that refuses what the record would silently miss.
  */
 
-import init, { type Sqlite3Static } from '@sqlite.org/sqlite-wasm'
-
-export type { Sqlite3Static }
-
-let loading: Promise<Sqlite3Static> | null = null
-
-/**
- * The SQLite build, loaded once and shared by every caller in this
- * realm (a page or a worker). A load that fails is retried by the next
- * call.
- */
-export function loadSqlite(): Promise<Sqlite3Static> {
-  loading ??= init().catch((err: unknown) => {
-    loading = null
-    throw err
-  })
-  return loading
-}
-
+export { loadSqlite, type Sqlite3Static } from './sqlite'
 export * from './changeset'
 export * from './errors'
 export * from './guard'

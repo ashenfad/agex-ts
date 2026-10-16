@@ -4,8 +4,10 @@ SQLite in the browser on an OPFS file, with every change recorded in a
 [kvgit](../kvgit-ts) log: checkpoints and restores, cheap test copies,
 and sync between devices through any kvgit remote.
 
-> **Status:** in development. This package so far loads the SQLite build,
-> records and applies changesets, and guards the schema. The design is agex-studio's
+> **Status:** in development. This package so far runs SQLite on a file
+> in OPFS (or in memory) through its own VFS, records and applies
+> changesets, and guards the schema; the changeset log comes next. The
+> design is agex-studio's
 > [`roadmap/app-db.md`](https://github.com/ashenfad/agex-studio/blob/rebuild/roadmap/app-db.md).
 
 ## How it will work
@@ -34,6 +36,68 @@ const db = new sqlite3.oo1.DB(':memory:')
 
 The build is pinned to an exact version: the package relies on its VFS
 API and its session-extension exports.
+
+## Opening a database
+
+A database is a file in a `Directory`, with its rollback journal beside
+it as `<name>-journal`. In a browser the directory is in OPFS, which
+works only in a dedicated worker (synchronous access handles exist only
+there):
+
+```ts
+import { OpfsDirectory, openDatabase } from '@agex-ts/kvsql'
+
+const dir = await OpfsDirectory.at('my-app') // created if missing
+const file = await openDatabase(dir, 'app.db')
+file.db.exec('CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, v TEXT)')
+file.db.exec({ sql: 'INSERT INTO t (v) VALUES (?)', bind: ['hello'] })
+file.close() // closes the connection and releases the files
+```
+
+`file.db` is an `oo1.DB` from `@sqlite.org/sqlite-wasm`.
+`deleteDatabase(dir, name)` removes a closed database and its journal.
+`MemoryDirectory` is the same in memory, for Node and tests;
+`image()` copies its files out and `new MemoryDirectory(image)` starts
+from a copy.
+
+- **Crash-safe by itself.** The database runs in PERSIST journal mode
+  with a 1 MiB `journal_size_limit`: a rollback journal on a real file,
+  which SQLite rolls back from on the next open after a crash.
+- **One connection per database.** A second `openDatabase` of an open
+  database fails, in the same worker by the VFS's registry and across
+  workers and tabs by OPFS's exclusive access handles. WebKit, unlike
+  Chromium and Firefox, lets another context delete an open OPFS file,
+  so keep deletes behind whatever lock guards the database.
+- **No WAL.** `PRAGMA journal_mode=WAL` is refused: it needs shared
+  memory the VFS doesn't provide.
+- **Temp files in memory.** Temp tables, sorts and statement journals
+  never reach the directory.
+
+### Your own directory
+
+A `Directory` opens, deletes and checks named files, asynchronously; a
+`SyncFile` it opens is read, written, truncated, synced and sized
+synchronously, as SQLite's VFS needs. `openDatabase` opens the
+database file and its journal before SQLite asks for them.
+
+### Crash testing
+
+`CrashingDirectory` wraps any directory and dies at a chosen
+operation: `crashAt({ op: 'write' | 'truncate' | 'sync', n, torn? })`
+fails the `n`th such operation (a torn write lands its first `torn`
+bytes) and every operation after it, so the underlying files hold what
+a process that died there would leave. `ops` counts operations, to
+crash at each in turn.
+
+```ts
+const mem = new MemoryDirectory(image)
+const dir = new CrashingDirectory(mem)
+const file = await openDatabase(dir, 'app.db')
+dir.crashAt({ op: 'write', n: 3, torn: 100 })
+// ...run a transaction, which throws SimulatedCrash...
+file.close()
+const after = await openDatabase(new MemoryDirectory(mem.image()), 'app.db')
+```
 
 ## Changesets
 
@@ -94,3 +158,8 @@ row whose key is NULL, and anything outside the main database, so:
 tests in Chromium; CI also runs them in Firefox and WebKit
 (`pnpm test:browser --browser.name=firefox`). Install the browsers once
 with `pnpm exec playwright install chromium firefox webkit`.
+
+The browser tests run each page in a persistent Playwright profile (a
+temporary directory): WebKit has no OPFS in Playwright's default
+private contexts, and the other browsers keep private storage off the
+disk.

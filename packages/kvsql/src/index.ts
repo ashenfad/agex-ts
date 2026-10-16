@@ -29,3 +29,21 @@ export function loadSqlite(): Promise<Sqlite3Static> {
 export * from './changeset'
 export * from './errors'
 export * from './guard'
+export type { Directory, SyncFile } from './files'
+export { type DirectoryImage, MemoryDirectory, MemoryFile } from './memory'
+export {
+  type CrashOp,
+  type CrashPoint,
+  CrashingDirectory,
+  SimulatedCrash,
+} from './crash'
+export { OpfsDirectory, OpfsFile } from './opfs'
+export { KvsqlVfs, kvsqlVfs, SECTOR_SIZE, VFS_NAME } from './vfs'
+export {
+  DatabaseFile,
+  deleteDatabase,
+  JOURNAL_MODE,
+  JOURNAL_SIZE_LIMIT,
+  journalName,
+  openDatabase,
+} from './database'

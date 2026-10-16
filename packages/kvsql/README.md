@@ -40,7 +40,8 @@ API and its session-extension exports.
 ## Opening a database
 
 A database is a file in a `Directory`, with its rollback journal beside
-it as `<name>-journal`. In a browser the directory is in OPFS, which
+it as `<name>-journal` (so a database's own name can't end in
+`-journal`). In a browser the directory is in OPFS, which
 works only in a dedicated worker (synchronous access handles exist only
 there):
 

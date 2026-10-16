@@ -168,6 +168,18 @@ function nodeBytes(node: Node): Uint8Array {
   return pyDumpsBytes(node, { sortKeys: true })
 }
 
+/** An empty record with no prototype, so every key, `__proto__`
+ *  included, is an own property when assigned. */
+function dict(): Record<string, string> {
+  return Object.create(null) as Record<string, string>
+}
+
+/** A leaf's encoded value for `key`, if it holds one: an own property,
+ *  never one inherited from `Object.prototype`. */
+function itemOf(items: Record<string, string>, key: string): string | undefined {
+  return Object.hasOwn(items, key) ? items[key] : undefined
+}
+
 function parseNode(bytes: Uint8Array): Node {
   return JSON.parse(_decoder.decode(bytes)) as Node
 }
@@ -351,7 +363,7 @@ export class Hamt {
       const node = await this.load(nodeHash)
       if (node === null) return null
       if (node.kind === 'leaf') {
-        const encoded = node.items[key]
+        const encoded = itemOf(node.items, key)
         return encoded === undefined ? null : decodeValue(encoded)
       }
       const chunk = kh[depth] as string
@@ -391,7 +403,7 @@ export class Hamt {
         if (node === undefined) continue
         for (const item of waiting) {
           if (node.kind === 'leaf') {
-            const encoded = node.items[item.key]
+            const encoded = itemOf(node.items, item.key)
             if (encoded !== undefined) found.set(item.key, decodeValue(encoded))
             continue
           }
@@ -474,6 +486,9 @@ export class Hamt {
    * evict the nodes point reads use.
    */
   async *keysBatched(chunk = 4096): AsyncIterable<string> {
+    if (!Number.isInteger(chunk) || chunk < 1) {
+      throw new RangeError(`chunk must be a positive integer, not ${chunk}`)
+    }
     const empty = await emptyHash()
     if (this.root === empty) return
     let level: string[] = [this.root]
@@ -652,7 +667,7 @@ export class Hamt {
     const node = await this.load(nodeHash, pending)
     if (node === null || node.kind === 'leaf') {
       // A dangling reference reads as an empty leaf, as in `insertAt`.
-      const items: Record<string, string> = { ...(node?.items ?? {}) }
+      const items = Object.assign(dict(), node?.items)
       let changed = node === null
       for (const c of changes) {
         if (c.value === null) {
@@ -683,7 +698,7 @@ export class Hamt {
       const child = children[nibble]
       let next: string | null
       if (child === undefined) {
-        const items: Record<string, string> = {}
+        const items = dict()
         for (const c of group) if (c.value !== null) items[c.key] = c.value
         next = await this.subtreeOf(items, depth + 1, pending)
         if (next === null) continue
@@ -772,7 +787,7 @@ export class Hamt {
 
     if (node.kind === 'leaf') {
       const encoded = encodeValue(value)
-      const existing = node.items[key]
+      const existing = itemOf(node.items, key)
       if (existing === encoded) return nodeHash // no-op
       const newItems: Record<string, string> = { ...node.items, [key]: encoded }
       if (Object.keys(newItems).length <= this.bucketMax) {
@@ -820,7 +835,7 @@ export class Hamt {
       const nibble = (await keyHash(k))[depth] as string
       let group = groups.get(nibble)
       if (group === undefined) {
-        group = {}
+        group = dict()
         groups.set(nibble, group)
       }
       group[k] = v
@@ -871,8 +886,8 @@ export class Hamt {
     if (node === null) return nodeHash
 
     if (node.kind === 'leaf') {
-      if (!(key in node.items)) return nodeHash
-      const newItems: Record<string, string> = {}
+      if (!Object.hasOwn(node.items, key)) return nodeHash
+      const newItems = dict()
       for (const [k, v] of Object.entries(node.items)) {
         if (k !== key) newItems[k] = v
       }
@@ -916,7 +931,7 @@ export class Hamt {
     children: Record<string, string>,
     pending: Map<string, Uint8Array>,
   ): Promise<string | null> {
-    const merged: Record<string, string> = {}
+    const merged = dict()
     let count = 0
     for (const childHash of Object.values(children)) {
       const child = await this.load(childHash, pending)

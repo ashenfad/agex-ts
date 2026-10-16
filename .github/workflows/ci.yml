@@ -74,15 +74,42 @@ jobs:
 
       # Filters name packages by their full names: a filter that
       # matches nothing exits 0 and runs nothing.
-      - name: Install Playwright Chromium, Firefox and WebKit (with system deps)
-        run: pnpm --filter @agex-ts/kvgit exec playwright install chromium firefox webkit --with-deps
+      - name: Install Playwright Chromium and Firefox (with system deps)
+        run: pnpm --filter @agex-ts/kvgit exec playwright install chromium firefox --with-deps
 
       - name: kvgit-ts (Chromium + real IndexedDB)
         run: pnpm --filter @agex-ts/kvgit test:browser
 
-      - name: kvsql (Chromium, Firefox, WebKit)
+      - name: kvsql (Chromium, Firefox)
         run: |
           pnpm --filter @agex-ts/kvsql test:browser
           pnpm --filter @agex-ts/kvsql test:browser --browser.name=firefox
-          pnpm --filter @agex-ts/kvsql test:browser --browser.name=webkit
+
+  # WebKit on macOS: Playwright's Linux WebKit has no OPFS
+  # (`navigator.storage` is undefined there), and macOS is where Safari
+  # runs.
+  webkit:
+    name: Browser tests (WebKit, macOS)
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.0.4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright WebKit
+        run: pnpm --filter @agex-ts/kvsql exec playwright install webkit
+
+      - name: kvsql (WebKit)
+        run: pnpm --filter @agex-ts/kvsql test:browser --browser.name=webkit
 

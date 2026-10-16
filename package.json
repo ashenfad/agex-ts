@@ -2,7 +2,7 @@
   "name": "agex-ts-monorepo",
   "version": "0.0.0",
   "private": true,
-  "description": "Monorepo root for agex-ts and the libraries under it (@agex-ts/world, @agex-ts/kvgit, @agex-ts/termish).",
+  "description": "Monorepo root for agex-ts and the libraries under it (@agex-ts/world, @agex-ts/kvgit, @agex-ts/termish, @agex-ts/kvsql).",
   "type": "module",
   "engines": {
     "node": ">=20"

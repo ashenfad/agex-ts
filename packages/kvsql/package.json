@@ -1,0 +1,57 @@
+{
+  "name": "@agex-ts/kvsql",
+  "version": "0.0.0",
+  "description": "SQLite in the browser on an OPFS file, with every change recorded in a kvgit log for checkpoints and sync between devices.",
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "sqlite",
+    "opfs",
+    "changeset",
+    "sync",
+    "kvgit",
+    "versioned",
+    "typescript",
+    "browser"
+  ],
+  "author": "Adam Ashenfelter",
+  "license": "MIT",
+  "homepage": "https://github.com/ashenfad/agex-ts/tree/main/packages/kvsql#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ashenfad/agex-ts.git",
+    "directory": "packages/kvsql"
+  },
+  "bugs": "https://github.com/ashenfad/agex-ts/issues",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "scripts": {
+    "build": "tsup",
+    "prepare": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:browser": "vitest run --config vitest.browser.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@vitest/browser": "^2.1.9",
+    "playwright": "^1.59.1",
+    "tsup": "^8.3.5",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  },
+  "dependencies": {
+    "@sqlite.org/sqlite-wasm": "3.53.4-build1"
+  }
+}

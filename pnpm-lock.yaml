@@ -92,6 +92,31 @@ importers:
         specifier: ^2.1.8
         version: 2.1.9(@types/node@22.19.17)(@vitest/browser@2.1.9)(msw@2.14.2(@types/node@22.19.17)(typescript@5.9.3))
 
+  packages/kvsql:
+    dependencies:
+      '@sqlite.org/sqlite-wasm':
+        specifier: 3.53.4-build1
+        version: 3.53.4-build1
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.19.17
+      '@vitest/browser':
+        specifier: ^2.1.9
+        version: 2.1.9(@types/node@22.19.17)(playwright@1.59.1)(typescript@5.9.3)(vite@5.4.21(@types/node@22.19.17))(vitest@2.1.9)
+      playwright:
+        specifier: ^1.59.1
+        version: 1.59.1
+      tsup:
+        specifier: ^8.3.5
+        version: 8.5.1(postcss@8.5.13)(typescript@5.9.3)
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      vitest:
+        specifier: ^2.1.8
+        version: 2.1.9(@types/node@22.19.17)(@vitest/browser@2.1.9)(msw@2.14.2(@types/node@22.19.17)(typescript@5.9.3))
+
   packages/termish-ts:
     dependencies:
       fflate:
@@ -873,6 +898,10 @@ packages:
     resolution: {integrity: sha512-Nd/SgG27WoA9e+/TdK74KnHz852TLa94ovOYySo/yMPuTmpckK/jIF2jSwS3g7ELSKXK13/cVdmg1Z/DaCWKxA==}
     cpu: [x64]
     os: [win32]
+
+  '@sqlite.org/sqlite-wasm@3.53.4-build1':
+    resolution: {integrity: sha512-U8pvL0patYHMgieD8JxxYJTlh9m1LUX8+BDYb7MiKQzBI89f2qbdmdcG/PvnPaLm9wsBbv4VlVG453ixnxBOnA==}
+    engines: {node: '>=22'}
 
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
@@ -2413,6 +2442,8 @@ snapshots:
 
   '@rollup/rollup-win32-x64-msvc@4.60.2':
     optional: true
+
+  '@sqlite.org/sqlite-wasm@3.53.4-build1': {}
 
   '@standard-schema/spec@1.1.0': {}
 

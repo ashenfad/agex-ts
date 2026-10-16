@@ -81,8 +81,8 @@ export const HELP: Readonly<Record<string, HelpEntry>> = {
   printf: { summary: 'print formatted text', usage: 'printf FORMAT [ARG...]' },
   pwd: { summary: 'print the working directory', usage: 'pwd' },
   realpath: {
-    summary: 'print absolute, normalized paths',
-    usage: 'realpath [-e | -m] PATH...',
+    summary: 'print absolute, normalized paths (symlinks not expanded)',
+    usage: 'realpath [-e | -m] [-s] PATH...',
   },
   rev: { summary: "reverse each line's characters", usage: 'rev [FILE...]' },
   rm: { summary: 'remove files and directories', usage: 'rm [-r] [-f] PATH...' },

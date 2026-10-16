@@ -642,6 +642,153 @@
     "stdout": "alice 30 eng\ncarol 35 eng\n"
   },
   {
+    "name": "append written once when another file fails",
+    "script": "awk 'BEGIN { print \"new\" >> \"f\"; print \"bad\" > \"block/x\" }' 2>/dev/null; cat f",
+    "files": {
+      "f": "old\n",
+      "block": "x\n"
+    },
+    "stdout": "old\nnew\n"
+  },
+  {
+    "name": "compound assignment evaluates its subscript once",
+    "script": "awk 'BEGIN { i=1; a[i++] += 2; print i, a[1], a[2] }'",
+    "stdout": "2 2 \n"
+  },
+  {
+    "name": "increment evaluates its subscript once",
+    "script": "awk 'BEGIN { i=1; a[i++]++; ++a[i++]; print i, a[1], a[2], a[3] }'",
+    "stdout": "3 1 1 \n"
+  },
+  {
+    "name": "assignment evaluates its target before its value",
+    "script": "awk 'BEGIN { i=1; a[i++] = i; print i, a[1], a[2] }'",
+    "stdout": "2 2 \n"
+  },
+  {
+    "name": "field compound assignment evaluates its index once",
+    "script": "echo 'a b c' | awk '{ i=1; $(i++) += 5; print i, $0 }'",
+    "stdout": "2 5 b c\n"
+  },
+  {
+    "name": "sub evaluates its target once",
+    "script": "awk 'BEGIN { i=1; s[1]=\"aaa\"; n=sub(/a/, \"x\", s[i++]); print n, i, s[1], s[2] }'",
+    "stdout": "1 2 xaa \n"
+  },
+  {
+    "name": "sub takes the longest alternative",
+    "script": "awk 'BEGIN { s=\"aa\"; sub(/a|aa/, \"x\", s); print s }'",
+    "stdout": "x\n"
+  },
+  {
+    "name": "match takes the longest at the leftmost start",
+    "script": "awk 'BEGIN { print match(\"aa\", /a|aa/), RSTART, RLENGTH; print match(\"xabcd\", /b|abc/), RSTART, RLENGTH }'",
+    "stdout": "1 1 2\n2 2 3\n"
+  },
+  {
+    "name": "longest through groups",
+    "script": "awk 'BEGIN { print match(\"xab\", /x(a|ab)/), RLENGTH; print match(\"abcd\", /(a|ab)(c|bcd)/), RLENGTH }'",
+    "stdout": "1 3\n1 4\n"
+  },
+  {
+    "name": "longest keeps anchors on the whole string",
+    "script": "awk 'BEGIN { print match(\"ab\", /a|ab$/), RLENGTH; print match(\"abc\", /a|ab$/), RLENGTH; s=\"baa\"; print gsub(/^b|^ba|a/, \"x\", s), s }'",
+    "stdout": "1 2\n1 1\n2 xx\n"
+  },
+  {
+    "name": "gsub takes the longest alternative each time",
+    "script": "awk 'BEGIN { s=\"abab\"; print gsub(/a|ab/, \"[&]\", s), s; t=\"aa\"; print gsub(/x*|a/, \"-\", t), t; u=\"abc\"; print gsub(/(a|ab)*/, \"<&>\", u), u }'",
+    "stdout": "2 [ab][ab]\n2 --\n2 <ab>c<>\n"
+  },
+  {
+    "name": "split and FS take the longest separator",
+    "script": "echo 1ab2a3 | awk -F'a|ab' '{ n = split($0, p, /a|ab/); print NF, $2, $3, n, p[2] }'",
+    "stdout": "3 2 3 3 2\n"
+  },
+  {
+    "name": "RS takes the longest separator",
+    "script": "printf '1ab2a3' | awk 'BEGIN { RS=\"a|ab\" } { print NR \": \" $0 }'",
+    "stdout": "1: 1\n2: 2\n3: 3\n"
+  },
+  {
+    "name": "RS regex groups are not records",
+    "script": "printf 'a--b--c' | awk 'BEGIN { RS=\"(--)\" } { print NR \": \" $0 }'",
+    "stdout": "1: a\n2: b\n3: c\n"
+  },
+  {
+    "name": "dot matches a newline",
+    "script": "awk 'BEGIN { print match(\"a\\nb\", /a.b/) }'",
+    "stdout": "1\n"
+  },
+  {
+    "name": "ARGV replaced in BEGIN",
+    "script": "awk 'BEGIN { ARGV[1]=\"b.txt\" } { print FILENAME, $0 }' a.txt",
+    "files": {
+      "a.txt": "A\n",
+      "b.txt": "B\n"
+    },
+    "stdout": "b.txt B\n"
+  },
+  {
+    "name": "ARGV deleted or emptied in BEGIN",
+    "script": "awk 'BEGIN { delete ARGV[1] } { print FILENAME, $0 }' a.txt b.txt; awk 'BEGIN { ARGV[2]=\"\" } { print FILENAME, $0 }' a.txt b.txt",
+    "files": {
+      "a.txt": "A\n",
+      "b.txt": "B\n"
+    },
+    "stdout": "b.txt B\na.txt A\n"
+  },
+  {
+    "name": "every ARGV deleted reads stdin",
+    "script": "echo S | awk 'BEGIN { delete ARGV[1] } { print \"[\" FILENAME \"]\", $0 }' a.txt",
+    "files": {
+      "a.txt": "A\n"
+    },
+    "stdout": "[] S\n"
+  },
+  {
+    "name": "ARGV grown and ARGC cut in BEGIN",
+    "script": "awk 'BEGIN { ARGV[ARGC++]=\"b.txt\" } { print FILENAME, $0 }' a.txt; awk 'BEGIN { ARGC=2 } { print FILENAME, $0 }' a.txt b.txt",
+    "files": {
+      "a.txt": "A\n",
+      "b.txt": "B\n"
+    },
+    "stdout": "a.txt A\nb.txt B\na.txt A\n"
+  },
+  {
+    "name": "ARGV assignment added in BEGIN",
+    "script": "awk 'BEGIN { ARGV[2]=\"x=7\"; ARGV[3]=\"b.txt\"; ARGC=4 } { print FILENAME, $0, x }' a.txt",
+    "files": {
+      "a.txt": "A\n",
+      "b.txt": "B\n"
+    },
+    "stdout": "a.txt A \nb.txt B 7\n"
+  },
+  {
+    "name": "ARGV changed while reading",
+    "script": "awk 'NR==1 { ARGV[2]=\"a.txt\" } { print FILENAME, $0 }' a.txt b.txt",
+    "files": {
+      "a.txt": "A\n",
+      "b.txt": "B\n"
+    },
+    "stdout": "a.txt A\na.txt A\n"
+  },
+  {
+    "name": "FILENAME for stdin",
+    "script": "echo S | awk '{ print \"[\" FILENAME \"]\", $0 }'; echo T | awk '{ print \"[\" FILENAME \"]\", $0 }' -",
+    "stdout": "[] S\n[-] T\n"
+  },
+  {
+    "name": "characters, not UTF-16 units",
+    "script": "awk 'BEGIN { s=\"a😀b\"; print length(s), substr(s, 2, 1), substr(s, 3), index(s, \"b\"), match(s, /😀/), RSTART, RLENGTH; printf \"[%3s][%-2s]\\n\", \"😀\", \"😀\" }'",
+    "stdout": "3 😀 b 3 2 2 1\n[  😀][😀 ]\n"
+  },
+  {
+    "name": "regexes match whole characters",
+    "script": "awk 'BEGIN { t=\"😀z\"; sub(/./, \"x\", t); u=\"😀\"; n=gsub(/x*/, \"-\", u); print t, n, u, match(\"a😀\", /[😀]/), RLENGTH, length() }'",
+    "stdout": "xz 2 -😀- 2 1 0\n"
+  },
+  {
     "name": "getline from a command refused",
     "script": "awk 'BEGIN { \"date\" | getline d }'",
     "error": "getline is not supported",

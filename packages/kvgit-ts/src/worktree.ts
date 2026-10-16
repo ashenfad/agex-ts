@@ -54,6 +54,11 @@ export interface WorktreeCommitOptions<V> extends WorktreeMergeRules<V> {
   /** Commit only these pending keys and leave the rest pending. */
   keys?: Iterable<string>
   info?: CommitInfo
+  /** What a commit does when the branch has moved since this
+   *  worktree's head: `'merge'` (default) three-way merges onto the
+   *  tip; `'raise'` throws `BranchMovedError`, writes nothing and keeps
+   *  the pending changes. */
+  onMoved?: 'merge' | 'raise'
 }
 
 export interface WorktreeApplyOptions<V> extends WorktreeMergeRules<V> {
@@ -78,7 +83,7 @@ export interface WorktreeMergeOptions<V> extends WorktreeApplyOptions<V> {
  * worktrees, in one process or many, may hold the same branch; a
  * commit that loses the race to another merges automatically, and
  * throws only when the two changed the same key in ways no merge rule
- * resolves.
+ * resolves. `commit({ onMoved: 'raise' })` refuses to merge instead.
  *
  * Obtain one from `Repo.worktree`.
  */
@@ -225,8 +230,15 @@ export class Worktree<V = Uint8Array> {
    *
    * Fast-forwards when the branch has not moved since this worktree's
    * head; otherwise three-way merges onto its tip with the effective
-   * merge rules.
+   * merge rules. With `onMoved: 'raise'` a moved branch is never
+   * merged: the commit lands only as a fast-forward from this
+   * worktree's head, decided by the same compare-and-swap that
+   * publishes it, and otherwise throws.
    *
+   * @throws BranchMovedError with `onMoved: 'raise'`, if the branch has
+   *   moved since this worktree's head; its `head` is the tip found.
+   *   Nothing is written and the pending changes stay readable; then
+   *   `refresh()` moves to the tip (dropping them) to redo the work.
    * @throws MergeConflict for keys both sides changed that no rule
    *   resolves (unless `onConflict: 'abandon'`).
    * @throws ConcurrencyError if the branch moved again mid-merge.
@@ -248,6 +260,7 @@ export class Worktree<V = Uint8Array> {
       ...(removals.size > 0 && { removals }),
       ...this.rules(opts),
       ...(opts.info !== undefined && { info: opts.info }),
+      ...(opts.onMoved !== undefined && { onMoved: opts.onMoved }),
     })
 
     if (result.merged) {

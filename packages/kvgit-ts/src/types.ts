@@ -10,6 +10,7 @@ import type { PyFloat } from './pyjson'
 
 export {
   BranchExistsError,
+  BranchMovedError,
   ConcurrencyError,
   CorruptHeadError,
   GcBusy,
@@ -257,6 +258,17 @@ export type MergeFn<T = unknown> = (
  */
 export type ConflictDisposition = 'raise' | 'abandon'
 
+/**
+ * What a commit does when its branch has moved since the handle's base
+ * (another writer committed to it first):
+ *
+ * - `'merge'` (default): three-way merge onto the branch's tip.
+ * - `'raise'`: throw `BranchMovedError` and write nothing. For data
+ *   whose keys are not independent, where a merge of two disjoint
+ *   changes is a state neither writer made.
+ */
+export type MovedDisposition = 'merge' | 'raise'
+
 /** Optional commit-level metadata. Surfaced via `commitInfo()`. */
 export type CommitInfo = Record<string, unknown>
 
@@ -276,6 +288,7 @@ export interface VersionedCommitOptions extends MergeRuleOptions {
   updates?: Map<string, Uint8Array> | null
   removals?: Set<string> | null
   onConflict?: ConflictDisposition
+  onMoved?: MovedDisposition
   info?: CommitInfo | null
 }
 

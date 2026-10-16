@@ -15,6 +15,7 @@
 
 import {
   type ApplyChangeOptions,
+  BranchMovedError,
   type CommitInfo,
   ConcurrencyError,
   type ConflictDisposition,
@@ -24,6 +25,7 @@ import {
   type MergePolicy,
   type MergeResult,
   type MergeRuleOptions,
+  type MovedDisposition,
   type PostCheck,
   UnknownBranchError,
   UnknownCommitError,
@@ -192,11 +194,19 @@ export abstract class VersionedBase implements Versioned {
    * otherwise three-way merges onto it. A HEAD move landing inside the
    * fast-forward's CAS window goes through that same merge, so a lost
    * race is never mistaken for a conflict.
+   *
+   * With `onMoved: 'raise'` a moved HEAD throws `BranchMovedError`
+   * instead of merging, whether it moved before the commit started or
+   * inside the CAS window: the only commit that can land is the
+   * fast-forward, published by the one CAS that expects HEAD at the
+   * base. A commit that loses withdraws its in-flight marker, leaving
+   * nothing reachable.
    */
   async commit(opts: VersionedCommitOptions = {}): Promise<MergeResult> {
     const updates = opts.updates ?? null
     const removals = opts.removals ?? null
     const onConflict = checkDisposition(opts.onConflict)
+    const onMoved = checkMoved(opts.onMoved)
     const info = opts.info ?? null
 
     // Nothing to do: report the current HEAD and write nothing.
@@ -212,6 +222,11 @@ export abstract class VersionedBase implements Versioned {
     let oursBuilt = false
     let saved: unknown = null
 
+    if (onMoved === 'raise' && currentHead !== this.baseCommitHash) {
+      if (currentHead === null) throw new UnknownBranchError(this.branch)
+      throw new BranchMovedError(this.branch, this.baseCommitHash, currentHead)
+    }
+
     // Fast-forward path: HEAD hasn't moved.
     if (currentHead === this.baseCommitHash) {
       saved = this.snapshotState()
@@ -223,6 +238,18 @@ export abstract class VersionedBase implements Versioned {
       if (await this.casHead(this.baseCommitHash, this.currentCommitHash)) {
         this.baseCommitHash = this.currentCommitHash
         return this.finish(landed(this.currentCommitHash, 'fast_forward', [], []))
+      }
+      if (onMoved === 'raise') {
+        this.restoreState(saved)
+        const head = await this.latestHead()
+        if (head === null) throw new UnknownBranchError(this.branch)
+        if (head !== this.baseCommitHash) {
+          throw new BranchMovedError(this.branch, this.baseCommitHash, head)
+        }
+        // HEAD reads as the base, yet the publish failed: it moved and
+        // came back, or the commit's in-flight marker lapsed and a sweep
+        // may have taken the commit.
+        throw new ConcurrencyError('Commit could not be published. Retry.')
       }
       // Lost the fast-forward race: another writer advanced HEAD between
       // our read and our CAS. Re-read HEAD and merge, as when the base
@@ -505,6 +532,14 @@ function checkDisposition(value: ConflictDisposition | undefined): ConflictDispo
     throw new TypeError(`onConflict must be 'raise' or 'abandon', got ${String(onConflict)}`)
   }
   return onConflict
+}
+
+function checkMoved(value: MovedDisposition | undefined): MovedDisposition {
+  const onMoved = value ?? 'merge'
+  if (onMoved !== 'merge' && onMoved !== 'raise') {
+    throw new TypeError(`onMoved must be 'merge' or 'raise', got ${String(onMoved)}`)
+  }
+  return onMoved
 }
 
 function noOp(commit: string): MergeResult {

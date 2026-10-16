@@ -49,6 +49,16 @@ for await (const c of repo.log({ branch: 'main' })) console.log(c.hash, c.info)
   throws `BranchMovedError` (with nothing to commit too) (a `ConcurrencyError`; `err.head` is the
   tip it found), writes nothing reachable and keeps the pending
   changes. `refresh()` then moves to the tip to redo the work.
+- **Lazy worktrees.** `repo.worktree(name, { lazy: true })` leaves the
+  commit's keyset in its tree and reads it on demand, for branches of
+  tens of thousands of keys and up. Opening reads one record whatever
+  the size; reads walk the tree through a bounded cache of tree nodes
+  (`repo.nodeCache`, 16 MB, shared by every lazy worktree on the repo,
+  or `{ lazy: { cache: new NodeCache({ maxBytes }) } }`); a commit
+  rewrites only the paths it changes. Everything else behaves as in an
+  eager worktree, and both write the same commits. A lazy worktree
+  keeps no decoded values, and `keys()` reads the whole tree on every
+  call.
 - **`Snapshot`** is a read-only view pinned to one commit. It looks
   keys up in the tree a batch at a time, so reading a few keys stays
   cheap however many the commit holds; `raw` gives the stored bytes.

@@ -236,7 +236,8 @@ export class Worktree<V = Uint8Array> {
    * publishes it, and otherwise throws.
    *
    * @throws BranchMovedError with `onMoved: 'raise'`, if the branch has
-   *   moved since this worktree's head; its `head` is the tip found.
+   *   moved since this worktree's head, even with nothing to commit; its
+   *   `head` is the tip found.
    *   Nothing is written and the pending changes stay readable; then
    *   `refresh()` moves to the tip (dropping them) to redo the work.
    * @throws MergeConflict for keys both sides changed that no rule

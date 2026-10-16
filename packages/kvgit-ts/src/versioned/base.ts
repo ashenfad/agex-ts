@@ -209,12 +209,21 @@ export abstract class VersionedBase implements Versioned {
     const onMoved = checkMoved(opts.onMoved)
     const info = opts.info ?? null
 
-    // Nothing to do: report the current HEAD and write nothing.
+    // Nothing to do: report the current HEAD and write nothing. With
+    // `onMoved: 'raise'` a moved branch still throws, since the caller's
+    // base is out of date whether or not it had anything to write.
     if (
       (updates === null || updates.size === 0) &&
       (removals === null || removals.size === 0) &&
       info === null
     ) {
+      if (onMoved === 'raise') {
+        const head = await this.latestHead()
+        if (head === null) throw new UnknownBranchError(this.branch)
+        if (head !== this.baseCommitHash) {
+          throw new BranchMovedError(this.branch, this.baseCommitHash, head)
+        }
+      }
       return this.finish(noOp(this.currentCommitHash))
     }
 

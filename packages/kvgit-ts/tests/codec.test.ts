@@ -36,6 +36,15 @@ describe('cborCodec', () => {
     expect((back.deep[0].get('k') as Uint8Array).constructor).toBe(Uint8Array)
   })
 
+  it('encodes into a buffer of exactly the encoding, not a view into scratch', () => {
+    for (const value of [1, { text: 'a'.repeat(4096) }, new Uint8Array(65536)]) {
+      const out = cborCodec.encode(value)
+      expect(out.constructor).toBe(Uint8Array)
+      expect(out.byteOffset).toBe(0)
+      expect(out.buffer.byteLength).toBe(out.byteLength)
+    }
+  })
+
   it('writes plain CBOR: a string-keyed object is a CBOR map, bytes a byte string', () => {
     const hex = (v: unknown) => Buffer.from(cborCodec.encode(v)).toString('hex')
     expect(hex({ a: 1 })).toMatch(/^(a1|b90001)616101$/)

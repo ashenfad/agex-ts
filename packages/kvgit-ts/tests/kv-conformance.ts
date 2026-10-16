@@ -323,6 +323,33 @@ export function runConformance(name: string, makeStore: StoreFactory): void {
         }
       })
 
+      it('stores a view as exactly its own bytes, through every write', async () => {
+        // A view into a larger buffer, at an offset and at the start: a
+        // store that kept the whole buffer would read back a view too
+        // (IndexedDB's structured clone keeps it) or pin the buffer.
+        const under = new Uint8Array(4096)
+        for (let i = 0; i < under.length; i++) under[i] = i & 0xff
+        const atOffset = under.subarray(100, 108)
+        const atStart = under.subarray(0, 8)
+        const s = await makeStore()
+        await s.set('set', atOffset)
+        await s.setMany([['setMany', atStart]])
+        await s.cas('cas', atOffset, null)
+        await s.casMany(new Map([['casMany', null]]), new Map([['casMany', atStart]]))
+        under.fill(0)
+        for (const [key, want] of [
+          ['set', [100, 101, 102, 103, 104, 105, 106, 107]],
+          ['setMany', [0, 1, 2, 3, 4, 5, 6, 7]],
+          ['cas', [100, 101, 102, 103, 104, 105, 106, 107]],
+          ['casMany', [0, 1, 2, 3, 4, 5, 6, 7]],
+        ] as const) {
+          const got = (await s.get(key)) as Uint8Array
+          expect([...got], key).toEqual(want)
+          expect(got.byteOffset, key).toBe(0)
+          expect(got.buffer.byteLength, key).toBe(8)
+        }
+      })
+
       it('handles a large payload (1 MiB)', async () => {
         const s = await makeStore()
         const big = new Uint8Array(1024 * 1024)

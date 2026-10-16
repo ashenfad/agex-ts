@@ -100,6 +100,54 @@ describe('IndexedDB — backend-specific', () => {
     }
   })
 
+  it('reads back a value stored as a view into a larger buffer', async () => {
+    // Values written before the backend copied views out are stored
+    // with their whole buffer; they stay that way and read as their bytes.
+    const dbName = uniqueDbName()
+    const idb = await IndexedDB.open({ dbName })
+    idb.close()
+    const raw = await new Promise<IDBDatabase>((resolve, reject) => {
+      const req = indexedDB.open(dbName)
+      req.onsuccess = () => resolve(req.result)
+      req.onerror = () => reject(req.error)
+    })
+    const under = new Uint8Array(4096).fill(9)
+    under.set([1, 2, 3], 50)
+    await new Promise<void>((resolve, reject) => {
+      const tx = raw.transaction('kv', 'readwrite')
+      tx.objectStore('kv').put(under.subarray(50, 53), 'old')
+      tx.oncomplete = () => resolve()
+      tx.onerror = () => reject(tx.error)
+    })
+    raw.close()
+
+    const b = await IndexedDB.open({ dbName })
+    openHandles.push(b)
+    expect([...((await b.get('old')) as Uint8Array)]).toEqual([1, 2, 3])
+    expect([...((await b.getMany(['old'])).get('old') as Uint8Array)]).toEqual([1, 2, 3])
+    expect(await b.cas('old', bytes('new'), new Uint8Array([1, 2, 3]))).toBe(true)
+  })
+
+  it('a cbor repository stores each value in a buffer of its own size', async () => {
+    const { Repo } = await import('../src/repo')
+    const idb = await IndexedDB.open({ dbName: uniqueDbName() })
+    openHandles.push(idb)
+    const repo = await Repo.open(idb, { codec: 'cbor' })
+    const wt = await repo.worktree('main', { create: true })
+    wt.set('text', 'x'.repeat(4096))
+    wt.set('blob', new Uint8Array(65536))
+    await wt.commit()
+
+    let held = 0
+    let stored = 0
+    for await (const [, value] of idb.items()) {
+      held += value.byteLength
+      stored += value.buffer.byteLength
+    }
+    expect(held).toBeGreaterThan(4096 + 65536)
+    expect(stored).toBe(held)
+  })
+
   it('end-to-end VersionedKV over IndexedDB', async () => {
     // Sanity check that the higher layers compose correctly with this
     // backend — same VersionedKV/Staged behavior we test against

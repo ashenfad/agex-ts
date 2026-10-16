@@ -60,7 +60,10 @@ const _cbor = new Encoder({
  * writes past 32 bits comes back a bigint.
  */
 export const cborCodec: Codec<unknown> = {
-  encode: (value) => _cbor.encode(value),
+  // cbor-x returns a view into its scratch buffer (a Node `Buffer` where
+  // there is one), several times the value's size; copy it out so a
+  // backend that keeps or stores the array doesn't keep the scratch too.
+  encode: (value) => new Uint8Array(_cbor.encode(value)),
   decode: (bytes) => plainBytes(_cbor.decode(bytes)),
 }
 

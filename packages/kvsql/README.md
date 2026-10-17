@@ -7,9 +7,9 @@ and sync between devices through any kvgit remote.
 > **Status:** in development. This package so far runs SQLite on a file
 > in OPFS (or in memory) through its own VFS, records and applies
 > changesets, guards the schema, keeps the changeset log in kvgit
-> with crash recovery and replay, copies a database, and serves the
-> database from a worker to every tab; rebase, snapshots and epochs
-> come next. The design is agex-studio's
+> with crash recovery and replay, copies a database, starts new epochs
+> from snapshots, and serves the database from a worker to every tab;
+> checkpoints and rebase come next. The design is agex-studio's
 > [`roadmap/app-db.md`](https://github.com/ashenfad/agex-studio/blob/rebuild/roadmap/app-db.md).
 
 ## How it will work
@@ -186,6 +186,30 @@ await db.close() // flushes first
   its branch and its mark, is refused like a database: delete the
   target to clear it. A detached copy can't be opened on a log, nor a
   logged database as a detached copy.
+- **Epochs.** A log on a branch named `<name>/<n>` is epoch `n` of a
+  series. `newEpoch()` starts the next, `<name>/<n+1>`: a snapshot of
+  the database as it stands (compacted with `VACUUM INTO`, every
+  transaction so far in it, flushed or not) is gzipped and committed to
+  the new branch, the file moves onto it in one transaction, and the
+  old epoch's branch is deleted, so the log behind the snapshot goes
+  without any branch being rewritten. Calls go on while the snapshot is
+  committed; flushes wait, their transactions safe in the file, and go
+  to the new epoch. The database also starts one by itself (`epochs`):
+  when the epoch's log reaches half the snapshot's gzipped size, or one
+  transaction does (an import, which then goes into the snapshot rather
+  than becoming a huge log entry), and at least 8 MiB either way
+  (`epochs.ratio`, `epochs.minBytes`; `epochs: false` turns it off). A
+  failure there leaves the database on its epoch and calls
+  `onEpochError`. A branch not named `<name>/<n>` has no epochs.
+- **Opening** follows the log to its newest finished epoch, whichever
+  of its branches it is asked for by, and deletes the older ones. A file
+  that is missing, or behind on an older epoch with nothing pending, is
+  rebuilt from the epoch's snapshot (`recovery.snapshot`); the file the
+  snapshot was taken from, left on the old epoch by a crash, finishes
+  its move (it is known by its position and its pending transactions'
+  digest); and one on an older epoch holding transactions no log has is
+  refused (`LogError`). `deleteLog(repo, branch)` deletes every epoch of
+  a log.
 - **Opening** brings the file level with the branch: entries it didn't
   write are replayed (so an empty directory rebuilds the database from
   the log), and an entry matching its pending transactions is its own
@@ -211,8 +235,22 @@ changesets is stored merged when that makes it at most half its size
 (a run rewriting the same rows), and otherwise packed one per
 transaction, each a restore point. Each commit's info is
 `{v: 1, from, to, length, digest, schema}`: the range, the entry's
-byte length and SHA-256, and the schema version after it; a reader
-refuses an entry that doesn't match them (`CorruptEntryError`).
+byte length and SHA-256, and the schema version after it, and `total`,
+the bytes of the epoch's entries through it; a reader refuses an entry
+that doesn't match them (`CorruptEntryError`).
+
+A new epoch's branch starts from the root commit with its snapshot:
+the database file, gzipped, in 8 MiB chunks under `snapshot/<i>`, two
+to a commit, so a sync can send one of any size as a run of small
+requests. The last of those commits also holds the snapshot's record
+under `epoch` (CBOR: the last transaction and schema version it holds,
+the file's size, the gzipped size, each chunk's SHA-256, and where it
+was taken from), and its info is `{v: 1, snapshot: {seq, schema, last:
+true}}` (the ones before, `last: false`: a branch whose tip is one of
+those never finished, and opening passes it over). Every later commit
+is a log entry, numbered on from the snapshot's last transaction. A
+rebuild checks each chunk's digest, gzip's own check and the size, and
+refuses a snapshot that doesn't match (`CorruptSnapshotError`).
 
 ## In a worker, from every tab
 
@@ -244,8 +282,11 @@ await db.close()
   with their `name` and fields, a DOMException as a DOMException.
 - **The config** names the database: `id` (required), and optionally
   `name` (the file, default `db.sqlite`), `branch` (default
-  `kvsql/<id>`), `label`, `foreignKeys`, `flush`, and `detached` (a
-  detached copy, which has no branch). Every tab passes the same config
+  `kvsql/<id>/0`), `label`, `foreignKeys`, `flush`, `epochs`, and
+  `detached` (a detached copy, which has no branch). Opening follows the
+  log to its newest epoch, so a config can keep naming the branch it
+  started with; `info().branch` says where the log is now, and
+  `db.newEpoch()` has the holder start the next. Every tab passes the same config
   for the same database, and a worker refuses a second connect to an
   id with a different one.
 - **Copies:** `db.copy(config)` has the worker holding the database

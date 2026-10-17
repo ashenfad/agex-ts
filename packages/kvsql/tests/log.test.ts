@@ -525,7 +525,12 @@ describe('opening', () => {
     expect(errors).toHaveLength(1)
     const again = await track(open(dir, await repoOver(store)))
     expect(again.pendingCount).toBe(1)
-    expect(again.recovery).toEqual({ ownFlush: false, entries: 0, transactions: 0 })
+    expect(again.recovery).toEqual({
+      ownFlush: false,
+      entries: 0,
+      transactions: 0,
+      snapshot: false,
+    })
     expect(await dump(again)).toMatchObject({ t: [{ id: 'a' }, { id: 'b' }] })
     expect(await again.flush()).toMatchObject({ from: 3, to: 3 })
   })
@@ -728,7 +733,7 @@ describe('the entry format', () => {
     await db.query("INSERT INTO t VALUES ('a', 1), ('b', 2)")
     await db.query("INSERT INTO t VALUES ('c', 3)")
     await db.flush()
-    const [, entry] = await logEntries(repo)
+    const [first, entry] = await logEntries(repo)
     const bytes = (await (
       await repo.snapshot({ commit: entry?.commit as string })
     ).get(ENTRY_KEY)) as Uint8Array
@@ -739,6 +744,8 @@ describe('the entry format', () => {
       length: bytes.byteLength,
       digest: await sha256Hex(bytes),
       schema: 1,
+      // the epoch's entries so far, this one's included
+      total: (first?.info as { length: number }).length + bytes.byteLength,
     })
 
     // Each tampered log: the entry's last commit replaced on a copy of the branch.

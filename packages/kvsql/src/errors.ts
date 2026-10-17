@@ -58,6 +58,24 @@ export class LogError extends KvsqlError {
 }
 
 /**
+ * An epoch's snapshot (see `epoch.ts`) doesn't match its record: a
+ * chunk is missing or altered, it doesn't decompress, or it isn't the
+ * size the record says. The database file isn't rebuilt from it.
+ */
+export class CorruptSnapshotError extends LogError {
+  override readonly name: string = 'CorruptSnapshotError'
+
+  constructor(
+    /** The snapshot's last commit, or the commit whose record names it. */
+    readonly commit: string,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(`snapshot ${commit}: ${message}`, options)
+  }
+}
+
+/**
  * A log entry's stored bytes don't match what its commit records (its
  * length or SHA-256 digest), or aren't in a format this version reads:
  * the entry was truncated, altered or written by something else.

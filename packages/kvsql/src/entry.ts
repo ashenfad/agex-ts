@@ -103,6 +103,13 @@ export interface EntryInfo {
   digest: string
   /** The schema version after the entry. */
   schema: number
+  /**
+   * The bytes of every entry of its epoch through this one (see
+   * `epoch.ts`), which tells when the log has grown enough, next to the
+   * epoch's snapshot, to start the next. Absent from entries written
+   * before epochs were.
+   */
+  total?: number
 }
 
 const KIND_CODES: Record<ItemKind, number> = { changeset: 0, sql: 1 }
@@ -262,8 +269,13 @@ export async function sha256Hex(bytes: Uint8Array): Promise<string> {
   return out
 }
 
-/** The commit info for an entry. */
-export function entryInfo(pieces: readonly Piece[], bytes: Uint8Array, digest: string): EntryInfo {
+/** The commit info for an entry, `total` the bytes of its epoch's entries through it. */
+export function entryInfo(
+  pieces: readonly Piece[],
+  bytes: Uint8Array,
+  digest: string,
+  total?: number,
+): EntryInfo {
   const first = pieces[0]
   const last = pieces[pieces.length - 1]
   if (!first || !last) throw new RangeError('an entry needs at least one piece')
@@ -274,13 +286,14 @@ export function entryInfo(pieces: readonly Piece[], bytes: Uint8Array, digest: s
     length: bytes.byteLength,
     digest,
     schema: schemaAfter(last),
+    ...(total !== undefined && { total }),
   }
 }
 
 /** A commit's info as an {@link EntryInfo}, or undefined if it isn't one. */
 export function parseEntryInfo(info: unknown): EntryInfo | undefined {
   if (info === null || typeof info !== 'object') return undefined
-  const { v, from, to, length, digest, schema } = info as Record<string, unknown>
+  const { v, from, to, length, digest, schema, total } = info as Record<string, unknown>
   if (
     v !== 1 ||
     !isCount(from) ||
@@ -290,9 +303,10 @@ export function parseEntryInfo(info: unknown): EntryInfo | undefined {
     !isCount(length) ||
     typeof digest !== 'string' ||
     !/^[0-9a-f]{64}$/.test(digest) ||
-    !isCount(schema)
+    !isCount(schema) ||
+    (total !== undefined && !isCount(total))
   ) {
     return undefined
   }
-  return { v, from, to, length, digest, schema }
+  return { v, from, to, length, digest, schema, ...(total !== undefined && { total }) }
 }

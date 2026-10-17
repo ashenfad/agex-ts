@@ -9,7 +9,7 @@
 
 import type { Params, Statement } from './entry'
 import { KvsqlError } from './errors'
-import type { CopyResult, FlushResult, QueryResult } from './log'
+import type { CopyResult, EpochResult, FlushResult, QueryResult } from './log'
 import {
   CONNECT,
   type ConnectMessage,
@@ -34,7 +34,7 @@ export type {
   Role,
   Status,
 } from './protocol'
-export type { CopyResult, FlushResult, QueryResult, Recovery } from './log'
+export type { CopyResult, EpochResult, FlushResult, QueryResult, Recovery } from './log'
 export type { Params, Statement } from './entry'
 
 /** Where a client sends its connect message: a `Worker`, usually. */
@@ -159,6 +159,14 @@ export class DatabaseClient {
    */
   copy(target: DatabaseConfig): Promise<CopyResult> {
     return this.#call('copy', [target])
+  }
+
+  /**
+   * Start the log's next epoch, by the worker holding the database, and
+   * move the database onto it (see `LoggedDatabase.newEpoch`).
+   */
+  newEpoch(): Promise<EpochResult> {
+    return this.#call('epoch', [])
   }
 
   /** The database's state, from the worker holding it. */

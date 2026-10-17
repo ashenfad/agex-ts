@@ -79,10 +79,38 @@ describe('errors across messages', () => {
 })
 
 describe('configKey', () => {
-  it('ignores key order and takes bigints', () => {
+  const key = (config: Record<string, unknown>) => configKey({ id: 'a', ...config } as never)
+
+  it('ignores key order and members that are undefined', () => {
     expect(configKey({ id: 'a', flush: { every: 1, maxAgeMs: 2 } })).toBe(
       configKey({ flush: { maxAgeMs: 2, every: 1 }, id: 'a' }),
     )
-    expect(configKey({ id: 'a', n: 1n } as never)).not.toBe(configKey({ id: 'a', n: 1 } as never))
+    expect(key({ label: undefined })).toBe(key({}))
+  })
+
+  it('keeps values of different kinds apart, even when their text matches', () => {
+    const distinct: Record<string, unknown>[] = [
+      { n: 1n },
+      { n: '1n' },
+      { n: 1 },
+      { n: '1' },
+      { n: true },
+      { n: 'true' },
+      { n: null },
+      { n: 'null' },
+      { n: [1] },
+      { n: '[1]' },
+      { n: { x: 1 } },
+      { n: { x: '1' } },
+      { n: { x: 1n } },
+      { n: [[1n]] },
+      { n: [['1n']] },
+      { n: [undefined] },
+      { n: [null] },
+      { n: new Uint8Array([1]) },
+      { n: { 0: 1 } },
+    ]
+    const keys = distinct.map(key)
+    expect(new Set(keys).size).toBe(keys.length)
   })
 })

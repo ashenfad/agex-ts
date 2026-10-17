@@ -795,15 +795,47 @@ function randomId(): string {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`
 }
 
-/** A config as stable JSON: keys sorted, bigints as strings. */
+/**
+ * A config as a canonical string: equal for configs that clone to the
+ * same value, different otherwise. Each value becomes a tagged node
+ * (`['s', text]`, `['n', number]`, `['b', bigint digits]`, `['t']`,
+ * `['f']`, `['z']` for null, `['a', ...items]`, `['o', [key, node],
+ * ...]` with keys sorted), so no two kinds of value share an encoding.
+ * As in JSON, object members that are undefined (or functions or
+ * symbols, which don't clone) are left out; in an array they are
+ * `['u']`.
+ */
 export function configKey(config: DatabaseConfig): string {
-  return JSON.stringify(config, (_key, value: unknown) => {
-    if (typeof value === 'bigint') return `${value}n`
-    if (value && typeof value === 'object' && !Array.isArray(value)) {
-      return Object.fromEntries(
-        Object.entries(value as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : 1)),
-      )
-    }
-    return value
-  })
+  return JSON.stringify(canonical(config))
+}
+
+type Node = readonly unknown[]
+
+function canonical(value: unknown): Node {
+  switch (typeof value) {
+    case 'string':
+      return ['s', value]
+    case 'number':
+      return ['n', Object.is(value, -0) ? '-0' : String(value)]
+    case 'bigint':
+      return ['b', value.toString()]
+    case 'boolean':
+      return [value ? 't' : 'f']
+    case 'undefined':
+    case 'function':
+    case 'symbol':
+      return ['u']
+  }
+  if (value === null) return ['z']
+  if (Array.isArray(value)) return ['a', ...value.map(canonical)]
+  if (value instanceof Date) return ['d', String(value.getTime())]
+  if (ArrayBuffer.isView(value)) {
+    const bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
+    return ['v', value.constructor.name, Array.from(bytes).join(',')]
+  }
+  const members = Object.entries(value as Record<string, unknown>)
+    .filter(([, v]) => v !== undefined && typeof v !== 'function' && typeof v !== 'symbol')
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([k, v]) => [k, canonical(v)])
+  return ['o', ...members]
 }

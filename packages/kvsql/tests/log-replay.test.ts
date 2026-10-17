@@ -123,7 +123,9 @@ class Workload {
   }
 }
 
-describe('replica equality', () => {
+// Random workloads, and a replay crashed at every sync: well under a
+// second each locally, but several times that on a shared CI runner.
+describe('replica equality', { timeout: 60_000 }, () => {
   quietSqliteWarnings()
 
   it.each(Array.from({ length: 24 }, (_, i) => i + 1))(

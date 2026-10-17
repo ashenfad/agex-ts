@@ -79,7 +79,9 @@ async function start(): Promise<{ image: DirectoryImage; store: Memory }> {
   return { image: dir.image(), store }
 }
 
-describe('crash safety of the log', () => {
+// Each test walks hundreds of crash points: ~1.5 s locally, several
+// times that on a shared CI runner.
+describe('crash safety of the log', { timeout: 60_000 }, () => {
   quietSqliteWarnings()
 
   it.each([

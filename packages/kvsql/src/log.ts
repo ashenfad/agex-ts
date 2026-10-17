@@ -368,9 +368,10 @@ export class LoggedDatabase {
    * session extension can't follow rows through a schema change. So
    * such a call must give the same result wherever it runs, and is
    * refused if it calls a function that may not (`random()`, the
-   * clock: `NONDETERMINISTIC_FUNCTIONS`). Make the schema change
-   * on its own, then change rows in a call of their own, where any
-   * value is recorded as it was written.
+   * clock: `NONDETERMINISTIC_FUNCTIONS`) or uses a TEMP table or view
+   * an earlier call made, which other copies don't have. Make the
+   * schema change on its own, then change rows in a call of their
+   * own, where any value is recorded as it was written.
    */
   transaction(statements: readonly Statement[]): Promise<QueryResult[]> {
     return this.#call(statements, false)
@@ -464,6 +465,8 @@ export class LoggedDatabase {
       if (guard.schemaChanged) {
         const fn = guard.nondeterministic
         if (fn !== undefined) throw new RefusedError(this.#nondeterministicMessage(fn))
+        const temp = guard.tempDependency
+        if (temp !== undefined) throw new RefusedError(this.#tempMessage(temp))
         const violations = checkSchema(db, this.#label === undefined ? {} : { label: this.#label })
         if (violations.length > 0) {
           throw new RefusedError(violations.map((v) => v.message).join('\n'))
@@ -536,6 +539,11 @@ export class LoggedDatabase {
   #nondeterministicMessage(fn: string): string {
     const label = this.#label ?? 'this database'
     return `${fn}() can't be used in a call that changes the schema of ${label}: schema changes are replayed as SQL on every copy of the database, so they must give the same result wherever they run, and ${fn}() can give a different one each time. Change the schema in one call, then the rows in another, where values are recorded as written.`
+  }
+
+  #tempMessage(name: string): string {
+    const label = this.#label ?? 'this database'
+    return `A call that changes the schema of ${label} can't use the TEMP table or view "${name}" made by an earlier call: schema changes are replayed as SQL on every copy of the database, where TEMP objects from other calls don't exist. Keep the data in an ordinary table, or compute it in the same call (a CTE, or a TEMP table created in this call).`
   }
 
   // --- Flush ---

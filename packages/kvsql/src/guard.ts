@@ -60,7 +60,16 @@ export interface SchemaGuard {
    * happen inside a column's DEFAULT expression aren't seen.
    */
   readonly nondeterministic: string | undefined
-  /** Clear {@link schemaChanged} and {@link nondeterministic}. */
+  /**
+   * The first TEMP table or view that a statement prepared outside
+   * {@link trusted} read or wrote, but that no statement created since
+   * the guard was installed or {@link resetSchemaChanged} last ran;
+   * undefined if none. TEMP objects belong to the connection, not the
+   * file, so a runner that re-executes a call's SQL on another copy
+   * refuses a call that depends on ones made earlier.
+   */
+  readonly tempDependency: string | undefined
+  /** Clear {@link schemaChanged}, {@link nondeterministic} and {@link tempDependency}. */
   resetSchemaChanged(): void
   /** Remove the authorizer from the connection. Safe to call twice. */
   dispose(): void
@@ -70,7 +79,13 @@ export interface SchemaGuard {
 // table keyed by number reads more plainly here.
 const CREATE_INDEX = 1
 const CREATE_TABLE = 2
+const CREATE_TEMP_TABLE = 4
 const CREATE_TEMP_TRIGGER = 5
+const CREATE_TEMP_VIEW = 6
+const DELETE = 9
+const INSERT = 18
+const READ = 20
+const UPDATE = 23
 const CREATE_TRIGGER = 7
 const CREATE_VIEW = 8
 const DROP_INDEX = 10
@@ -87,6 +102,9 @@ const FUNCTION = 31
 const PRAGMA = 19
 const TRANSACTION = 22
 const SQLITE_AUTH = 23
+
+/** Action codes that read or write a table; the database's name is in the third argument. */
+const TEMP_ACCESS = new Set([READ, INSERT, UPDATE, DELETE])
 
 /** Action codes that change a schema; the database's name is in the third argument. */
 const SCHEMA_CHANGES = new Set([
@@ -288,6 +306,8 @@ export function installGuard(
   let refused: string | undefined
   let schemaChanged = false
   let nondeterministic: string | undefined
+  let tempDependency: string | undefined
+  const tempCreated = new Set<string>()
   let installed = true
 
   const rc = capi.sqlite3_set_authorizer(
@@ -303,6 +323,14 @@ export function installGuard(
         if (code === FUNCTION && typeof a2 === 'string') {
           const fn = a2.toLowerCase()
           if (NONDETERMINISTIC_FUNCTIONS.has(fn)) nondeterministic ??= fn
+        }
+        if ((code === CREATE_TEMP_TABLE || code === CREATE_TEMP_VIEW) && typeof a1 === 'string') {
+          tempCreated.add(a1.toLowerCase())
+        } else if (TEMP_ACCESS.has(code) && a3 === 'temp' && typeof a1 === 'string') {
+          // Reading a TEMP view reports the view itself, so views are
+          // caught along with tables.
+          const name = a1.toLowerCase()
+          if (name !== 'sqlite_temp_master' && !tempCreated.has(name)) tempDependency ??= a1
         }
       }
       if (changesMainSchema(code, args)) schemaChanged = true
@@ -341,9 +369,14 @@ export function installGuard(
     get nondeterministic() {
       return nondeterministic
     },
+    get tempDependency() {
+      return tempDependency
+    },
     resetSchemaChanged() {
       schemaChanged = false
       nondeterministic = undefined
+      tempDependency = undefined
+      tempCreated.clear()
     },
     dispose() {
       if (!installed) return

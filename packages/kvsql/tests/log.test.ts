@@ -228,6 +228,36 @@ describe('transactions', () => {
     ])
   })
 
+  it('refuses a schema change that depends on a TEMP object from an earlier call', async () => {
+    const { db, repo } = await fresh()
+    await db.query('CREATE TEMP TABLE scratch (x)')
+    await db.query('INSERT INTO scratch VALUES (1), (2)')
+    await db.query('CREATE TEMP VIEW doubled AS SELECT x * 2 AS y FROM scratch')
+    for (const statements of [
+      [['CREATE TABLE t (id INTEGER PRIMARY KEY)'], ['INSERT INTO t SELECT x FROM temp.scratch']],
+      [['CREATE TABLE t (id INTEGER PRIMARY KEY)'], ['INSERT INTO t SELECT y FROM doubled']],
+      [['CREATE TABLE t (id INTEGER PRIMARY KEY)'], ['DELETE FROM scratch']],
+    ] as const) {
+      await expect(db.transaction(statements)).rejects.toThrow(
+        /can't use the TEMP table or view "(scratch|doubled)" made by an earlier call/,
+      )
+    }
+    expect(db.schemaVersion).toBe(0)
+
+    // A TEMP table made in the same call is replayed with it; outside a
+    // schema change, rows read from TEMP tables are recorded as values.
+    await db.transaction([
+      ['CREATE TEMP TABLE staging (x)'],
+      ['INSERT INTO staging VALUES (7)'],
+      ['CREATE TABLE t (id INTEGER PRIMARY KEY)'],
+      ['INSERT INTO t SELECT x FROM staging'],
+    ])
+    await db.query('INSERT INTO t SELECT x FROM scratch')
+    await db.flush()
+    const copy = await track(replica(repo))
+    expect(await dump(copy)).toEqual(await dump(db))
+  })
+
   it('logs nothing for a call that changes nothing', async () => {
     const { db } = await fresh()
     await db.query('CREATE TABLE t (id TEXT PRIMARY KEY NOT NULL, v)')

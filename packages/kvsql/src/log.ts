@@ -505,9 +505,14 @@ export class LoggedDatabase {
    * that does, or if the branch exists. Either way the file is copied
    * as it is, at any size, without going through memory whole.
    *
-   * The target must be missing, empty, a detached copy, or a copy of
-   * this database left unfinished: anything else there is refused, so
-   * a copy never replaces a database. Nothing may have it open.
+   * The target must be missing, empty, not a database (a copy cut
+   * short: the first page goes last), or a detached copy. Anything else
+   * there is refused, so a copy never replaces a database, and nothing
+   * may have it open. A logged copy is marked detached until its branch
+   * exists, so one cut short before then is replaced too; one cut short
+   * in the moments between its last page and its mark, or between its
+   * branch and its mark, is refused like a database, and deleting the
+   * target clears it.
    */
   copy(target: CopyTarget): Promise<CopyResult> {
     if (this.#closing) return Promise.reject(closedError())
@@ -537,36 +542,42 @@ export class LoggedDatabase {
         )
       }
     }
-    await this.#checkTarget(dir, name, logged ? branch : DETACHED)
+    await this.#checkTarget(dir, name)
     const bytes = await copyDatabase(this.#file, dir, name)
     const copy = await openDatabase(dir, name)
     try {
-      copy.db.exec('BEGIN IMMEDIATE')
-      try {
-        copy.db.exec({
-          sql: 'UPDATE _kvsql_meta SET branch = ? WHERE id = 1',
-          bind: [logged ? branch : DETACHED],
-        })
-        copy.db.exec('DELETE FROM _kvsql_pending')
-        copy.db.exec('COMMIT')
-      } catch (err) {
-        if (this.#sqlite3.capi.sqlite3_get_autocommit(copy.db) === 0) copy.db.exec('ROLLBACK')
-        throw err
+      this.#mark(copy, DETACHED, true)
+      if (logged) {
+        await repo.branches.create(branch, this.#meta.base)
+        this.#mark(copy, branch, false)
       }
     } finally {
       copy.close()
     }
-    if (logged) await repo.branches.create(branch, this.#meta.base)
     return { bytes, seq: this.seq, schema: this.#meta.schema, base: this.#meta.base }
   }
 
+  /** Name the copy's branch in its file, dropping its pending transactions first time. */
+  #mark(copy: DatabaseFile, branch: string, dropPending: boolean): void {
+    copy.db.exec('BEGIN IMMEDIATE')
+    try {
+      copy.db.exec({ sql: 'UPDATE _kvsql_meta SET branch = ? WHERE id = 1', bind: [branch] })
+      if (dropPending) copy.db.exec('DELETE FROM _kvsql_pending')
+      copy.db.exec('COMMIT')
+    } catch (err) {
+      if (this.#sqlite3.capi.sqlite3_get_autocommit(copy.db) === 0) copy.db.exec('ROLLBACK')
+      throw err
+    }
+  }
+
   /**
-   * Refuse a target file a copy mustn't replace. A missing or empty
-   * file, one that isn't a database (a copy cut short starts with
-   * zeros), a detached copy, and a copy of this database made for
-   * `branch` or cut short before it was marked may go.
+   * Refuse a target file a copy mustn't replace: only a missing or
+   * empty file, one that isn't a database (a copy cut short starts with
+   * zeros) and a detached copy may go. A logged database is refused
+   * whatever its branch: even one on this database's own may hold
+   * transactions no log has.
    */
-  async #checkTarget(dir: Directory, name: string, branch: string): Promise<void> {
+  async #checkTarget(dir: Directory, name: string): Promise<void> {
     if (!(await dir.exists(name))) return
     let file: DatabaseFile
     try {
@@ -592,7 +603,7 @@ export class LoggedDatabase {
         if (isNotADatabase(err)) return
         throw err
       }
-      if (owner === DETACHED || owner === branch || owner === this.branch) return
+      if (owner === DETACHED) return
       throw new LogError(
         `${name} holds the database on branch '${String(owner)}', which a copy won't replace`,
       )

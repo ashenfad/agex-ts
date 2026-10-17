@@ -48,9 +48,11 @@ import {
 import {
   type DatabaseFile,
   copyDatabase,
-  deleteDatabase,
+  deleteSnapshot,
   openDatabase,
-  vacuumDatabase,
+  openSnapshot,
+  snapshotName,
+  vacuumIntoSnapshot,
 } from './database'
 import {
   ENTRY_KEY,
@@ -301,9 +303,6 @@ const DEFAULT_EPOCH_MIN_BYTES = 8 << 20
 
 /** The base a snapshot's file records, until it is opened on its epoch and given the snapshot's commit. */
 const SNAPSHOT_BASE = 'snapshot'
-
-/** The file, beside the database's own, a snapshot is made in before it's committed. */
-const snapshotName = (name: string): string => `${name}-snapshot`
 
 /** The version of the file's own tables. */
 const FILE_FORMAT = 1
@@ -1095,7 +1094,7 @@ export class LoggedDatabase {
     } finally {
       this.#epoch = null
       this.#holding = false
-      if (shot) await deleteDatabase(this.#file.directory, shot.tmp).catch(() => {})
+      if (shot) await deleteSnapshot(this.#file.directory, this.name).catch(() => {})
       if (!this.#closing) {
         if (this.#every > 0 && this.#pending >= this.#every) {
           void this.#serial(() => this.#flushReporting())
@@ -1124,6 +1123,11 @@ export class LoggedDatabase {
     // The snapshot must hold every entry of the log it replaces.
     await this.#wt.refresh()
     if (this.#wt.head !== this.#meta.base) await this.#catchUp()
+    if (!Number.isSafeInteger(parsed.n + 1)) {
+      throw new LogError(
+        `the log's branch '${this.#branch}' is its last epoch: ${parsed.n} can't be counted past`,
+      )
+    }
     const branch = epochBranch(parsed.log, parsed.n + 1)
     if (await repo.branches.has(branch)) {
       if (await finished(repo, branch)) {
@@ -1134,10 +1138,10 @@ export class LoggedDatabase {
     }
     const dir = this.#file.directory
     const tmp = snapshotName(this.name)
-    await vacuumDatabase(this.#file, dir, tmp, (sql) => this.#exec(sql))
+    await vacuumIntoSnapshot(this.#file, (sql) => this.#exec(sql))
     const seq = this.seq
     const pending = await pendingDigest(this.#sqlite3, this.#readPending())
-    const snap = await openDatabase(dir, tmp)
+    const snap = await openSnapshot(dir, this.name)
     try {
       // the pending rows' pages are freed as zeros, which gzip all but drops
       snap.db.exec('PRAGMA secure_delete = ON')
@@ -1268,8 +1272,7 @@ export class LoggedDatabase {
         }
       }
       const dir = this.#file.directory
-      const tmp = snapshotName(this.name)
-      if (await dir.exists(tmp)) await deleteDatabase(dir, tmp)
+      if (await dir.exists(snapshotName(this.name))) await deleteSnapshot(dir, this.name)
     } catch (err) {
       this.#reportEpochError(err)
     }

@@ -45,6 +45,14 @@ export function journalName(name: string): string {
   return `${name}${JOURNAL_SUFFIX}`
 }
 
+/** The suffix of the snapshot a database makes beside it for a new epoch. */
+const SNAPSHOT_SUFFIX = '-snapshot'
+
+/** The name of database `name`'s snapshot file, beside it in its directory. */
+export function snapshotName(name: string): string {
+  return `${name}${SNAPSHOT_SUFFIX}`
+}
+
 const directoryIds = new WeakMap<Directory, number>()
 let nextDirectoryId = 0
 
@@ -60,16 +68,22 @@ function vfsPath(dir: Directory, name: string): string {
 
 /**
  * A database name is one path segment, and doesn't end in the journal
- * suffix: database `x-journal` would share its file with database
- * `x`'s journal, so one would overwrite or delete the other.
+ * or snapshot suffix: database `x-journal` would share its file with
+ * database `x`'s journal, and `x-snapshot` with the snapshot `x` makes
+ * for a new epoch, so one would overwrite or delete the other.
  */
 function checkName(name: string): void {
   if (name === '' || name.includes('/'))
     throw new Error(`bad database name: ${JSON.stringify(name)}`)
-  if (name.endsWith(JOURNAL_SUFFIX)) {
-    throw new Error(
-      `bad database name: ${JSON.stringify(name)} ends in ${JOURNAL_SUFFIX}, the suffix of database journals`,
-    )
+  for (const [suffix, what] of [
+    [JOURNAL_SUFFIX, 'database journals'],
+    [SNAPSHOT_SUFFIX, 'the snapshots databases make for new epochs'],
+  ] as const) {
+    if (name.endsWith(suffix)) {
+      throw new Error(
+        `bad database name: ${JSON.stringify(name)} ends in ${suffix}, the suffix of ${what}`,
+      )
+    }
   }
 }
 
@@ -187,6 +201,16 @@ function releaseFiles(vfs: KvsqlVfs, path: string, files: readonly SyncFile[]): 
  */
 export async function openDatabase(dir: Directory, name: string): Promise<DatabaseFile> {
   checkName(name)
+  return openFile(dir, name)
+}
+
+/** Open database `of`'s snapshot file (see {@link vacuumIntoSnapshot}) as a database. */
+export async function openSnapshot(dir: Directory, of: string): Promise<DatabaseFile> {
+  checkName(of)
+  return openFile(dir, snapshotName(of))
+}
+
+async function openFile(dir: Directory, name: string): Promise<DatabaseFile> {
   const sqlite3 = await loadSqlite()
   const vfs = kvsqlVfs(sqlite3)
   const path = vfsPath(dir, name)
@@ -235,6 +259,16 @@ export async function openDatabase(dir: Directory, name: string): Promise<Databa
  */
 export async function deleteDatabase(dir: Directory, name: string): Promise<void> {
   checkName(name)
+  await removeFiles(dir, name)
+}
+
+/** Delete database `of`'s snapshot file, if it's there. */
+export async function deleteSnapshot(dir: Directory, of: string): Promise<void> {
+  checkName(of)
+  await removeFiles(dir, snapshotName(of))
+}
+
+async function removeFiles(dir: Directory, name: string): Promise<void> {
   const vfs = kvsqlVfs(await loadSqlite())
   if (vfs.has(vfsPath(dir, name))) throw new Error(`database is open: ${name}`)
   await dir.delete(name)
@@ -279,8 +313,28 @@ export async function vacuumDatabase(
   exec: (sql: string) => void = (sql) => source.db.exec(sql),
 ): Promise<number> {
   checkName(name)
+  return vacuumTo(source, dir, name, exec)
+}
+
+/**
+ * {@link vacuumDatabase} into the database's snapshot file beside it,
+ * the first step of a new epoch.
+ */
+export function vacuumIntoSnapshot(
+  source: DatabaseFile,
+  exec: (sql: string) => void,
+): Promise<number> {
+  return vacuumTo(source, source.directory, snapshotName(source.name), exec)
+}
+
+async function vacuumTo(
+  source: DatabaseFile,
+  dir: Directory,
+  name: string,
+  exec: (sql: string) => void,
+): Promise<number> {
   const vfs = kvsqlVfs(await loadSqlite())
-  await deleteDatabase(dir, name)
+  await removeFiles(dir, name)
   const path = vfsPath(dir, name)
   const files: SyncFile[] = []
   const registered: string[] = []
@@ -296,7 +350,10 @@ export async function vacuumDatabase(
       vfs.register(p, file as SyncFile)
       registered.push(p)
     }
-    exec(`VACUUM INTO 'file:${path}?vfs=${vfs.name}'`)
+    // the path's segments URI-encoded (SQLite decodes them), then
+    // quoted as a SQL string
+    const uri = `file:${path.split('/').map(encodeURIComponent).join('/')}?vfs=${encodeURIComponent(vfs.name)}`
+    exec(`VACUUM INTO '${uri.replaceAll("'", "''")}'`)
     const copy = files[0] as SyncFile
     copy.sync()
     return copy.size()

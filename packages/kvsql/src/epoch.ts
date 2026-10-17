@@ -141,9 +141,10 @@ function decodeRecord(bytes: unknown, commit: string): SnapshotRecord {
 
 /** Branch `<log>/<n>` as its log and epoch number, or null if it isn't named for epochs. */
 export function parseEpoch(branch: string): { log: string; n: number } | null {
-  const match = /^(.+)\/(0|[1-9][0-9]{0,8})$/.exec(branch)
+  const match = /^(.+)\/(0|[1-9][0-9]*)$/.exec(branch)
   if (!match) return null
-  return { log: match[1] as string, n: Number(match[2]) }
+  const n = Number(match[2])
+  return Number.isSafeInteger(n) ? { log: match[1] as string, n } : null
 }
 
 /** Epoch `n` of log `log`: branch `<log>/<n>`. */

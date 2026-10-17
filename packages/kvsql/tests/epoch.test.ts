@@ -163,6 +163,46 @@ describe('a new epoch', () => {
     await db.close()
   }, 60_000)
 
+  it('works for a database whose name SQL or a URI would read as syntax', async () => {
+    const repo = await repoOver()
+    const dir = new MemoryDirectory()
+    const name = "it's #1?.db"
+    const db = await open(dir, repo, { name })
+    await db.query('CREATE TABLE t (id INTEGER PRIMARY KEY NOT NULL)')
+    await db.query('INSERT INTO t VALUES (1)')
+    expect((await db.newEpoch()).branch).toBe(NEXT)
+    await db.close()
+    expect(dir.names()).toEqual([name, `${name}-journal`])
+    const fresh = await open(new MemoryDirectory(), repo, { name })
+    expect((await fresh.query('SELECT id FROM t')).rows).toEqual([{ id: 1 }])
+    await fresh.close()
+  })
+
+  it("leaves a database alone that a snapshot's name would clash with: such names are refused", async () => {
+    const repo = await repoOver()
+    await expect(open(new MemoryDirectory(), repo, { name: `${NAME}-snapshot` })).rejects.toThrow(
+      /ends in -snapshot/,
+    )
+  })
+
+  it('is refused past the last epoch number there is', async () => {
+    const repo = await repoOver()
+    const last = `db/test/${Number.MAX_SAFE_INTEGER}`
+    const db = await open(new MemoryDirectory(), repo, { branch: last })
+    await db.query('CREATE TABLE t (id INTEGER PRIMARY KEY NOT NULL)')
+    await expect(db.newEpoch()).rejects.toThrow(/can't be counted past/)
+    expect(await repo.branches.list()).toEqual([last])
+    await db.close()
+    // epochs with more digits than any before are still the log's
+    const wide = await open(new MemoryDirectory(), repo, { branch: 'db/wide/999999999' })
+    await wide.query('CREATE TABLE t (id INTEGER PRIMARY KEY NOT NULL)')
+    expect((await wide.newEpoch()).branch).toBe('db/wide/1000000000')
+    await wide.close()
+    const again = await open(new MemoryDirectory(), repo, { branch: 'db/wide/999999999' })
+    expect(again.branch).toBe('db/wide/1000000000')
+    await again.close()
+  })
+
   it('is refused on a branch not named for epochs, and by a detached copy', async () => {
     const repo = await repoOver()
     const db = await open(new MemoryDirectory(), repo, { branch: 'main' })

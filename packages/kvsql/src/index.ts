@@ -5,7 +5,8 @@
  * The database is a file in a `Directory` (OPFS in a browser worker,
  * or in memory), opened through kvsql's own SQLite VFS. Its changes are
  * recorded as changesets with SQLite's session extension, behind a
- * schema guard that refuses what the record would silently miss.
+ * schema guard that refuses what the record would silently miss, and
+ * flushed in batches to a log on a kvgit branch (`openLog`).
  */
 
 export { loadSqlite, type Sqlite3Static } from './sqlite'
@@ -30,3 +31,22 @@ export {
   journalName,
   openDatabase,
 } from './database'
+export {
+  type FlushPolicy,
+  type FlushResult,
+  LoggedDatabase,
+  type LogOptions,
+  openLog,
+  type QueryResult,
+  type Recovery,
+  REPLAY_CHUNK_BYTES,
+  REPLAY_CHUNK_TRANSACTIONS,
+} from './log'
+export {
+  ENTRY_FORMAT,
+  ENTRY_KEY,
+  type EntryInfo,
+  MERGE_RATIO,
+  type Params,
+  type Statement,
+} from './entry'

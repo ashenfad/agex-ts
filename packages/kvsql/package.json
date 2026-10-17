@@ -52,6 +52,7 @@
     "vitest": "^2.1.8"
   },
   "dependencies": {
+    "@agex-ts/kvgit": "workspace:*",
     "@sqlite.org/sqlite-wasm": "3.53.4-build1"
   }
 }

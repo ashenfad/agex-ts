@@ -180,8 +180,12 @@ export type Response =
 export type ChannelMessage =
   /** A worker joined: the holder answers with `holder`. */
   | { t: 'hello'; from: string }
-  /** `from` holds the lock: send requests to it. */
-  | { t: 'holder'; from: string }
+  /**
+   * `from` holds the lock: send requests to it. `epoch` orders holders:
+   * each takes one larger than any it has seen (and than the clock), so
+   * a late announcement from an earlier holder is recognised as one.
+   */
+  | { t: 'holder'; from: string; epoch: number }
   /** A forwarded request. */
   | { t: 'request'; from: string; to: string; rid: number; op: Op; args: unknown[] }
   /**

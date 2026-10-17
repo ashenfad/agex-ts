@@ -49,6 +49,18 @@ export interface SchemaGuard {
    * too; such a false positive only costs a schema check.
    */
   readonly schemaChanged: boolean
+  /**
+   * The first function whose result can differ from one run to the
+   * next (`random()`, the date and time functions, ...; see
+   * {@link NONDETERMINISTIC_FUNCTIONS}) that a statement prepared
+   * outside {@link trusted} calls, directly or through a trigger, since
+   * the guard was installed or {@link resetSchemaChanged} last ran;
+   * undefined if none. A runner that re-executes a call's SQL on
+   * another copy of the database refuses such a call. Calls that only
+   * happen inside a column's DEFAULT expression aren't seen.
+   */
+  readonly nondeterministic: string | undefined
+  /** Clear {@link schemaChanged} and {@link nondeterministic}. */
   resetSchemaChanged(): void
   /** Remove the authorizer from the connection. Safe to call twice. */
   dispose(): void
@@ -73,6 +85,7 @@ const CREATE_VTABLE = 29
 const DROP_VTABLE = 30
 const FUNCTION = 31
 const PRAGMA = 19
+const TRANSACTION = 22
 const SQLITE_AUTH = 23
 
 /** Action codes that change a schema; the database's name is in the third argument. */
@@ -88,6 +101,31 @@ const SCHEMA_CHANGES = new Set([
   ANALYZE,
   CREATE_VTABLE,
   DROP_VTABLE,
+])
+
+/**
+ * Functions whose result can differ between two runs of the same
+ * statement on the same data: random values, the clock (the date and
+ * time functions read it for `'now'` or no argument, and the authorizer
+ * doesn't see arguments, so all of them count), and the counters of
+ * the connection's earlier statements.
+ */
+export const NONDETERMINISTIC_FUNCTIONS: ReadonlySet<string> = new Set([
+  'random',
+  'randomblob',
+  'current_date',
+  'current_time',
+  'current_timestamp',
+  'date',
+  'time',
+  'datetime',
+  'julianday',
+  'unixepoch',
+  'strftime',
+  'timediff',
+  'changes',
+  'total_changes',
+  'last_insert_rowid',
 ])
 
 /**
@@ -136,6 +174,12 @@ function refusal(code: number, args: readonly (string | 0)[], label: string): st
         : `ATTACH and VACUUM aren't available in ${label}: it is a single database, and its file space is managed for you. Keep every table in it.`
     case DETACH:
       return `DETACH isn't available in ${label}: no other database can be attached.`
+    case TRANSACTION:
+      // A transaction ended by the caller would commit changes outside
+      // the runner's own transaction, unrecorded. Savepoints nest
+      // inside it (RELEASE and ROLLBACK TO never end a transaction
+      // opened with BEGIN), so they stay available.
+      return `${args[0] || 'BEGIN'} isn't available in ${label}: each call already runs as one transaction, committed if it succeeds and rolled back if it fails. To run several statements as one, pass them together to transaction([[sql, params], ...]). SAVEPOINT, RELEASE and ROLLBACK TO work inside a call.`
     case CREATE_TEMP_TRIGGER:
       // SQLite runs TEMP triggers even when triggers are switched off,
       // so one would fire again when recorded changes are replayed.
@@ -226,6 +270,10 @@ function changesMainSchema(code: number, args: readonly (string | 0)[]): boolean
  *   `temp_store` are left alone, and so is `foreign_keys`, which is the
  *   connection owner's choice (foreign-key conflicts are only detected
  *   when it is on);
+ * - `BEGIN`, `COMMIT`, `END` and `ROLLBACK`: the runner owns the
+ *   transaction, and one the caller ended would commit changes without
+ *   their record (`SAVEPOINT`, `RELEASE` and `ROLLBACK TO` stay
+ *   allowed: inside a transaction they never end it);
  * - any use of a table, index, view or trigger whose name starts with
  *   {@link INTERNAL_TABLE_PREFIX}.
  */
@@ -239,6 +287,7 @@ export function installGuard(
   let trustedDepth = 0
   let refused: string | undefined
   let schemaChanged = false
+  let nondeterministic: string | undefined
   let installed = true
 
   const rc = capi.sqlite3_set_authorizer(
@@ -250,6 +299,10 @@ export function installGuard(
         if (why !== undefined) {
           refused ??= why
           return capi.SQLITE_DENY
+        }
+        if (code === FUNCTION && typeof a2 === 'string') {
+          const fn = a2.toLowerCase()
+          if (NONDETERMINISTIC_FUNCTIONS.has(fn)) nondeterministic ??= fn
         }
       }
       if (changesMainSchema(code, args)) schemaChanged = true
@@ -285,8 +338,12 @@ export function installGuard(
     get schemaChanged() {
       return schemaChanged
     },
+    get nondeterministic() {
+      return nondeterministic
+    },
     resetSchemaChanged() {
       schemaChanged = false
+      nondeterministic = undefined
     },
     dispose() {
       if (!installed) return

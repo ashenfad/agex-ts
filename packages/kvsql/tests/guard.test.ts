@@ -145,6 +145,50 @@ describe('refusals', () => {
     )
   })
 
+  it('transaction control, pointing at transaction([...])', () => {
+    const { db, guard } = guarded('CREATE TABLE t (id TEXT PRIMARY KEY NOT NULL, v)')
+    for (const [sql, word] of [
+      ['BEGIN', 'BEGIN'],
+      ['BEGIN IMMEDIATE', 'BEGIN'],
+      ['BEGIN EXCLUSIVE TRANSACTION', 'BEGIN'],
+      ['COMMIT', 'COMMIT'],
+      ['END TRANSACTION', 'COMMIT'],
+      ['ROLLBACK', 'ROLLBACK'],
+    ] as const) {
+      expect(refusal(guard, () => db.exec(sql)).message, sql).toBe(
+        `${word} isn't available in agex.db: each call already runs as one transaction, committed if it succeeds and rolled back if it fails. To run several statements as one, pass them together to transaction([[sql, params], ...]). SAVEPOINT, RELEASE and ROLLBACK TO work inside a call.`,
+      )
+    }
+    // Refused at prepare, so a script stops before the statement runs.
+    expect(() =>
+      guard.run(() =>
+        db.exec("INSERT INTO t VALUES ('a', 1); COMMIT; INSERT INTO t VALUES ('b', 2)"),
+      ),
+    ).toThrow(RefusedError)
+    expect(dump(db)).toEqual({ t: [{ id: 'a', v: 1 }] })
+    // The runner's own statements go through trusted mode.
+    guard.trusted(() => db.exec('BEGIN IMMEDIATE; ROLLBACK'))
+  })
+
+  it('savepoints inside a transaction, which never end it', () => {
+    const { db, guard } = guarded('CREATE TABLE t (id TEXT PRIMARY KEY NOT NULL, v)')
+    const autocommit = () => sqlite3.capi.sqlite3_get_autocommit(db) !== 0
+    guard.trusted(() => db.exec('BEGIN IMMEDIATE'))
+    guard.run(() =>
+      db.exec(`
+        SAVEPOINT a; INSERT INTO t VALUES ('a', 1); RELEASE a;
+        SAVEPOINT b; INSERT INTO t VALUES ('b', 2); ROLLBACK TO b; RELEASE b;
+        SAVEPOINT c; SAVEPOINT d; INSERT INTO t VALUES ('c', 3); RELEASE c;
+        SAVEPOINT open_at_end;`),
+    )
+    expect(autocommit()).toBe(false)
+    expect(() => guard.run(() => db.exec('RELEASE nope'))).toThrow(/no such savepoint/)
+    expect(autocommit()).toBe(false)
+    guard.trusted(() => db.exec('ROLLBACK'))
+    // The outer rollback undid what every released savepoint did.
+    expect(dump(db)).toEqual({ t: [] })
+  })
+
   it('names with the reserved prefix', () => {
     const { db, guard } = guarded()
     const expected =
@@ -280,6 +324,29 @@ describe('schema-change detection', () => {
     })
   }
 
+  it('notes the first nondeterministic function, in a trigger too, until reset', () => {
+    const { db, guard } = guarded(`
+      CREATE TABLE t (id TEXT PRIMARY KEY NOT NULL, v);
+      CREATE TABLE log (id INTEGER PRIMARY KEY, at);
+      CREATE TRIGGER t_log AFTER INSERT ON t BEGIN INSERT INTO log (at) VALUES (julianday('now')); END;
+    `)
+    guard.run(() => db.exec("SELECT abs(-1), upper('x'), coalesce(NULL, 1)"))
+    expect(guard.nondeterministic).toBeUndefined()
+    guard.run(() => db.exec('SELECT random(), CURRENT_TIMESTAMP'))
+    expect(guard.nondeterministic).toBe('random')
+    guard.resetSchemaChanged()
+    expect(guard.nondeterministic).toBeUndefined()
+    guard.run(() => db.exec("INSERT INTO t VALUES ('a', 1)"))
+    expect(guard.nondeterministic).toBe('julianday')
+    guard.resetSchemaChanged()
+    guard.run(() => db.exec('SELECT Last_Insert_RowID()'))
+    expect(guard.nondeterministic).toBe('last_insert_rowid')
+    // Not counted for the runner's own statements.
+    guard.resetSchemaChanged()
+    guard.trusted(() => db.exec('SELECT random()'))
+    expect(guard.nondeterministic).toBeUndefined()
+  })
+
   it('detects schema changes in trusted mode too', () => {
     const { db, guard } = guarded()
     guard.resetSchemaChanged()
@@ -366,7 +433,7 @@ describe('the schema check', () => {
     /** Run `statements` as one transaction, refusing schema the log can't record. */
     const transaction = (statements: string[]) => {
       guard.resetSchemaChanged()
-      db.exec('BEGIN IMMEDIATE')
+      guard.trusted(() => db.exec('BEGIN IMMEDIATE'))
       try {
         guard.run(() => {
           for (const sql of statements) db.exec(sql)
@@ -376,9 +443,9 @@ describe('the schema check', () => {
           if (violations.length > 0)
             throw new RefusedError(violations.map((v) => v.message).join('\n'))
         }
-        db.exec('COMMIT')
+        guard.trusted(() => db.exec('COMMIT'))
       } catch (err) {
-        db.exec('ROLLBACK')
+        guard.trusted(() => db.exec('ROLLBACK'))
         throw err
       }
     }

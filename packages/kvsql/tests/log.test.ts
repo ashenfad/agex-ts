@@ -59,6 +59,23 @@ async function track(db: Promise<LoggedDatabase>): Promise<LoggedDatabase> {
   return it
 }
 
+/** A connection to a database file's bytes, in memory. */
+function openBytes(bytes: Uint8Array) {
+  const db = new sqlite3.oo1.DB()
+  const { capi, wasm } = sqlite3
+  const p = wasm.allocFromTypedArray(bytes)
+  const rc = capi.sqlite3_deserialize(
+    db,
+    'main',
+    p,
+    bytes.byteLength,
+    bytes.byteLength,
+    capi.SQLITE_DESERIALIZE_FREEONCLOSE | capi.SQLITE_DESERIALIZE_RESIZEABLE,
+  )
+  if (rc !== 0) throw new Error(`sqlite3_deserialize: ${rc}`)
+  return db
+}
+
 /** The log's entries, oldest first: each commit's info and decoded pieces. */
 async function logEntries(repo: Repo<Uint8Array>) {
   const out: { commit: string; info: Record<string, unknown>; pieces: Piece[] }[] = []
@@ -360,6 +377,43 @@ describe('transactions', () => {
     const copy = await track(replica(repo))
     expect((await copy.query(stats)).rows).toEqual((await db.query(stats)).rows)
     expect((await db.query(stats)).rows).toContainEqual({ tbl: 't', idx: 't_v', stat: '3 1' })
+  })
+
+  it('exports a standalone file: its schema and rows, pending ones too, without its own tables', async () => {
+    const { db } = await fresh()
+    await db.transaction([
+      ['CREATE TABLE notes (id TEXT PRIMARY KEY NOT NULL, title TEXT, body BLOB)'],
+      ['CREATE INDEX notes_title ON notes (title)'],
+      ['CREATE VIEW titles AS SELECT title FROM notes'],
+      ['PRAGMA user_version = 4'],
+    ])
+    await db.query("INSERT INTO notes VALUES ('a', 'Alpha', x'0102')")
+    await db.flush()
+    await db.query("INSERT INTO notes VALUES ('b', 'Beta', NULL)")
+    expect(db.pendingCount).toBe(1)
+
+    const copy = openBytes(await db.export())
+    try {
+      expect(copy.selectValue('PRAGMA integrity_check')).toBe('ok')
+      expect(copy.selectValue('PRAGMA user_version')).toBe(4)
+      expect(copy.selectValues('SELECT name FROM sqlite_schema ORDER BY name')).toEqual([
+        'notes',
+        'notes_title',
+        'sqlite_autoindex_notes_1',
+        'titles',
+      ])
+      expect(copy.selectObjects('SELECT * FROM notes ORDER BY id')).toEqual([
+        { id: 'a', title: 'Alpha', body: new Uint8Array([1, 2]) },
+        { id: 'b', title: 'Beta', body: null },
+      ])
+    } finally {
+      copy.close()
+    }
+    // The database goes on as it was.
+    expect(db.pendingCount).toBe(1)
+    expect((await db.query('SELECT count(*) AS n FROM notes')).rows).toEqual([{ n: 2 }])
+    await db.close()
+    await expect(db.export()).rejects.toThrow(/closed/)
   })
 
   it('replays a table rebuild, the usual migration for changing a table', async () => {

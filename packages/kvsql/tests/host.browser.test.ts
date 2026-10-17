@@ -169,7 +169,7 @@ afterAll(async () => {
 
 describe('the worker host', () => {
   it(
-    'serves one tab: query, transaction, flush, info, close',
+    'serves one tab: query, transaction, flush, info, export, close',
     async () => {
       const id = newId()
       const db = open(tab(), config(id))
@@ -186,6 +186,10 @@ describe('the worker host', () => {
       expect(await role(db)).toBe('holder')
       expect(await db.info()).toMatchObject({ seq: 2, pendingCount: 1, branch: `kvsql/${id}` })
       expect(await db.flush()).toMatchObject({ from: 2, to: 2 })
+      // The file in OPFS, copied out as one SQLite file.
+      const file = await db.export()
+      expect(new TextDecoder().decode(file.subarray(0, 15))).toBe('SQLite format 3')
+      expect(file.byteLength % 4096).toBe(0)
       expect(await lockHolder(`kvsql:${id}`)).toBeDefined()
       await db.close()
       await expect(db.query('SELECT 1')).rejects.toThrow(/closed/)

@@ -136,6 +136,7 @@ export interface Ops {
   query: { args: [sql: string, params: unknown]; result: QueryResult }
   transaction: { args: [statements: unknown]; result: QueryResult[] }
   flush: { args: []; result: FlushResult | null }
+  export: { args: []; result: Uint8Array }
   info: { args: []; result: DatabaseInfo }
   delete: { args: [options: DeleteOptions]; result: undefined }
   status: { args: []; result: Status }
@@ -147,11 +148,11 @@ export type Op = keyof Ops
 /**
  * Requests that are safe to run twice, so one sent to a worker that
  * went away before answering is sent again to the next one: reading
- * the state, flushing whatever is pending, and deleting. A query or a
+ * the state or the file, flushing whatever is pending, and deleting. A query or a
  * transaction might write, and might have committed, so it fails with
  * {@link ConnectionLostError} instead.
  */
-export const RETRY_SAFE: ReadonlySet<Op> = new Set<Op>(['flush', 'info', 'delete'])
+export const RETRY_SAFE: ReadonlySet<Op> = new Set<Op>(['flush', 'export', 'info', 'delete'])
 
 /** Marks the message a client sends a worker to connect to a database. */
 export const CONNECT = 'kvsql:connect'

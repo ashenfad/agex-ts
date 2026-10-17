@@ -29,6 +29,7 @@ import {
 import type { Database, SqlValue, Sqlite3Static } from '@sqlite.org/sqlite-wasm'
 import {
   type Conflict,
+  INTERNAL_TABLE_PREFIX,
   type Session,
   applyChangeset,
   changesetTables,
@@ -387,6 +388,38 @@ export class LoggedDatabase {
   flush(): Promise<FlushResult | null> {
     if (this.#closing) return Promise.reject(closedError())
     return this.#serial(() => this.#flush())
+  }
+
+  /**
+   * The database as a standalone SQLite file: its tables, indexes,
+   * views and triggers and `user_version`, without kvsql's own tables,
+   * compacted, for any SQLite tool to open. Taken between calls, so it
+   * holds every transaction committed so far, flushed or not. The copy
+   * is built in memory, so it costs about twice the file's size there
+   * while it's made.
+   */
+  export(): Promise<Uint8Array> {
+    if (this.#closing) return Promise.reject(closedError())
+    return this.#serial(() => this.#export())
+  }
+
+  #export(): Uint8Array {
+    const { capi, oo1 } = this.#sqlite3
+    const name = `file:/kvsql-export-${crypto.randomUUID()}?vfs=memdb`
+    // An open connection keeps the memdb alive for VACUUM INTO to fill.
+    const copy = new oo1.DB(name)
+    try {
+      this.#exec(`VACUUM INTO '${name}'`)
+      const own = copy.selectValues(
+        "SELECT name FROM sqlite_schema WHERE type = 'table' AND substr(name, 1, ?) = ?",
+        [INTERNAL_TABLE_PREFIX.length, INTERNAL_TABLE_PREFIX],
+      ) as string[]
+      for (const table of own) copy.exec(`DROP TABLE "${table}"`)
+      copy.exec('VACUUM')
+      return capi.sqlite3_js_db_export(copy)
+    } finally {
+      copy.close()
+    }
   }
 
   /**

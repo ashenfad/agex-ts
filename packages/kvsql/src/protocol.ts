@@ -208,8 +208,11 @@ export type ChannelMessage =
    * unanswered never ran.
    */
   | { t: 'released'; from: string }
-  /** The database was deleted: every worker closes. */
-  | { t: 'deleted'; from: string }
+  /**
+   * The database was deleted: every worker closes, except where the
+   * deletion `id` was already applied (by the worker that asked for it).
+   */
+  | { t: 'deleted'; from: string; id: string }
   /** A flush the holder's policy started failed. */
   | { t: 'flushError'; from: string; error: SerializedError }
 

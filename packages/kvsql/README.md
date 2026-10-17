@@ -278,7 +278,9 @@ one: its access handles are exclusive.
   database, deletes the file, its journal and the log's branch (and,
   with the default worker, the directory and IndexedDB database),
   closes every tab's connection, and keeps the lock until the other
-  workers have left its queue, so none of them opens it again. Don't
+  workers have left its queue, so none of them opens it again (a
+  connect made after the delete resolves waits for that, then starts
+  the database afresh). Don't
   delete a database's files in any other way: WebKit lets one context
   delete a file another has open, and the database is lost when it
   closes. `db.delete({ keepLog: true })` deletes only this device's

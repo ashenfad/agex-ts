@@ -376,6 +376,38 @@ describe('delete', () => {
     ).toEqual([{ n: 0 }])
   })
 
+  /** Delete through `deleter`'s worker and connect again through it at once, the broadcast late. */
+  async function deleteAndReconnect(o: Origin, deleter: 'h' | 'f') {
+    const wh = o.worker('h')
+    const h = client(wh.connect(CONFIG))
+    await h.query('CREATE TABLE t (id INTEGER PRIMARY KEY)')
+    await h.query('INSERT INTO t VALUES (1)')
+    const wf = o.worker('f')
+    const f = client(wf.connect(CONFIG))
+    const g = client(o.worker('g').connect(CONFIG))
+    await until(async () => (await role(g)) === 'forwarding', 3_000, 'g forwarding')
+    // Every `deleted` message takes 300 ms to arrive, within a worker too.
+    o.channels.route = (_from, _to, m) => ((m as { t: string }).t === 'deleted' ? 300 : 0)
+    const [db, worker] = deleter === 'h' ? [h, wh] : [f, wf]
+    await db.delete()
+    const again = client(worker.connect(CONFIG))
+    const fresh = await again.query("SELECT count(*) AS n FROM sqlite_schema WHERE name = 't'")
+    expect(fresh.rows).toEqual([{ n: 0 }])
+    await new Promise((r) => setTimeout(r, 400))
+    // The late broadcast closed the third tab's old connection, not the new one.
+    await expect(g.query('SELECT 1')).rejects.toThrow(/agex\.db was deleted/)
+    expect((await again.query('SELECT 1 AS x')).rows).toEqual([{ x: 1 }])
+    expect(await again.status()).toMatchObject({ role: 'holder', deleted: false })
+  }
+
+  it('lets a forwarding tab connect again right after its delete', async () => {
+    await deleteAndReconnect(setup(), 'f')
+  })
+
+  it("lets the holder's own tab connect again right after its delete", async () => {
+    await deleteAndReconnect(setup(), 'h')
+  })
+
   it('with keepLog, rebuilds the file from the log and goes on serving every tab', async () => {
     const o = setup()
     const a = client(o.worker('a').connect(CONFIG))

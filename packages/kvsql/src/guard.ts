@@ -45,10 +45,21 @@ export interface SchemaGuard {
    *
    * It is set when a statement is prepared, so a runner resets it
    * before the statements of a transaction and reads it after them.
-   * A statement prepared but never run (`EXPLAIN CREATE ...`) sets it
-   * too; such a false positive only costs a schema check.
+   * It says what a statement may do, not what it did: one that turns
+   * out a no-op (`CREATE TABLE IF NOT EXISTS` on a table that exists,
+   * `EXPLAIN CREATE ...`, a change rolled back to a savepoint) sets it
+   * too. A runner that only records real changes confirms against the
+   * file: its schema cookie (`PRAGMA schema_version`), `user_version`
+   * and `application_id`, and {@link analyzed}.
    */
   readonly schemaChanged: boolean
+  /**
+   * Whether an `ANALYZE` of `main` has been prepared since the guard
+   * was installed or {@link resetSchemaChanged} last ran. Statistics
+   * it rewrites change no schema cookie, so a runner can't confirm
+   * them against the file.
+   */
+  readonly analyzed: boolean
   /**
    * The first function whose result can differ from one run to the
    * next (`random()`, the date and time functions, ...; see
@@ -69,7 +80,7 @@ export interface SchemaGuard {
    * refuses a call that depends on ones made earlier.
    */
   readonly tempDependency: string | undefined
-  /** Clear {@link schemaChanged}, {@link nondeterministic} and {@link tempDependency}. */
+  /** Clear {@link schemaChanged}, {@link analyzed}, {@link nondeterministic} and {@link tempDependency}. */
   resetSchemaChanged(): void
   /** Remove the authorizer from the connection. Safe to call twice. */
   dispose(): void
@@ -333,6 +344,7 @@ export function installGuard(
   let trustedDepth = 0
   let refused: string | undefined
   let schemaChanged = false
+  let analyzed = false
   let nondeterministic: string | undefined
   let tempDependency: string | undefined
   const tempCreated = new Set<string>()
@@ -362,6 +374,7 @@ export function installGuard(
         }
       }
       if (changesMainSchema(code, args)) schemaChanged = true
+      if (code === ANALYZE && a3 === 'main') analyzed = true
       return capi.SQLITE_OK
     },
     0,
@@ -394,6 +407,9 @@ export function installGuard(
     get schemaChanged() {
       return schemaChanged
     },
+    get analyzed() {
+      return analyzed
+    },
     get nondeterministic() {
       return nondeterministic
     },
@@ -402,6 +418,7 @@ export function installGuard(
     },
     resetSchemaChanged() {
       schemaChanged = false
+      analyzed = false
       nondeterministic = undefined
       tempDependency = undefined
       tempCreated.clear()

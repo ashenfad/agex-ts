@@ -314,6 +314,54 @@ describe('transactions', () => {
     expect(db.schemaVersion).toBe(3)
   })
 
+  it('logs a schema statement that changes nothing as rows, as an app reloading does', async () => {
+    const { db, repo } = await fresh()
+    const create = 'CREATE TABLE IF NOT EXISTS notes (id TEXT PRIMARY KEY NOT NULL, title TEXT)'
+    const index = 'CREATE INDEX IF NOT EXISTS notes_title ON notes (title)'
+    await db.transaction([[create], [index], ['PRAGMA user_version = 1']])
+    expect(db.schemaVersion).toBe(1)
+    const flushed = (await logEntries(repo)).length
+
+    // The app loads again: the same statements change nothing.
+    await db.transaction([[create], [index], ['PRAGMA user_version = 1']])
+    await db.query('DROP TABLE IF EXISTS gone')
+    // Nor does a change undone inside the call.
+    await db.transaction([
+      ['SAVEPOINT s'],
+      ['CREATE TABLE tried (id TEXT PRIMARY KEY NOT NULL)'],
+      ['ROLLBACK TO s'],
+      ['RELEASE s'],
+    ])
+    expect(db.schemaVersion).toBe(1)
+    expect(db.pendingCount).toBe(0)
+    expect(await logEntries(repo)).toHaveLength(flushed)
+
+    // Rows written beside a no-op are logged as rows, values and all,
+    // so a nondeterministic function is fine there.
+    await db.transaction([[create], ["INSERT INTO notes VALUES ('a', hex(randomblob(4)))"]])
+    expect([db.schemaVersion, db.pendingCount]).toEqual([1, 1])
+    await db.flush()
+    expect(await dump(await track(replica(repo)))).toEqual(await dump(db))
+  })
+
+  it('logs ANALYZE as SQL, though rewriting statistics changes no schema cookie', async () => {
+    const { db, repo } = await fresh()
+    await db.query('CREATE TABLE t (id TEXT PRIMARY KEY NOT NULL, v)')
+    await db.query('CREATE INDEX t_v ON t (v)')
+    await db.query("INSERT INTO t VALUES ('a', 1), ('b', 2)")
+    await db.query('ANALYZE')
+    const version = db.schemaVersion
+    await db.query("INSERT INTO t VALUES ('c', 3)")
+    await db.query('ANALYZE')
+    expect(db.schemaVersion).toBe(version + 1)
+    // the app's tables' statistics; kvsql's own differ with what was pending
+    const stats =
+      "SELECT * FROM sqlite_stat1 WHERE substr(tbl, 1, 7) != '_kvsql_' ORDER BY tbl, idx"
+    const copy = await track(replica(repo))
+    expect((await copy.query(stats)).rows).toEqual((await db.query(stats)).rows)
+    expect((await db.query(stats)).rows).toContainEqual({ tbl: 't', idx: 't_v', stat: '3 1' })
+  })
+
   it('replays a table rebuild, the usual migration for changing a table', async () => {
     const { db, repo } = await fresh()
     await db.query('CREATE TABLE t (id TEXT PRIMARY KEY NOT NULL, a, b)')

@@ -143,7 +143,9 @@ await db.close() // flushes first
   `schemaVersion`. Replay runs that SQL again, so it must give the same
   result anywhere: a schema-changing call that uses `random()`, the
   clock or the change counters is refused (change rows in a call of
-  their own, where values are recorded as written). Column defaults
+  their own, where values are recorded as written), and so is one that
+  uses a TEMP table or view an earlier call made, since other copies
+  don't have it. Column defaults
   that read the clock, and queries whose result depends on row order
   without an `ORDER BY`, aren't caught.
 - **Flushes** commit every pending transaction to the log as one entry:
@@ -230,7 +232,9 @@ row whose key is NULL, and anything outside the main database, so:
   session extension doesn't record either. `guard.nondeterministic`
   names the first function a statement called whose result can differ
   between runs (`random()`, the date and time functions, the change
-  counters), for a runner that replays a call's SQL.
+  counters), and `guard.tempDependency` the first TEMP table or view a
+  statement used that no statement since the last reset created, for a
+  runner that replays a call's SQL.
 - `checkSchema(db)`, run after a schema change, lists every table
   without a non-null `PRIMARY KEY`, so the transaction can be rolled
   back. `INTEGER PRIMARY KEY` and `WITHOUT ROWID` keys qualify; any

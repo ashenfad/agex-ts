@@ -73,7 +73,7 @@ describe('one tab', () => {
     ])
     expect((await db.status()).role).toBe('holder')
     const info = await db.info()
-    expect(info).toMatchObject({ holder: 'a', name: 'db.sqlite', branch: 'kvsql/test', seq: 2 })
+    expect(info).toMatchObject({ holder: 'a', name: 'db.sqlite', branch: 'kvsql/test/0', seq: 2 })
     // The schema change flushed at once; the insert is pending.
     expect(info.pendingCount).toBe(1)
     expect(await db.flush()).toMatchObject({ from: 2, to: 2 })
@@ -221,7 +221,7 @@ describe('tabs', () => {
     await until(async () => (await role(b)) === 'holder', 3_000, 'b to hold')
     const info = await b.info()
     expect(info).toMatchObject({ holder: 'b', pendingCount: 0, seq: 2 })
-    expect(info.recovery).toEqual({ ownFlush: false, entries: 0, transactions: 0 })
+    expect(info.recovery).toEqual({ ownFlush: false, entries: 0, transactions: 0, snapshot: false })
     expect((await b.query('SELECT id FROM t')).rows).toEqual([{ id: 1 }])
   })
 
@@ -254,7 +254,7 @@ describe('tabs', () => {
     expect(await c.status()).toMatchObject({ role: 'forwarding', holder: 'b' })
     const info = await c.info()
     expect(info).toMatchObject({ holder: 'b', pendingCount: 3, seq: 4 })
-    expect(info.recovery).toEqual({ ownFlush: false, entries: 0, transactions: 0 })
+    expect(info.recovery).toEqual({ ownFlush: false, entries: 0, transactions: 0, snapshot: false })
     expect((await c.query('SELECT count(*) AS n FROM t')).rows).toEqual([{ n: 3 }])
     expect(await c.flush()).toMatchObject({ from: 2, to: 4 })
     await c.query('INSERT INTO t VALUES (4)')
@@ -364,7 +364,7 @@ describe('delete', () => {
     await b.delete()
     expect(o.disk.dir.names()).toEqual([])
     const repo = await Repo.open(o.store)
-    await expect(repo.branches.get('kvsql/test')).rejects.toBeInstanceOf(UnknownBranchError)
+    await expect(repo.branches.get('kvsql/test/0')).rejects.toBeInstanceOf(UnknownBranchError)
     for (const db of [a, b, c]) {
       await expect(db.query('SELECT 1')).rejects.toThrow(/agex\.db was deleted/)
     }
@@ -420,7 +420,7 @@ describe('delete', () => {
     await until(async () => (await role(b)) === 'forwarding', 3_000, 'forwarding')
     await b.delete({ keepLog: true })
     const info = await b.info()
-    expect(info.recovery).toEqual({ ownFlush: false, entries: 2, transactions: 2 })
+    expect(info.recovery).toEqual({ ownFlush: false, entries: 2, transactions: 2, snapshot: false })
     expect(info.pendingCount).toBe(0)
     expect((await b.query('SELECT id FROM t')).rows).toEqual([{ id: 1 }])
     expect((await a.query('SELECT id FROM t')).rows).toEqual([{ id: 1 }])
@@ -464,11 +464,11 @@ describe('copies', () => {
     expect((await copy.query('SELECT v FROM t')).rows).toEqual([{ v: 'changed' }])
     expect((await db.query('SELECT v FROM t')).rows).toEqual([{ v: 'one' }])
     const repo = await Repo.open(o.store)
-    expect(await repo.branches.list()).toEqual(['kvsql/test'])
+    expect(await repo.branches.list()).toEqual(['kvsql/test/0'])
 
     await expect(copy.delete({ keepLog: true })).rejects.toThrow(/no log/)
     await copy.delete()
-    expect(await repo.branches.list()).toEqual(['kvsql/test'])
+    expect(await repo.branches.list()).toEqual(['kvsql/test/0'])
   })
 
   it("makes a logged copy, on a branch from the source's log", async () => {
@@ -480,7 +480,7 @@ describe('copies', () => {
     const { base } = await db.copy(fork)
     const repo = await Repo.open(o.store)
     expect(await repo.branches.get('kvsql/fork')).toBe(base)
-    expect(await repo.branches.get('kvsql/test')).toBe(base)
+    expect(await repo.branches.get('kvsql/test/0')).toBe(base)
 
     const copy = client(w.connect(fork))
     const info = await copy.info()
@@ -513,5 +513,37 @@ describe('copies', () => {
     await expect(db.copy(COPY)).rejects.toThrow(/is open, so a copy can't replace it/)
     await expect(db.copy({ ...CONFIG, detached: true })).rejects.toThrow(/onto itself/)
     await expect(db.copy({ id: 'x', detached: true, branch: 'b' })).rejects.toThrow(/no branch/)
+  })
+})
+
+describe('epochs', () => {
+  it('starts one by the holder, for a forwarding tab too, and a rebuild comes from it', async () => {
+    const o = setup()
+    const a = client(o.worker('a').connect(CONFIG))
+    await a.query('CREATE TABLE t (id INTEGER PRIMARY KEY)')
+    await a.query('INSERT INTO t VALUES (1)')
+    const b = client(o.worker('b').connect(CONFIG))
+    await until(async () => (await role(b)) === 'forwarding', 3_000, 'forwarding')
+    const result = await b.newEpoch()
+    expect(result).toMatchObject({ branch: 'kvsql/test/1', previous: 'kvsql/test/0', seq: 2 })
+    expect(await a.info()).toMatchObject({ branch: 'kvsql/test/1', pendingCount: 0 })
+    await a.query('INSERT INTO t VALUES (2)')
+
+    await b.delete({ keepLog: true })
+    const info = await b.info()
+    expect(info.recovery).toEqual({ ownFlush: false, entries: 1, transactions: 1, snapshot: true })
+    expect((await a.query('SELECT id FROM t')).rows).toEqual([{ id: 1 }, { id: 2 }])
+  })
+
+  it('deletes every epoch of the log with the database', async () => {
+    const o = setup()
+    const db = client(o.worker('a').connect(CONFIG))
+    await db.query('CREATE TABLE t (id INTEGER PRIMARY KEY)')
+    await db.newEpoch()
+    await db.newEpoch()
+    const repo = await Repo.open(o.store)
+    expect(await repo.branches.list()).toEqual(['kvsql/test/2'])
+    await db.delete()
+    expect(await repo.branches.list()).toEqual([])
   })
 })

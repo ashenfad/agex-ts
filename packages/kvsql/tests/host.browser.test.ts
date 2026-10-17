@@ -184,7 +184,7 @@ describe('the worker host', () => {
         { id: 'b', n: 2n ** 60n, b: null },
       ])
       expect(await role(db)).toBe('holder')
-      expect(await db.info()).toMatchObject({ seq: 2, pendingCount: 1, branch: `kvsql/${id}` })
+      expect(await db.info()).toMatchObject({ seq: 2, pendingCount: 1, branch: `kvsql/${id}/0` })
       expect(await db.flush()).toMatchObject({ from: 2, to: 2 })
       // The file in OPFS, copied out as one SQLite file.
       const file = await db.export()
@@ -298,7 +298,12 @@ describe('the worker host', () => {
       await until(async () => (await other.status()).holder === status.worker, 'other follows')
       const info = await other.info()
       expect(info).toMatchObject({ holder: status.worker, pendingCount: 3, seq: 4 })
-      expect(info.recovery).toEqual({ ownFlush: false, entries: 0, transactions: 0 })
+      expect(info.recovery).toEqual({
+        ownFlush: false,
+        entries: 0,
+        transactions: 0,
+        snapshot: false,
+      })
       expect((await other.query('SELECT count(*) AS n FROM t')).rows).toEqual([{ n: 3 }])
       expect((await other.query('PRAGMA integrity_check')).rows).toEqual([
         { integrity_check: 'ok' },
@@ -389,8 +394,41 @@ describe('the worker host', () => {
       await until(async () => (await role(b)) === 'forwarding', 'b forwarding')
       await b.delete({ keepLog: true })
       const info = await b.info()
-      expect(info.recovery).toEqual({ ownFlush: false, entries: 2, transactions: 2 })
+      expect(info.recovery).toEqual({
+        ownFlush: false,
+        entries: 2,
+        transactions: 2,
+        snapshot: false,
+      })
       expect((await a.query('SELECT id FROM t')).rows).toEqual([{ id: 1 }])
+    },
+    SLOW,
+  )
+
+  it(
+    'starts a new epoch on OPFS, and rebuilds the file from its snapshot',
+    async () => {
+      const id = newId()
+      const a = open(tab(), config(id))
+      await a.query('CREATE TABLE t (id INTEGER PRIMARY KEY, v BLOB)')
+      await a.query('INSERT INTO t VALUES (1, randomblob(100000))')
+      const b = open(tab(), config(id))
+      await until(async () => (await role(b)) === 'forwarding', 'b forwarding')
+      const result = await b.newEpoch()
+      expect(result).toMatchObject({ seq: 2, chunks: 1 })
+      expect(result.branch).toMatch(/\/1$/)
+      await a.query('INSERT INTO t VALUES (2, NULL)')
+      const before = (await a.query('SELECT id, hex(v) AS v FROM t ORDER BY id')).rows
+      await b.delete({ keepLog: true })
+      const info = await b.info()
+      expect(info).toMatchObject({ branch: result.branch, pendingCount: 0 })
+      expect(info.recovery).toEqual({
+        ownFlush: false,
+        entries: 1,
+        transactions: 1,
+        snapshot: true,
+      })
+      expect((await a.query('SELECT id, hex(v) AS v FROM t ORDER BY id')).rows).toEqual(before)
     },
     SLOW,
   )

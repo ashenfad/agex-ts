@@ -263,3 +263,52 @@ export async function copyDatabase(
     into.close()
   }
 }
+
+/**
+ * Writes a compacted copy of the open database `source` (`VACUUM
+ * INTO`) to the database `name` in `dir`, replacing any there, which
+ * must not be open: `source` as of its last commit, so with no
+ * transaction open, without its free pages. `exec` runs the statement
+ * on `source`'s connection (one with an authorizer passes its own).
+ * Returns the copy's size in bytes.
+ */
+export async function vacuumDatabase(
+  source: DatabaseFile,
+  dir: Directory,
+  name: string,
+  exec: (sql: string) => void = (sql) => source.db.exec(sql),
+): Promise<number> {
+  checkName(name)
+  const vfs = kvsqlVfs(await loadSqlite())
+  await deleteDatabase(dir, name)
+  const path = vfsPath(dir, name)
+  const files: SyncFile[] = []
+  const registered: string[] = []
+  try {
+    files.push(await dir.open(name))
+    // SQLite writes a VACUUM INTO target without a journal; one is
+    // registered anyway, so nothing it opens lands outside `dir`.
+    files.push(await dir.open(journalName(name)))
+    for (const [p, file] of [
+      [path, files[0]],
+      [journalName(path), files[1]],
+    ] as const) {
+      vfs.register(p, file as SyncFile)
+      registered.push(p)
+    }
+    exec(`VACUUM INTO 'file:${path}?vfs=${vfs.name}'`)
+    const copy = files[0] as SyncFile
+    copy.sync()
+    return copy.size()
+  } catch (err) {
+    vfs.takeError()
+    throw err
+  } finally {
+    for (const p of registered) if (!vfs.isOpen(p)) vfs.unregister(p)
+    for (const file of files) {
+      try {
+        file.close()
+      } catch {}
+    }
+  }
+}

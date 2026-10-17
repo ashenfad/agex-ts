@@ -13,6 +13,7 @@
 import {
   ConnectionLostError,
   CorruptEntryError,
+  CorruptSnapshotError,
   KvsqlError,
   LogError,
   RebaseRequiredError,
@@ -21,7 +22,15 @@ import {
   SqliteError,
   StatementError,
 } from './errors'
-import type { CopyResult, FlushPolicy, FlushResult, QueryResult, Recovery } from './log'
+import type {
+  CopyResult,
+  EpochPolicy,
+  EpochResult,
+  FlushPolicy,
+  FlushResult,
+  QueryResult,
+  Recovery,
+} from './log'
 
 /**
  * What a worker needs to open a database. Every tab passes the same
@@ -40,7 +49,11 @@ export interface DatabaseConfig {
   id: string
   /** The database file's name in its directory. Default `db.sqlite`. */
   name?: string
-  /** The log's kvgit branch. Default `kvsql/<id>`. */
+  /**
+   * The log's kvgit branch. Default `kvsql/<id>/0`. Named `<name>/<n>`,
+   * the log has epochs (`newEpoch()`), and opening follows it to its
+   * newest, so every tab may keep passing the branch it first had.
+   */
   branch?: string
   /**
    * A detached copy: the file alone, with no log, so its writes are
@@ -54,6 +67,8 @@ export interface DatabaseConfig {
   /** `PRAGMA foreign_keys` for the connection. Default true. */
   foreignKeys?: boolean
   flush?: FlushPolicy
+  /** When the database starts a new epoch by itself; false: only when asked. */
+  epochs?: EpochPolicy | false
 }
 
 /** The default file name of a database. */
@@ -79,7 +94,7 @@ export function resolveConfig(config: DatabaseConfig): { name: string; branch: s
     }
     return { name, branch: '' }
   }
-  return { name, branch: config.branch ?? `kvsql/${config.id}` }
+  return { name, branch: config.branch ?? `kvsql/${config.id}/0` }
 }
 
 /** What this worker's part in serving the database is. */
@@ -121,7 +136,7 @@ export interface DatabaseInfo {
   /** The worker holding the database. */
   holder: string
   name: string
-  /** The log's branch; empty for a detached copy. */
+  /** The log's branch, its current epoch's; empty for a detached copy. */
   branch: string
   /** Whether the database is a detached copy, with no log. */
   detached: boolean
@@ -158,6 +173,7 @@ export interface Ops {
   flush: { args: []; result: FlushResult | null }
   export: { args: []; result: Uint8Array }
   copy: { args: [target: DatabaseConfig]; result: CopyResult }
+  epoch: { args: []; result: EpochResult }
   info: { args: []; result: DatabaseInfo }
   delete: { args: [options: DeleteOptions]; result: undefined }
   status: { args: []; result: Status }
@@ -273,6 +289,7 @@ const CLASSES: Record<string, ErrorClass> = {
   StatementError,
   LogError,
   CorruptEntryError,
+  CorruptSnapshotError,
   ReplayError,
   RebaseRequiredError,
   ConnectionLostError,

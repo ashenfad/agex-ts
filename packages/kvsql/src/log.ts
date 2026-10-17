@@ -17,6 +17,13 @@
  * whose range, length and digest match the file's pending transactions
  * is the file's own flush, which crashed before its delete: those
  * transactions are dropped from the pending table instead.
+ *
+ * A log on a branch named `<log>/<n>` has epochs (`epoch.ts`): a new
+ * epoch is a new branch starting from a snapshot of the database, onto
+ * which the database moves, its old epoch deleted, so the log behind it
+ * doesn't grow without end. Opening follows the log to its newest
+ * epoch, and a file that is missing, or behind on an older epoch, is
+ * rebuilt from the snapshot.
  */
 
 import {
@@ -24,6 +31,7 @@ import {
   type Commit,
   ROOT_COMMIT,
   type Repo,
+  UnknownBranchError,
   UnknownCommitError,
   type Worktree,
 } from '@agex-ts/kvgit'
@@ -37,7 +45,13 @@ import {
   combineChangesets,
   startSession,
 } from './changeset'
-import { type DatabaseFile, copyDatabase, openDatabase } from './database'
+import {
+  type DatabaseFile,
+  copyDatabase,
+  deleteDatabase,
+  openDatabase,
+  vacuumDatabase,
+} from './database'
 import {
   ENTRY_KEY,
   type EntryInfo,
@@ -55,6 +69,18 @@ import {
   schemaAfter,
   sha256Hex,
 } from './entry'
+import {
+  type SnapshotRecord,
+  currentEpoch,
+  epochBranch,
+  epochsOf,
+  finished,
+  parseEpoch,
+  readSnapshot,
+  restoreSnapshot,
+  snapshotCommit,
+  writeSnapshot,
+} from './epoch'
 import {
   CorruptEntryError,
   KvsqlError,
@@ -79,6 +105,26 @@ export interface FlushPolicy {
    * milliseconds old. Default 2000; 0: never by age.
    */
   maxAgeMs?: number
+}
+
+/**
+ * When a database starts a new epoch by itself (see `epoch.ts`): once
+ * its epoch's log has grown large next to the epoch's snapshot, or one
+ * transaction is (an import, which then goes into the snapshot rather
+ * than the log). `newEpoch()` starts one any time.
+ */
+export interface EpochPolicy {
+  /**
+   * The size, as a fraction of the snapshot's gzipped size, the log, or
+   * one transaction, reaches to start an epoch. Default 0.5; 0: never.
+   */
+  ratio?: number
+  /**
+   * The size the log, or one transaction, reaches first in any case, in
+   * bytes. Default 8 MiB. A log's first epoch has no snapshot, so this
+   * alone starts its second.
+   */
+  minBytes?: number
 }
 
 export interface LogOptions {
@@ -114,6 +160,19 @@ export interface LogOptions {
    * them. Explicit `flush()` calls throw instead.
    */
   onFlushError?: (err: unknown) => void
+  /**
+   * When to start a new epoch by itself; false: only when `newEpoch()`
+   * is called. Only a log on a branch named for epochs (`<name>/<n>`)
+   * has them.
+   */
+  epochs?: EpochPolicy | false
+  /**
+   * Called with the error when an epoch the policy started fails, or
+   * tidying up after one does. The database stays on the epoch it was
+   * on, and a later one is tried when the policy calls for it again.
+   * Explicit `newEpoch()` calls throw instead.
+   */
+  onEpochError?: (err: unknown) => void
 }
 
 /** What a statement returned. */
@@ -173,6 +232,26 @@ export interface QueryResult {
   lastInsertRowid: number | bigint
 }
 
+/** A new epoch, which the database moved to. */
+export interface EpochResult {
+  /** Its branch, which the database's log is on now. */
+  branch: string
+  /** The epoch the database left, whose branch is deleted. */
+  previous: string
+  /** The last transaction the snapshot holds. */
+  seq: number
+  /** The snapshot's schema version. */
+  schema: number
+  /** The size of the database file the snapshot holds. */
+  bytes: number
+  /** The snapshot's gzipped size. */
+  gzipped: number
+  /** The chunks it is stored in. */
+  chunks: number
+  /** The snapshot's last commit, where the epoch's log starts. */
+  commit: string
+}
+
 /** One flush: the log entry it committed. */
 export interface FlushResult {
   /** The log commit holding the entry. */
@@ -197,6 +276,11 @@ export interface Recovery {
   entries: number
   /** Transactions those entries held. */
   transactions: number
+  /**
+   * Whether the file was rebuilt from the epoch's snapshot first: it
+   * was missing, or behind on an older epoch with nothing pending.
+   */
+  snapshot: boolean
 }
 
 /**
@@ -212,6 +296,14 @@ export const REPLAY_CHUNK_BYTES = 32 << 20
 
 const DEFAULT_EVERY = 100
 const DEFAULT_MAX_AGE_MS = 2000
+const DEFAULT_EPOCH_RATIO = 0.5
+const DEFAULT_EPOCH_MIN_BYTES = 8 << 20
+
+/** The base a snapshot's file records, until it is opened on its epoch and given the snapshot's commit. */
+const SNAPSHOT_BASE = 'snapshot'
+
+/** The file, beside the database's own, a snapshot is made in before it's committed. */
+const snapshotName = (name: string): string => `${name}-snapshot`
 
 /** The version of the file's own tables. */
 const FILE_FORMAT = 1
@@ -260,6 +352,17 @@ interface LogEntry extends EntryInfo {
   commit: string
 }
 
+/** A snapshot taken for a new epoch, waiting to be committed. */
+interface Shot {
+  /** The new epoch's branch. */
+  branch: string
+  /** The snapshot's file, beside the database's. */
+  tmp: string
+  seq: number
+  schema: number
+  previous: { branch: string; base: string; pending: string | null }
+}
+
 /** Changesets gathered for one replay chunk. */
 interface Chunk {
   /** The log commit of its first changeset, for errors. */
@@ -294,8 +397,6 @@ export function openDetached(options: DetachedOptions): Promise<LoggedDatabase> 
  */
 export class LoggedDatabase {
   readonly name: string
-  /** The log's branch; empty for a detached copy. */
-  readonly branch: string
   /** What opening did to bring the file level with the log. */
   readonly recovery: Recovery
 
@@ -304,12 +405,23 @@ export class LoggedDatabase {
   readonly #db: Database
   readonly #guard: SchemaGuard
   /** The log, unless the database is a detached copy. */
-  readonly #log: { repo: Repo<Uint8Array>; wt: Worktree<Uint8Array> } | null
+  #log: { repo: Repo<Uint8Array>; wt: Worktree<Uint8Array> } | null
+  #branch: string
   readonly #label: string | undefined
   readonly #foreignKeys: boolean
   readonly #every: number
   readonly #maxAgeMs: number
   readonly #onFlushError: ((err: unknown) => void) | undefined
+  readonly #epochs: Required<EpochPolicy> | null
+  readonly #onEpochError: ((err: unknown) => void) | undefined
+  /** The epoch being started, if one is. */
+  #epoch: Promise<EpochResult> | null = null
+  /** Whether flushes wait: a snapshot is being committed for a new epoch. */
+  #holding = false
+  /** The bytes of the current epoch's log entries. */
+  #logBytes = 0
+  /** The current epoch's snapshot's gzipped size (0 for none). */
+  #snapshotGzipped = 0
   #meta: Meta
   #pending: number
   #queue: Promise<unknown> = Promise.resolve()
@@ -328,8 +440,8 @@ export class LoggedDatabase {
     pending: number,
   ) {
     this.name = options.name
-    this.branch = branch
-    this.recovery = { ownFlush: false, entries: 0, transactions: 0 }
+    this.#branch = branch
+    this.recovery = { ownFlush: false, entries: 0, transactions: 0, snapshot: false }
     this.#sqlite3 = sqlite3
     this.#file = file
     this.#db = file.db
@@ -340,6 +452,14 @@ export class LoggedDatabase {
     this.#every = options.flush?.every ?? DEFAULT_EVERY
     this.#maxAgeMs = options.flush?.maxAgeMs ?? DEFAULT_MAX_AGE_MS
     this.#onFlushError = options.onFlushError
+    this.#epochs =
+      options.epochs === false
+        ? null
+        : {
+            ratio: options.epochs?.ratio ?? DEFAULT_EPOCH_RATIO,
+            minBytes: options.epochs?.minBytes ?? DEFAULT_EPOCH_MIN_BYTES,
+          }
+    this.#onEpochError = options.onEpochError
     this.#meta = meta
     this.#pending = pending
   }
@@ -347,14 +467,18 @@ export class LoggedDatabase {
   /** @internal Use {@link openLog}. */
   static async open(options: LogOptions): Promise<LoggedDatabase> {
     checkOptions(options)
-    const wt = await options.repo.worktree(options.branch, { create: true })
-    const log = await LoggedDatabase.#start(options, options.branch, wt)
+    const branch = await currentEpoch(options.repo, options.branch)
+    const rebuilt = await prepareFile(options, branch)
+    const wt = await options.repo.worktree(branch, { create: true })
+    const log = await LoggedDatabase.#start(options, branch, wt)
     try {
-      Object.assign(log.recovery, await log.#catchUp())
+      Object.assign(log.recovery, await log.#catchUp(), { snapshot: rebuilt })
+      await log.#readEpoch()
     } catch (err) {
       log.#file.close()
       throw err
     }
+    await log.#tidy()
     if (log.#pending > 0) log.#arm()
     return log
   }
@@ -402,6 +526,11 @@ export class LoggedDatabase {
   }
 
   // --- State ---
+
+  /** The log's branch: its current epoch's. Empty for a detached copy. */
+  get branch(): string {
+    return this.#branch
+  }
 
   /** The schema version: how many schema changes the database has had. */
   get schemaVersion(): number {
@@ -480,7 +609,26 @@ export class LoggedDatabase {
    */
   flush(): Promise<FlushResult | null> {
     if (this.#closing) return Promise.reject(closedError())
-    return this.#serial(() => this.#flush())
+    return this.#afterEpoch(() => this.#serial(() => this.#flush()))
+  }
+
+  /**
+   * Start the log's next epoch (see `epoch.ts`), and move the database
+   * onto it: a snapshot of the database as it stands, every transaction
+   * so far included, flushed or not, committed to the new epoch's
+   * branch (`<name>/<n+1>`); the old epoch's branch is then deleted.
+   * Calls go on meanwhile, but flushes wait until the snapshot is in,
+   * since the log behind them is about to go; their transactions stay
+   * pending in the file, where they are safe, and flush to the new
+   * epoch. Resolves once the database is on it. An epoch already being
+   * started is the one this resolves with.
+   *
+   * @throws LogError if the log's branch isn't named for epochs, or the
+   *   database is a detached copy.
+   */
+  newEpoch(): Promise<EpochResult> {
+    if (this.#closing) return Promise.reject(closedError())
+    return this.#startEpoch()
   }
 
   /**
@@ -516,7 +664,7 @@ export class LoggedDatabase {
    */
   copy(target: CopyTarget): Promise<CopyResult> {
     if (this.#closing) return Promise.reject(closedError())
-    return this.#serial(() => this.#copy(target))
+    return this.#afterEpoch(() => this.#serial(() => this.#copy(target)))
   }
 
   async #copy(target: CopyTarget): Promise<CopyResult> {
@@ -639,10 +787,12 @@ export class LoggedDatabase {
    * throw.
    */
   close(): Promise<void> {
-    this.#closing ??= this.#serial(async () => {
-      this.#disarm()
-      if (this.#pending > 0) await this.#flushReporting()
-    }).finally(() => {
+    this.#closing ??= this.#afterEpoch(() =>
+      this.#serial(async () => {
+        this.#disarm()
+        if (this.#pending > 0) await this.#flushReporting()
+      }),
+    ).finally(() => {
       this.#disarm()
       this.#guard.dispose()
       this.#file.close()
@@ -654,8 +804,12 @@ export class LoggedDatabase {
     if (this.#closing) throw closedError()
     checkStatements(statements)
     return this.#serial(async () => {
-      const { results, logged } = this.#transact(statements, single)
-      if (logged === 'sql' || (logged && this.#every > 0 && this.#pending >= this.#every)) {
+      const { results, logged, bytes } = this.#transact(statements, single)
+      if (logged && this.#reaches(bytes)) {
+        // the new epoch's snapshot holds it, so it never becomes a log entry
+        this.#startEpochReporting()
+        this.#arm()
+      } else if (logged === 'sql' || (logged && this.#every > 0 && this.#pending >= this.#every)) {
         await this.#flushReporting()
       } else if (logged) {
         this.#arm()
@@ -671,6 +825,12 @@ export class LoggedDatabase {
     return run
   }
 
+  /** Run `fn` once no epoch is being started. */
+  async #afterEpoch<T>(fn: () => Promise<T>): Promise<T> {
+    while (this.#epoch) await this.#epoch.catch(() => {})
+    return fn()
+  }
+
   // --- Transactions ---
 
   /**
@@ -680,7 +840,7 @@ export class LoggedDatabase {
   #transact(
     statements: readonly Statement[],
     single: boolean,
-  ): { results: QueryResult[]; logged: ItemKind | undefined } {
+  ): { results: QueryResult[]; logged: ItemKind | undefined; bytes: number } {
     const { capi } = this.#sqlite3
     const db = this.#db
     const guard = this.#guard
@@ -755,7 +915,7 @@ export class LoggedDatabase {
       this.#exec('COMMIT')
       this.#meta = next
       if (item) this.#pending++
-      return { results, logged: item?.kind }
+      return { results, logged: item?.kind, bytes: item?.body.byteLength ?? 0 }
     } catch (err) {
       this.#rollback()
       throw err
@@ -811,6 +971,8 @@ export class LoggedDatabase {
 
   async #flush(retried = false): Promise<FlushResult | null> {
     this.#disarm()
+    // Committing a snapshot for a new epoch: the switch to it arms again.
+    if (this.#holding) return null
     if (this.#pending === 0) return null
     // A flush whose commit landed but whose delete didn't leaves the
     // file's base behind the log; settle that before writing another.
@@ -825,7 +987,8 @@ export class LoggedDatabase {
       )
     }
     const { bytes, pieces } = encodeEntry(this.#sqlite3, items)
-    const info = entryInfo(pieces, bytes, await sha256Hex(bytes))
+    const total = this.#logBytes + bytes.byteLength
+    const info = entryInfo(pieces, bytes, await sha256Hex(bytes), total)
     this.#wt.set(ENTRY_KEY, bytes)
     try {
       await this.#wt.commit({ info: { ...info }, onMoved: 'raise' })
@@ -849,6 +1012,8 @@ export class LoggedDatabase {
     this.#meta = next
     this.#pending -= items.length
     this.#flushError = undefined
+    this.#logBytes = total
+    if (this.#reaches(total)) this.#startEpochReporting()
     return { commit, from: first.seq, to: last.seq, bytes: bytes.byteLength, pieces: pieces.length }
   }
 
@@ -875,6 +1040,241 @@ export class LoggedDatabase {
     this.#timer = null
   }
 
+  // --- Epochs ---
+
+  /**
+   * Whether `bytes`, of the epoch's log or of one transaction, call for
+   * a new epoch by the policy, now.
+   */
+  #reaches(bytes: number): boolean {
+    const policy = this.#epochs
+    if (!policy || policy.ratio === 0 || this.#epoch || this.#closing || !this.#log) return false
+    if (!parseEpoch(this.#branch)) return false
+    return bytes >= Math.max(policy.minBytes, policy.ratio * this.#snapshotGzipped)
+  }
+
+  #startEpoch(): Promise<EpochResult> {
+    this.#epoch ??= this.#runEpoch()
+    return this.#epoch
+  }
+
+  /** Start an epoch the policy called for, reporting a failure to `onEpochError`. */
+  #startEpochReporting(): void {
+    this.#startEpoch().catch((err) => this.#reportEpochError(err))
+  }
+
+  #reportEpochError(err: unknown): void {
+    try {
+      this.#onEpochError?.(err)
+    } catch {}
+  }
+
+  /**
+   * Take the snapshot (between calls), commit it while calls go on,
+   * then move the file onto the new epoch (between calls again).
+   */
+  async #runEpoch(): Promise<EpochResult> {
+    let shot: Shot | undefined
+    try {
+      shot = await this.#serial(() => this.#takeSnapshot())
+      const taken = shot
+      let written: Awaited<ReturnType<typeof writeSnapshot>>
+      try {
+        const source = await this.#file.directory.open(taken.tmp)
+        try {
+          written = await writeSnapshot(this.#repo, taken.branch, source, taken)
+        } finally {
+          source.close()
+        }
+      } catch (err) {
+        // An epoch that didn't finish: the file is still on the old one.
+        await this.#dropEpoch(taken.branch)
+        throw err
+      }
+      return await this.#serial(() => this.#moveTo(taken, written.wt, written.record))
+    } finally {
+      this.#epoch = null
+      this.#holding = false
+      if (shot) await deleteDatabase(this.#file.directory, shot.tmp).catch(() => {})
+      if (!this.#closing) {
+        if (this.#every > 0 && this.#pending >= this.#every) {
+          void this.#serial(() => this.#flushReporting())
+        } else {
+          this.#arm()
+        }
+      }
+    }
+  }
+
+  /**
+   * Write the database, compacted, as the new epoch's snapshot file,
+   * with its own tables saying where it stands and nothing pending: its
+   * pending transactions are in it, so they never go to the old epoch.
+   * Flushes wait from here until the move.
+   */
+  async #takeSnapshot(): Promise<Shot> {
+    if (!this.#log) throw new LogError('a detached copy has no log, so no epochs')
+    const parsed = parseEpoch(this.#branch)
+    if (!parsed) {
+      throw new LogError(
+        `the log's branch '${this.#branch}' isn't named for epochs ('<name>/<n>'), so it can't start a new one`,
+      )
+    }
+    const repo = this.#repo
+    // The snapshot must hold every entry of the log it replaces.
+    await this.#wt.refresh()
+    if (this.#wt.head !== this.#meta.base) await this.#catchUp()
+    const branch = epochBranch(parsed.log, parsed.n + 1)
+    if (await repo.branches.has(branch)) {
+      if (await finished(repo, branch)) {
+        throw new LogError(`the log's next epoch, '${branch}', already exists`)
+      }
+      // left by an epoch that didn't finish
+      await repo.branches.delete(branch)
+    }
+    const dir = this.#file.directory
+    const tmp = snapshotName(this.name)
+    await vacuumDatabase(this.#file, dir, tmp, (sql) => this.#exec(sql))
+    const seq = this.seq
+    const pending = await pendingDigest(this.#sqlite3, this.#readPending())
+    const snap = await openDatabase(dir, tmp)
+    try {
+      // the pending rows' pages are freed as zeros, which gzip all but drops
+      snap.db.exec('PRAGMA secure_delete = ON')
+      snap.db.exec('BEGIN IMMEDIATE')
+      snap.db.exec('DELETE FROM _kvsql_pending')
+      snap.db.exec({
+        sql: 'UPDATE _kvsql_meta SET branch = ?, base = ?, base_seq = ?, applied_seq = ?, next_seq = ? WHERE id = 1',
+        bind: [branch, SNAPSHOT_BASE, seq, seq, seq + 1],
+      })
+      snap.db.exec('COMMIT')
+    } finally {
+      snap.close()
+    }
+    this.#holding = true
+    return {
+      branch,
+      tmp,
+      seq,
+      schema: this.#meta.schema,
+      previous: { branch: this.#branch, base: this.#meta.base, pending },
+    }
+  }
+
+  /** Delete an epoch the file never moved to, if it's there. */
+  async #dropEpoch(branch: string): Promise<void> {
+    try {
+      await this.#repo.branches.delete(branch)
+    } catch {}
+  }
+
+  /**
+   * Move the file onto the new epoch, whose snapshot is in: one file
+   * transaction drops the transactions the snapshot holds from the
+   * pending table and moves the file's base to the snapshot. Then the
+   * old epoch's branch goes.
+   *
+   * A transaction that throws may still have landed (a COMMIT that
+   * failed after its journal was cleared), so the file says which: moved,
+   * the move goes on; not, the new epoch goes, since entries flushed to
+   * the old one from now on wouldn't be in it; unreadable, the new
+   * epoch stays for the next open to settle (it finishes the move if
+   * the file is still where the snapshot was taken).
+   */
+  async #moveTo(
+    shot: Shot,
+    wt: Worktree<Uint8Array>,
+    record: SnapshotRecord,
+  ): Promise<EpochResult> {
+    const repo = this.#repo
+    const commit = wt.head
+    // nothing may reach the old epoch after the snapshot: one writer
+    // holds the database, but a log can move by sync
+    if ((await repo.branches.get(shot.previous.branch)) !== shot.previous.base) {
+      await this.#dropEpoch(shot.branch)
+      throw new LogError(
+        `the log on branch '${shot.previous.branch}' moved while the new epoch's snapshot was committed, so the snapshot misses its new entries`,
+      )
+    }
+    const dropped = this.#guard.trusted(
+      () =>
+        this.#db.selectValue('SELECT count(*) FROM _kvsql_pending WHERE seq <= ?', [
+          shot.seq,
+        ]) as number,
+    )
+    const next: Meta = { ...this.#meta, base: commit, baseSeq: shot.seq, appliedSeq: shot.seq }
+    try {
+      this.#inTransaction(() => {
+        this.#exec('DELETE FROM _kvsql_pending WHERE seq <= ?', [shot.seq])
+        this.#exec('UPDATE _kvsql_meta SET branch = ? WHERE id = 1', [shot.branch])
+        this.#saveMeta(next)
+      })
+    } catch (err) {
+      let landed: boolean | null = null
+      try {
+        landed =
+          this.#guard.trusted(() =>
+            this.#db.selectValue('SELECT branch FROM _kvsql_meta WHERE id = 1'),
+          ) === shot.branch
+      } catch {}
+      if (landed !== true) {
+        if (landed === false) await this.#dropEpoch(shot.branch)
+        throw err
+      }
+    }
+    const previous = this.#branch
+    this.#meta = next
+    this.#pending -= dropped
+    this.#branch = shot.branch
+    this.#log = { repo, wt }
+    this.#logBytes = 0
+    this.#snapshotGzipped = record.gzipped
+    try {
+      await repo.branches.delete(previous)
+    } catch (err) {
+      // the next open deletes it
+      if (!(err instanceof UnknownBranchError)) this.#reportEpochError(err)
+    }
+    return {
+      branch: shot.branch,
+      previous,
+      seq: shot.seq,
+      schema: record.schema,
+      bytes: record.bytes,
+      gzipped: record.gzipped,
+      chunks: record.digests.length,
+      commit,
+    }
+  }
+
+  /** Read how large the epoch's log and snapshot are, from its tip. */
+  async #readEpoch(): Promise<void> {
+    const tip = this.#wt.head
+    if (tip === ROOT_COMMIT) return
+    this.#logBytes = parseEntryInfo((await this.#repo.getCommit(tip)).info)?.total ?? 0
+    this.#snapshotGzipped = (await readSnapshot(this.#repo, tip))?.gzipped ?? 0
+  }
+
+  /**
+   * Delete what an epoch that moved on, or one that didn't finish,
+   * left: the log's older epochs, and a snapshot file.
+   */
+  async #tidy(): Promise<void> {
+    try {
+      const parsed = parseEpoch(this.#branch)
+      if (parsed) {
+        for (const epoch of await epochsOf(this.#repo, parsed.log)) {
+          if (epoch.n < parsed.n) await this.#repo.branches.delete(epoch.branch)
+        }
+      }
+      const dir = this.#file.directory
+      const tmp = snapshotName(this.name)
+      if (await dir.exists(tmp)) await deleteDatabase(dir, tmp)
+    } catch (err) {
+      this.#reportEpochError(err)
+    }
+  }
+
   // --- Recovery and replay ---
 
   /**
@@ -886,7 +1286,7 @@ export class LoggedDatabase {
    *   and the log has entries it didn't write.
    */
   async #catchUp(): Promise<Recovery> {
-    const recovery: Recovery = { ownFlush: false, entries: 0, transactions: 0 }
+    const recovery: Recovery = { ownFlush: false, entries: 0, transactions: 0, snapshot: false }
     await this.#wt.refresh()
     const tip = this.#wt.head
     if (tip === this.#meta.base) return recovery
@@ -1305,6 +1705,182 @@ function initFile(db: Database, branch: string): void {
   }
 }
 
+/** What a database file holds, as `prepareFile` reads it without opening it for use. */
+type Peeked =
+  | 'fresh'
+  | 'other'
+  | { branch: string; base: string; baseSeq: number; nextSeq: number; pending: number }
+
+/**
+ * The file `name` in `dir`: fresh (missing, empty, or not a database
+ * yet: a rebuild cut short starts with zeros), a logged database's
+ * position, or some other database.
+ */
+async function peekFile(dir: Directory, name: string): Promise<Peeked> {
+  if (!(await dir.exists(name))) return 'fresh'
+  let file: DatabaseFile
+  try {
+    file = await openDatabase(dir, name)
+  } catch (err) {
+    if (isNotADatabase(err)) return 'fresh'
+    throw err
+  }
+  try {
+    const known = file.db.selectValue(
+      "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = '_kvsql_meta'",
+    )
+    if (known === 0) {
+      return file.db.selectValue('SELECT count(*) FROM sqlite_schema') === 0 ? 'fresh' : 'other'
+    }
+    const row = file.db.exec({
+      sql: 'SELECT branch, base, base_seq, next_seq FROM _kvsql_meta WHERE id = 1',
+      rowMode: 'object',
+      returnValue: 'resultRows',
+    })[0] as Record<string, SqlValue> | undefined
+    if (!row) return 'other'
+    return {
+      branch: String(row.branch),
+      base: String(row.base),
+      baseSeq: Number(row.base_seq),
+      nextSeq: Number(row.next_seq),
+      pending: Number(file.db.selectValue('SELECT count(*) FROM _kvsql_pending')),
+    }
+  } catch (err) {
+    if (isNotADatabase(err)) return 'fresh'
+    throw err
+  } finally {
+    file.close()
+  }
+}
+
+/**
+ * Make the file ready to open on epoch `branch`, if the epoch has a
+ * snapshot: rebuild it from the snapshot if it is fresh, or behind on
+ * an older epoch with nothing pending; or, if it is where the snapshot
+ * was taken from (a crash stopped the move), finish moving it over.
+ * Anything else is left for opening to take or refuse. Whether the
+ * file was rebuilt.
+ */
+async function prepareFile(options: LogOptions, branch: string): Promise<boolean> {
+  const { repo, dir, name } = options
+  if (!(await repo.branches.has(branch))) return false
+  const tip = await repo.branches.get(branch)
+  const record = await readSnapshot(repo, tip)
+  if (!record) return false
+  const file = await peekFile(dir, name)
+  if (file === 'other') return false
+  const rebuild = async () => {
+    const commit = await snapshotCommit(repo, tip)
+    await restoreSnapshot(repo, commit, record, dir, name)
+    await anchor(dir, name, branch, commit, record.seq, false)
+    return true
+  }
+  if (file === 'fresh') return rebuild()
+  if (file.base === SNAPSHOT_BASE) {
+    // rebuilt, and stopped before it was given the snapshot's commit
+    if (file.baseSeq !== record.seq) return rebuild()
+    await anchor(dir, name, branch, await snapshotCommit(repo, tip), record.seq, false)
+    return true
+  }
+  if (file.branch === branch) return false
+  const ours = parseEpoch(file.branch)
+  const theirs = parseEpoch(branch)
+  if (!ours || !theirs || ours.log !== theirs.log || ours.n >= theirs.n) return false
+  const { previous } = record
+  if (
+    previous?.branch === file.branch &&
+    previous.base === file.base &&
+    (await pendingThrough(dir, name, file.baseSeq, record.seq)) === previous.pending
+  ) {
+    // the file the snapshot was taken from, which a crash stopped moving
+    await anchor(dir, name, branch, await snapshotCommit(repo, tip), record.seq, true)
+    return false
+  }
+  if (file.pending > 0) {
+    throw new LogError(
+      `the database file is on epoch '${file.branch}', behind its log's current epoch '${branch}', and holds ${file.pending} transaction${file.pending === 1 ? '' : 's'} no log has, which rebuilding it from the epoch's snapshot would lose`,
+    )
+  }
+  if (file.baseSeq > record.seq) {
+    throw new LogError(
+      `the database file is on epoch '${file.branch}', with transactions through ${file.baseSeq}, past the ${record.seq} of its log's current epoch '${branch}' starts from, which rebuilding it would lose`,
+    )
+  }
+  return rebuild()
+}
+
+/** The SHA-256 of pending transactions encoded as one entry; null for none. */
+async function pendingDigest(
+  sqlite3: Sqlite3Static,
+  items: readonly PendingItem[],
+): Promise<string | null> {
+  return items.length === 0 ? null : sha256Hex(encodeEntry(sqlite3, items).bytes)
+}
+
+/**
+ * The digest of the file's pending transactions through `seq`
+ * ({@link pendingDigest}), if they are all of the transactions from
+ * `baseSeq` to `seq`; undefined if they aren't.
+ */
+async function pendingThrough(
+  dir: Directory,
+  name: string,
+  baseSeq: number,
+  seq: number,
+): Promise<string | null | undefined> {
+  const file = await openDatabase(dir, name)
+  let items: PendingItem[]
+  try {
+    items = file.db.exec({
+      sql: 'SELECT seq, kind, body, schema FROM _kvsql_pending WHERE seq <= ? ORDER BY seq',
+      bind: [seq],
+      rowMode: 'object',
+      returnValue: 'resultRows',
+    }) as unknown as PendingItem[]
+  } finally {
+    file.close()
+  }
+  const last = items.length === 0 ? baseSeq : items[items.length - 1]?.seq
+  if (last !== seq || (items[0] !== undefined && items[0].seq !== baseSeq + 1)) return undefined
+  return pendingDigest(await loadSqlite(), items)
+}
+
+/**
+ * Give the file `name` in `dir` the log position `commit` (holding
+ * transactions through `seq`) on `branch`, dropping its pending
+ * transactions through `seq` if `dropPending`.
+ */
+async function anchor(
+  dir: Directory,
+  name: string,
+  branch: string,
+  commit: string,
+  seq: number,
+  dropPending: boolean,
+): Promise<void> {
+  const file = await openDatabase(dir, name)
+  try {
+    file.db.exec('BEGIN IMMEDIATE')
+    try {
+      if (dropPending) {
+        file.db.exec({ sql: 'DELETE FROM _kvsql_pending WHERE seq <= ?', bind: [seq] })
+      }
+      file.db.exec({
+        sql: 'UPDATE _kvsql_meta SET branch = ?, base = ?, base_seq = ?, applied_seq = ? WHERE id = 1',
+        bind: [branch, commit, seq, seq],
+      })
+      file.db.exec('COMMIT')
+    } catch (err) {
+      try {
+        file.db.exec('ROLLBACK')
+      } catch {}
+      throw err
+    }
+  } finally {
+    file.close()
+  }
+}
+
 /** The file's log position and pending count, checked against `branch`. */
 function readPosition(db: Database, branch: string): { meta: Meta; pending: number } {
   const row = db.exec({
@@ -1366,6 +1942,15 @@ function checkOptions(options: LogOptions): void {
     const value = options.flush?.[key]
     if (value !== undefined && !(Number.isSafeInteger(value) && value >= 0)) {
       throw new TypeError(`openLog: flush.${key} must be a whole number >= 0`)
+    }
+  }
+  if (options.epochs !== undefined && options.epochs !== false) {
+    const { ratio, minBytes } = options.epochs
+    if (ratio !== undefined && !(Number.isFinite(ratio) && ratio >= 0)) {
+      throw new TypeError('openLog: epochs.ratio must be a number >= 0')
+    }
+    if (minBytes !== undefined && !(Number.isSafeInteger(minBytes) && minBytes >= 0)) {
+      throw new TypeError('openLog: epochs.minBytes must be a whole number >= 0')
     }
   }
 }

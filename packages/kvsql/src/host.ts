@@ -23,8 +23,9 @@
  * tests with in-memory stand-ins.
  */
 
-import { type Repo, UnknownBranchError } from '@agex-ts/kvgit'
+import type { Repo } from '@agex-ts/kvgit'
 import { deleteDatabase } from './database'
+import { deleteLog } from './epoch'
 import { ConnectionLostError, KvsqlError } from './errors'
 import type { Directory } from './files'
 import { type CopyResult, type LoggedDatabase, openDetached, openLog } from './log'
@@ -434,6 +435,8 @@ class DatabaseHost<C extends DatabaseConfig> {
         return db.export()
       case 'copy':
         return this.#copy(db, args[0] as C)
+      case 'epoch':
+        return db.newEpoch()
       case 'info':
         return {
           holder: this.#self,
@@ -494,7 +497,7 @@ class DatabaseHost<C extends DatabaseConfig> {
       try {
         this.#storage ??= await this.#opener(this.#config)
         const { dir, repo } = this.#storage
-        const { label, foreignKeys, flush, detached } = this.#config
+        const { label, foreignKeys, flush, epochs, detached } = this.#config
         const options = {
           dir,
           name: this.#name,
@@ -509,7 +512,9 @@ class DatabaseHost<C extends DatabaseConfig> {
                 repo: needRepo(repo, this.#config),
                 branch: this.#branch,
                 ...(flush !== undefined && { flush }),
+                ...(epochs !== undefined && { epochs }),
                 onFlushError: (err) => this.#flushFailed(err),
+                onEpochError: (err) => this.#flushFailed(err),
               })
         this.#openError = undefined
         this.#role = 'holder'
@@ -615,11 +620,8 @@ class DatabaseHost<C extends DatabaseConfig> {
       this.#storage = storage
       await deleteDatabase(storage.dir, this.#name)
       if (this.#config.detached !== true) {
-        try {
-          await needRepo(storage.repo, this.#config).branches.delete(this.#branch)
-        } catch (err) {
-          if (!(err instanceof UnknownBranchError)) throw err
-        }
+        // every epoch of the log, wherever the database had moved to
+        await deleteLog(needRepo(storage.repo, this.#config), this.#branch)
       }
       this.#storage = null
       await storage.close?.()

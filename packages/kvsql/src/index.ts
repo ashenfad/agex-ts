@@ -35,11 +35,24 @@ export {
   JOURNAL_SIZE_LIMIT,
   journalName,
   openDatabase,
+  vacuumDatabase,
 } from './database'
+export {
+  CHUNKS_PER_COMMIT,
+  currentEpoch,
+  deleteLog,
+  EPOCH_KEY,
+  epochBranch,
+  parseEpoch,
+  SNAPSHOT_CHUNK,
+  type SnapshotRecord,
+} from './epoch'
 export {
   type CopyResult,
   type CopyTarget,
   type DetachedOptions,
+  type EpochPolicy,
+  type EpochResult,
   type FlushPolicy,
   type FlushResult,
   LoggedDatabase,

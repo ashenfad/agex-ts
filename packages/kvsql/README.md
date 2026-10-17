@@ -7,8 +7,9 @@ and sync between devices through any kvgit remote.
 > **Status:** in development. This package so far runs SQLite on a file
 > in OPFS (or in memory) through its own VFS, records and applies
 > changesets, guards the schema, keeps the changeset log in kvgit
-> with crash recovery and replay, and serves the database from a
-> worker to every tab; rebase, snapshots and epochs come next. The design is agex-studio's
+> with crash recovery and replay, copies a database, and serves the
+> database from a worker to every tab; rebase, snapshots and epochs
+> come next. The design is agex-studio's
 > [`roadmap/app-db.md`](https://github.com/ashenfad/agex-studio/blob/rebuild/roadmap/app-db.md).
 
 ## How it will work
@@ -162,6 +163,24 @@ await db.close() // flushes first
   transaction, flushed or not. The copy is made in memory (`VACUUM
   INTO` an in-memory database), so it briefly costs about twice the
   file's size there.
+- **Copies:** `copy({ dir, name })` writes the database, as it stands
+  between calls, to the file `name` in `dir` as a **detached copy**: a
+  database with no log, for a test to run on. Its file is copied as it
+  is, a chunk at a time, so a copy of any size never sits in memory
+  whole. `openDetached({ dir, name, label })` opens it (or starts an
+  empty one). Its calls are refused and checked as the logged
+  database's are, but record nothing: `flush()` has nothing to do, and
+  `seq`, `base` and `schemaVersion` stay where the copy was taken.
+  `copy({ dir, name, repo, branch })` makes a **logged copy** instead:
+  it flushes first, and the copy's log is a new branch starting where
+  this database's flushed transactions end, so its history is its
+  source's and then its own, and the branch alone rebuilds it. That
+  branch must be new, and in a repository holding the source's log.
+  A copy replaces only a copy: the target file must be missing, empty,
+  a detached copy, or a copy of this database left unfinished (the
+  file's first page is written last, so a copy cut short reads as no
+  database). A detached copy can't be opened on a log, nor a logged
+  database as a detached copy.
 - **Opening** brings the file level with the branch: entries it didn't
   write are replayed (so an empty directory rebuilds the database from
   the log), and an entry matching its pending transactions is its own
@@ -208,7 +227,8 @@ await db.close()
 ```
 
 - **The calls** are the logged database's (`query`, `transaction`,
-  `flush`, `close`), as promises, plus `info()` (the database's
+  `flush`, `export`, `close`), as promises, plus `copy(config)` (below),
+  `info()` (the database's
   sequence number, pending count, recovery, last flush error) and
   `status()` (this tab's part, below). Values cross as structured
   clones, so blobs stay `Uint8Array` and big integers bigint.
@@ -219,13 +239,26 @@ await db.close()
   with their `name` and fields, a DOMException as a DOMException.
 - **The config** names the database: `id` (required), and optionally
   `name` (the file, default `db.sqlite`), `branch` (default
-  `kvsql/<id>`), `label`, `foreignKeys` and `flush`. Every tab passes
-  the same config for the same database, and a worker refuses a second
-  connect to an id with a different one.
+  `kvsql/<id>`), `label`, `foreignKeys`, `flush`, and `detached` (a
+  detached copy, which has no branch). Every tab passes the same config
+  for the same database, and a worker refuses a second connect to an
+  id with a different one.
+- **Copies:** `db.copy(config)` has the worker holding the database
+  copy it to the database `config` names, in storage from that worker's
+  opener: a detached copy if `config.detached`, else a logged one on
+  `config`'s branch. That worker holds the target's lock meanwhile and
+  refuses a target open anywhere; connect to the target afterwards to
+  use it. A copy whose holder went away isn't sent again (it may have
+  been made). A logged copy's log starts from its source's, so both
+  must be in one repository: the default worker gives each database
+  its own, so there only detached copies work (and logged copies of a
+  database that has flushed nothing yet). An app that makes logged
+  copies keeps every log in one repository of its own (below).
 - **The default worker** (`@agex-ts/kvsql/worker`) keeps each database
   with `openDefault`: the file in OPFS directory `kvsql/<id>` and the
   log on IndexedDB database `kvsql:<id>` (config `directory` and
-  `indexedDB` change them).
+  `indexedDB` change them; a detached copy has no log, so no IndexedDB
+  database).
 - **Flushes on hide.** The client flushes when the page is hidden and
   on `pagehide`, which a worker can't see, best effort
   (`flushOnHide: false` turns it off). `onFlushError` hears of a flush
@@ -246,7 +279,8 @@ serve(async (config) => ({ dir: await OpfsDirectory.at('dbs', config.id), repo: 
 ```
 
 The opener runs in the worker that takes the database's lock, each time
-it opens it. It returns `{ dir, repo }`, and may add `close()` (called
+it opens it, and in the worker that copies a database to it. It
+returns `{ dir, repo }` (a detached copy needs no `repo`), and may add `close()` (called
 after the database closes) and `destroy()` (called when it is deleted,
 to remove what was the database's alone). Config fields of the app's
 own reach the opener as they are. `serve(open, { scope: null })`

@@ -24,6 +24,7 @@ import {
   type Commit,
   ROOT_COMMIT,
   type Repo,
+  UnknownCommitError,
   type Worktree,
 } from '@agex-ts/kvgit'
 import type { Database, SqlValue, Sqlite3Static } from '@sqlite.org/sqlite-wasm'
@@ -36,7 +37,7 @@ import {
   combineChangesets,
   startSession,
 } from './changeset'
-import { type DatabaseFile, openDatabase } from './database'
+import { type DatabaseFile, copyDatabase, openDatabase } from './database'
 import {
   ENTRY_KEY,
   type EntryInfo,
@@ -116,6 +117,47 @@ export interface LogOptions {
 }
 
 /** What a statement returned. */
+/** Options for {@link openDetached}. */
+export interface DetachedOptions {
+  /** The directory holding the database file. */
+  dir: Directory
+  /** The database file's name in `dir`. */
+  name: string
+  /** How error messages name the database, e.g. `'agex.db'`. */
+  label?: string
+  /** `PRAGMA foreign_keys` for the connection. Default true. */
+  foreignKeys?: boolean
+}
+
+/**
+ * Where {@link LoggedDatabase.copy} writes a copy: the file `name` in
+ * `dir`, and, for a logged copy, its log's new branch in `repo`.
+ */
+export interface CopyTarget {
+  dir: Directory
+  name: string
+  /**
+   * For a logged copy: the repository its log is in, which must hold
+   * this database's log, since the copy's branch starts from it (the
+   * same repository, or one it is synced with).
+   */
+  repo?: Repo<Uint8Array>
+  /** For a logged copy: its log's branch, which mustn't exist yet. */
+  branch?: string
+}
+
+/** What a copy took. */
+export interface CopyResult {
+  /** The size of the file copied. */
+  bytes: number
+  /** The last transaction in the copy (0 for none). */
+  seq: number
+  /** The copy's schema version. */
+  schema: number
+  /** The log commit the copy's flushed transactions end at, where a logged copy's branch starts. */
+  base: string
+}
+
 export interface QueryResult {
   /**
    * Its rows, as objects keyed by column name. For SQL holding several
@@ -174,6 +216,9 @@ const DEFAULT_MAX_AGE_MS = 2000
 /** The version of the file's own tables. */
 const FILE_FORMAT = 1
 
+/** The branch a detached copy's file names: none. */
+const DETACHED = ''
+
 const INTERNAL_TABLES = `
   CREATE TABLE _kvsql_meta (
     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -231,11 +276,25 @@ export function openLog(options: LogOptions): Promise<LoggedDatabase> {
 }
 
 /**
- * An open logged database. Calls (`query`, `transaction`, `flush`,
- * `close`) run one at a time, in the order they were made.
+ * Open the detached copy `name` in `dir` (made by
+ * {@link LoggedDatabase.copy}), or a new one if the file is empty: a
+ * database with no log. Its calls run as a logged database's do,
+ * refused and checked alike, but record nothing; `flush()` has nothing
+ * to do, and `seq`, `base` and `schemaVersion` stay where the copy was
+ * taken.
+ */
+export function openDetached(options: DetachedOptions): Promise<LoggedDatabase> {
+  return LoggedDatabase.openDetached(options)
+}
+
+/**
+ * An open logged database, or a detached copy of one. Calls (`query`,
+ * `transaction`, `flush`, `close`, ...) run one at a time, in the order
+ * they were made.
  */
 export class LoggedDatabase {
   readonly name: string
+  /** The log's branch; empty for a detached copy. */
   readonly branch: string
   /** What opening did to bring the file level with the log. */
   readonly recovery: Recovery
@@ -244,8 +303,8 @@ export class LoggedDatabase {
   readonly #file: DatabaseFile
   readonly #db: Database
   readonly #guard: SchemaGuard
-  readonly #repo: Repo<Uint8Array>
-  readonly #wt: Worktree<Uint8Array>
+  /** The log, unless the database is a detached copy. */
+  readonly #log: { repo: Repo<Uint8Array>; wt: Worktree<Uint8Array> } | null
   readonly #label: string | undefined
   readonly #foreignKeys: boolean
   readonly #every: number
@@ -259,23 +318,23 @@ export class LoggedDatabase {
   #flushError: unknown = undefined
 
   private constructor(
-    options: LogOptions,
+    options: Partial<LogOptions> & DetachedOptions,
+    branch: string,
     sqlite3: Sqlite3Static,
     file: DatabaseFile,
     guard: SchemaGuard,
-    wt: Worktree<Uint8Array>,
+    wt: Worktree<Uint8Array> | null,
     meta: Meta,
     pending: number,
   ) {
     this.name = options.name
-    this.branch = options.branch
+    this.branch = branch
     this.recovery = { ownFlush: false, entries: 0, transactions: 0 }
     this.#sqlite3 = sqlite3
     this.#file = file
     this.#db = file.db
     this.#guard = guard
-    this.#repo = options.repo
-    this.#wt = wt
+    this.#log = options.repo && wt ? { repo: options.repo, wt } : null
     this.#label = options.label
     this.#foreignKeys = options.foreignKeys ?? true
     this.#every = options.flush?.every ?? DEFAULT_EVERY
@@ -288,8 +347,29 @@ export class LoggedDatabase {
   /** @internal Use {@link openLog}. */
   static async open(options: LogOptions): Promise<LoggedDatabase> {
     checkOptions(options)
-    const sqlite3 = await loadSqlite()
     const wt = await options.repo.worktree(options.branch, { create: true })
+    const log = await LoggedDatabase.#start(options, options.branch, wt)
+    try {
+      Object.assign(log.recovery, await log.#catchUp())
+    } catch (err) {
+      log.#file.close()
+      throw err
+    }
+    if (log.#pending > 0) log.#arm()
+    return log
+  }
+
+  /** @internal Use {@link openDetached}. */
+  static openDetached(options: DetachedOptions): Promise<LoggedDatabase> {
+    return LoggedDatabase.#start(options, DETACHED, null)
+  }
+
+  static async #start(
+    options: Partial<LogOptions> & DetachedOptions,
+    branch: string,
+    wt: Worktree<Uint8Array> | null,
+  ): Promise<LoggedDatabase> {
+    const sqlite3 = await loadSqlite()
     const file = await openDatabase(options.dir, options.name)
     try {
       const foreignKeys = options.foreignKeys ?? true
@@ -300,17 +380,25 @@ export class LoggedDatabase {
         options.label === undefined ? {} : { label: options.label },
       )
       const { meta, pending } = guard.trusted(() => {
-        initFile(file.db, options.branch)
-        return readPosition(file.db, options.branch)
+        initFile(file.db, branch)
+        return readPosition(file.db, branch)
       })
-      const log = new LoggedDatabase(options, sqlite3, file, guard, wt, meta, pending)
-      Object.assign(log.recovery, await log.#catchUp())
-      if (log.#pending > 0) log.#arm()
-      return log
+      return new LoggedDatabase(options, branch, sqlite3, file, guard, wt, meta, pending)
     } catch (err) {
       file.close()
       throw err
     }
+  }
+
+  /** The log's worktree: only a logged database's paths reach for it. */
+  get #wt(): Worktree<Uint8Array> {
+    if (!this.#log) throw new LogError('a detached copy has no log')
+    return this.#log.wt
+  }
+
+  get #repo(): Repo<Uint8Array> {
+    if (!this.#log) throw new LogError('a detached copy has no log')
+    return this.#log.repo
   }
 
   // --- State ---
@@ -341,6 +429,11 @@ export class LoggedDatabase {
    */
   get flushError(): unknown {
     return this.#flushError
+  }
+
+  /** Whether this is a detached copy: a database with no log. */
+  get detached(): boolean {
+    return this.#log === null
   }
 
   /** Whether `close()` has been called. */
@@ -401,6 +494,111 @@ export class LoggedDatabase {
   export(): Promise<Uint8Array> {
     if (this.#closing) return Promise.reject(closedError())
     return this.#serial(() => this.#export())
+  }
+
+  /**
+   * Copy the database, as it stands between calls, to `target.name` in
+   * `target.dir`, replacing any copy there: a detached copy (a file
+   * with no log, as tests use), or, given `repo` and `branch`, a logged
+   * copy, whose log is a new branch starting where this database's
+   * flushed transactions end. A logged copy flushes first, and fails if
+   * that does, or if the branch exists. Either way the file is copied
+   * as it is, at any size, without going through memory whole.
+   *
+   * The target must be missing, empty, a detached copy, or a copy of
+   * this database left unfinished: anything else there is refused, so
+   * a copy never replaces a database. Nothing may have it open.
+   */
+  copy(target: CopyTarget): Promise<CopyResult> {
+    if (this.#closing) return Promise.reject(closedError())
+    return this.#serial(() => this.#copy(target))
+  }
+
+  async #copy(target: CopyTarget): Promise<CopyResult> {
+    checkCopyTarget(target)
+    const { dir, name, repo, branch } = target
+    const logged = repo !== undefined && branch !== undefined
+    if (logged) {
+      if (!this.#log) {
+        throw new LogError(
+          "a detached copy can't be copied into a logged one: its changes are in no log",
+        )
+      }
+      await this.#flush()
+      if (await repo.branches.has(branch)) {
+        throw new LogError(`the copy's branch '${branch}' already exists`)
+      }
+      try {
+        await repo.getCommit(this.#meta.base)
+      } catch (err) {
+        if (!(err instanceof UnknownCommitError)) throw err
+        throw new LogError(
+          `the copy's repository doesn't hold this database's log, which the copy's branch '${branch}' starts from`,
+        )
+      }
+    }
+    await this.#checkTarget(dir, name, logged ? branch : DETACHED)
+    const bytes = await copyDatabase(this.#file, dir, name)
+    const copy = await openDatabase(dir, name)
+    try {
+      copy.db.exec('BEGIN IMMEDIATE')
+      try {
+        copy.db.exec({
+          sql: 'UPDATE _kvsql_meta SET branch = ? WHERE id = 1',
+          bind: [logged ? branch : DETACHED],
+        })
+        copy.db.exec('DELETE FROM _kvsql_pending')
+        copy.db.exec('COMMIT')
+      } catch (err) {
+        if (this.#sqlite3.capi.sqlite3_get_autocommit(copy.db) === 0) copy.db.exec('ROLLBACK')
+        throw err
+      }
+    } finally {
+      copy.close()
+    }
+    if (logged) await repo.branches.create(branch, this.#meta.base)
+    return { bytes, seq: this.seq, schema: this.#meta.schema, base: this.#meta.base }
+  }
+
+  /**
+   * Refuse a target file a copy mustn't replace. A missing or empty
+   * file, one that isn't a database (a copy cut short starts with
+   * zeros), a detached copy, and a copy of this database made for
+   * `branch` or cut short before it was marked may go.
+   */
+  async #checkTarget(dir: Directory, name: string, branch: string): Promise<void> {
+    if (!(await dir.exists(name))) return
+    let file: DatabaseFile
+    try {
+      file = await openDatabase(dir, name)
+    } catch (err) {
+      if (isNotADatabase(err)) return
+      throw err
+    }
+    try {
+      let owner: SqlValue
+      try {
+        const known = file.db.selectValue(
+          "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = '_kvsql_meta'",
+        )
+        if (known === 0) {
+          if (file.db.selectValue('SELECT count(*) FROM sqlite_schema') === 0) return
+          throw new LogError(
+            `${name} holds a database that isn't a copy, which a copy won't replace`,
+          )
+        }
+        owner = file.db.selectValue('SELECT branch FROM _kvsql_meta WHERE id = 1') as SqlValue
+      } catch (err) {
+        if (isNotADatabase(err)) return
+        throw err
+      }
+      if (owner === DETACHED || owner === branch || owner === this.branch) return
+      throw new LogError(
+        `${name} holds the database on branch '${String(owner)}', which a copy won't replace`,
+      )
+    } finally {
+      file.close()
+    }
   }
 
   #export(): Uint8Array {
@@ -480,7 +678,8 @@ export class LoggedDatabase {
     let session: Session | undefined
     try {
       const header = this.#header()
-      session = startSession(this.#sqlite3, db)
+      // A detached copy records nothing, but checks what it runs alike.
+      if (this.#log) session = startSession(this.#sqlite3, db)
       const results = statements.map((statement, i) => {
         try {
           const result = guard.run(() => this.#statement(statement))
@@ -515,11 +714,12 @@ export class LoggedDatabase {
             statements: statements.map(([sql, params]) => [sql, params ?? null]),
           }),
         }
-      } else {
+      } else if (session) {
         const changeset = session.changeset()
         if (changeset.byteLength > 0) item = { kind: 'changeset', body: changeset }
       }
-      session.dispose()
+      session?.dispose()
+      if (!this.#log) item = undefined
 
       let next = this.#meta
       if (item) {
@@ -1107,6 +1307,13 @@ function readPosition(db: Database, branch: string): { meta: Meta; pending: numb
       `the database file's tables are format ${String(row.format)}, which this version doesn't read`,
     )
   }
+  if (row.branch !== branch && (row.branch === DETACHED || branch === DETACHED)) {
+    throw new LogError(
+      row.branch === DETACHED
+        ? `the database file is a detached copy, with no log, so it can't be opened on branch '${branch}'`
+        : `the database file belongs to the log on branch '${String(row.branch)}', and isn't a detached copy`,
+    )
+  }
   if (row.branch !== branch) {
     throw new LogError(
       `the database file belongs to the log on branch '${String(row.branch)}', not '${branch}'`,
@@ -1122,6 +1329,22 @@ function readPosition(db: Database, branch: string): { meta: Meta; pending: numb
     },
     pending: db.selectValue('SELECT count(*) FROM _kvsql_pending') as number,
   }
+}
+
+function checkCopyTarget(target: CopyTarget): void {
+  if ((target.repo === undefined) !== (target.branch === undefined)) {
+    throw new TypeError('copy: a logged copy needs both repo and branch, a detached one neither')
+  }
+  if (target.branch !== undefined && (typeof target.branch !== 'string' || target.branch === '')) {
+    throw new TypeError('copy: branch must be a non-empty string')
+  }
+}
+
+/** SQLite's result code for a file that isn't a database. */
+const SQLITE_NOTADB = 26
+
+function isNotADatabase(err: unknown): boolean {
+  return (err as { resultCode?: unknown } | null)?.resultCode === SQLITE_NOTADB
 }
 
 function checkOptions(options: LogOptions): void {

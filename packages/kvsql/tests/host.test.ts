@@ -15,8 +15,8 @@ import {
   RefusedError,
   StatementError,
 } from '../src/client'
-import { type DatabaseConfig, MemoryDirectory, lockName } from '../src/index'
-import { type FakeWorker, Origin, until } from './host-fakes'
+import { type DatabaseConfig, MemoryDirectory, type Opener, lockName } from '../src/index'
+import { Disk, type FakeWorker, Origin, until } from './host-fakes'
 import { CrashingStore, quietSqliteWarnings } from './log-helpers'
 
 quietSqliteWarnings()
@@ -424,5 +424,94 @@ describe('delete', () => {
     expect(info.pendingCount).toBe(0)
     expect((await b.query('SELECT id FROM t')).rows).toEqual([{ id: 1 }])
     expect((await a.query('SELECT id FROM t')).rows).toEqual([{ id: 1 }])
+  })
+})
+
+describe('copies', () => {
+  /** An opener with a disk per database, logs in the origin's store. */
+  function disks(o: Origin): Opener {
+    const byId = new Map<string, Disk>()
+    return async (config) => {
+      const disk = byId.get(config.id) ?? new Disk()
+      byId.set(config.id, disk)
+      return {
+        dir: disk.open(),
+        ...(config.detached !== true && { repo: await Repo.open(o.store) }),
+      }
+    }
+  }
+
+  const COPY: DatabaseConfig = { id: 'copy', label: 'agex.db', detached: true }
+
+  async function seeded(c: DatabaseClient) {
+    await c.query('CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)')
+    await c.query("INSERT INTO t VALUES (1, 'one')")
+  }
+
+  it('makes a detached copy, which writes nothing to the log', async () => {
+    const o = setup()
+    const w = o.worker('a', disks(o))
+    const db = client(w.connect(CONFIG))
+    await seeded(db)
+    const result = await db.copy(COPY)
+    expect(result).toMatchObject({ seq: 2, schema: 1 })
+    // Copying didn't flush.
+    expect((await db.info()).pendingCount).toBe(1)
+
+    const copy = client(w.connect(COPY))
+    expect(await copy.info()).toMatchObject({ detached: true, branch: '', seq: 2 })
+    await copy.query("UPDATE t SET v = 'changed'")
+    expect((await copy.query('SELECT v FROM t')).rows).toEqual([{ v: 'changed' }])
+    expect((await db.query('SELECT v FROM t')).rows).toEqual([{ v: 'one' }])
+    const repo = await Repo.open(o.store)
+    expect(await repo.branches.list()).toEqual(['kvsql/test'])
+
+    await expect(copy.delete({ keepLog: true })).rejects.toThrow(/no log/)
+    await copy.delete()
+    expect(await repo.branches.list()).toEqual(['kvsql/test'])
+  })
+
+  it("makes a logged copy, on a branch from the source's log", async () => {
+    const o = setup()
+    const w = o.worker('a', disks(o))
+    const db = client(w.connect(CONFIG))
+    await seeded(db)
+    const fork: DatabaseConfig = { id: 'fork', label: 'agex.db', branch: 'kvsql/fork' }
+    const { base } = await db.copy(fork)
+    const repo = await Repo.open(o.store)
+    expect(await repo.branches.get('kvsql/fork')).toBe(base)
+    expect(await repo.branches.get('kvsql/test')).toBe(base)
+
+    const copy = client(w.connect(fork))
+    const info = await copy.info()
+    expect(info).toMatchObject({ detached: false, branch: 'kvsql/fork', seq: 2, pendingCount: 0 })
+    expect(info.recovery.entries).toBe(0)
+    expect((await copy.query('SELECT v FROM t')).rows).toEqual([{ v: 'one' }])
+  })
+
+  it('is made by the holder for a forwarding tab', async () => {
+    const o = setup()
+    const open = disks(o)
+    const a = client(o.worker('a', open).connect(CONFIG))
+    await seeded(a)
+    const wb = o.worker('b', open)
+    const b = client(wb.connect(CONFIG))
+    await until(async () => (await role(b)) === 'forwarding')
+    await b.copy(COPY)
+    const copy = client(wb.connect(COPY))
+    expect((await copy.query('SELECT v FROM t')).rows).toEqual([{ v: 'one' }])
+    expect((await copy.status()).role).toBe('holder')
+  })
+
+  it('refuses a target that is open, or the database itself', async () => {
+    const o = setup()
+    const w = o.worker('a', disks(o))
+    const db = client(w.connect(CONFIG))
+    await seeded(db)
+    const copy = client(w.connect(COPY))
+    await copy.query('SELECT 1')
+    await expect(db.copy(COPY)).rejects.toThrow(/is open, so a copy can't replace it/)
+    await expect(db.copy({ ...CONFIG, detached: true })).rejects.toThrow(/onto itself/)
+    await expect(db.copy({ id: 'x', detached: true, branch: 'b' })).rejects.toThrow(/no branch/)
   })
 })

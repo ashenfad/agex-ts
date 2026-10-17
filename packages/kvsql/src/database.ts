@@ -103,6 +103,34 @@ export class DatabaseFile {
     return this.released
   }
 
+  /**
+   * Writes the database file's bytes into `into`, a file of another
+   * database, replacing what it held, and syncs it: the database as of
+   * its last commit, so call it with no transaction open. The first
+   * page goes last, so a copy cut short starts with zeros, which SQLite
+   * reads as no database at all. Returns the bytes copied.
+   */
+  copyInto(into: SyncFile): number {
+    if (this.released) throw new Error(`database is closed: ${this.name}`)
+    const from = this.files[0] as SyncFile
+    const size = from.size()
+    const chunk = new Uint8Array(Math.min(COPY_CHUNK, size))
+    into.truncate(0)
+    // The first page holds the header; any page is at least 512 bytes.
+    const head = Math.min(512, size)
+    for (let at = head; at < size; at += chunk.byteLength) {
+      const part = chunk.subarray(0, Math.min(chunk.byteLength, size - at))
+      readFully(from, part, at)
+      into.write(part, at)
+    }
+    into.sync()
+    const first = new Uint8Array(head)
+    readFully(from, first, 0)
+    into.write(first, 0)
+    into.sync()
+    return size
+  }
+
   /** Closes the connection and releases its files. Closing twice does nothing. */
   close(): void {
     if (this.db.pointer !== undefined) this.db.close()
@@ -113,6 +141,15 @@ export class DatabaseFile {
     if (this.released) return
     this.released = true
     releaseFiles(this.vfs, this.path, this.files)
+  }
+}
+
+/** How many bytes `copyInto` reads and writes at a time. */
+const COPY_CHUNK = 1 << 20
+
+function readFully(file: SyncFile, into: Uint8Array, at: number): void {
+  if (file.read(into, at) !== into.byteLength) {
+    throw new Error('the database file ended while it was being copied')
   }
 }
 
@@ -202,4 +239,27 @@ export async function deleteDatabase(dir: Directory, name: string): Promise<void
   if (vfs.has(vfsPath(dir, name))) throw new Error(`database is open: ${name}`)
   await dir.delete(name)
   await dir.delete(journalName(name))
+}
+
+/**
+ * Copies the open database `source` to the database `name` in `dir`,
+ * replacing any there, which must not be open: `source` as of its last
+ * commit, so with no transaction open. Returns the copy's size in
+ * bytes.
+ */
+export async function copyDatabase(
+  source: DatabaseFile,
+  dir: Directory,
+  name: string,
+): Promise<number> {
+  checkName(name)
+  // The old journal goes too: one left hot beside the copy would be
+  // rolled back into it.
+  await deleteDatabase(dir, name)
+  const into = await dir.open(name)
+  try {
+    return source.copyInto(into)
+  } finally {
+    into.close()
+  }
 }

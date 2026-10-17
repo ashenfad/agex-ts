@@ -38,8 +38,26 @@ export class LockHub {
 
   for(owner: string): Locks {
     return {
-      request: (name, { signal }, callback) =>
-        new Promise((resolve, reject) => {
+      request: <T>(
+        name: string,
+        options: { signal: AbortSignal } | { ifAvailable: true },
+        callback: (lock: unknown) => Promise<T>,
+      ): Promise<T> => {
+        if ('ifAvailable' in options) {
+          if (this.held.has(name) || this.queue.some((r) => r.name === name)) {
+            return Promise.resolve().then(() => callback(null))
+          }
+          return new Promise<T>((resolve, reject) => {
+            const entry: LockRequest = { owner, name, grant: () => {} }
+            this.held.set(name, entry)
+            Promise.resolve()
+              .then(() => callback({ name }))
+              .then(resolve, reject)
+              .finally(() => this.#releaseIf(entry))
+          })
+        }
+        const { signal } = options
+        return new Promise((resolve, reject) => {
           if (signal.aborted) {
             reject(new DOMException('aborted', 'AbortError'))
             return
@@ -62,7 +80,8 @@ export class LockHub {
           })
           this.queue.push(entry)
           this.#pump(name)
-        }),
+        })
+      },
       query: async () => ({
         pending: this.queue.map((r) => ({ name: r.name })),
         held: [...this.held.values()].map((r) => ({ name: r.name })),

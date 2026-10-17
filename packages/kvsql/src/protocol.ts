@@ -21,7 +21,7 @@ import {
   SqliteError,
   StatementError,
 } from './errors'
-import type { FlushPolicy, FlushResult, QueryResult, Recovery } from './log'
+import type { CopyResult, FlushPolicy, FlushResult, QueryResult, Recovery } from './log'
 
 /**
  * What a worker needs to open a database. Every tab passes the same
@@ -42,6 +42,13 @@ export interface DatabaseConfig {
   name?: string
   /** The log's kvgit branch. Default `kvsql/<id>`. */
   branch?: string
+  /**
+   * A detached copy: the file alone, with no log, so its writes are
+   * recorded nowhere (`openDetached`), as a test's copy is. Made by a
+   * logged database's `copy()`, or empty. It has no `branch`, and its
+   * opener needn't give a repository.
+   */
+  detached?: boolean
   /** How error messages name the database, e.g. `'agex.db'`. */
   label?: string
   /** `PRAGMA foreign_keys` for the connection. Default true. */
@@ -57,12 +64,22 @@ export function lockName(id: string): string {
   return `kvsql:${id}`
 }
 
-/** A database's file name and branch, with the defaults filled in. */
+/**
+ * A database's file name and branch, with the defaults filled in; a
+ * detached copy's branch is empty.
+ */
 export function resolveConfig(config: DatabaseConfig): { name: string; branch: string } {
   if (typeof config?.id !== 'string' || config.id === '') {
     throw new TypeError('kvsql: the database config needs an id, a non-empty string')
   }
-  return { name: config.name ?? DEFAULT_NAME, branch: config.branch ?? `kvsql/${config.id}` }
+  const name = config.name ?? DEFAULT_NAME
+  if (config.detached === true) {
+    if (config.branch !== undefined) {
+      throw new TypeError('kvsql: a detached database has no log, so no branch')
+    }
+    return { name, branch: '' }
+  }
+  return { name, branch: config.branch ?? `kvsql/${config.id}` }
 }
 
 /** What this worker's part in serving the database is. */
@@ -104,7 +121,10 @@ export interface DatabaseInfo {
   /** The worker holding the database. */
   holder: string
   name: string
+  /** The log's branch; empty for a detached copy. */
   branch: string
+  /** Whether the database is a detached copy, with no log. */
+  detached: boolean
   /** The number of the last transaction (0 for none). */
   seq: number
   /** Transactions in the file not yet flushed to the log. */
@@ -137,6 +157,7 @@ export interface Ops {
   transaction: { args: [statements: unknown]; result: QueryResult[] }
   flush: { args: []; result: FlushResult | null }
   export: { args: []; result: Uint8Array }
+  copy: { args: [target: DatabaseConfig]; result: CopyResult }
   info: { args: []; result: DatabaseInfo }
   delete: { args: [options: DeleteOptions]; result: undefined }
   status: { args: []; result: Status }

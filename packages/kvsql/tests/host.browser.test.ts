@@ -414,4 +414,60 @@ describe('the worker host', () => {
     },
     SLOW,
   )
+
+  it(
+    'copies a database for another tab: detached, and logged in the same repository',
+    async () => {
+      const id = newId()
+      const a = open(tab(CUSTOM_WORKER), config(id))
+      await a.query('CREATE TABLE t (id INTEGER PRIMARY KEY, b BLOB)')
+      await a.query('INSERT INTO t VALUES (1, randomblob(3000000))')
+      const other = tab(CUSTOM_WORKER)
+      const b = open(other, config(id))
+      await until(async () => (await role(b)) === 'forwarding', 'b forwarding')
+      const sample = 'SELECT id, length(b) AS n, hex(substr(b, 2000000, 8)) AS h FROM t'
+      const rows = (await a.query(sample)).rows
+
+      // The holder copies its file in OPFS; the asking tab opens it.
+      const copyId = newId()
+      const detached = { id: copyId, label: 'agex.db', detached: true }
+      expect(await b.copy(detached)).toMatchObject({ seq: 2, schema: 1 })
+      const copy = open(other, detached)
+      expect((await copy.query(sample)).rows).toEqual(rows)
+      await copy.query('DELETE FROM t')
+      expect((await a.query(sample)).rows).toEqual(rows)
+      expect(await copy.info()).toMatchObject({ detached: true, pendingCount: 0 })
+      await copy.delete()
+
+      const forkId = newId()
+      const { base } = await b.copy(config(forkId))
+      const fork = open(other, config(forkId))
+      const info = await fork.info()
+      expect(info).toMatchObject({ base, seq: 2, pendingCount: 0 })
+      expect(info.recovery.entries).toBe(0)
+      expect((await fork.query(sample)).rows).toEqual(rows)
+      await fork.delete()
+    },
+    SLOW,
+  )
+
+  it(
+    'keeps a detached copy without a log in the default worker',
+    async () => {
+      const id = newId()
+      const worker = tab()
+      const a = open(worker, config(id))
+      await a.query('CREATE TABLE t (id INTEGER PRIMARY KEY)')
+      await a.query('INSERT INTO t VALUES (1)')
+      const copyId = newId()
+      const detached = { id: copyId, detached: true }
+      await a.copy(detached)
+      const copy = open(worker, detached)
+      expect((await copy.query('SELECT id FROM t')).rows).toEqual([{ id: 1 }])
+      expect(await idbNames()).not.toContain(`kvsql:${copyId}`)
+      await copy.delete()
+      expect(await opfsDir('kvsql', copyId)).toBeNull()
+    },
+    SLOW,
+  )
 })

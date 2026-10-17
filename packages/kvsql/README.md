@@ -177,10 +177,15 @@ await db.close() // flushes first
   source's and then its own, and the branch alone rebuilds it. That
   branch must be new, and in a repository holding the source's log.
   A copy replaces only a copy: the target file must be missing, empty,
-  a detached copy, or a copy of this database left unfinished (the
-  file's first page is written last, so a copy cut short reads as no
-  database). A detached copy can't be opened on a log, nor a logged
-  database as a detached copy.
+  not a database, or a detached copy. Any logged database is refused,
+  even one on the source's own branch, which may hold transactions no
+  log has. The file's first page is written last, so a copy cut short
+  reads as no database, and a logged copy is marked detached until its
+  branch exists, so either is replaced by the next try. A copy cut
+  short in the moment between its last page and its mark, or between
+  its branch and its mark, is refused like a database: delete the
+  target to clear it. A detached copy can't be opened on a log, nor a
+  logged database as a detached copy.
 - **Opening** brings the file level with the branch: entries it didn't
   write are replayed (so an empty directory rebuilds the database from
   the log), and an entry matching its pending transactions is its own

@@ -3,6 +3,7 @@
  * logged ones (a new branch starting from the source's log).
  */
 
+import { Memory } from '@agex-ts/kvgit/backends/memory'
 import { afterEach, describe, expect, it } from 'vitest'
 import {
   CrashingDirectory,
@@ -15,7 +16,17 @@ import {
   openDatabase,
   openDetached,
 } from '../src/index'
-import { BRANCH, NAME, dump, integrity, open, quietSqliteWarnings, repoOver } from './log-helpers'
+import {
+  BRANCH,
+  CrashingStore,
+  NAME,
+  StoreCrash,
+  dump,
+  integrity,
+  open,
+  quietSqliteWarnings,
+  repoOver,
+} from './log-helpers'
 
 quietSqliteWarnings()
 await loadSqlite()
@@ -177,6 +188,14 @@ describe('the target', () => {
       /holds the database on branch 'db\/other\/0'/,
     )
 
+    // Even a replica on the source's own branch, which may hold
+    // transactions no log has.
+    const replica = new MemoryDirectory()
+    await (await open(replica, a.repo)).close()
+    await expect(a.db.copy({ dir: replica, name: NAME })).rejects.toThrow(
+      /holds the database on branch 'db\/test\/0'/,
+    )
+
     const plain = new MemoryDirectory()
     const file = await openDatabase(plain, COPY)
     file.db.exec('CREATE TABLE t (v)')
@@ -219,6 +238,24 @@ describe('a logged copy', () => {
     )
     expect(rebuilt.recovery.entries).toBe(4)
     expect(await dump(rebuilt)).toEqual(await dump(copy))
+  })
+
+  it('cut short before its branch exists, is replaced by the next try', async () => {
+    const store = new CrashingStore(new Memory())
+    const repo = await repoOver(store)
+    const db = await track(open(new MemoryDirectory(), repo))
+    await db.query('CREATE TABLE t (id INTEGER PRIMARY KEY)')
+    await db.query('INSERT INTO t VALUES (1)')
+    await db.flush()
+    const to = new MemoryDirectory()
+    store.failNextWrite()
+    await expect(db.copy({ dir: to, name: COPY, repo, branch: 'db/copy/0' })).rejects.toThrow(
+      StoreCrash,
+    )
+    expect(await repo.branches.has('db/copy/0')).toBe(false)
+    await db.copy({ dir: to, name: COPY, repo, branch: 'db/copy/0' })
+    const copy = await track(open(to, repo, { name: COPY, branch: 'db/copy/0' }))
+    expect((await copy.query('SELECT id FROM t')).rows).toEqual([{ id: 1 }])
   })
 
   it('refuses a branch that exists, or a repository without the log', async () => {

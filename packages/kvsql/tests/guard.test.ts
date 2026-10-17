@@ -354,6 +354,18 @@ describe('schema-change detection', () => {
     })
   }
 
+  it('notes ANALYZE apart, until reset', () => {
+    const { db, guard } = guarded('CREATE TABLE t (id TEXT PRIMARY KEY NOT NULL, v)')
+    guard.run(() => db.exec('CREATE INDEX t_v ON t (v)'))
+    expect([guard.schemaChanged, guard.analyzed]).toEqual([true, false])
+    guard.run(() => db.exec('ANALYZE'))
+    expect([guard.schemaChanged, guard.analyzed]).toEqual([true, true])
+    guard.resetSchemaChanged()
+    expect([guard.schemaChanged, guard.analyzed]).toEqual([false, false])
+    guard.run(() => db.exec('ANALYZE t'))
+    expect(guard.analyzed).toBe(true)
+  })
+
   it('notes the first nondeterministic function, in a trigger too, until reset', () => {
     const { db, guard } = guarded(`
       CREATE TABLE t (id TEXT PRIMARY KEY NOT NULL, v);

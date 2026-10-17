@@ -138,9 +138,12 @@ await db.close() // flushes first
   written into the file's pending table (`_kvsql_pending`) inside the
   call's own transaction, so the file's commit makes it durable on the
   device. A call that changed the schema (DDL, `PRAGMA user_version` or
-  `application_id`) is logged instead as its SQL, every statement in
-  order, with the `foreign_keys` setting it ran under, and bumps
-  `schemaVersion`. Replay runs that SQL again, so it must give the same
+  `application_id`, `ANALYZE`) is logged instead as its SQL, every
+  statement in order, with the `foreign_keys` setting it ran under, and
+  bumps `schemaVersion`. Only a real change counts: DDL that turns out
+  a no-op (`CREATE TABLE IF NOT EXISTS` on a table that exists, as an
+  app runs on every load) leaves the file's schema cookie as it was,
+  and the call is logged as rows. Replay runs that SQL again, so it must give the same
   result anywhere: a schema-changing call that uses `random()`, the
   clock or the change counters is refused (change rows in a call of
   their own, where values are recorded as written), and so is one that
@@ -340,7 +343,9 @@ row whose key is NULL, and anything outside the main database, so:
   `guard.trusted(fn)` lifts the refusals for the package's own
   statements. `guard.schemaChanged` reports DDL on the main database,
   and setting `PRAGMA user_version` or `application_id`, which the
-  session extension doesn't record either. `guard.nondeterministic`
+  session extension doesn't record either: what a statement may do, as
+  prepared, so a no-op counts too. `guard.analyzed` reports `ANALYZE`,
+  whose statistics change no schema cookie. `guard.nondeterministic`
   names the first function a statement called whose result can differ
   between runs (`random()`, the date and time functions, the change
   counters), and `guard.tempDependency` the first TEMP table or view a

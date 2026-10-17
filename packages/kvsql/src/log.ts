@@ -446,6 +446,7 @@ export class LoggedDatabase {
     this.#exec('BEGIN IMMEDIATE')
     let session: Session | undefined
     try {
+      const header = this.#header()
       session = startSession(this.#sqlite3, db)
       const results = statements.map((statement, i) => {
         try {
@@ -462,7 +463,10 @@ export class LoggedDatabase {
       })
 
       let item: { kind: ItemKind; body: Uint8Array } | undefined
-      if (guard.schemaChanged) {
+      // A statement that could change the schema, confirmed by the file:
+      // `CREATE TABLE IF NOT EXISTS` on a table that exists, run by an
+      // app on every load, changes nothing and logs as rows do.
+      if (guard.schemaChanged && (guard.analyzed || this.#header() !== header)) {
         const fn = guard.nondeterministic
         if (fn !== undefined) throw new RefusedError(this.#nondeterministicMessage(fn))
         const temp = guard.tempDependency
@@ -958,6 +962,21 @@ export class LoggedDatabase {
           rowMode: 'object',
           returnValue: 'resultRows',
         }) as unknown as PendingItem[],
+    )
+  }
+
+  /**
+   * What a schema change alters in the file's header: the schema cookie
+   * (bumped by every change to `sqlite_schema`), `user_version` and
+   * `application_id`.
+   */
+  #header(): string {
+    return this.#guard.trusted(() =>
+      JSON.stringify(
+        this.#db.selectArray(
+          'SELECT s.schema_version, u.user_version, a.application_id FROM pragma_schema_version s, pragma_user_version u, pragma_application_id a',
+        ),
+      ),
     )
   }
 

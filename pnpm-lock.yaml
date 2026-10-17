@@ -94,6 +94,9 @@ importers:
 
   packages/kvsql:
     dependencies:
+      '@agex-ts/kvgit':
+        specifier: workspace:*
+        version: link:../kvgit-ts
       '@sqlite.org/sqlite-wasm':
         specifier: 3.53.4-build1
         version: 3.53.4-build1

@@ -6,8 +6,9 @@ and sync between devices through any kvgit remote.
 
 > **Status:** in development. This package so far runs SQLite on a file
 > in OPFS (or in memory) through its own VFS, records and applies
-> changesets, and guards the schema; the changeset log comes next. The
-> design is agex-studio's
+> changesets, guards the schema, and keeps the changeset log in kvgit
+> with crash recovery and replay; rebase, snapshots and epochs come
+> next. The design is agex-studio's
 > [`roadmap/app-db.md`](https://github.com/ashenfad/agex-studio/blob/rebuild/roadmap/app-db.md).
 
 ## How it will work
@@ -100,6 +101,84 @@ file.close()
 const after = await openDatabase(new MemoryDirectory(mem.image()), 'app.db')
 ```
 
+## The logged database
+
+`openLog` opens a database whose every transaction is recorded in a
+changeset log on a kvgit branch. The caller brings the `Repo` (its
+codec must store bytes as they are: `'bytes'`, the default) and names
+the branch:
+
+```ts
+import { openLog } from '@agex-ts/kvsql'
+
+const db = await openLog({ dir, name: 'app.db', repo, branch: 'db/abc/0', label: 'agex.db' })
+await db.query('CREATE TABLE events (id TEXT PRIMARY KEY NOT NULL, title TEXT, start INTEGER)')
+const { rows } = await db.query('SELECT * FROM events WHERE start >= ?', [from])
+await db.transaction([
+  ['UPDATE accounts SET balance = balance - ? WHERE id = ?', [10, 'a1']],
+  ['UPDATE accounts SET balance = balance + ? WHERE id = ?', [10, 'a2']],
+])
+await db.close() // flushes first
+```
+
+- **Calls.** Each `query(sql, params)` is one transaction;
+  `transaction([[sql, params], ...])` runs several as one. Each returns
+  `{ rows, changes, lastInsertRowid }` (an array of them for a
+  transaction). A failing statement rolls the whole call back; in a
+  transaction its error is a `StatementError` with the statement's
+  `index`. Calls run one at a time, in order.
+- **Behind the schema guard.** `BEGIN`, `COMMIT` and `ROLLBACK` are
+  refused (each call already is a transaction; savepoints work inside
+  one), as is everything the guard refuses, and a schema change that
+  leaves a table without a non-null primary key is rolled back.
+- **Foreign keys** are enforced by default (`foreignKeys: false` turns
+  them off): an app that declares `REFERENCES` expects it, and a replay
+  only notices a broken foreign key when they're on.
+- **What's logged.** A call's changes are recorded as a changeset and
+  written into the file's pending table (`_kvsql_pending`) inside the
+  call's own transaction, so the file's commit makes it durable on the
+  device. A call that changed the schema (DDL, `PRAGMA user_version` or
+  `application_id`) is logged instead as its SQL, every statement in
+  order, with the `foreign_keys` setting it ran under, and bumps
+  `schemaVersion`. Replay runs that SQL again, so it must give the same
+  result anywhere: a schema-changing call that uses `random()`, the
+  clock or the change counters is refused (change rows in a call of
+  their own, where values are recorded as written). Column defaults
+  that read the clock, and queries whose result depends on row order
+  without an `ORDER BY`, aren't caught.
+- **Flushes** commit every pending transaction to the log as one entry:
+  every 100 transactions (`flush.every`), when the oldest pending one is
+  2 s old (`flush.maxAgeMs`), after a schema change, on `flush()`, and
+  on `close()`. A flush the policy started that fails leaves the
+  transactions pending (and calls `onFlushError`); `flush()` throws.
+- **Opening** brings the file level with the branch: entries it didn't
+  write are replayed (so an empty directory rebuilds the database from
+  the log), and an entry matching its pending transactions is its own
+  flush, interrupted before it could delete them. A file with pending
+  transactions on a branch that has entries it didn't write needs a
+  rebase, which isn't supported yet: `RebaseRequiredError`.
+- **Replay** combines runs of changesets and applies them in chunks of
+  up to 100k transactions or 32 MiB, stopping at any conflict
+  (`ReplayError`): in a log written only by appending there is none, so
+  one means divergence. A changeset written under another schema
+  version, or recording a column count a table doesn't have (which
+  SQLite would skip silently), is refused the same way.
+
+### The log format
+
+The log is the branch's first-parent chain of commits; each holds one
+entry under the key `entry`, overwritten by every flush. Transactions
+are numbered from 1 across the whole log. An entry is a format byte (1)
+followed by CBOR: an array of pieces `[kind, from, to, schema, body]`,
+where kind 0 is a changeset of transactions `from` to `to` and kind 1 a
+schema change (`body` is CBOR `{foreignKeys, statements}`). A run of
+changesets is stored merged when that makes it at most half its size
+(a run rewriting the same rows), and otherwise packed one per
+transaction, each a restore point. Each commit's info is
+`{v: 1, from, to, length, digest, schema}`: the range, the entry's
+byte length and SHA-256, and the schema version after it; a reader
+refuses an entry that doesn't match them (`CorruptEntryError`).
+
 ## Changesets
 
 A session records what statements change, by primary key; the
@@ -142,12 +221,16 @@ row whose key is NULL, and anything outside the main database, so:
   replay), `load_extension()`, and setting the pragmas
   that change how the file is written (`journal_mode`, `locking_mode`,
   `synchronous`, `writable_schema`, `schema_version`, `page_size`,
-  `auto_vacuum`), and keeps callers out of `_kvsql_*` tables. `guard.run(fn)` turns a refusal into a
+  `auto_vacuum`), `BEGIN`, `COMMIT` and `ROLLBACK` (savepoints stay
+  allowed), and keeps callers out of `_kvsql_*` tables. `guard.run(fn)` turns a refusal into a
   `RefusedError` whose message says what to do instead;
   `guard.trusted(fn)` lifts the refusals for the package's own
   statements. `guard.schemaChanged` reports DDL on the main database,
   and setting `PRAGMA user_version` or `application_id`, which the
-  session extension doesn't record either.
+  session extension doesn't record either. `guard.nondeterministic`
+  names the first function a statement called whose result can differ
+  between runs (`random()`, the date and time functions, the change
+  counters), for a runner that replays a call's SQL.
 - `checkSchema(db)`, run after a schema change, lists every table
   without a non-null `PRIMARY KEY`, so the transaction can be rolled
   back. `INTEGER PRIMARY KEY` and `WITHOUT ROWID` keys qualify; any

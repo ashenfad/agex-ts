@@ -188,6 +188,56 @@ export function changesetOps(sqlite3: Sqlite3Static, changeset: Uint8Array): Cha
   })
 }
 
+/**
+ * The tables `changeset` touches, each with the column count it
+ * records, in order of first appearance. Lighter than
+ * {@link changesetOps} for a large changeset: it reads each change's
+ * header, not its values. A session records one count per table, and
+ * {@link combineChangesets} refuses to mix two, so a table's first
+ * count is its only one.
+ */
+export function changesetTables(
+  sqlite3: Sqlite3Static,
+  changeset: Uint8Array,
+): Map<string, number> {
+  const tables = new Map<string, number>()
+  if (changeset.byteLength === 0) return tables
+  const { capi, wasm } = sqlite3
+  return withBytes(sqlite3, changeset, (p) => {
+    const pIter = outHandle(sqlite3, 'sqlite3changeset_start', (pp) =>
+      capi.sqlite3changeset_start(pp, changeset.byteLength, p),
+    )
+    let failed = false
+    const sp = wasm.pstack.pointer
+    try {
+      const pzTab = wasm.pstack.allocPtr()
+      const pnCol = wasm.pstack.alloc(4)
+      const pOp = wasm.pstack.alloc(4)
+      const pInd = wasm.pstack.alloc(4)
+      for (;;) {
+        const rc = capi.sqlite3changeset_next(pIter)
+        if (rc === capi.SQLITE_DONE) break
+        if (rc !== capi.SQLITE_ROW) {
+          failed = true
+          check(sqlite3, rc, 'sqlite3changeset_next')
+        }
+        check(
+          sqlite3,
+          capi.sqlite3changeset_op(pIter, pzTab, pnCol, pOp, pInd),
+          'sqlite3changeset_op',
+        )
+        const table = wasm.cstrToJs(Number(wasm.peekPtr(pzTab))) ?? ''
+        if (!tables.has(table)) tables.set(table, wasm.peek32(pnCol))
+      }
+    } finally {
+      wasm.pstack.restore(sp)
+      const rc = capi.sqlite3changeset_finalize(pIter)
+      if (!failed) check(sqlite3, rc, 'sqlite3changeset_finalize')
+    }
+    return tables
+  })
+}
+
 const OPS: Record<number, ChangeOp> = { 18: 'INSERT', 23: 'UPDATE', 9: 'DELETE' }
 
 /** The change a changeset iterator is at (also valid inside a conflict handler). */

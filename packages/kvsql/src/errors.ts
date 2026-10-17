@@ -28,3 +28,94 @@ export class SqliteError extends KvsqlError {
 export class RefusedError extends KvsqlError {
   override readonly name: string = 'RefusedError'
 }
+
+/**
+ * A statement of a `transaction([...])` call failed, and the whole call
+ * was rolled back. `index` is the statement's position in the call
+ * (from 0); `cause` is the error it failed with (SQLite's, or a
+ * {@link RefusedError}), whose message this one repeats.
+ */
+export class StatementError extends KvsqlError {
+  override readonly name: string = 'StatementError'
+
+  constructor(
+    readonly index: number,
+    cause: unknown,
+  ) {
+    super(`statement ${index}: ${cause instanceof Error ? cause.message : String(cause)}`, {
+      cause,
+    })
+  }
+}
+
+/**
+ * The changeset log and the database file disagree, or the log is not
+ * one this version can read. Nothing was changed by the call that
+ * threw it.
+ */
+export class LogError extends KvsqlError {
+  override readonly name: string = 'LogError'
+}
+
+/**
+ * A log entry's stored bytes don't match what its commit records (its
+ * length or SHA-256 digest), or aren't in a format this version reads:
+ * the entry was truncated, altered or written by something else.
+ */
+export class CorruptEntryError extends LogError {
+  override readonly name: string = 'CorruptEntryError'
+
+  constructor(
+    /** The log commit holding the entry. */
+    readonly commit: string,
+    message: string,
+  ) {
+    super(`log entry ${commit}: ${message}`)
+  }
+}
+
+/**
+ * Replaying the log stopped: an entry doesn't apply to the database as
+ * it stands (a conflict, a schema version or column count that doesn't
+ * match, a schema change that failed). In a log written only by
+ * appending, none of these happen, so the database and the log have
+ * diverged. The replay's last transaction was rolled back; what it
+ * applied before that stays applied and is resumed from on the next
+ * open.
+ */
+export class ReplayError extends LogError {
+  override readonly name: string = 'ReplayError'
+
+  constructor(
+    /** The log commit holding the entry that failed. */
+    readonly commit: string,
+    /** The first transaction number of the part that failed. */
+    readonly seq: number,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(`replaying log entry ${commit} at transaction ${seq}: ${message}`, options)
+  }
+}
+
+/**
+ * The database file holds transactions not yet in the log, and the log
+ * has entries this file didn't write (another copy of the database
+ * flushed to the same branch). Those transactions would have to be
+ * rebased onto the new entries, which this version doesn't do. The
+ * file and the log are left as they were.
+ */
+export class RebaseRequiredError extends LogError {
+  override readonly name: string = 'RebaseRequiredError'
+
+  constructor(
+    /** How many transactions the file holds that the log doesn't. */
+    readonly pending: number,
+    /** How many log entries the file hasn't applied. */
+    readonly entries: number,
+  ) {
+    super(
+      `this database has ${pending} transaction${pending === 1 ? '' : 's'} not yet in its log, and the log has ${entries} entr${entries === 1 ? 'y' : 'ies'} it didn't write: they need a rebase, which isn't supported yet`,
+    )
+  }
+}

@@ -9,7 +9,7 @@
 
 import type { Params, Statement } from './entry'
 import { KvsqlError } from './errors'
-import type { FlushResult, QueryResult } from './log'
+import type { CopyResult, FlushResult, QueryResult } from './log'
 import {
   CONNECT,
   type ConnectMessage,
@@ -34,7 +34,7 @@ export type {
   Role,
   Status,
 } from './protocol'
-export type { FlushResult, QueryResult, Recovery } from './log'
+export type { CopyResult, FlushResult, QueryResult, Recovery } from './log'
 export type { Params, Statement } from './entry'
 
 /** Where a client sends its connect message: a `Worker`, usually. */
@@ -146,6 +146,19 @@ export class DatabaseClient {
    */
   export(): Promise<Uint8Array> {
     return this.#call('export', [])
+  }
+
+  /**
+   * Copy the database, by the worker holding it, to the database
+   * `target` names (its config, as a connect to it would pass): a
+   * detached copy if `target.detached`, else a logged copy whose log
+   * starts from this one's, on `target`'s branch (see
+   * `LoggedDatabase.copy`). The worker makes it with its opener and
+   * holds `target`'s lock meanwhile, so nothing may have `target`
+   * open. Connect to `target` afterwards to use the copy.
+   */
+  copy(target: DatabaseConfig): Promise<CopyResult> {
+    return this.#call('copy', [target])
   }
 
   /** The database's state, from the worker holding it. */

@@ -28,6 +28,7 @@ export {
 export { OpfsDirectory, OpfsFile } from './opfs'
 export { KvsqlVfs, kvsqlVfs, SECTOR_SIZE, VFS_NAME } from './vfs'
 export {
+  copyDatabase,
   DatabaseFile,
   deleteDatabase,
   JOURNAL_MODE,
@@ -36,10 +37,14 @@ export {
   openDatabase,
 } from './database'
 export {
+  type CopyResult,
+  type CopyTarget,
+  type DetachedOptions,
   type FlushPolicy,
   type FlushResult,
   LoggedDatabase,
   type LogOptions,
+  openDetached,
   openLog,
   type QueryResult,
   type Recovery,

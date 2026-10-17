@@ -27,7 +27,7 @@ import { type Repo, UnknownBranchError } from '@agex-ts/kvgit'
 import { deleteDatabase } from './database'
 import { ConnectionLostError, KvsqlError } from './errors'
 import type { Directory } from './files'
-import { type LoggedDatabase, openLog } from './log'
+import { type CopyResult, type LoggedDatabase, openDetached, openLog } from './log'
 import {
   CONNECT,
   type ChannelMessage,
@@ -50,8 +50,11 @@ import {
 export interface DatabaseStorage {
   /** The directory holding the database file and its journal. */
   dir: Directory
-  /** The kvgit repository holding the log (codec `'bytes'`). */
-  repo: Repo<Uint8Array>
+  /**
+   * The kvgit repository holding the log (codec `'bytes'`). A detached
+   * copy has no log, so its opener may leave it out.
+   */
+  repo?: Repo<Uint8Array>
   /** Called after the database closes: release the repository's store. */
   close?(): void | Promise<void>
   /**
@@ -71,11 +74,15 @@ export type Opener<C extends DatabaseConfig = DatabaseConfig> = (
 
 /** The part of the Web Locks API (`navigator.locks`) the host uses. */
 export interface Locks {
-  request(
+  /**
+   * Hold lock `name` while `callback` runs. With `ifAvailable`, take it
+   * only if it is free now: the callback gets null if it isn't.
+   */
+  request<T>(
     name: string,
-    options: { signal: AbortSignal },
-    callback: (lock: unknown) => Promise<void>,
-  ): Promise<unknown>
+    options: { signal: AbortSignal } | { ifAvailable: true },
+    callback: (lock: unknown) => Promise<T>,
+  ): Promise<T>
   query(): Promise<{ pending?: readonly { name?: string }[] }>
 }
 
@@ -425,11 +432,14 @@ class DatabaseHost<C extends DatabaseConfig> {
         return db.flush()
       case 'export':
         return db.export()
+      case 'copy':
+        return this.#copy(db, args[0] as C)
       case 'info':
         return {
           holder: this.#self,
           name: db.name,
           branch: db.branch,
+          detached: db.detached,
           seq: db.seq,
           pendingCount: db.pendingCount,
           schemaVersion: db.schemaVersion,
@@ -484,17 +494,23 @@ class DatabaseHost<C extends DatabaseConfig> {
       try {
         this.#storage ??= await this.#opener(this.#config)
         const { dir, repo } = this.#storage
-        const { label, foreignKeys, flush } = this.#config
-        this.#db = await openLog({
+        const { label, foreignKeys, flush, detached } = this.#config
+        const options = {
           dir,
-          repo,
           name: this.#name,
-          branch: this.#branch,
           ...(label !== undefined && { label }),
           ...(foreignKeys !== undefined && { foreignKeys }),
-          ...(flush !== undefined && { flush }),
-          onFlushError: (err) => this.#flushFailed(err),
-        })
+        }
+        this.#db =
+          detached === true
+            ? await openDetached(options)
+            : await openLog({
+                ...options,
+                repo: needRepo(repo, this.#config),
+                branch: this.#branch,
+                ...(flush !== undefined && { flush }),
+                onFlushError: (err) => this.#flushFailed(err),
+              })
         this.#openError = undefined
         this.#role = 'holder'
         return
@@ -524,12 +540,55 @@ class DatabaseHost<C extends DatabaseConfig> {
 
   // --- Delete ---
 
+  /**
+   * Copy the database to the database `target` names, holding its lock
+   * while the copy is made: a detached copy if `target` is, else a
+   * logged one on its branch. A target that is open anywhere is
+   * refused rather than waited for.
+   */
+  async #copy(db: LoggedDatabase, target: C): Promise<CopyResult> {
+    const { name, branch } = resolveConfig(target)
+    if (target.id === this.#config.id) {
+      throw new KvsqlError(
+        `kvsql: database ${JSON.stringify(target.id)} can't be copied onto itself`,
+      )
+    }
+    const result = await this.#env.locks.request(
+      lockName(target.id),
+      { ifAvailable: true },
+      async (lock) => {
+        if (lock === null) return null
+        const storage = await this.#opener(target)
+        try {
+          return await db.copy({
+            dir: storage.dir,
+            name,
+            ...(target.detached !== true && { repo: needRepo(storage.repo, target), branch }),
+          })
+        } finally {
+          await storage.close?.()
+        }
+      },
+    )
+    if (result === null) {
+      throw new KvsqlError(
+        `kvsql: database ${JSON.stringify(target.id)} is open, so a copy can't replace it`,
+      )
+    }
+    return result
+  }
+
   /** Runs on the holder's chain, so every call before it has finished. */
   async #delete(
     options: DeleteOptions,
     deletion: string,
   ): Promise<{ deleted: string } | undefined> {
     const db = this.#db
+    if (options.keepLog === true && this.#config.detached === true) {
+      throw new KvsqlError(
+        'kvsql: a detached copy has no log to rebuild its file from: delete it without keepLog',
+      )
+    }
     if (options.keepLog === true) {
       if (db) {
         // A flush that fails leaves the file, and its transactions, as they were.
@@ -555,10 +614,12 @@ class DatabaseHost<C extends DatabaseConfig> {
       const storage = this.#storage ?? (await this.#opener(this.#config))
       this.#storage = storage
       await deleteDatabase(storage.dir, this.#name)
-      try {
-        await storage.repo.branches.delete(this.#branch)
-      } catch (err) {
-        if (!(err instanceof UnknownBranchError)) throw err
+      if (this.#config.detached !== true) {
+        try {
+          await needRepo(storage.repo, this.#config).branches.delete(this.#branch)
+        } catch (err) {
+          if (!(err instanceof UnknownBranchError)) throw err
+        }
       }
       this.#storage = null
       await storage.close?.()
@@ -858,6 +919,16 @@ class DatabaseHost<C extends DatabaseConfig> {
 }
 
 // --- Helpers ---
+
+/** A logged database's repository, which its opener must give. */
+function needRepo(repo: Repo<Uint8Array> | undefined, config: DatabaseConfig): Repo<Uint8Array> {
+  if (!repo) {
+    throw new KvsqlError(
+      `kvsql: the opener gave database ${JSON.stringify(config.id)} no repository for its log`,
+    )
+  }
+  return repo
+}
 
 function reply(port: MessagePort, message: Response): void {
   try {

@@ -26,12 +26,22 @@ const ROOT = 'kvsql'
 /**
  * Open a database's storage: the OPFS directory `directory` (created if
  * missing) and a kvgit repository on the IndexedDB database
- * `indexedDB`. Deleting the database also removes the directory and the
- * IndexedDB database, when they are the defaults (and so the database's
- * alone).
+ * `indexedDB` (none for a detached copy, which has no log). Deleting
+ * the database also removes the directory and the IndexedDB database,
+ * when they are the defaults (and so the database's alone).
  */
 export async function openDefault(config: DefaultConfig): Promise<DatabaseStorage> {
   const dir = await OpfsDirectory.at(...(config.directory ?? [ROOT, config.id]))
+  const removeDir = async () => {
+    if (config.directory !== undefined) return
+    const root = await OpfsDirectory.at(ROOT)
+    try {
+      await root.handle.removeEntry(config.id, { recursive: true })
+    } catch (err) {
+      if (!(err instanceof DOMException && err.name === 'NotFoundError')) throw err
+    }
+  }
+  if (config.detached === true) return { dir, destroy: removeDir }
   const dbName = config.indexedDB ?? `kvsql:${config.id}`
   const store = await IndexedDB.open({ dbName })
   let repo: Repo<Uint8Array>
@@ -47,14 +57,7 @@ export async function openDefault(config: DefaultConfig): Promise<DatabaseStorag
     close: () => store.close(),
     destroy: async () => {
       if (config.indexedDB === undefined) await IndexedDB.deleteDatabase(dbName)
-      if (config.directory === undefined) {
-        const root = await OpfsDirectory.at(ROOT)
-        try {
-          await root.handle.removeEntry(config.id, { recursive: true })
-        } catch (err) {
-          if (!(err instanceof DOMException && err.name === 'NotFoundError')) throw err
-        }
-      }
+      await removeDir()
     },
   }
 }

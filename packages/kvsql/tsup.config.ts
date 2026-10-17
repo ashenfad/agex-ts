@@ -1,7 +1,9 @@
 import { defineConfig } from 'tsup'
 
 export default defineConfig({
-  entry: ['src/index.ts'],
+  // The client is the page's entry, and loads neither SQLite nor kvgit;
+  // the worker is the default worker's.
+  entry: ['src/index.ts', 'src/client.ts', 'src/worker.ts'],
   format: ['esm'],
   dts: true,
   sourcemap: true,

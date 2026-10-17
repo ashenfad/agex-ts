@@ -6,9 +6,9 @@ and sync between devices through any kvgit remote.
 
 > **Status:** in development. This package so far runs SQLite on a file
 > in OPFS (or in memory) through its own VFS, records and applies
-> changesets, guards the schema, and keeps the changeset log in kvgit
-> with crash recovery and replay; rebase, snapshots and epochs come
-> next. The design is agex-studio's
+> changesets, guards the schema, keeps the changeset log in kvgit
+> with crash recovery and replay, and serves the database from a
+> worker to every tab; rebase, snapshots and epochs come next. The design is agex-studio's
 > [`roadmap/app-db.md`](https://github.com/ashenfad/agex-studio/blob/rebuild/roadmap/app-db.md).
 
 ## How it will work
@@ -181,6 +181,112 @@ transaction, each a restore point. Each commit's info is
 byte length and SHA-256, and the schema version after it; a reader
 refuses an entry that doesn't match them (`CorruptEntryError`).
 
+## In a worker, from every tab
+
+OPFS's synchronous handles exist only in dedicated workers, so a page
+runs its database in one and talks to it with a client. The client,
+`@agex-ts/kvsql/client`, loads neither SQLite nor kvgit.
+
+```ts
+import { connect } from '@agex-ts/kvsql/client'
+// Vite; elsewhere, new Worker(new URL('@agex-ts/kvsql/worker', import.meta.url), { type: 'module' })
+import KvsqlWorker from '@agex-ts/kvsql/worker?worker'
+
+const db = connect(new KvsqlWorker(), { id: 'calendar', label: 'agex.db' })
+await db.query('CREATE TABLE IF NOT EXISTS events (id TEXT PRIMARY KEY NOT NULL, title TEXT)')
+const { rows } = await db.query('SELECT * FROM events')
+await db.close()
+```
+
+- **The calls** are the logged database's (`query`, `transaction`,
+  `flush`, `close`), as promises, plus `info()` (the database's
+  sequence number, pending count, recovery, last flush error) and
+  `status()` (this tab's part, below). Values cross as structured
+  clones, so blobs stay `Uint8Array` and big integers bigint.
+- **Errors arrive as their classes:** kvsql's (`RefusedError`,
+  `StatementError` with its `index`, `RebaseRequiredError`, ...) and
+  JavaScript's, with their fields and cause, so `instanceof` works on
+  the page. Other errors (SQLite's own, a store's) arrive as an `Error`
+  with their `name` and fields, a DOMException as a DOMException.
+- **The config** names the database: `id` (required), and optionally
+  `name` (the file, default `db.sqlite`), `branch` (default
+  `kvsql/<id>`), `label`, `foreignKeys` and `flush`. Every tab passes
+  the same config for the same database, and a worker refuses a second
+  connect to an id with a different one.
+- **The default worker** (`@agex-ts/kvsql/worker`) keeps each database
+  with `openDefault`: the file in OPFS directory `kvsql/<id>` and the
+  log on IndexedDB database `kvsql:<id>` (config `directory` and
+  `indexedDB` change them).
+- **Flushes on hide.** The client flushes when the page is hidden and
+  on `pagehide`, which a worker can't see, best effort
+  (`flushOnHide: false` turns it off). `onFlushError` hears of a flush
+  the policy started that failed, in whichever tab ran it.
+
+### Your own worker
+
+An app that keeps its log in a repository of its own writes the worker
+itself: `serve` takes the function that opens a database's storage from
+its config.
+
+```ts
+// db.worker.ts
+import { OpfsDirectory, serve } from '@agex-ts/kvsql'
+import { repo } from './my-repo' // a Repo<Uint8Array>, or a promise of one
+
+serve(async (config) => ({ dir: await OpfsDirectory.at('dbs', config.id), repo: await repo }))
+```
+
+The opener runs in the worker that takes the database's lock, each time
+it opens it. It returns `{ dir, repo }`, and may add `close()` (called
+after the database closes) and `destroy()` (called when it is deleted,
+to remove what was the database's alone). Config fields of the app's
+own reach the opener as they are. `serve(open, { scope: null })`
+listens for nothing and leaves the app to pass `server.connect(config,
+port)` the ports from its own messages.
+
+### Many tabs, one writer
+
+Each tab runs its own worker, but a database's file can be open in only
+one: its access handles are exclusive.
+
+- **A Web Lock, `kvsql:<id>`,** is held by the worker that has the file
+  open, for as long as it has it. The other tabs' workers wait in the
+  lock's queue and meanwhile send their requests to the holder over a
+  `BroadcastChannel` of the same name. `status().role` is `holder` or
+  `forwarding` (`connecting` until the holder answers; `opening`,
+  `failed` while it opens or after it failed to; `closed`).
+- **When the holder's tab closes,** the browser releases its lock (as
+  it does for a terminated worker), and the next worker in the queue
+  takes it, opens the file (the log's recovery runs: transactions it
+  committed are there, pending, and flush as usual) and serves every
+  tab. A holder whose last connection closes flushes, closes the file
+  and lets the lock go, and its unanswered requests go to the next
+  holder: nothing it ran goes unanswered.
+- **A busy holder lets go late.** A worker terminated while SQLite runs
+  a statement stops when the engine can interrupt it: at once in
+  Firefox, after about 2 s in Chromium, and in WebKit only once the
+  statement returns (WebKit can't stop a worker inside a WebAssembly
+  call). Its lock, and so the takeover, waits until then.
+- **A request lost with the holder** fails with `ConnectionLostError`:
+  sent, not answered, and the worker running it went away, so it may or
+  may not have committed. Nothing retries a query or transaction,
+  since the client can't tell a read from a write; retry it yourself,
+  written so running it twice is safe. `flush()`, `info()` and
+  `delete()` are safe to repeat, and are sent again to the next holder.
+- **Delete through a client:** `db.delete()` runs on the holder, under
+  the lock, after every call it received before: it closes the
+  database, deletes the file, its journal and the log's branch (and,
+  with the default worker, the directory and IndexedDB database),
+  closes every tab's connection, and keeps the lock until the other
+  workers have left its queue, so none of them opens it again. Don't
+  delete a database's files in any other way: WebKit lets one context
+  delete a file another has open, and the database is lost when it
+  closes. `db.delete({ keepLog: true })` deletes only this device's
+  file, after flushing its pending transactions (if that fails, nothing
+  is deleted), and rebuilds it from the log at once; a file that fails
+  to open can be deleted either way, though its unflushed transactions
+  are lost.
+
 ## Changesets
 
 A session records what statements change, by primary key; the
@@ -247,8 +353,12 @@ row whose key is NULL, and anything outside the main database, so:
 
 `pnpm test` runs the Node tests. `pnpm test:browser` runs the browser
 tests in Chromium; CI also runs them in Firefox and WebKit
-(`pnpm test:browser --browser.name=firefox`). Install the browsers once
-with `pnpm exec playwright install chromium firefox webkit`.
+(`pnpm test:browser --browser.name=firefox`). The worker host's Node
+tests run the handoff between tabs over in-memory locks and channels;
+its browser tests stand in for tabs with dedicated workers of one page,
+since Web Locks and `BroadcastChannel` are origin-wide. Install the
+browsers once with `pnpm exec playwright install chromium firefox
+webkit`.
 
 The browser tests run each page in a persistent Playwright profile (a
 temporary directory): WebKit has no OPFS in Playwright's default

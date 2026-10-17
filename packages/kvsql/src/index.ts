@@ -7,6 +7,10 @@
  * recorded as changesets with SQLite's session extension, behind a
  * schema guard that refuses what the record would silently miss, and
  * flushed in batches to a log on a kvgit branch (`openLog`).
+ *
+ * In a browser the database runs in a dedicated worker: `serve` (or
+ * the default worker, `@agex-ts/kvsql/worker`) serves it to the page's
+ * clients (`@agex-ts/kvsql/client`), with one writer across tabs.
  */
 
 export { loadSqlite, type Sqlite3Static } from './sqlite'
@@ -50,3 +54,26 @@ export {
   type Params,
   type Statement,
 } from './entry'
+export {
+  type Channel,
+  type DatabaseStorage,
+  type Locks,
+  type MessageScope,
+  type Opener,
+  type Server,
+  type ServeOptions,
+  serve,
+} from './host'
+export { type DefaultConfig, openDefault } from './default'
+export {
+  type DatabaseConfig,
+  type DatabaseInfo,
+  DEFAULT_NAME,
+  type DeleteOptions,
+  lockName,
+  type Role,
+  type SerializedError,
+  type Status,
+  reviveError,
+  serializeError,
+} from './protocol'

@@ -119,3 +119,15 @@ export class RebaseRequiredError extends LogError {
     )
   }
 }
+
+/**
+ * The worker serving a request went away before answering it (its tab
+ * closed, or it was terminated), so the request may or may not have
+ * run: a write may or may not have committed. Nothing retries it; a
+ * caller that retries a write should make it safe to run twice (an
+ * upsert, or a check that it hasn't landed). Requests made after this
+ * go to the worker that takes over.
+ */
+export class ConnectionLostError extends KvsqlError {
+  override readonly name: string = 'ConnectionLostError'
+}

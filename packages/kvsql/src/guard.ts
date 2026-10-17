@@ -209,6 +209,10 @@ function refusal(code: number, args: readonly (string | 0)[], label: string): st
       if (pragma !== undefined && MANAGED_PRAGMAS.has(pragma)) {
         return `Setting PRAGMA ${pragma} isn't available in ${label}: the database manages its own file (journaling, page layout) and schema. Reading the pragma is fine.`
       }
+      const hint = pragma === undefined ? undefined : REPLAY_PRAGMAS.get(pragma)
+      if (hint !== undefined) {
+        return `Setting PRAGMA ${pragma} isn't available in ${label}: it changes what statements do on this connection only, so the same SQL would act differently after a reopen, in another tab, or where the database's changes are replayed. ${hint}`
+      }
       break
     }
     case FUNCTION:
@@ -250,6 +254,25 @@ const MANAGED_PRAGMAS = new Set([
   'auto_vacuum',
 ])
 
+/**
+ * Per-connection pragmas that change what a statement does, so a
+ * schema change replayed as SQL on another copy (which runs with the
+ * defaults) could give a different result; refused when they set a
+ * value. `recursive_triggers` lets a trigger fire itself;
+ * `case_sensitive_like` changes what LIKE matches (and has no reading
+ * form). Each maps to the hint its refusal ends with.
+ */
+const REPLAY_PRAGMAS: ReadonlyMap<string, string> = new Map([
+  [
+    'recursive_triggers',
+    "Triggers here don't fire themselves: do a trigger's work in one firing, or walk a hierarchy with a recursive CTE. Reading the pragma is fine.",
+  ],
+  [
+    'case_sensitive_like',
+    'LIKE here ignores ASCII case: for a case-sensitive match use GLOB, or instr().',
+  ],
+])
+
 /** A PRAGMA's name, lowercased, if it sets a value (`PRAGMA x = v` or `PRAGMA x(v)`). */
 function pragmaSet(code: number, args: readonly (string | 0)[]): string | undefined {
   // The authorizer gets the pragma's name, its argument (null when it
@@ -284,10 +307,15 @@ function changesMainSchema(code: number, args: readonly (string | 0)[]): boolean
  *   `writable_schema`, `schema_version`, `page_size` or `auto_vacuum`
  *   (reading them is fine), in any schema: the file's journaling and
  *   layout are kvsql's to manage, and a writable schema bypasses the
- *   record. Per-connection pragmas such as `cache_size` and
- *   `temp_store` are left alone, and so is `foreign_keys`, which is the
- *   connection owner's choice (foreign-key conflicts are only detected
- *   when it is on);
+ *   record;
+ * - setting `recursive_triggers` or `case_sensitive_like`: they change
+ *   what statements do on this connection only, so SQL replayed on
+ *   another copy, under the defaults, could act differently.
+ *   Per-connection pragmas that only tune performance, such as
+ *   `cache_size` and `temp_store`, are left alone, and so is
+ *   `foreign_keys`, which is the connection owner's choice (foreign-key
+ *   conflicts are only detected when it is on, and schema changes
+ *   record the setting they ran under);
  * - `BEGIN`, `COMMIT`, `END` and `ROLLBACK`: the runner owns the
  *   transaction, and one the caller ended would commit changes without
  *   their record (`SAVEPOINT`, `RELEASE` and `ROLLBACK TO` stay

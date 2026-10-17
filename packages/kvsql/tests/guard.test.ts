@@ -145,6 +145,36 @@ describe('refusals', () => {
     )
   })
 
+  it('setting per-connection pragmas that change what statements do', () => {
+    const { db, guard } = guarded()
+    const prefix = (name: string) =>
+      `Setting PRAGMA ${name} isn't available in agex.db: it changes what statements do on this connection only, so the same SQL would act differently after a reopen, in another tab, or where the database's changes are replayed. `
+    for (const [name, hint] of [
+      [
+        'recursive_triggers',
+        /^Triggers here don't fire themselves: .* Reading the pragma is fine\.$/,
+      ],
+      ['case_sensitive_like', /^LIKE here ignores ASCII case: .*GLOB/],
+    ] as const) {
+      for (const sql of [
+        `PRAGMA ${name} = ON`,
+        `PRAGMA main.${name} = 1`,
+        `PRAGMA ${name.toUpperCase()}(true)`,
+        `PRAGMA temp.${name} = 0`,
+      ]) {
+        const message = refusal(guard, () => db.exec(sql)).message
+        expect(message.startsWith(prefix(name)), `${sql}: ${message}`).toBe(true)
+        expect(message.slice(prefix(name).length), sql).toMatch(hint)
+      }
+    }
+    // Reading recursive_triggers stays allowed (case_sensitive_like has
+    // no reading form), and the defaults hold.
+    expect(guard.run(() => db.selectValue('PRAGMA recursive_triggers'))).toBe(0)
+    expect(guard.run(() => db.selectValue("SELECT 'ABC' LIKE 'abc'"))).toBe(1)
+    guard.trusted(() => db.exec('PRAGMA recursive_triggers = ON'))
+    expect(db.selectValue('PRAGMA recursive_triggers')).toBe(1)
+  })
+
   it('transaction control, pointing at transaction([...])', () => {
     const { db, guard } = guarded('CREATE TABLE t (id TEXT PRIMARY KEY NOT NULL, v)')
     for (const [sql, word] of [

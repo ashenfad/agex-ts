@@ -223,8 +223,11 @@ row whose key is NULL, and anything outside the main database, so:
   replay), `load_extension()`, and setting the pragmas
   that change how the file is written (`journal_mode`, `locking_mode`,
   `synchronous`, `writable_schema`, `schema_version`, `page_size`,
-  `auto_vacuum`), `BEGIN`, `COMMIT` and `ROLLBACK` (savepoints stay
-  allowed), and keeps callers out of `_kvsql_*` tables. `guard.run(fn)` turns a refusal into a
+  `auto_vacuum`) or that change what statements do on this connection
+  only, so replayed SQL would act differently elsewhere
+  (`recursive_triggers`, `case_sensitive_like`), `BEGIN`, `COMMIT` and
+  `ROLLBACK` (savepoints stay allowed), and keeps callers out of
+  `_kvsql_*` tables. `guard.run(fn)` turns a refusal into a
   `RefusedError` whose message says what to do instead;
   `guard.trusted(fn)` lifts the refusals for the package's own
   statements. `guard.schemaChanged` reports DDL on the main database,

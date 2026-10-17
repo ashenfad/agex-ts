@@ -200,6 +200,9 @@ describe('tabs', () => {
       { id: 'from b' },
     ])
     expect((await b.info()).holder).toBe('a')
+    // An export from a forwarding tab is the holder's file.
+    const exported = await b.export()
+    expect(new TextDecoder().decode(exported.subarray(0, 15))).toBe('SQLite format 3')
     const refused = await b.query('COMMIT').catch((e: unknown) => e)
     expect(refused).toBeInstanceOf(RefusedError)
     const failed = await b.transaction([['SELEC', null]]).catch((e: unknown) => e)

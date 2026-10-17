@@ -423,6 +423,8 @@ class DatabaseHost<C extends DatabaseConfig> {
         return db.transaction(args[0] as never)
       case 'flush':
         return db.flush()
+      case 'export':
+        return db.export()
       case 'info':
         return {
           holder: this.#self,

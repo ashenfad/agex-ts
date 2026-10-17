@@ -140,6 +140,14 @@ export class DatabaseClient {
     return this.#call('flush', [])
   }
 
+  /**
+   * The database as a standalone SQLite file, without kvsql's own
+   * tables, from the worker holding it (see `LoggedDatabase.export`).
+   */
+  export(): Promise<Uint8Array> {
+    return this.#call('export', [])
+  }
+
   /** The database's state, from the worker holding it. */
   async info(): Promise<DatabaseInfo> {
     const { flushError, ...info } = (await this.#call('info', [])) as unknown as Omit<

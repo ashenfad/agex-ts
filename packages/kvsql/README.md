@@ -156,6 +156,12 @@ await db.close() // flushes first
   2 s old (`flush.maxAgeMs`), after a schema change, on `flush()`, and
   on `close()`. A flush the policy started that fails leaves the
   transactions pending (and calls `onFlushError`); `flush()` throws.
+- **Export:** `export()` gives the database as a standalone SQLite
+  file's bytes (its schema, rows and `user_version`, without kvsql's
+  own tables, vacuumed), for any SQLite tool. It holds every committed
+  transaction, flushed or not. The copy is made in memory (`VACUUM
+  INTO` an in-memory database), so it briefly costs about twice the
+  file's size there.
 - **Opening** brings the file level with the branch: entries it didn't
   write are replayed (so an empty directory rebuilds the database from
   the log), and an entry matching its pending transactions is its own
@@ -274,8 +280,9 @@ one: its access handles are exclusive.
   sent, not answered, and the worker running it went away, so it may or
   may not have committed. Nothing retries a query or transaction,
   since the client can't tell a read from a write; retry it yourself,
-  written so running it twice is safe. `flush()`, `info()` and
-  `delete()` are safe to repeat, and are sent again to the next holder.
+  written so running it twice is safe. `flush()`, `export()`, `info()`
+  and `delete()` are safe to repeat, and are sent again to the next
+  holder.
 - **Delete through a client:** `db.delete()` runs on the holder, under
   the lock, after every call it received before: it closes the
   database, deletes the file, its journal and the log's branch (and,

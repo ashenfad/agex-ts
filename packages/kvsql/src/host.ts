@@ -144,6 +144,7 @@ export function serve<C extends DatabaseConfig>(
     channel: options.channel ?? broadcastChannel,
     openRetryMs: options.openRetryMs ?? 10_000,
     deleteDrainMs: options.deleteDrainMs ?? 2_000,
+    handledDeletes: new Set(),
   }
   const hosts = new Map<string, DatabaseHost<C>>()
   const incarnations = new Map<string, number>()
@@ -194,6 +195,13 @@ interface Env {
   channel: (name: string) => Channel
   openRetryMs: number
   deleteDrainMs: number
+  /**
+   * Deletions this worker has applied, by id: a `deleted` message for
+   * one of them arrives late (after the delete's own answer, or from
+   * an earlier host of the database in this worker) and must not close
+   * a host made since.
+   */
+  handledDeletes: Set<string>
 }
 
 /**
@@ -354,6 +362,23 @@ class DatabaseHost<C extends DatabaseConfig> {
 
   /** Run a request here if this worker holds the lock, or send it to the holder. */
   #dispatch(op: Op, args: unknown[]): Promise<unknown> {
+    if (op === 'delete') {
+      // The deletion's id rides the request, the answer and the
+      // `deleted` broadcast. This worker applies it on the answer,
+      // before the client hears of it, so a connect made right after
+      // gets a new host, which the broadcast arriving later leaves be.
+      const deletion = randomId()
+      return this.#route(op, [args[0] ?? {}, deletion]).then((value) => {
+        if ((value as { deleted?: unknown } | undefined)?.deleted === deletion) {
+          this.#applyDeleted(deletion)
+        }
+        return undefined
+      })
+    }
+    return this.#route(op, args)
+  }
+
+  #route(op: Op, args: unknown[]): Promise<unknown> {
     if (this.#deleted) return Promise.reject(deletedError(this.#config))
     if (this.#role === 'closed') {
       return Promise.reject(this.#brokenError ?? new KvsqlError('the database is closed'))
@@ -385,7 +410,10 @@ class DatabaseHost<C extends DatabaseConfig> {
 
   async #perform(op: Op, args: unknown[]): Promise<unknown> {
     if (this.#deleted) throw deletedError(this.#config)
-    if (op === 'delete') return this.#delete((args[0] ?? {}) as DeleteOptions)
+    if (op === 'delete') {
+      const deletion = typeof args[1] === 'string' ? args[1] : randomId()
+      return this.#delete((args[0] ?? {}) as DeleteOptions, deletion)
+    }
     const db = this.#db
     if (!db) throw this.#openError ?? new KvsqlError('the database is closed')
     switch (op) {
@@ -495,7 +523,10 @@ class DatabaseHost<C extends DatabaseConfig> {
   // --- Delete ---
 
   /** Runs on the holder's chain, so every call before it has finished. */
-  async #delete(options: DeleteOptions): Promise<undefined> {
+  async #delete(
+    options: DeleteOptions,
+    deletion: string,
+  ): Promise<{ deleted: string } | undefined> {
     const db = this.#db
     if (options.keepLog === true) {
       if (db) {
@@ -537,9 +568,14 @@ class DatabaseHost<C extends DatabaseConfig> {
       this.#role = 'failed'
       throw err
     }
+    this.#env.handledDeletes.add(deletion)
     this.#deleted = true
-    void this.#finishDeleted()
-    return undefined
+    // While it keeps the lock to drain the queue, this host announces
+    // nothing and runs nothing more: hosts made since the deletion wait
+    // for the next holder, which starts the database afresh.
+    this.#stopping = true
+    void this.#finishDeleted(deletion)
+    return { deleted: deletion }
   }
 
   /**
@@ -547,14 +583,14 @@ class DatabaseHost<C extends DatabaseConfig> {
    * have left its queue (they leave on the `deleted` message), so none
    * of them takes it and creates the database again; then let go.
    */
-  async #finishDeleted(): Promise<void> {
+  async #finishDeleted(deletion: string): Promise<void> {
     this.#onGone()
     this.#role = 'closed'
     this.#failWaiting(deletedError(this.#config))
     // After the delete's own answer, which is posted once the call
     // returns: the others close on this, failing what they still wait for.
     await sleep(0)
-    this.#post({ t: 'deleted', from: this.#self })
+    this.#post({ t: 'deleted', from: this.#self, id: deletion })
     const name = lockName(this.#config.id)
     const deadline = Date.now() + this.#env.deleteDrainMs
     while (Date.now() < deadline) {
@@ -647,7 +683,8 @@ class DatabaseHost<C extends DatabaseConfig> {
         if (message.from === this.#holder) this.#holderReleased(message.from)
         return
       case 'deleted':
-        this.#onDeleted()
+        if (typeof message.id !== 'string' || this.#env.handledDeletes.has(message.id)) return
+        this.#applyDeleted(message.id)
         return
       case 'flushError':
         this.#notify(message.error)
@@ -799,8 +836,13 @@ class DatabaseHost<C extends DatabaseConfig> {
     }
   }
 
-  /** Another worker deleted the database: leave the lock's queue and close. */
-  #onDeleted(): void {
+  /**
+   * The database was deleted (by the holder this host sent the delete
+   * to, or another tab's): stop serving it, leave the lock's queue and
+   * close.
+   */
+  #applyDeleted(deletion: string): void {
+    this.#env.handledDeletes.add(deletion)
     if (this.#deleted) return
     this.#deleted = true
     this.#onGone()

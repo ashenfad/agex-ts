@@ -119,6 +119,14 @@ export class ChannelHub {
   readonly sent: { owner: string; message: unknown }[] = []
   /** Called as each message is sent, before it is delivered. */
   onSend: ((owner: string, message: unknown) => void) | null = null
+  /**
+   * Decides each delivery, from the sending worker to a receiving one:
+   * a delay in milliseconds (0 when unset), or `'drop'`. Delays that
+   * differ reorder messages between senders, as a browser may; a
+   * sender's messages to one receiver keep their order only while
+   * their delays don't decrease.
+   */
+  route: ((from: string, to: string, message: unknown) => number | 'drop') | null = null
 
   for(owner: string): (name: string) => Channel {
     return (name) => {
@@ -132,9 +140,11 @@ export class ChannelHub {
           const data = structuredClone(message)
           for (const other of this.#members) {
             if (other === me || other.name !== name) continue
+            const route = this.route?.(owner, other.owner, data) ?? 0
+            if (route === 'drop') continue
             setTimeout(() => {
               if (!other.closed && !this.#dead.has(other.owner)) other.listener?.(data)
-            }, 0)
+            }, route)
           }
         },
         listen: (listener) => {

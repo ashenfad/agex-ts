@@ -146,6 +146,7 @@ export function serve<C extends DatabaseConfig>(
     deleteDrainMs: options.deleteDrainMs ?? 2_000,
   }
   const hosts = new Map<string, DatabaseHost<C>>()
+  const incarnations = new Map<string, number>()
   const server: Server<C> = {
     id: worker,
     connect(config, port) {
@@ -160,7 +161,10 @@ export function serve<C extends DatabaseConfig>(
           )
         }
         if (!host) {
-          const created = new DatabaseHost(config, open, env, () => {
+          const n = (incarnations.get(config.id) ?? 0) + 1
+          incarnations.set(config.id, n)
+          const self = n === 1 ? worker : `${worker}#${n}`
+          const created = new DatabaseHost(config, open, env, self, () => {
             if (hosts.get(config.id) === created) hosts.delete(config.id)
           })
           hosts.set(config.id, created)
@@ -192,6 +196,16 @@ interface Env {
   deleteDrainMs: number
 }
 
+/**
+ * How long a request sent to a worker that lost the lock may still be
+ * answered by it, after another worker announced it holds the lock.
+ */
+const LOST_GRACE_MS = 200
+
+/** The first wait between `hello`s while no holder is known, doubling to the most. */
+const HELLO_FIRST_MS = 50
+const HELLO_MAX_MS = 2_000
+
 /** A request waiting for its outcome. */
 interface Pending {
   op: Op
@@ -209,7 +223,12 @@ class DatabaseHost<C extends DatabaseConfig> {
   readonly #branch: string
   readonly #opener: Opener<C>
   readonly #env: Env
-  readonly #worker: string
+  /**
+   * This host's id between workers: the worker's id, with `#<n>` for
+   * the n-th host of the same database in one worker, so a host that
+   * closed is never mistaken for one that came after it.
+   */
+  readonly #self: string
   readonly #onGone: () => void
   readonly #channel: Channel
   readonly #abort = new AbortController()
@@ -217,6 +236,20 @@ class DatabaseHost<C extends DatabaseConfig> {
   #role: Role = 'connecting'
   /** The worker holding the lock, if known. */
   #holder: string | null = null
+  /**
+   * The newest holder accepted, as (epoch, id): an announcement counts
+   * only if it is newer. It stays when the holder becomes unknown, so a
+   * late announcement from an older holder can't bring that one back.
+   */
+  #newest: { epoch: number; id: string } = { epoch: Number.NEGATIVE_INFINITY, id: '' }
+  /** The largest epoch seen in any announcement. */
+  #seenEpoch = 0
+  /** This host's epoch while it holds the lock. */
+  #epoch = 0
+  /** Holders that said they are releasing or closing: never holders again. */
+  readonly #gone = new Set<string>()
+  #helloTimer: ReturnType<typeof setTimeout> | null = null
+  #helloDelay = HELLO_FIRST_MS
   /** Whether this worker holds the lock. */
   #holding = false
   #release: (() => void) | null = null
@@ -241,7 +274,7 @@ class DatabaseHost<C extends DatabaseConfig> {
   /** Each connection's requests not yet answered. */
   readonly #ports = new Map<MessagePort, Set<Promise<unknown>>>()
 
-  constructor(config: C, opener: Opener<C>, env: Env, onGone: () => void) {
+  constructor(config: C, opener: Opener<C>, env: Env, self: string, onGone: () => void) {
     const { name, branch } = resolveConfig(config)
     this.key = configKey(config)
     this.#config = config
@@ -249,11 +282,11 @@ class DatabaseHost<C extends DatabaseConfig> {
     this.#branch = branch
     this.#opener = opener
     this.#env = env
-    this.#worker = env.worker
+    this.#self = self
     this.#onGone = onGone
     this.#channel = env.channel(lockName(config.id))
     this.#channel.listen((message) => this.#onChannel(message as ChannelMessage))
-    this.#post({ t: 'hello', from: this.#worker })
+    this.#seekHolder()
     env.locks
       .request(lockName(config.id), { signal: this.#abort.signal }, () => this.#hold())
       .catch((err: unknown) => {
@@ -307,7 +340,7 @@ class DatabaseHost<C extends DatabaseConfig> {
 
   #status() {
     return {
-      worker: this.#worker,
+      worker: this.#self,
       role: this.#role,
       holder: this.#holder,
       openRetries: this.#openRetries,
@@ -336,7 +369,7 @@ class DatabaseHost<C extends DatabaseConfig> {
   #send(pending: Pending, to: string): void {
     const rid = this.#nextRid++
     this.#inflight.set(rid, { ...pending, to })
-    this.#post({ t: 'request', from: this.#worker, to, rid, op: pending.op, args: pending.args })
+    this.#post({ t: 'request', from: this.#self, to, rid, op: pending.op, args: pending.args })
   }
 
   /** Queue a call on the holder's chain. */
@@ -364,7 +397,7 @@ class DatabaseHost<C extends DatabaseConfig> {
         return db.flush()
       case 'info':
         return {
-          holder: this.#worker,
+          holder: this.#self,
           name: db.name,
           branch: db.branch,
           seq: db.seq,
@@ -391,8 +424,14 @@ class DatabaseHost<C extends DatabaseConfig> {
       }
       this.#holding = true
       this.#role = 'opening'
-      this.#post({ t: 'holder', from: this.#worker })
-      this.#setHolder(this.#worker)
+      // Newer than every holder this host has heard of, even if the
+      // clock stepped back; the clock keeps it newer than holders it
+      // hasn't heard of, which held the lock earlier.
+      this.#epoch = Math.max(this.#seenEpoch + 1, Date.now())
+      this.#seenEpoch = this.#epoch
+      this.#newest = { epoch: this.#epoch, id: this.#self }
+      this.#post({ t: 'holder', from: this.#self, epoch: this.#epoch })
+      this.#setHolder(this.#self)
       void this.#enqueue(() => this.#open())
       for (const pending of this.#unsent.splice(0)) this.#runHere(pending)
     })
@@ -445,7 +484,7 @@ class DatabaseHost<C extends DatabaseConfig> {
 
   #flushFailed(err: unknown): void {
     const error = serializeError(err)
-    this.#post({ t: 'flushError', from: this.#worker, error })
+    this.#post({ t: 'flushError', from: this.#self, error })
     this.#notify(error)
   }
 
@@ -515,7 +554,7 @@ class DatabaseHost<C extends DatabaseConfig> {
     // After the delete's own answer, which is posted once the call
     // returns: the others close on this, failing what they still wait for.
     await sleep(0)
-    this.#post({ t: 'deleted', from: this.#worker })
+    this.#post({ t: 'deleted', from: this.#self })
     const name = lockName(this.#config.id)
     const deadline = Date.now() + this.#env.deleteDrainMs
     while (Date.now() < deadline) {
@@ -543,7 +582,7 @@ class DatabaseHost<C extends DatabaseConfig> {
         this.#storage = null
         await storage?.close?.()
       }).catch(() => {})
-      this.#post({ t: 'released', from: this.#worker })
+      this.#post({ t: 'released', from: this.#self })
     }
     this.#role = 'closed'
     this.#failWaiting(new KvsqlError('the database is closed'))
@@ -551,6 +590,7 @@ class DatabaseHost<C extends DatabaseConfig> {
   }
 
   #letGo(): void {
+    this.#stopSeeking()
     this.#holding = false
     this.#release?.()
     this.#release = null
@@ -586,13 +626,15 @@ class DatabaseHost<C extends DatabaseConfig> {
   }
 
   #onChannel(message: ChannelMessage): void {
-    if (!message || typeof message !== 'object' || message.from === this.#worker) return
+    if (!message || typeof message !== 'object' || message.from === this.#self) return
     switch (message.t) {
       case 'hello':
-        if (this.#holding) this.#post({ t: 'holder', from: this.#worker })
+        if (this.#holding && !this.#stopping) {
+          this.#post({ t: 'holder', from: this.#self, epoch: this.#epoch })
+        }
         return
       case 'holder':
-        if (!this.#holding) this.#setHolder(message.from)
+        this.#onHolder(message.from, message.epoch)
         return
       case 'request':
         this.#onRequest(message)
@@ -601,6 +643,7 @@ class DatabaseHost<C extends DatabaseConfig> {
         this.#onResponse(message)
         return
       case 'released':
+        this.#gone.add(message.from)
         if (message.from === this.#holder) this.#holderReleased(message.from)
         return
       case 'deleted':
@@ -610,6 +653,46 @@ class DatabaseHost<C extends DatabaseConfig> {
         this.#notify(message.error)
         return
     }
+  }
+
+  /**
+   * An announcement that `worker` holds the lock. Messages from different
+   * workers can arrive out of order, so an old holder's announcement
+   * (an answer to a `hello` just before it let go) can come after its
+   * successor's: only one newer than the newest accepted counts, and
+   * none from a holder that said it was going.
+   */
+  #onHolder(worker: string, epoch: number): void {
+    if (typeof epoch !== 'number' || Number.isNaN(epoch)) return
+    this.#seenEpoch = Math.max(this.#seenEpoch, epoch)
+    if (this.#holding || this.#gone.has(worker)) return
+    const newest = this.#newest
+    if (!(epoch > newest.epoch || (epoch === newest.epoch && worker > newest.id))) return
+    this.#newest = { epoch, id: worker }
+    this.#setHolder(worker)
+  }
+
+  /**
+   * Ask for the holder until one is known: `hello` now, then again with
+   * backoff, which the holder answers by announcing itself.
+   */
+  #seekHolder(): void {
+    if (this.#helloTimer !== null) return
+    const ask = () => {
+      this.#helloTimer = null
+      if (this.#holder !== null || this.#holding || this.#role === 'closed') return
+      this.#post({ t: 'hello', from: this.#self })
+      this.#helloTimer = setTimeout(ask, this.#helloDelay)
+      ;(this.#helloTimer as { unref?: () => void }).unref?.()
+      this.#helloDelay = Math.min(this.#helloDelay * 2, HELLO_MAX_MS)
+    }
+    ask()
+  }
+
+  #stopSeeking(): void {
+    if (this.#helloTimer !== null) clearTimeout(this.#helloTimer)
+    this.#helloTimer = null
+    this.#helloDelay = HELLO_FIRST_MS
   }
 
   /**
@@ -644,8 +727,9 @@ class DatabaseHost<C extends DatabaseConfig> {
       }, LOST_GRACE_MS)
     }
     this.#holder = worker
+    this.#stopSeeking()
     this.#unsent.unshift(...resend)
-    if (worker === this.#worker) return
+    if (worker === this.#self) return
     if (this.#role === 'connecting') this.#role = 'forwarding'
     for (const pending of this.#unsent.splice(0)) this.#send(pending, worker)
   }
@@ -663,14 +747,15 @@ class DatabaseHost<C extends DatabaseConfig> {
     }
     this.#holder = null
     if (this.#role === 'forwarding') this.#role = 'connecting'
+    this.#seekHolder()
   }
 
   #onRequest(message: Extract<ChannelMessage, { t: 'request' }>): void {
-    if (message.to !== this.#worker) return
+    if (message.to !== this.#self) return
     const answer = (fields: Partial<Extract<ChannelMessage, { t: 'response' }>>) =>
       this.#post({
         t: 'response',
-        from: this.#worker,
+        from: this.#self,
         to: message.from,
         rid: message.rid,
         ok: false,
@@ -694,14 +779,19 @@ class DatabaseHost<C extends DatabaseConfig> {
   }
 
   #onResponse(message: Extract<ChannelMessage, { t: 'response' }>): void {
-    if (message.to !== this.#worker) return
+    if (message.to !== this.#self) return
     const pending = this.#inflight.get(message.rid)
     if (!pending || pending.to !== message.from) return
     this.#inflight.delete(message.rid)
     if (message.retry) {
-      if (this.#holder === message.from) this.#holder = null
-      if (this.#role === 'forwarding') this.#role = 'connecting'
+      // A holder answers `retry` only once it is closing.
+      this.#gone.add(message.from)
       this.#unsent.push(pending)
+      if (this.#holder === message.from) {
+        this.#holder = null
+        if (this.#role === 'forwarding') this.#role = 'connecting'
+        this.#seekHolder()
+      }
     } else if (message.ok) {
       pending.resolve(message.value)
     } else {
@@ -724,12 +814,6 @@ class DatabaseHost<C extends DatabaseConfig> {
 }
 
 // --- Helpers ---
-
-/**
- * How long a request sent to a worker that lost the lock may still be
- * answered by it, after another worker announced it holds the lock.
- */
-const LOST_GRACE_MS = 200
 
 function reply(port: MessagePort, message: Response): void {
   try {

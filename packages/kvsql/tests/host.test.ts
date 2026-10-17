@@ -16,7 +16,7 @@ import {
   StatementError,
 } from '../src/client'
 import { type DatabaseConfig, MemoryDirectory, lockName } from '../src/index'
-import { Origin, until } from './host-fakes'
+import { type FakeWorker, Origin, until } from './host-fakes'
 import { CrashingStore, quietSqliteWarnings } from './log-helpers'
 
 quietSqliteWarnings()
@@ -279,6 +279,73 @@ describe('tabs', () => {
     expect(await flush).toMatchObject({ from: 2, to: 2 })
     expect(await role(b)).toBe('holder')
     expect((await b.query('SELECT count(*) AS n FROM t')).rows).toEqual([{ n: 1 }])
+  })
+})
+
+describe('announcements out of order', () => {
+  type Message = { t: string }
+  const t = (m: unknown) => (m as Message).t
+
+  /** Three tabs: o holds, n waits, and f's hello is answered by o late, after o lets go. */
+  async function staleAnnouncement(
+    o: Origin,
+    letGo: (wo: FakeWorker, a: DatabaseClient) => unknown,
+  ) {
+    const wo = o.worker('o')
+    const a = wo.connect(CONFIG)
+    await a.query('CREATE TABLE t (id INTEGER PRIMARY KEY)')
+    const n = client(o.worker('n').connect(CONFIG))
+    await until(async () => (await role(n)) === 'forwarding', 3_000, 'n forwarding')
+    o.channels.route = (from, to, m) => (from === 'o' && to === 'f' && t(m) === 'holder' ? 300 : 0)
+    const mark = o.channels.sent.length
+    const f = client(o.worker('f').connect(CONFIG))
+    await until(
+      () => o.channels.sent.slice(mark).some((s) => s.owner === 'o' && t(s.message) === 'holder'),
+      1_000,
+      "o's answer to f",
+    )
+    await letGo(wo, a)
+    await until(async () => (await role(n)) === 'holder', 3_000, 'n to hold')
+    // o's announcement lands now, after n's.
+    await new Promise((r) => setTimeout(r, 400))
+    expect(await f.status()).toMatchObject({ role: 'forwarding', holder: 'n' })
+    const answer = await Promise.race([
+      f.query('INSERT INTO t VALUES (1)'),
+      new Promise((r) => setTimeout(() => r('no answer'), 2_000)),
+    ])
+    expect(answer).toMatchObject({ changes: 1 })
+    expect((await n.query('SELECT count(*) AS c FROM t')).rows).toEqual([{ c: 1 }])
+  }
+
+  it('ignores a late announcement from a holder that released the lock', async () => {
+    await staleAnnouncement(setup(), (_wo, a) => a.close())
+  })
+
+  it('ignores a late announcement from a holder that was killed', async () => {
+    await staleAnnouncement(setup(), (wo) => wo.kill())
+  })
+
+  it('asks for the holder again when it misses the announcement', async () => {
+    const o = setup()
+    const a = client(o.worker('o').connect(CONFIG))
+    await a.query('CREATE TABLE t (id INTEGER PRIMARY KEY)')
+    const n = client(o.worker('n').connect(CONFIG))
+    await until(async () => (await role(n)) === 'forwarding', 3_000, 'n forwarding')
+    const f = client(o.worker('f').connect(CONFIG))
+    await until(async () => (await role(f)) === 'forwarding', 3_000, 'f forwarding')
+    // n's announcement on taking the lock never reaches f.
+    let dropped = 0
+    o.channels.route = (from, to, m) =>
+      from === 'n' && to === 'f' && t(m) === 'holder' && dropped++ === 0 ? 'drop' : 0
+    const mark = o.channels.sent.length
+    await a.close()
+    expect((await f.query('INSERT INTO t VALUES (1)')).changes).toBe(1)
+    expect(dropped).toBeGreaterThanOrEqual(2)
+    expect(await f.status()).toMatchObject({ holder: 'n' })
+    const hellos = o.channels.sent
+      .slice(mark)
+      .filter((s) => s.owner === 'f' && t(s.message) === 'hello')
+    expect(hellos.length).toBeGreaterThanOrEqual(1)
   })
 })
 

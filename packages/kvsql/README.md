@@ -235,8 +235,12 @@ await db.close() // flushes first
   rebuilt from the epoch's snapshot (`recovery.snapshot`); the file the
   snapshot was taken from, left on the old epoch by a crash, finishes
   its move (it is known by its position and its pending transactions'
-  digest); and one on an older epoch holding transactions no log has is
-  refused (`LogError`). `deleteLog(repo, branch)` deletes every epoch of
+  digest). One on an older epoch with changes the snapshot may not hold
+  (entries past where it was taken, or pending transactions) stays on
+  its own epoch while that epoch's branch is in the repository: another
+  device's epoch replaced it, and `rebase()` moves it over
+  (`recovery.stayed` names the newer epoch). One whose epoch's branch is
+  gone holding transactions no log has is refused (`LogError`). `deleteLog(repo, branch)` deletes every epoch of
   a log.
 - **The content hash.** `contentHash()` is a SHA-256 of the database's
   schema, header and every row in key order (each value `quote()`d, so
@@ -273,8 +277,35 @@ await db.close() // flushes first
   Rebasing again with `keep: 'theirs'` takes the log's side (the file
   is rebuilt from the log when this copy's own schema change can't be
   undone); `keep: 'mine'` keeps this copy's, after an entry that undoes
-  the log's (not yet over a schema change of the log's). Either way the
-  side not kept stays as a checkpoint, on this device only (`kept`).
+  the log's, or, over a schema change of the log's, which can't be
+  undone, as a new epoch whose snapshot is this copy's file (after
+  every epoch there is, and after every transaction of either side).
+  Either way the side not kept stays as a checkpoint, on this device
+  only (`kept`).
+- **Rebase onto a new epoch.** With a newer epoch of its log in the
+  repository (another device's), `rebase()` moves the database onto its
+  tip. The newer epoch's snapshot folds in what changed before it, so
+  there is no log to undo or apply: the database's changes since
+  `synced` (the last commit of its own epoch the newer one holds, such
+  as the one this copy last synced; by default, where the snapshot was
+  taken, if the repository has that commit) are applied to a copy
+  rebuilt at the tip beside the file (`<name>-rebase`), committed after
+  the tip, and that copy replaces the file; the old epoch goes. With
+  nothing of its own, the database just moves, comparing its content
+  hash first if it is where the snapshot was taken. Conflicts and
+  `keep` work as within an epoch; keeping `'mine'` starts an epoch after
+  the newer one. A crash leaves it on its old epoch or rebased: opening
+  finishes a built copy (it names the new epoch, at the rebase branch's
+  tip), moving the epoch's branch only from where the rebase started.
+- **Adopt.** `adopt(tip, { since?, keep? })` takes into the database
+  entries another copy pushed to the epoch it moved on from, which its
+  snapshot doesn't hold (pushed while it started the epoch): those on
+  `tip`'s line after `since` (by default where that line parted from
+  the one the snapshot was taken on), applied in one file transaction
+  as entries after the database's own. A conflict changes nothing;
+  `keep: 'mine'` takes nothing and keeps `tip` as a checkpoint. The last
+  entry records `tip`, so adopting it again does nothing, and a later
+  tip starts after it.
   A crash leaves the database as it was or rebased: opening finishes
   the branch's move if the file committed, from the head a tag
   (`kvsql/rebase/<log>`) recorded and only from there (a branch that

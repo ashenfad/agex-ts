@@ -449,6 +449,8 @@ class DatabaseHost<C extends DatabaseConfig> {
         return db.contentHash()
       case 'rebase':
         return db.rebase((args[0] as string | null) ?? undefined, (args[1] ?? {}) as never)
+      case 'adopt':
+        return db.adopt(args[0] as string, (args[1] ?? {}) as never)
       case 'info':
         return {
           holder: this.#self,

@@ -80,7 +80,13 @@ describe('a new epoch', () => {
     expect(await db.flush()).toMatchObject({ from: 5, to: 5 })
     const fresh = await replica(repo)
     expect(fresh.branch).toBe(NEXT)
-    expect(fresh.recovery).toEqual({ ownFlush: false, entries: 1, transactions: 1, snapshot: true })
+    expect(fresh.recovery).toEqual({
+      ownFlush: false,
+      entries: 1,
+      transactions: 1,
+      rebased: 0,
+      snapshot: true,
+    })
     expect(await dump(fresh)).toEqual(await dump(db))
     expect(await dump(fresh)).not.toEqual(before)
     expect(await integrity(fresh)).toBe('ok')

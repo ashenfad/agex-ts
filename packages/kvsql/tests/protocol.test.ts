@@ -35,7 +35,28 @@ describe('errors across messages', () => {
       [new LogError('diverged'), LogError, {}],
       [new CorruptEntryError('abc', 'bad digest'), CorruptEntryError, { commit: 'abc' }],
       [new ReplayError('abc', 7, 'conflict'), ReplayError, { commit: 'abc', seq: 7 }],
-      [new RebaseRequiredError(3, 1), RebaseRequiredError, { pending: 3, entries: 1 }],
+      [
+        new RebaseRequiredError(3, 1, {
+          conflicts: [
+            {
+              kind: 'DATA',
+              action: 'abort',
+              op: 'UPDATE',
+              table: 't',
+              columns: 2,
+              indirect: false,
+              pk: [1],
+            },
+          ],
+        }),
+        RebaseRequiredError,
+        { pending: 3, entries: 1, schemaChange: null, conflicts: [{ kind: 'DATA', pk: [1] }] },
+      ],
+      [
+        new RebaseRequiredError(2, 1, { schemaChange: 'theirs' }),
+        RebaseRequiredError,
+        { schemaChange: 'theirs', conflicts: [] },
+      ],
       [new ConnectionLostError('gone'), ConnectionLostError, {}],
     ]
     for (const [original, Class, fields] of cases) {

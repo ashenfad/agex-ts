@@ -30,6 +30,8 @@ import type {
   FlushPolicy,
   FlushResult,
   QueryResult,
+  RebaseOptions,
+  RebaseResult,
   Recovery,
   RestoreResult,
 } from './log'
@@ -182,6 +184,7 @@ export interface Ops {
   checkpoints: { args: []; result: Checkpoint[] }
   deleteCheckpoint: { args: [id: string]; result: undefined }
   restore: { args: [id: string]; result: RestoreResult }
+  rebase: { args: [onto: string | null, options: RebaseOptions]; result: RebaseResult }
   info: { args: []; result: DatabaseInfo }
   delete: { args: [options: DeleteOptions]; result: undefined }
   status: { args: []; result: Status }
@@ -193,7 +196,8 @@ export type Op = keyof Ops
 /**
  * Requests that are safe to run twice, so one sent to a worker that
  * went away before answering is sent again to the next one: reading
- * the state or the file, flushing whatever is pending, and deleting. A query or a
+ * the state or the file, flushing whatever is pending, deleting, and
+ * rebasing (a rebase that landed finds the database up to date). A query or a
  * transaction might write, and might have committed, so it fails with
  * {@link ConnectionLostError} instead.
  */
@@ -204,6 +208,7 @@ export const RETRY_SAFE: ReadonlySet<Op> = new Set<Op>([
   'delete',
   'checkpoints',
   'deleteCheckpoint',
+  'rebase',
 ])
 
 /** Marks the message a client sends a worker to connect to a database. */
@@ -279,9 +284,11 @@ export interface SerializedError {
   cause?: SerializedError
   /**
    * The error's own fields with plain values (a `StatementError`'s
-   * `index`, a `SqliteError`'s `rc`, SQLite's `resultCode`, ...).
+   * `index`, a `SqliteError`'s `rc`, SQLite's `resultCode`, ...), and
+   * arrays of plain data (a `RebaseRequiredError`'s `conflicts`), which
+   * a message clones.
    */
-  fields?: Record<string, string | number | boolean | bigint | null>
+  fields?: Record<string, string | number | boolean | bigint | null | readonly unknown[]>
 }
 
 type ErrorClass = new (...args: never[]) => Error
@@ -324,7 +331,9 @@ export function serializeError(err: unknown, depth = 0): SerializedError {
   for (const key of Object.keys(err)) {
     if (key === 'name' || key === 'message' || key === 'stack' || key === 'cause') continue
     const value = (err as unknown as Record<string, unknown>)[key]
-    if (value === null || FIELD_TYPES.has(typeof value)) fields[key] = value as never
+    if (value === null || FIELD_TYPES.has(typeof value) || Array.isArray(value)) {
+      fields[key] = value as never
+    }
   }
   if (Object.keys(fields).length > 0) out.fields = fields
   return out

@@ -537,6 +537,7 @@ describe('opening', () => {
       ownFlush: false,
       entries: 0,
       transactions: 0,
+      rebased: 0,
       snapshot: false,
     })
     expect(await dump(again)).toMatchObject({ t: [{ id: 'a' }, { id: 'b' }] })
@@ -930,25 +931,48 @@ describe('replay refuses what SQLite would skip', () => {
 })
 
 describe('another copy flushing to the same branch', () => {
-  it('needs a rebase, which throws its own error', async () => {
+  it("rebases its pending transactions onto the other copy's entries", async () => {
+    const repo = await repoOver()
+    const a = await track(open(new MemoryDirectory(), repo))
+    await a.query('CREATE TABLE t (id TEXT PRIMARY KEY NOT NULL, v)')
+    const b = await track(open(new MemoryDirectory(), repo, { flush: { every: 0 } }))
+    expect(b.schemaVersion).toBe(1)
+    await a.query("INSERT INTO t VALUES ('a', 1)")
+    await a.flush()
+    await b.query("INSERT INTO t VALUES ('b', 1)")
+    const flushed = await b.flush()
+    // the rebase flushed it, numbered after a's
+    expect(flushed).toBeNull()
+    expect(b.pendingCount).toBe(0)
+    expect(b.seq).toBe(3)
+    expect(await dump(b)).toMatchObject({ t: [{ id: 'a' }, { id: 'b' }] })
+    const c = await track(replica(repo))
+    expect(await dump(c)).toEqual(await dump(b))
+  })
+
+  it("needs a rebase it can't make itself when the copies conflict, which throws its own error", async () => {
     const repo = await repoOver()
     const a = await track(open(new MemoryDirectory(), repo))
     await a.query('CREATE TABLE t (id TEXT PRIMARY KEY NOT NULL, v)')
     const bDir = new MemoryDirectory()
     const b = await track(open(bDir, repo, { flush: { every: 0 } }))
-    expect(b.schemaVersion).toBe(1)
     await a.query("INSERT INTO t VALUES ('a', 1)")
     await a.flush()
-    await b.query("INSERT INTO t VALUES ('b', 1)")
+    await b.query("INSERT INTO t VALUES ('a', 2)")
     const err = await b.flush().catch((e: unknown) => e)
     expect(err).toBeInstanceOf(RebaseRequiredError)
-    expect(err).toMatchObject({ pending: 1, entries: 1 })
+    expect(err).toMatchObject({
+      pending: 1,
+      entries: 1,
+      schemaChange: null,
+      conflicts: [{ kind: 'CONFLICT', op: 'INSERT', table: 't', pk: ['a'] }],
+    })
     expect((err as Error).message).toBe(
-      "this database has 1 transaction not yet in its log, and the log has 1 entry it didn't write: they need a rebase, which isn't supported yet",
+      "this database has 1 transaction not yet in its log, and the log has 1 entry it didn't write, which they can't follow (1 conflict): rebase keeping one side",
     )
     // Nothing changed: b keeps its transaction, the log a's entry.
     expect(b.pendingCount).toBe(1)
-    expect(await dump(b)).toMatchObject({ t: [{ id: 'b', v: 1 }] })
+    expect(await dump(b)).toMatchObject({ t: [{ id: 'a', v: 2 }] })
     // Opening the file again refuses the same way.
     await expect(open(new MemoryDirectory(bDir.image()), repo)).rejects.toThrow(RebaseRequiredError)
     // With nothing pending, a copy just catches up.

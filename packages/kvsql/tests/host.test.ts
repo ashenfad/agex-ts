@@ -15,7 +15,7 @@ import {
   RefusedError,
   StatementError,
 } from '../src/client'
-import { type DatabaseConfig, MemoryDirectory, type Opener, lockName } from '../src/index'
+import { type DatabaseConfig, MemoryDirectory, type Opener, lockName, openLog } from '../src/index'
 import { Disk, type FakeWorker, Origin, until } from './host-fakes'
 import { CrashingStore, quietSqliteWarnings } from './log-helpers'
 
@@ -221,7 +221,13 @@ describe('tabs', () => {
     await until(async () => (await role(b)) === 'holder', 3_000, 'b to hold')
     const info = await b.info()
     expect(info).toMatchObject({ holder: 'b', pendingCount: 0, seq: 2 })
-    expect(info.recovery).toEqual({ ownFlush: false, entries: 0, transactions: 0, snapshot: false })
+    expect(info.recovery).toEqual({
+      ownFlush: false,
+      entries: 0,
+      transactions: 0,
+      rebased: 0,
+      snapshot: false,
+    })
     expect((await b.query('SELECT id FROM t')).rows).toEqual([{ id: 1 }])
   })
 
@@ -254,7 +260,13 @@ describe('tabs', () => {
     expect(await c.status()).toMatchObject({ role: 'forwarding', holder: 'b' })
     const info = await c.info()
     expect(info).toMatchObject({ holder: 'b', pendingCount: 3, seq: 4 })
-    expect(info.recovery).toEqual({ ownFlush: false, entries: 0, transactions: 0, snapshot: false })
+    expect(info.recovery).toEqual({
+      ownFlush: false,
+      entries: 0,
+      transactions: 0,
+      rebased: 0,
+      snapshot: false,
+    })
     expect((await c.query('SELECT count(*) AS n FROM t')).rows).toEqual([{ n: 3 }])
     expect(await c.flush()).toMatchObject({ from: 2, to: 4 })
     await c.query('INSERT INTO t VALUES (4)')
@@ -420,7 +432,13 @@ describe('delete', () => {
     await until(async () => (await role(b)) === 'forwarding', 3_000, 'forwarding')
     await b.delete({ keepLog: true })
     const info = await b.info()
-    expect(info.recovery).toEqual({ ownFlush: false, entries: 2, transactions: 2, snapshot: false })
+    expect(info.recovery).toEqual({
+      ownFlush: false,
+      entries: 2,
+      transactions: 2,
+      rebased: 0,
+      snapshot: false,
+    })
     expect(info.pendingCount).toBe(0)
     expect((await b.query('SELECT id FROM t')).rows).toEqual([{ id: 1 }])
     expect((await a.query('SELECT id FROM t')).rows).toEqual([{ id: 1 }])
@@ -531,7 +549,13 @@ describe('epochs', () => {
 
     await b.delete({ keepLog: true })
     const info = await b.info()
-    expect(info.recovery).toEqual({ ownFlush: false, entries: 1, transactions: 1, snapshot: true })
+    expect(info.recovery).toEqual({
+      ownFlush: false,
+      entries: 1,
+      transactions: 1,
+      rebased: 0,
+      snapshot: true,
+    })
     expect((await a.query('SELECT id FROM t')).rows).toEqual([{ id: 1 }, { id: 2 }])
   })
 
@@ -566,5 +590,35 @@ describe('checkpoints', () => {
     expect((await a.query('SELECT * FROM t')).rows).toEqual([{ id: 1 }])
     await a.deleteCheckpoint(cp.id)
     expect((await b.checkpoints()).map((c) => c.auto)).toEqual([true])
+  })
+})
+
+describe('rebase', () => {
+  it("is made by the holder, for a forwarding tab too, onto another copy's entries", async () => {
+    const store = new Memory()
+    const o = setup(store)
+    const a = client(o.worker('a').connect(CONFIG))
+    await a.query('CREATE TABLE t (id INTEGER PRIMARY KEY NOT NULL, v TEXT)')
+    await a.flush()
+    const b = client(o.worker('b').connect(CONFIG))
+    await until(async () => (await role(b)) === 'forwarding', 3_000, 'forwarding')
+    // another copy of the database, on another device, flushed first
+    const other = await openLog({
+      dir: new MemoryDirectory(),
+      name: 'other.db',
+      repo: await Repo.open(store),
+      branch: 'kvsql/test/0',
+      flush: { every: 0, maxAgeMs: 0 },
+    })
+    await other.query("INSERT INTO t VALUES (1, 'other')")
+    await other.flush()
+    await other.close()
+    await a.query("INSERT INTO t VALUES (2, 'a')")
+    expect(await b.rebase()).toMatchObject({ status: 'rebased', mine: 1, theirs: 1, seq: 3 })
+    expect((await a.query('SELECT * FROM t ORDER BY id')).rows).toEqual([
+      { id: 1, v: 'other' },
+      { id: 2, v: 'a' },
+    ])
+    expect(await b.info()).toMatchObject({ pendingCount: 0, seq: 3 })
   })
 })

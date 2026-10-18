@@ -302,6 +302,7 @@ describe('the worker host', () => {
         ownFlush: false,
         entries: 0,
         transactions: 0,
+        rebased: 0,
         snapshot: false,
       })
       expect((await other.query('SELECT count(*) AS n FROM t')).rows).toEqual([{ n: 3 }])
@@ -398,6 +399,7 @@ describe('the worker host', () => {
         ownFlush: false,
         entries: 2,
         transactions: 2,
+        rebased: 0,
         snapshot: false,
       })
       expect((await a.query('SELECT id FROM t')).rows).toEqual([{ id: 1 }])
@@ -451,6 +453,7 @@ describe('the worker host', () => {
         ownFlush: false,
         entries: 1,
         transactions: 1,
+        rebased: 0,
         snapshot: true,
       })
       expect((await a.query('SELECT id, hex(v) AS v FROM t ORDER BY id')).rows).toEqual(before)

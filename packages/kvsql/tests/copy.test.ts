@@ -223,7 +223,13 @@ describe('a logged copy', () => {
     expect(await repo.branches.get('db/copy/0')).toBe(head)
 
     const copy = await track(open(to, repo, { name: COPY, branch: 'db/copy/0' }))
-    expect(copy.recovery).toEqual({ ownFlush: false, entries: 0, transactions: 0, snapshot: false })
+    expect(copy.recovery).toEqual({
+      ownFlush: false,
+      entries: 0,
+      transactions: 0,
+      rebased: 0,
+      snapshot: false,
+    })
     expect(await dump(copy)).toEqual(await dump(db))
     await copy.query("UPDATE notes SET body = 'mine' WHERE id = 'b'")
     await copy.flush()

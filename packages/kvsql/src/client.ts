@@ -10,7 +10,15 @@
 import type { Checkpoint } from './checkpoint'
 import type { Params, Statement } from './entry'
 import { KvsqlError } from './errors'
-import type { CopyResult, EpochResult, FlushResult, QueryResult, RestoreResult } from './log'
+import type {
+  CopyResult,
+  EpochResult,
+  FlushResult,
+  QueryResult,
+  RebaseOptions,
+  RebaseResult,
+  RestoreResult,
+} from './log'
 import {
   CONNECT,
   type ConnectMessage,
@@ -41,6 +49,9 @@ export type {
   EpochResult,
   FlushResult,
   QueryResult,
+  RebaseOptions,
+  RebaseResult,
+  RebaseSide,
   Recovery,
   RestoreResult,
 } from './log'
@@ -200,6 +211,15 @@ export class DatabaseClient {
    */
   restore(id: string): Promise<RestoreResult> {
     return this.#call('restore', [id])
+  }
+
+  /**
+   * Rebase the database onto `onto`, a commit of its log another copy
+   * wrote, or its branch's tip, by the worker holding it (see
+   * `LoggedDatabase.rebase`). Every tab sees the result.
+   */
+  rebase(onto?: string, options: RebaseOptions = {}): Promise<RebaseResult> {
+    return this.#call('rebase', [onto ?? null, options])
   }
 
   /** The database's state, from the worker holding it. */

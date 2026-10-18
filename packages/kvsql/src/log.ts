@@ -34,6 +34,7 @@ import {
   UnknownBranchError,
   UnknownCommitError,
   type Worktree,
+  publishHead,
 } from '@agex-ts/kvgit'
 import type { Database, SqlValue, Sqlite3Static } from '@sqlite.org/sqlite-wasm'
 import {
@@ -43,6 +44,7 @@ import {
   applyChangeset,
   changesetTables,
   combineChangesets,
+  invertChangeset,
   startSession,
 } from './changeset'
 import {
@@ -74,9 +76,12 @@ import {
   decodeEntry,
   decodeSqlBody,
   encodeEntry,
+  encodePieces,
   encodeSqlBody,
   entryInfo,
   parseEntryInfo,
+  pieceOf,
+  renumber,
   schemaAfter,
   sha256Hex,
 } from './entry'
@@ -87,7 +92,9 @@ import {
   epochsOf,
   finished,
   parseEpoch,
+  parseSnapshotInfo,
   readSnapshot,
+  rebaseBranch,
   restoreBranch,
   restoreSnapshot,
   snapshotCommit,
@@ -271,6 +278,57 @@ export interface RestoreResult {
   branch: string
 }
 
+/** A side of a rebase: this database's changes, or the log's. */
+export type RebaseSide = 'mine' | 'theirs'
+
+export interface RebaseOptions {
+  /**
+   * Settle a conflict by keeping one side: `'mine'`, this database's
+   * changes since it and the log parted, with an entry before them
+   * undoing the log's; `'theirs'`, the log's, this database's dropped.
+   * The side not kept stays as a checkpoint. Without it, a conflict
+   * changes nothing.
+   */
+  keep?: RebaseSide
+}
+
+/** What a rebase did. */
+export interface RebaseResult {
+  /**
+   * - `up-to-date`: the database's log holds the commit already.
+   * - `fast-forwarded`: the database had nothing the log lacks, and
+   *   caught up with it.
+   * - `rebased`: the database's own changes since it and the log
+   *   parted now follow the log's, numbered after them.
+   * - `conflict`: they can't follow as they are (`conflicts`, or a
+   *   `schemaChange`); nothing changed. Rebase again keeping a side.
+   * - `kept`: a conflict settled by keeping one side (`kept`); the
+   *   other is `checkpoint`.
+   */
+  status: 'up-to-date' | 'fast-forwarded' | 'rebased' | 'conflict' | 'kept'
+  /** For `kept`: the side kept. */
+  kept: RebaseSide | null
+  /** For `conflict`: what re-applying the database's changes after the log's met. */
+  conflicts: Conflict[]
+  /**
+   * For `conflict`: the side whose schema change stopped it, if one
+   * did. A changeset is recorded under one schema, so the database's
+   * changes can't follow a schema change of the log's, nor be undone
+   * past one of their own.
+   */
+  schemaChange: RebaseSide | null
+  /** The database's transactions the log didn't hold. */
+  mine: number
+  /** The log's transactions the database didn't hold. */
+  theirs: number
+  /** For `kept`: the side not kept, as a checkpoint to restore. */
+  checkpoint: Checkpoint | null
+  /** The database's last transaction after. */
+  seq: number
+  /** The log commit the file is at after. */
+  base: string
+}
+
 /** A new epoch, which the database moved to. */
 export interface EpochResult {
   /** Its branch, which the database's log is on now. */
@@ -315,6 +373,11 @@ export interface Recovery {
   entries: number
   /** Transactions those entries held. */
   transactions: number
+  /**
+   * This file's transactions, pending or in entries the log's branch
+   * no longer holds, rebased onto entries another copy wrote.
+   */
+  rebased: number
   /**
    * Whether the file was rebuilt from the epoch's snapshot first: it
    * was missing, or behind on an older epoch with nothing pending.
@@ -408,6 +471,12 @@ interface Shot {
   previous: { branch: string; base: string; pending: string | null }
 }
 
+/** One entry of a rebase's new line: its pieces, and their encoding. */
+interface Line {
+  pieces: Piece[]
+  bytes: Uint8Array
+}
+
 /** Changesets gathered for one replay chunk. */
 interface Chunk {
   /** The log commit of its first changeset, for errors. */
@@ -494,7 +563,7 @@ export class LoggedDatabase {
     this.name = options.name
     this.#options = options
     this.#branch = branch
-    this.recovery = { ownFlush: false, entries: 0, transactions: 0, snapshot: false }
+    this.recovery = { ownFlush: false, entries: 0, transactions: 0, rebased: 0, snapshot: false }
     this.#sqlite3 = sqlite3
     this.#file = file
     this.#db = file.db
@@ -532,6 +601,7 @@ export class LoggedDatabase {
     const wt = await options.repo.worktree(branch, { create: true })
     const log = await LoggedDatabase.#start(options, branch, wt)
     try {
+      await log.#settleRebase()
       Object.assign(log.recovery, await log.#catchUp(), { snapshot: rebuilt })
       await log.#readEpoch()
     } catch (err) {
@@ -760,6 +830,42 @@ export class LoggedDatabase {
   restore(id: string): Promise<RestoreResult> {
     if (this.#closing) return Promise.reject(closedError())
     return this.#afterEpoch(() => this.#serial(() => this.#restore(id)))
+  }
+
+  /**
+   * Rebase the database onto `onto`, a commit of its log that another
+   * copy of it wrote after the two parted (another device's, fetched
+   * by sync), or by default its branch's tip. The database's own
+   * changes since then, its pending transactions and the entries only
+   * it has, follow the log's: in one file transaction they are undone,
+   * the log's applied and theirs applied again, and they become entries
+   * numbered after the log's, on a line the log's branch then moves to.
+   * Only this copy ever had those entries, so moving the branch off
+   * them rewrites nothing another copy holds, and pushing the branch
+   * afterwards is a fast-forward.
+   *
+   * Changes to different rows, or different columns of one row, follow
+   * cleanly. Anything else stops it with nothing changed (`conflict`):
+   * one column changed both ways, a row deleted on one side and changed
+   * on the other, one key inserted on both, a constraint the two break
+   * together, or a schema change on either side. Rebasing again with
+   * `keep` settles it, the other side kept as a checkpoint; keeping
+   * this database's changes over a schema change of the log's isn't
+   * supported yet.
+   *
+   * `onto` must be on the database's current epoch, and in the
+   * repository (a sync that found the two diverged has fetched it).
+   *
+   * @throws LogError for a detached copy, or an `onto` that isn't in
+   *   the repository or shares no history with the database's log.
+   */
+  rebase(onto?: string, options: RebaseOptions = {}): Promise<RebaseResult> {
+    if (this.#closing) return Promise.reject(closedError())
+    const keep = options.keep
+    if (keep !== undefined && keep !== 'mine' && keep !== 'theirs') {
+      return Promise.reject(new TypeError("rebase: keep must be 'mine' or 'theirs'"))
+    }
+    return this.#afterEpoch(() => this.#serial(() => this.#rebase(onto, keep)))
   }
 
   /**
@@ -1397,22 +1503,24 @@ export class LoggedDatabase {
       await deleteDatabaseFiles(dir, tmp).catch(() => {})
       await deleteDatabaseFiles(dir, scratch).catch(() => {})
     }
-    await this.#reopen()
+    await this.#reopen("the restore's new epoch is in the log")
   }
 
   /**
    * Close the file and open it again on the log's current epoch, as
    * opening the database does: after a restore committed a new epoch,
-   * the file is rebuilt from its snapshot. If that fails, the database
-   * is closed, and opening it again finishes the job.
+   * the file is rebuilt from its snapshot. `before` runs once the file
+   * is closed. If either fails, the database is closed, and opening it
+   * again finishes the job; `done` says what was done that it finishes.
    */
-  async #reopen(): Promise<void> {
+  async #reopen(done: string, before?: () => Promise<void>): Promise<void> {
     const repo = this.#repo
     this.#disarm()
     this.#guard.dispose()
     this.#file.close()
     let opened: OpenedFile | undefined
     try {
+      await before?.()
       const options = { ...this.#options, repo } as LogOptions
       const branch = await currentEpoch(repo, this.#branch)
       await prepareFile(options, branch)
@@ -1425,6 +1533,7 @@ export class LoggedDatabase {
       this.#pending = opened.pending
       this.#branch = branch
       this.#log = { repo, wt }
+      await this.#settleRebase()
       await this.#catchUp()
       await this.#readEpoch()
     } catch (err) {
@@ -1435,11 +1544,432 @@ export class LoggedDatabase {
       }
       this.#closing = Promise.resolve()
       throw new LogError(
-        `the restore's new epoch is in the log, but the database file couldn't be rebuilt from it: open the database again to finish (${messageOf(err)})`,
+        `${done}, but the database file couldn't be rebuilt from it: open the database again to finish (${messageOf(err)})`,
         { cause: err },
       )
     }
     await this.#tidy()
+  }
+
+  // --- Rebase ---
+
+  async #rebase(onto: string | undefined, keep: RebaseSide | undefined): Promise<RebaseResult> {
+    if (!this.#log) throw new LogError('a detached copy has no log to rebase onto')
+    const repo = this.#repo
+    await this.#wt.refresh()
+    const head = this.#wt.head
+    // this file's own flush, landed but not yet dropped from the file
+    if (
+      head !== this.#meta.base &&
+      this.#pending > 0 &&
+      (await this.#holds(head, this.#meta.base))
+    ) {
+      const [first] = await this.#walk(head)
+      if (first) await this.#dropOwnFlush(first)
+    }
+    const target = onto ?? head
+    const base = this.#meta.base
+    let parted: string | null
+    try {
+      parted = await repo.mergeBase(base, target)
+    } catch (err) {
+      if (!(err instanceof UnknownCommitError)) throw err
+      throw new LogError(`commit ${target} isn't in the repository`, { cause: err })
+    }
+    if (parted === null) {
+      throw new LogError(
+        `commit ${target} shares no history with the database's log: it is another log's, or another epoch's`,
+      )
+    }
+    if (head !== base && !(await this.#holds(target, head))) {
+      throw new LogError(
+        `branch '${this.#branch}' has entries the database file hasn't applied, which commit ${target} doesn't hold`,
+      )
+    }
+    const at = await this.#positionAt(parted)
+    const theirs = await this.#walk(target, parted, at.seq)
+    const own = await this.#walk(base, parted, at.seq)
+    const pending = this.#readPending()
+    const transactions = (entries: readonly LogEntry[]) =>
+      entries.reduce((n, e) => n + e.to - e.from + 1, 0)
+    const mine = transactions(own) + pending.length
+    const theirCount = transactions(theirs)
+    const result = (
+      status: RebaseResult['status'],
+      more: Partial<RebaseResult> = {},
+    ): RebaseResult => ({
+      status,
+      kept: null,
+      conflicts: [],
+      schemaChange: null,
+      mine,
+      theirs: theirCount,
+      checkpoint: null,
+      seq: this.seq,
+      base: this.#meta.base,
+      ...more,
+    })
+    if (theirs.length === 0) return result('up-to-date')
+    if (mine === 0) {
+      if (head !== target) await this.#moveBranch(head, target)
+      await this.#catchUp()
+      return result('fast-forwarded')
+    }
+
+    const ownPieces = [
+      ...(await Promise.all(own.map((entry) => this.#readEntry(entry)))).flat(),
+      ...pending.map(pieceOf),
+    ]
+    const theirPieces = (await Promise.all(theirs.map((entry) => this.#readEntry(entry)))).flat()
+    const ownSql = ownPieces.some((piece) => piece.kind === 'sql')
+    // this database's entries, then its pending transactions, as
+    // entries numbered `by` later
+    const ownEntries = async (by: number): Promise<Line[]> => {
+      const lines = await Promise.all(
+        own.map(async (entry) => {
+          const pieces = renumber(await this.#readEntry(entry), by)
+          return { pieces, bytes: encodePieces(pieces) }
+        }),
+      )
+      if (pending.length > 0) {
+        lines.push(
+          encodeEntry(
+            this.#sqlite3,
+            pending.map((p) => ({ ...p, seq: p.seq + by })),
+          ),
+        )
+      }
+      return lines
+    }
+
+    if (keep === undefined) {
+      if (ownSql) return result('conflict', { schemaChange: 'mine' })
+      const landed = await this.#rebaseFile(head, target, at.schema, {
+        undo: ownPieces,
+        apply: theirPieces,
+        redo: ownPieces,
+        lines: await ownEntries(theirCount),
+      })
+      if ('conflicts' in landed) return result('conflict', landed)
+      return result('rebased')
+    }
+
+    if (keep === 'theirs') {
+      const checkpoint = await this.#keepMine(base, pending)
+      if (ownSql) {
+        // its schema change can't be undone: the file is rebuilt from the log
+        await this.#reopen('the rebase moved the log to the synced changes', async () => {
+          await deleteDatabaseFiles(this.#file.directory, this.name)
+          if (!(await publishHead(repo.store, this.#branch, head, target))) {
+            throw new LogError(`branch '${this.#branch}' moved during the rebase`)
+          }
+        })
+      } else {
+        await this.#rebaseFile(head, target, at.schema, {
+          undo: ownPieces,
+          apply: theirPieces,
+          redo: [],
+          lines: [],
+        })
+      }
+      return result('kept', { kept: 'theirs', checkpoint })
+    }
+
+    if (theirPieces.some((piece) => piece.kind === 'sql')) {
+      throw new LogError(
+        "keeping this database's changes over a schema change in the log isn't supported yet: keep the log's, or restore this database's from the checkpoint taken then",
+      )
+    }
+    const ends = await this.#positionAt(target)
+    const checkpoint = await this.#tag(
+      target,
+      ends.seq,
+      ends.schema,
+      "the synced changes, replaced by this copy's",
+    )
+    // an entry undoing the log's changes, then this database's own
+    const lines: Line[] = []
+    const inverse = invertChangeset(
+      this.#sqlite3,
+      combineChangesets(
+        this.#sqlite3,
+        theirPieces.map((piece) => piece.body),
+      ),
+    )
+    if (inverse.byteLength > 0) {
+      const piece: Piece = {
+        kind: 'changeset',
+        from: ends.seq + 1,
+        to: ends.seq + 1,
+        schema: ends.schema,
+        body: inverse,
+      }
+      lines.push({ pieces: [piece], bytes: encodePieces([piece]) })
+    }
+    lines.push(...(await ownEntries(theirCount + lines.length)))
+    await this.#rebaseFile(head, target, at.schema, { undo: [], apply: [], redo: [], lines })
+    return result('kept', { kept: 'mine', checkpoint })
+  }
+
+  /**
+   * Rebase the file, in one transaction: undo `undo` (this database's
+   * changes since the log parted, all changesets), apply `apply` (the
+   * log's since, from schema version `from`), and apply `redo` (this
+   * database's again), stopping with the file unchanged at a conflict
+   * re-applying them. Then, still in the transaction, commit `lines`
+   * on the rebase's branch, started at `onto`, and make its tip the
+   * file's log position, with nothing pending; once the file commits,
+   * the log's branch moves from `head` to that tip.
+   *
+   * A crash before the file commits leaves the database as it was, and
+   * after it, opening finishes the move (`#settleRebase`). A conflict
+   * drops the rebase's branch; any other failure leaves it, for opening
+   * to settle by where the file is.
+   */
+  async #rebaseFile(
+    head: string,
+    onto: string,
+    from: number,
+    steps: { undo: Piece[]; apply: Piece[]; redo: Piece[]; lines: Line[] },
+  ): Promise<{ landed: string } | { conflicts: Conflict[]; schemaChange: RebaseSide | null }> {
+    const sqlite3 = this.#sqlite3
+    const combined = (pieces: readonly Piece[]) =>
+      pieces.length === 1
+        ? (pieces[0] as Piece).body
+        : combineChangesets(
+            sqlite3,
+            pieces.map((piece) => piece.body),
+          )
+    const apply = (changeset: Uint8Array, invert = false) =>
+      this.#guard.trusted(() => applyChangeset(sqlite3, this.#db, changeset, { invert }))
+    // `PRAGMA foreign_keys` can't change inside the transaction
+    const bodies = new Map<Piece, ReturnType<typeof decodeSqlBody>>()
+    for (const piece of steps.apply) {
+      if (piece.kind !== 'sql') continue
+      const body = decodeSqlBody(piece.body)
+      if (body.foreignKeys !== this.#foreignKeys) {
+        throw new LogError(
+          `the log's schema change at transaction ${piece.from} ran with foreign keys ${body.foreignKeys ? 'on' : 'off'}, and this database has them ${this.#foreignKeys ? 'on' : 'off'}, which a rebase can't switch`,
+        )
+      }
+      bodies.set(piece, body)
+    }
+    const temp = rebaseBranch(logName(this.#branch))
+    let line: { head: string; seq: number; schema: number; total: number } | null = null
+    let schema = from
+    this.#exec('BEGIN IMMEDIATE')
+    try {
+      if (steps.undo.length > 0) {
+        const undone = apply(combined(steps.undo), true)
+        if (!undone.applied) {
+          throw new LogError(
+            `undoing this database's own changes since its log parted conflicts with the file (${describeConflicts(undone.conflicts)})`,
+          )
+        }
+      }
+      const columns = new Map<string, number>()
+      let run: Piece[] = []
+      const applyRun = () => {
+        if (run.length === 0) return
+        const applied = apply(combined(run))
+        if (!applied.applied) {
+          throw new LogError(
+            `the log's transactions ${(run[0] as Piece).from} to ${(run[run.length - 1] as Piece).to} conflict with the database as it was when they were written (${describeConflicts(applied.conflicts)})`,
+          )
+        }
+        run = []
+      }
+      for (const piece of steps.apply) {
+        const body = bodies.get(piece)
+        if (body) {
+          applyRun()
+          if (piece.schema !== schema) {
+            throw new LogError(
+              `the log's schema change at transaction ${piece.from} was written under schema version ${piece.schema}, not ${schema}`,
+            )
+          }
+          body.statements.forEach(([sql, params], i) => {
+            try {
+              this.#guard.trusted(() =>
+                this.#db.exec({
+                  sql,
+                  ...(params !== undefined && params !== null && { bind: params }),
+                }),
+              )
+            } catch (err) {
+              throw new LogError(
+                `statement ${i} of the log's schema change at transaction ${piece.from} failed: ${messageOf(err)}`,
+                { cause: err },
+              )
+            }
+          })
+          schema = schemaAfter(piece)
+          columns.clear()
+        } else {
+          const problem = this.#checkChangeset(piece, columns, schema)
+          if (problem !== undefined) {
+            throw new LogError(`the log's transaction ${piece.from}: ${problem}`)
+          }
+          run.push(piece)
+        }
+      }
+      applyRun()
+      if (steps.redo.length > 0) {
+        for (const piece of steps.redo) {
+          if (this.#checkChangeset(piece, columns, schema) !== undefined) {
+            this.#rollback()
+            return { conflicts: [], schemaChange: 'theirs' }
+          }
+        }
+        const redone = apply(combined(steps.redo))
+        if (!redone.applied) {
+          this.#rollback()
+          return { conflicts: redone.conflicts, schemaChange: null }
+        }
+      }
+      line = await this.#commitLine(temp, onto, steps.lines)
+      const next: Meta = {
+        base: line.head,
+        baseSeq: line.seq,
+        appliedSeq: line.seq,
+        nextSeq: line.seq + 1,
+        schema: line.schema,
+      }
+      this.#exec('DELETE FROM _kvsql_pending')
+      this.#saveMeta(next)
+      this.#exec('COMMIT')
+      this.#meta = next
+      this.#pending = 0
+      this.#logBytes = line.total
+      this.#disarm()
+    } catch (err) {
+      // The rebase's branch stays: if the file's COMMIT failed but
+      // landed, opening finds the file at its tip and moves the log's
+      // branch there; if it didn't, opening drops it.
+      this.#rollback()
+      if (line && this.#meta.base === line.head) this.#closeUnfinished(err)
+      throw err
+    }
+    try {
+      await this.#moveBranch(head, line.head)
+    } catch (err) {
+      this.#closeUnfinished(err)
+    }
+    await this.#repo.branches.delete(temp).catch(() => {})
+    return { landed: line.head }
+  }
+
+  /**
+   * The rebase is in the file, but the log's branch didn't move to it:
+   * close, so that opening again, which moves it, is the next step.
+   */
+  #closeUnfinished(err: unknown): never {
+    this.#disarm()
+    this.#guard.dispose()
+    this.#file.close()
+    this.#closing = Promise.resolve()
+    throw new LogError(
+      `the rebase is in the database file, but branch '${this.#branch}' wasn't moved to it: open the database again to finish (${messageOf(err)})`,
+      { cause: err },
+    )
+  }
+
+  /**
+   * Start branch `temp` at `onto` (replacing what a crash left there)
+   * and commit `lines` on it, each one log entry. Returns its tip, and
+   * the log's position there.
+   */
+  async #commitLine(
+    temp: string,
+    onto: string,
+    lines: readonly Line[],
+  ): Promise<{ head: string; seq: number; schema: number; total: number }> {
+    const repo = this.#repo
+    if (await repo.branches.has(temp)) await repo.branches.delete(temp)
+    await repo.branches.create(temp, onto)
+    const wt = await repo.worktree(temp)
+    let { seq, schema } = await this.#positionAt(onto)
+    let total = parseEntryInfo((await repo.getCommit(onto)).info)?.total ?? 0
+    for (const { pieces, bytes } of lines) {
+      total += bytes.byteLength
+      const info = entryInfo(pieces, bytes, await sha256Hex(bytes), total)
+      wt.set(ENTRY_KEY, bytes)
+      await wt.commit({ info: { ...info } })
+      seq = info.to
+      schema = info.schema
+    }
+    return { head: wt.head, seq, schema, total }
+  }
+
+  /**
+   * Keep this database's changes as a checkpoint, before a rebase drops
+   * them: its log position `base`, with `pending` after it committed
+   * there first, off the log's branch.
+   */
+  async #keepMine(base: string, pending: readonly PendingItem[]): Promise<Checkpoint> {
+    const label = "this copy's changes, replaced by sync"
+    const last = pending[pending.length - 1]
+    if (!last) return this.#tag(base, this.#meta.baseSeq, this.#meta.schema, label)
+    const temp = rebaseBranch(logName(this.#branch))
+    try {
+      const line = await this.#commitLine(temp, base, [encodeEntry(this.#sqlite3, pending)])
+      return await this.#tag(line.head, line.seq, line.schema, label)
+    } finally {
+      await this.#repo.branches.delete(temp).catch(() => {})
+    }
+  }
+
+  /** Tag `commit`, transaction `seq` at schema version `schema`, as a checkpoint. */
+  async #tag(commit: string, seq: number, schema: number, label: string): Promise<Checkpoint> {
+    const id = checkpointId(logName(this.#branch), seq)
+    const time = Date.now()
+    await this.#repo.tags.create(id, commit, {
+      info: { v: 1, checkpoint: { seq, schema, label, auto: false, time } },
+    })
+    return { id, label, auto: false, seq, schema, time, commit }
+  }
+
+  /** Move the log's branch from `from` to `to`, if it's still at `from`. */
+  async #moveBranch(from: string, to: string): Promise<void> {
+    if (!(await publishHead(this.#repo.store, this.#branch, from, to))) {
+      throw new LogError(`branch '${this.#branch}' moved during the rebase`)
+    }
+    await this.#wt.refresh()
+  }
+
+  /**
+   * Finish or drop a rebase a crash interrupted. If the file is at the
+   * rebase branch's tip, the rebase committed it, and the log's branch
+   * moves there; otherwise the file is as it was before, and the
+   * rebase's branch is only dropped.
+   */
+  async #settleRebase(): Promise<void> {
+    const repo = this.#repo
+    const temp = rebaseBranch(logName(this.#branch))
+    if (!(await repo.branches.has(temp))) return
+    const line = await repo.branches.get(temp)
+    await this.#wt.refresh()
+    const head = this.#wt.head
+    if (this.#meta.base === line && !(await this.#holds(head, line))) {
+      await this.#moveBranch(head, line)
+    }
+    await repo.branches.delete(temp)
+  }
+
+  /** Whether commit `ancestor` is `commit` or in its history. */
+  async #holds(commit: string, ancestor: string): Promise<boolean> {
+    return commit === ancestor || (await this.#repo.mergeBase(commit, ancestor)) === ancestor
+  }
+
+  /** The log's position at `commit`: its last transaction, and the schema version after it. */
+  async #positionAt(commit: string): Promise<{ seq: number; schema: number }> {
+    if (commit === ROOT_COMMIT) return { seq: 0, schema: 0 }
+    const info = (await this.#repo.getCommit(commit)).info
+    const entry = parseEntryInfo(info)
+    if (entry) return { seq: entry.to, schema: entry.schema }
+    const snapshot = parseSnapshotInfo(info)?.snapshot
+    if (snapshot?.last) return { seq: snapshot.seq, schema: snapshot.schema }
+    throw new LogError(`commit ${commit} isn't a position in a kvsql log`)
   }
 
   // --- Epochs ---
@@ -1690,13 +2220,20 @@ export class LoggedDatabase {
   /**
    * Bring the file level with the branch's tip: drop this file's own
    * flush if the log has it, then replay every entry after the file's
-   * base.
+   * base, or, if the file has pending transactions too, rebase them
+   * onto those entries.
    *
    * @throws RebaseRequiredError if the file has pending transactions
-   *   and the log has entries it didn't write.
+   *   that conflict with entries the log has that it didn't write.
    */
   async #catchUp(): Promise<Recovery> {
-    const recovery: Recovery = { ownFlush: false, entries: 0, transactions: 0, snapshot: false }
+    const recovery: Recovery = {
+      ownFlush: false,
+      entries: 0,
+      transactions: 0,
+      rebased: 0,
+      snapshot: false,
+    }
     await this.#wt.refresh()
     const tip = this.#wt.head
     if (tip === this.#meta.base) return recovery
@@ -1708,7 +2245,14 @@ export class LoggedDatabase {
         entries = entries.slice(1)
       }
       if (this.#pending > 0 && entries.length > 0) {
-        throw new RebaseRequiredError(this.#pending, entries.length)
+        const rebased = await this.#rebase(tip, undefined)
+        if (rebased.status === 'conflict') {
+          throw new RebaseRequiredError(rebased.mine, entries.length, rebased)
+        }
+        recovery.entries = entries.length
+        recovery.transactions = rebased.theirs
+        recovery.rebased = rebased.mine
+        return recovery
       }
     }
     if (entries.length > 0) {
@@ -1719,11 +2263,15 @@ export class LoggedDatabase {
   }
 
   /**
-   * The log entries from just after the file's base to `tip`, oldest
-   * first, checked to be a line of consecutive entries.
+   * The log entries from just after `base` (the file's, by default), at
+   * transaction `baseSeq`, to `tip`, oldest first, checked to be a line
+   * of consecutive entries.
    */
-  async #walk(tip: string): Promise<LogEntry[]> {
-    const base = this.#meta.base
+  async #walk(
+    tip: string,
+    base = this.#meta.base,
+    baseSeq = this.#meta.baseSeq,
+  ): Promise<LogEntry[]> {
     const entries: LogEntry[] = []
     let commit = tip
     while (commit !== base) {
@@ -1747,7 +2295,7 @@ export class LoggedDatabase {
       commit = parent
     }
     entries.reverse()
-    let seq = this.#meta.baseSeq
+    let seq = baseSeq
     for (const entry of entries) {
       if (entry.from !== seq + 1) {
         throw new LogError(
@@ -1874,9 +2422,13 @@ export class LoggedDatabase {
    * undefined if it can. SQLite skips, without an error, the changes
    * to a table whose column count differs from the changeset's.
    */
-  #checkChangeset(piece: Piece, columns: Map<string, number>): string | undefined {
-    if (piece.schema !== this.#meta.schema) {
-      return `it was written under schema version ${piece.schema}, but the database is at version ${this.#meta.schema}`
+  #checkChangeset(
+    piece: Piece,
+    columns: Map<string, number>,
+    schema = this.#meta.schema,
+  ): string | undefined {
+    if (piece.schema !== schema) {
+      return `it was written under schema version ${piece.schema}, but the database is at version ${schema}`
     }
     for (const [table, recorded] of changesetTables(this.#sqlite3, piece.body)) {
       let have = columns.get(table)

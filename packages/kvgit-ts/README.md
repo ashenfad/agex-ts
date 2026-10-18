@@ -395,3 +395,25 @@ bytes it takes for text).
 - Live tests ([`tests/github-pack-live.test.ts`](./tests/github-pack-live.test.ts))
   run against a scratch repo when `KVGIT_GH_TOKEN` and `KVGIT_GH_REPO`
   are set.
+
+#### A fake GitHub, for tests
+
+`FakeGithub` (`@agex-ts/kvgit/github/fake`) is an in-memory stand-in
+for the slice of GitHub `PackRemote` uses: its GraphQL documents and
+raw blob reads. Use it in-process (`fake.client()`, or `fake.fetch` as
+a client's `fetchImpl`), or over HTTP with `serveFakeGithub`
+(`@agex-ts/kvgit/github/fake-server`, Node), whose URL is a client's
+`apiBase`. The server answers any origin's cross-origin requests, so a
+page in a browser can sync against it, and two browser profiles can
+play two devices. `fake.failNext({ status, body, headers, path })`
+answers the next requests with a failure (a rate limit, a server
+error); `maxBodyBytes` refuses larger requests with 413, standing in
+for GitHub's undocumented size limit.
+
+```sh
+pnpm -F @agex-ts/kvgit build
+pnpm -F @agex-ts/kvgit fake-github -- --port 4180 --repo me/sync
+```
+
+It keeps everything in memory, gone when it stops; its commit ids
+aren't git's.

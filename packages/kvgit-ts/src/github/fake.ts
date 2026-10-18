@@ -2,15 +2,21 @@
  * An in-memory stand-in for the slice of GitHub the pack transport
  * uses: the GraphQL documents `PackRemote` sends (roster / one-ref
  * queries, `createRef` + `createCommitOnBranch`, `updateRefs`) and the
- * raw blob reads. Commits are flat path → bytes snapshots;
- * oids are hashes of their own records, not git's.
+ * raw blob reads. Commits are flat path → bytes snapshots; oids are
+ * counters, not git's hashes. For tests: in-process through
+ * {@link FakeGithub.client} (or {@link FakeGithub.fetch} as a client's
+ * `fetchImpl`), or over HTTP with `serveFakeGithub`
+ * (`@agex-ts/kvgit/github/fake-server`), so a browser can sync
+ * against it.
  *
  * Dispatch is by the operation's shape (which root fields the document
- * names), which is enough for the documents the transport sends.
+ * names), which is enough for the documents the transport sends. It
+ * holds everything in memory, and keeps no history of deleted refs.
  */
 
-import { gitBlobSha1 } from '../src/github/git-hash'
-import { GithubClient } from '../src/github/index'
+import { base64ToBytes } from './base64'
+import { GithubClient } from './client'
+import { gitBlobSha1 } from './git-hash'
 
 interface Commit {
   oid: string
@@ -23,15 +29,39 @@ export interface FakeCall {
   detail: string
 }
 
+export interface FakeGithubOptions {
+  /** The repo it serves, `owner/name`. Default `o/r`. */
+  repo?: string
+  /**
+   * The largest request body it takes, in bytes; a larger one is
+   * answered 413 without being read. GitHub refuses requests much past
+   * 30 MB (its exact limit and answer aren't documented). Default
+   * unlimited.
+   */
+  maxBodyBytes?: number
+}
+
+/** A failure the fake answers with in place of the next requests. */
+export interface FakeFailure {
+  status: number
+  /** The response's JSON body. Default `{ message: 'injected failure' }`. */
+  body?: unknown
+  /** Its headers (`retry-after`, say). */
+  headers?: Record<string, string>
+  /** Only requests whose path ends with this (`/graphql`, say). */
+  path?: string
+}
+
 const ZERO = '0'.repeat(40)
 const enc = new TextEncoder()
 const dec = new TextDecoder()
-const fromB64 = (s: string): Uint8Array => new Uint8Array(Buffer.from(s, 'base64'))
 
 let counter = 0
 const nextOid = (): string => (++counter).toString(16).padStart(40, 'c')
 
-export class FakePackGithub {
+export class FakeGithub {
+  readonly repo: string
+  maxBodyBytes: number
   readonly commits = new Map<string, Commit>()
   /** Full ref name (`refs/heads/x`) → oid. */
   readonly refs = new Map<string, string>()
@@ -48,8 +78,12 @@ export class FakePackGithub {
   /** An error `updateRefs` answers with, refs unchanged (a token
    *  without the permission, say), in place of applying it. */
   updateRefsError: string | null = null
+  /** Failures to answer the next matching requests with, in order. */
+  readonly #failures: FakeFailure[] = []
 
-  constructor() {
+  constructor(opts: FakeGithubOptions = {}) {
+    this.repo = opts.repo ?? 'o/r'
+    this.maxBodyBytes = opts.maxBodyBytes ?? Number.POSITIVE_INFINITY
     const root: Commit = {
       oid: nextOid(),
       parent: null,
@@ -59,12 +93,12 @@ export class FakePackGithub {
     this.refs.set('refs/heads/main', root.oid)
   }
 
+  /** A client on this fake, in-process, retrying nothing and waiting for nothing. */
   client(): GithubClient {
     return new GithubClient({
       token: 'tok',
-      repo: 'o/r',
-      fetchImpl: (async (url: RequestInfo | URL, init?: RequestInit) =>
-        this.handle(String(url), init)) as typeof fetch,
+      repo: this.repo,
+      fetchImpl: this.fetch,
       maxRetries: 0,
       writeIntervalMs: 0,
       sleeper: async () => {},
@@ -88,6 +122,15 @@ export class FakePackGithub {
     this.refs.set(ref, commit.oid)
   }
 
+  /**
+   * Answer the next `times` requests (default 1) matching
+   * `failure.path` with `failure` instead: a rate limit, a server
+   * error, a refused token.
+   */
+  failNext(failure: FakeFailure, times = 1): void {
+    for (let i = 0; i < times; i++) this.#failures.push(failure)
+  }
+
   count(kind: FakeCall['kind']): number {
     return this.calls.filter((c) => c.kind === kind).length
   }
@@ -98,19 +141,34 @@ export class FakePackGithub {
     return oid === undefined ? [] : [...(this.commits.get(oid) as Commit).files.keys()].sort()
   }
 
-  private async handle(url: string, init?: RequestInit): Promise<Response> {
+  /** Answer one request, as `fetch` would: a client's `fetchImpl`. */
+  readonly fetch = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
+    this.#handle(String(input instanceof Request ? input.url : input), init)) as typeof fetch
+
+  async #handle(url: string, init?: RequestInit): Promise<Response> {
     for (const bytes of this.pending.splice(0)) this.blobs.set(await gitBlobSha1(bytes), bytes)
-    if (url.endsWith('/graphql')) {
-      const { query, variables } = JSON.parse(init?.body as string) as {
+    const path = new URL(url, 'http://fake').pathname
+    const at = this.#failures.findIndex((f) => f.path === undefined || path.endsWith(f.path))
+    if (at >= 0) {
+      const [failure] = this.#failures.splice(at, 1) as [FakeFailure]
+      return json(failure.status, failure.body ?? { message: 'injected failure' }, failure.headers)
+    }
+    const body = typeof init?.body === 'string' ? init.body : undefined
+    if (body !== undefined && new TextEncoder().encode(body).byteLength > this.maxBodyBytes) {
+      return json(413, { message: 'Request body too large' })
+    }
+    if (path.endsWith('/graphql')) {
+      const { query, variables } = JSON.parse(body as string) as {
         query: string
         variables: Record<string, unknown>
       }
       return json(200, this.graphql(query, variables))
     }
-    const m = /\/repos\/o\/r\/git\/blobs\/([0-9a-f]{40})$/.exec(url)
-    if (m !== null) {
-      this.calls.push({ kind: 'raw', detail: m[1] as string })
-      const bytes = this.blobs.get(m[1] as string)
+    const blobs = `/repos/${this.repo}/git/blobs/`
+    const sha = path.startsWith(blobs) ? path.slice(blobs.length) : ''
+    if (/^[0-9a-f]{40}$/.test(sha)) {
+      this.calls.push({ kind: 'raw', detail: sha })
+      const bytes = this.blobs.get(sha)
       if (bytes === undefined) return json(404, { message: 'Not Found' })
       return new Response(bytes as Uint8Array<ArrayBuffer>, { status: 200 })
     }
@@ -245,7 +303,7 @@ export class FakePackGithub {
     const files = new Map((this.commits.get(head) as Commit).files)
     for (const d of (vars.deletions ?? []) as Array<{ path: string }>) files.delete(d.path)
     for (const a of (vars.additions ?? []) as Array<{ path: string; contents: string }>) {
-      const bytes = fromB64(a.contents)
+      const bytes = base64ToBytes(a.contents)
       files.set(a.path, bytes)
       this.pending.push(bytes)
     }
@@ -274,6 +332,9 @@ export class FakePackGithub {
   }
 }
 
-function json(status: number, body: unknown): Response {
-  return new Response(JSON.stringify(body), { status })
+function json(status: number, body: unknown, headers?: Record<string, string>): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json', ...headers },
+  })
 }

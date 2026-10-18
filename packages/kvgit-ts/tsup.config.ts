@@ -8,6 +8,8 @@ export default defineConfig({
     'src/backends/sqlite.ts',
     'src/backends/sqlite.browser.ts',
     'src/github/index.ts',
+    'src/github/fake.ts',
+    'src/github/fake-server.ts',
   ],
   format: ['esm'],
   dts: true,

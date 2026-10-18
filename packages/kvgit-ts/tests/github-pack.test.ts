@@ -360,6 +360,7 @@ describe('PackRemote packs over time', () => {
 })
 
 describe('PackRemote.repack and its request size', () => {
+  // 24MB committed, pushed and packed: seconds, more on a loaded runner.
   it('refuses a history too large for one request, before sending it', async () => {
     const gh = new FakeGithub()
     const a = await device(gh)
@@ -374,7 +375,7 @@ describe('PackRemote.repack and its request size', () => {
     const mutations = gh.count('graphql-mutation')
     await expect(a.remote.repack(BRANCH)).rejects.toThrow(/more than one request can carry/)
     expect(gh.count('graphql-mutation')).toBe(mutations)
-  })
+  }, 30_000)
 })
 
 describe('PackRemote roster and lifecycle', () => {

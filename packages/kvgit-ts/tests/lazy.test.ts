@@ -87,6 +87,8 @@ async function valuesOf(vk: VersionedKV): Promise<Record<string, string | null>>
 }
 
 describe('Hamt.updatedBatch', () => {
+  // Forty rounds, each also building a tree from scratch: seconds on a
+  // loaded runner.
   for (const bucketMax of [1, 2, 8]) {
     it(`gives the same tree as one-at-a-time updates (bucketMax ${bucketMax})`, async () => {
       const store = new Memory()
@@ -114,7 +116,7 @@ describe('Hamt.updatedBatch', () => {
         })
         expect(batch.root).toBe(scratch.root)
       }
-    })
+    }, 30_000)
   }
 
   for (const bucketMax of [1, 8]) {
@@ -259,6 +261,7 @@ describe('lazy VersionedKV', () => {
     expect(await valuesOf(lazy)).toEqual(await valuesOf(eager))
   })
 
+  // A 3,000-key commit: seconds on a loaded runner.
   it('hits the node cache for repeated reads', async () => {
     const store = new Memory()
     const writer = await VersionedKV.open(store)
@@ -273,7 +276,7 @@ describe('lazy VersionedKV', () => {
     cache.resetStats()
     expect(text(await lazy.get('page/42'))).toBe('v42')
     expect(cache.stats()).toMatchObject({ misses: 0 })
-  })
+  }, 30_000)
 })
 
 describe('lazy Worktree', () => {

@@ -384,6 +384,14 @@ interface Meta {
   schema: number
 }
 
+/** A database file opened behind its schema guard, and where it stands. */
+interface OpenedFile {
+  file: DatabaseFile
+  guard: SchemaGuard
+  meta: Meta
+  pending: number
+}
+
 /** A log entry found walking the branch: its commit and what it records. */
 interface LogEntry extends EntryInfo {
   commit: string
@@ -455,6 +463,11 @@ export class LoggedDatabase {
   readonly #autoCheckpoints: number
   /** The epoch being started, if one is. */
   #epoch: Promise<EpochResult> | null = null
+  /**
+   * Checkpoints before schema changes made while flushes waited for an
+   * epoch's snapshot, taken once they no longer wait.
+   */
+  #deferred: { before: number; label: string; schema: number }[] = []
   /** Whether flushes wait: a snapshot is being committed for a new epoch. */
   #holding = false
   /** The bytes of the current epoch's log entries. */
@@ -551,7 +564,7 @@ export class LoggedDatabase {
     sqlite3: Sqlite3Static,
     options: Partial<LogOptions> & DetachedOptions,
     branch: string,
-  ): Promise<{ file: DatabaseFile; guard: SchemaGuard; meta: Meta; pending: number }> {
+  ): Promise<OpenedFile> {
     const file = await openDatabaseFile(options.dir, options.name)
     try {
       const foreignKeys = options.foreignKeys ?? true
@@ -1183,18 +1196,27 @@ export class LoggedDatabase {
    * reported to `onFlushError`; the schema change stands.
    */
   async #autoCheckpoint(statements: readonly Statement[]): Promise<void> {
-    if (this.#autoCheckpoints === 0 || this.#holding || !this.#log) return
+    if (this.#autoCheckpoints === 0 || !this.#log) return
     const before = this.seq - 1
     // nothing before it to go back to
     if (before === 0) return
+    const sql = (statements[0]?.[0] ?? '').replace(/\s+/g, ' ').trim()
+    const label = `before ${sql.length > 100 ? `${sql.slice(0, 99)}…` : sql}`
+    // the schema change's own item records the schema it ran under
+    const wanted = { before, label, schema: this.#meta.schema - 1 }
+    // Flushes wait for an epoch's snapshot, which was taken before this
+    // change: once the database is past it, `before` is the snapshot's
+    // position or a pending transaction after it.
+    if (this.#holding) this.#deferred.push(wanted)
+    else await this.#autoCheckpointAt(wanted)
+  }
+
+  /** Take the checkpoint `#autoCheckpoint` wants, flushing up to its position first. */
+  async #autoCheckpointAt(wanted: { before: number; label: string; schema: number }) {
     try {
-      if (this.#meta.baseSeq < before) await this.#flush(false, before)
-      if (this.#meta.baseSeq !== before) return
-      const sql = (statements[0]?.[0] ?? '').replace(/\s+/g, ' ').trim()
-      const label = `before ${sql.length > 100 ? `${sql.slice(0, 99)}…` : sql}`
-      // the schema change's own item records the schema it ran under
-      const schema = this.#meta.schema - 1
-      await this.#checkpointAt(label, true, schema)
+      if (this.#meta.baseSeq < wanted.before) await this.#flush(false, wanted.before)
+      if (this.#meta.baseSeq !== wanted.before) return
+      await this.#checkpointAt(wanted.label, true, wanted.schema)
       const autos = (await listCheckpoints(this.#repo, logName(this.#branch))).filter((c) => c.auto)
       for (const old of autos.slice(0, Math.max(0, autos.length - this.#autoCheckpoints))) {
         await deleteCheckpoint(this.#repo, logName(this.#branch), old.id)
@@ -1389,12 +1411,13 @@ export class LoggedDatabase {
     this.#disarm()
     this.#guard.dispose()
     this.#file.close()
+    let opened: OpenedFile | undefined
     try {
       const options = { ...this.#options, repo } as LogOptions
       const branch = await currentEpoch(repo, this.#branch)
       await prepareFile(options, branch)
       const wt = await repo.worktree(branch, { create: true })
-      const opened = await LoggedDatabase.#openFile(this.#sqlite3, options, branch)
+      opened = await LoggedDatabase.#openFile(this.#sqlite3, options, branch)
       this.#file = opened.file
       this.#db = opened.file.db
       this.#guard = opened.guard
@@ -1405,6 +1428,11 @@ export class LoggedDatabase {
       await this.#catchUp()
       await this.#readEpoch()
     } catch (err) {
+      // closed, so its files are free for the next open to finish the job
+      if (opened) {
+        opened.guard.dispose()
+        opened.file.close()
+      }
       this.#closing = Promise.resolve()
       throw new LogError(
         `the restore's new epoch is in the log, but the database file couldn't be rebuilt from it: open the database again to finish (${messageOf(err)})`,
@@ -1471,6 +1499,10 @@ export class LoggedDatabase {
       this.#holding = false
       if (shot)
         await deleteDatabaseFiles(this.#file.directory, snapshotName(this.name)).catch(() => {})
+      // before a close, which waits for the epoch, queues its flush
+      for (const wanted of this.#deferred.splice(0)) {
+        void this.#serial(() => this.#autoCheckpointAt(wanted))
+      }
       if (!this.#closing) {
         if (this.#every > 0 && this.#pending >= this.#every) {
           void this.#serial(() => this.#flushReporting())

@@ -547,3 +547,24 @@ describe('epochs', () => {
     expect(await repo.branches.list()).toEqual([])
   })
 })
+
+describe('checkpoints', () => {
+  it('are taken and restored by the holder, for a forwarding tab too, and every tab sees it', async () => {
+    const o = setup()
+    const a = client(o.worker('a').connect(CONFIG))
+    await a.query('CREATE TABLE t (id INTEGER PRIMARY KEY)')
+    await a.query('INSERT INTO t VALUES (1)')
+    const b = client(o.worker('b').connect(CONFIG))
+    await until(async () => (await role(b)) === 'forwarding', 3_000, 'forwarding')
+    const cp = await b.checkpoint('one row')
+    expect(cp).toMatchObject({ label: 'one row', seq: 2, auto: false })
+    await a.query('ALTER TABLE t ADD COLUMN v TEXT')
+    await a.query("INSERT INTO t VALUES (2, 'two')")
+    expect((await b.checkpoints()).map((c) => c.auto)).toEqual([false, true])
+
+    expect(await b.restore(cp.id)).toMatchObject({ how: 'epoch', branch: 'kvsql/test/1' })
+    expect((await a.query('SELECT * FROM t')).rows).toEqual([{ id: 1 }])
+    await a.deleteCheckpoint(cp.id)
+    expect((await b.checkpoints()).map((c) => c.auto)).toEqual([true])
+  })
+})

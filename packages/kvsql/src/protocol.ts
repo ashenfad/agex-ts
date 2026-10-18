@@ -10,6 +10,7 @@
  * same class, for `instanceof`.
  */
 
+import type { Checkpoint } from './checkpoint'
 import {
   ConnectionLostError,
   CorruptEntryError,
@@ -30,6 +31,7 @@ import type {
   FlushResult,
   QueryResult,
   Recovery,
+  RestoreResult,
 } from './log'
 
 /**
@@ -69,6 +71,8 @@ export interface DatabaseConfig {
   flush?: FlushPolicy
   /** When the database starts a new epoch by itself; false: only when asked. */
   epochs?: EpochPolicy | false
+  /** How many of its own checkpoints, before schema changes, the database keeps. Default 10. */
+  autoCheckpoints?: number
 }
 
 /** The default file name of a database. */
@@ -174,6 +178,10 @@ export interface Ops {
   export: { args: []; result: Uint8Array }
   copy: { args: [target: DatabaseConfig]; result: CopyResult }
   epoch: { args: []; result: EpochResult }
+  checkpoint: { args: [label: string]; result: Checkpoint }
+  checkpoints: { args: []; result: Checkpoint[] }
+  deleteCheckpoint: { args: [id: string]; result: undefined }
+  restore: { args: [id: string]; result: RestoreResult }
   info: { args: []; result: DatabaseInfo }
   delete: { args: [options: DeleteOptions]; result: undefined }
   status: { args: []; result: Status }
@@ -189,7 +197,14 @@ export type Op = keyof Ops
  * transaction might write, and might have committed, so it fails with
  * {@link ConnectionLostError} instead.
  */
-export const RETRY_SAFE: ReadonlySet<Op> = new Set<Op>(['flush', 'export', 'info', 'delete'])
+export const RETRY_SAFE: ReadonlySet<Op> = new Set<Op>([
+  'flush',
+  'export',
+  'info',
+  'delete',
+  'checkpoints',
+  'deleteCheckpoint',
+])
 
 /** Marks the message a client sends a worker to connect to a database. */
 export const CONNECT = 'kvsql:connect'

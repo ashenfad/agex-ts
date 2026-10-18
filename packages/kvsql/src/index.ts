@@ -38,6 +38,10 @@ export {
   vacuumDatabase,
 } from './database'
 export {
+  type Checkpoint,
+  CHECKPOINT_PREFIX,
+} from './checkpoint'
+export {
   CHUNKS_PER_COMMIT,
   currentEpoch,
   deleteLog,
@@ -61,6 +65,7 @@ export {
   openLog,
   type QueryResult,
   type Recovery,
+  type RestoreResult,
   REPLAY_CHUNK_BYTES,
   REPLAY_CHUNK_TRANSACTIONS,
 } from './log'

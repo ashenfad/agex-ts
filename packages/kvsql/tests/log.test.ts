@@ -310,10 +310,18 @@ describe('transactions', () => {
     expect(db.schemaVersion).toBe(2)
     // A schema change flushes at once.
     expect(db.pendingCount).toBe(0)
+    // The transactions before it go first, in an entry of their own, so
+    // the database can checkpoint itself before the change.
     const entries = await logEntries(repo)
-    const last = entries[entries.length - 1]
-    expect(last?.pieces.map((p) => p.kind)).toEqual(['changeset', 'sql'])
-    expect(last?.info).toMatchObject({ v: 1, schema: 2 })
+    expect(entries.map((e) => e.pieces.map((p) => p.kind))).toEqual([
+      ['sql'],
+      ['changeset'],
+      ['sql'],
+    ])
+    expect(entries[2]?.info).toMatchObject({ v: 1, schema: 2 })
+    expect(await db.checkpoints()).toMatchObject([
+      { auto: true, seq: 2, schema: 1, label: 'before ALTER TABLE notes ADD COLUMN slug TEXT' },
+    ])
 
     const copy = await track(replica(repo))
     expect(await integrity(copy)).toBe('ok')

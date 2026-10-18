@@ -406,6 +406,31 @@ describe('the worker host', () => {
   )
 
   it(
+    'restores a checkpoint on OPFS, undoing changes and across a schema change',
+    async () => {
+      const id = newId()
+      const a = open(tab(), config(id))
+      await a.query('CREATE TABLE t (id INTEGER PRIMARY KEY, v BLOB)')
+      await a.query('INSERT INTO t VALUES (1, randomblob(50000))')
+      const before = (await a.query('SELECT id, hex(v) AS v FROM t')).rows
+      const cp = await a.checkpoint('before')
+      const b = open(tab(), config(id))
+      await until(async () => (await role(b)) === 'forwarding', 'b forwarding')
+      await b.query('INSERT INTO t VALUES (2, NULL)')
+      expect(await b.restore(cp.id)).toMatchObject({ how: 'undo', undone: 1 })
+      expect((await a.query('SELECT id, hex(v) AS v FROM t')).rows).toEqual(before)
+      await a.query('ALTER TABLE t ADD COLUMN w TEXT')
+      await a.query("INSERT INTO t VALUES (3, NULL, 'w')")
+      expect(await b.restore(cp.id)).toMatchObject({ how: 'epoch' })
+      expect((await a.query('SELECT id, hex(v) AS v FROM t')).rows).toEqual(before)
+      expect((await a.query("SELECT count(*) AS n FROM pragma_table_info('t')")).rows).toEqual([
+        { n: 2 },
+      ])
+    },
+    SLOW,
+  )
+
+  it(
     'starts a new epoch on OPFS, and rebuilds the file from its snapshot',
     async () => {
       const id = newId()

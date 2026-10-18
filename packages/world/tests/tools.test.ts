@@ -107,16 +107,21 @@ describe('ws.terminal', () => {
     const gate = new Promise<void>((r) => {
       release = r
     })
+    let waiting!: () => void
+    const started = new Promise<void>((r) => {
+      waiting = r
+    })
     const ws = await open({
       commands: {
         wait: async (ctx) => {
           ctx.stdout.write('waiting\n')
+          waiting()
           await gate
         },
       },
     })
     const running = ws.terminal('wait; echo after')
-    await new Promise((r) => setTimeout(r, 10))
+    await started
     expect(ws.interrupt()).toBe(true)
     release()
     const r = await running

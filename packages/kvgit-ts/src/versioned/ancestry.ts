@@ -212,8 +212,8 @@ export async function ancestryDelta(
  * reachable from it.
  */
 export async function isAncestor(store: KVStore, ancestor: string, from: string): Promise<boolean> {
-  if (ancestor === from) return true
   if ((await parentsOf(store, ancestor)) === null) return false
+  if (ancestor === from) return true
   try {
     return (await paint(store, ancestor, [from], { first: true })).delta.size === 0
   } catch (e) {

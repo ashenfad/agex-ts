@@ -238,6 +238,15 @@ await db.close() // flushes first
   digest); and one on an older epoch holding transactions no log has is
   refused (`LogError`). `deleteLog(repo, branch)` deletes every epoch of
   a log.
+- **The content hash.** `contentHash()` is a SHA-256 of the database's
+  schema, header and every row in key order (each value `quote()`d, so
+  `1`, `1.0` and `'1'` differ), kvsql's own tables aside: the same for
+  any copy holding the same, however it came by it. Each snapshot
+  records it (`hash` in its record). A copy that opens onto a new epoch
+  from the very point its snapshot was taken, holding nothing past it,
+  compares its own first, and one that holds something else (a change
+  SQLite skipped, a file changed outside the log) stays on its epoch
+  with `DivergedError` rather than moving over silently.
 - **Opening** brings the file level with the branch: entries it didn't
   write are replayed (so an empty directory rebuilds the database from
   the log), and an entry matching its pending transactions is its own

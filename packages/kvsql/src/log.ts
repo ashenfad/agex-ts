@@ -103,6 +103,7 @@ import {
 } from './epoch'
 import {
   CorruptEntryError,
+  DivergedError,
   KvsqlError,
   LogError,
   RebaseRequiredError,
@@ -112,6 +113,7 @@ import {
 } from './errors'
 import type { Directory } from './files'
 import { type SchemaGuard, checkSchema, installGuard } from './guard'
+import { contentHash } from './hash'
 import { loadSqlite } from './sqlite'
 
 export type { Params, Statement } from './entry'
@@ -470,6 +472,8 @@ interface Shot {
   seq: number
   schema: number
   previous: { branch: string; base: string; pending: string | null }
+  /** Its content hash, once worked out. */
+  hash?: string
 }
 
 /** One entry of a rebase's new line: its pieces, and their encoding. */
@@ -867,6 +871,17 @@ export class LoggedDatabase {
       return Promise.reject(new TypeError("rebase: keep must be 'mine' or 'theirs'"))
     }
     return this.#afterEpoch(() => this.#serial(() => this.#rebase(onto, keep)))
+  }
+
+  /**
+   * The database's content hash (`hash.ts`): a SHA-256 of its schema and
+   * every row, the same for any copy holding the same, however it came
+   * by them. Taken between calls, so it covers every transaction
+   * committed so far, flushed or not.
+   */
+  contentHash(): Promise<string> {
+    if (this.#closing) return Promise.reject(closedError())
+    return this.#serial(() => contentHash(this.#db, (fn) => this.#guard.trusted(fn)))
   }
 
   /**
@@ -1487,11 +1502,13 @@ export class LoggedDatabase {
       const seq = this.seq + 1
       const schema = this.#meta.schema + 1
       await markSnapshot(dir, tmp, branch, seq, schema)
+      const hash = await hashFile(dir, tmp)
       const file = await dir.open(tmp)
       try {
         await writeSnapshot(repo, branch, file, {
           seq,
           schema,
+          hash,
           previous: { branch: this.#branch, base: this.#meta.base, pending: null },
         })
       } catch (err) {
@@ -2039,6 +2056,8 @@ export class LoggedDatabase {
     try {
       shot = await this.#serial(() => this.#takeSnapshot())
       const taken = shot
+      // the snapshot's file is its own: hashed while calls go on
+      taken.hash = await hashFile(this.#file.directory, taken.tmp)
       let written: Awaited<ReturnType<typeof writeSnapshot>>
       try {
         const source = await this.#file.directory.open(taken.tmp)
@@ -2783,7 +2802,13 @@ async function prepareFile(options: LogOptions, branch: string): Promise<boolean
     previous.base === file.base &&
     (await pendingThrough(dir, name, file.baseSeq, record.seq)) === previous.pending
   ) {
-    // the file the snapshot was taken from, which a crash stopped moving
+    // the file the snapshot was taken from, which a crash stopped moving,
+    // or a copy at the same point: holding nothing past the snapshot, it
+    // must hold what the snapshot does
+    if (record.hash !== undefined && file.nextSeq - 1 === record.seq) {
+      const hash = await hashFile(dir, name)
+      if (hash !== record.hash) throw new DivergedError(file.branch, file.base, record.hash, hash)
+    }
     await anchor(dir, name, branch, await snapshotCommit(repo, tip), record.seq, true)
     return false
   }
@@ -2798,6 +2823,16 @@ async function prepareFile(options: LogOptions, branch: string): Promise<boolean
     )
   }
   return rebuild()
+}
+
+/** The content hash of the database file `name` in `dir`, which mustn't be open. */
+async function hashFile(dir: Directory, name: string): Promise<string> {
+  const file = await openDatabaseFile(dir, name)
+  try {
+    return await contentHash(file.db)
+  } finally {
+    file.close()
+  }
 }
 
 /** The SHA-256 of pending transactions encoded as one entry; null for none. */

@@ -91,6 +91,7 @@ export {
   serve,
 } from './host'
 export { type DefaultConfig, openDefault } from './default'
+export { contentHash, HASH_BLOCK_ROWS } from './hash'
 export {
   type DatabaseConfig,
   type DatabaseInfo,

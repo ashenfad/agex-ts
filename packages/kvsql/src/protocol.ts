@@ -15,6 +15,7 @@ import {
   ConnectionLostError,
   CorruptEntryError,
   CorruptSnapshotError,
+  DivergedError,
   KvsqlError,
   LogError,
   RebaseRequiredError,
@@ -314,6 +315,7 @@ const CLASSES: Record<string, ErrorClass> = {
   CorruptSnapshotError,
   ReplayError,
   RebaseRequiredError,
+  DivergedError,
   ConnectionLostError,
 }
 

@@ -157,6 +157,32 @@ export class RebaseRequiredError extends LogError {
 }
 
 /**
+ * A copy of the database is at the point a new epoch's snapshot was
+ * taken, holding nothing past it, yet holds something else: its content
+ * hash isn't the snapshot's. One of the two went wrong without an error
+ * (a change SQLite skipped, a file changed outside the log), so the
+ * file is left as it is, on its epoch, rather than moved over.
+ */
+export class DivergedError extends LogError {
+  override readonly name: string = 'DivergedError'
+
+  constructor(
+    /** The epoch the file is on. */
+    readonly branch: string,
+    /** The log commit it is at. */
+    readonly base: string,
+    /** The snapshot's content hash. */
+    readonly expected: string,
+    /** The file's. */
+    readonly actual: string,
+  ) {
+    super(
+      `the database file on '${branch}' is where the next epoch's snapshot was taken, but holds something else: its content hash is ${actual}, the snapshot's ${expected}`,
+    )
+  }
+}
+
+/**
  * The worker serving a request went away before answering it (its tab
  * closed, or it was terminated), so the request may or may not have
  * run: a write may or may not have committed. Nothing retries it; a

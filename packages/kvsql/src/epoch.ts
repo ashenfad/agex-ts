@@ -68,6 +68,12 @@ export interface SnapshotRecord {
    * move. Null for none.
    */
   previous: { branch: string; base: string; pending: string | null } | null
+  /**
+   * The database's content hash (`hash.ts`) as the snapshot holds it,
+   * which a copy at the same point compares its own with. Absent from
+   * snapshots taken before it was recorded.
+   */
+  hash?: string
 }
 
 /** A snapshot commit's info. */
@@ -97,7 +103,7 @@ function decodeRecord(bytes: unknown, commit: string): SnapshotRecord {
   } catch (err) {
     throw corrupt(`its record doesn't decode: ${err instanceof Error ? err.message : String(err)}`)
   }
-  const { v, seq, schema, bytes: size, gzipped, digests, previous } = raw ?? {}
+  const { v, seq, schema, bytes: size, gzipped, digests, previous, hash } = raw ?? {}
   const prev = previous as
     | { branch?: unknown; base?: unknown; pending?: unknown }
     | null
@@ -110,6 +116,7 @@ function decodeRecord(bytes: unknown, commit: string): SnapshotRecord {
     !isCount(gzipped) ||
     !Array.isArray(digests) ||
     !digests.every((d) => typeof d === 'string' && /^[0-9a-f]{64}$/.test(d)) ||
+    (hash !== undefined && (typeof hash !== 'string' || !/^[0-9a-f]{64}$/.test(hash))) ||
     (prev !== null &&
       (typeof prev?.branch !== 'string' ||
         typeof prev.base !== 'string' ||
@@ -132,6 +139,7 @@ function decodeRecord(bytes: unknown, commit: string): SnapshotRecord {
             base: prev.base as string,
             pending: prev.pending as string | null,
           },
+    ...(hash !== undefined && { hash: hash as string }),
   }
 }
 
@@ -281,6 +289,8 @@ export interface SnapshotOf {
   seq: number
   schema: number
   previous: SnapshotRecord['previous']
+  /** The snapshot's content hash. */
+  hash?: string
 }
 
 /**
@@ -381,6 +391,7 @@ export async function writeSnapshot(
     gzipped,
     digests,
     previous: of.previous,
+    ...(of.hash !== undefined && { hash: of.hash }),
   }
   wt.set(EPOCH_KEY, cborCodec.encode(record))
   await wt.commit({ info: { ...info(true) }, onMoved: 'raise' })

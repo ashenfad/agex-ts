@@ -56,9 +56,12 @@ export {
 } from './sync/apply'
 export { MemoryRemote, type Remote, type RemoteRef } from './sync/remote'
 export {
+  deleteRemoteBranch,
   pullBranch,
   pushBranch,
   syncBranch,
+  type DeleteResult,
+  type DeleteStatus,
   type SyncOutcome,
   type SyncResult,
   type SyncStatus,
@@ -102,6 +105,7 @@ export {
   type WorktreeMergeRules,
 } from './worktree'
 export { mergeBase } from './versioned/kv'
+export { ancestryDelta, isAncestor } from './versioned/ancestry'
 export type { TagInfo } from './versioned/refs'
 export { type GcOptions, gcStore } from './versioned/kv'
 export { GC_LEASE_TTL, IN_FLIGHT_TTL } from './versioned/lease'

@@ -13,7 +13,14 @@ import {
   decodePack,
   encodePack,
 } from '../src/github/index'
-import { VersionedKV, applyWire, pullBranch, pushBranch, walkDelta } from '../src/index'
+import {
+  VersionedKV,
+  applyWire,
+  deleteRemoteBranch,
+  pullBranch,
+  pushBranch,
+  walkDelta,
+} from '../src/index'
 import type { WireCommit } from '../src/types'
 
 const enc = new TextEncoder()
@@ -439,5 +446,129 @@ describe('PackRemote roster and lifecycle', () => {
     }
     expect(await a.remote.archiveBranch(BRANCH)).toBe(false)
     expect(gh.refs.has(`refs/heads/archived/${BRANCH}`)).toBe(false)
+  })
+})
+
+describe('PackRemote.deleteBranch', () => {
+  it('deletes a session at the head expected, in one updateRefs', async () => {
+    const gh = new FakeGithub()
+    const a = await device(gh)
+    const vk = await commitN(a.store, 2, 'a')
+    await pushBranch(a.store, a.remote, BRANCH)
+    expect(await a.remote.deleteBranch(BRANCH, 'f'.repeat(40))).toBe(false)
+
+    gh.calls.length = 0
+    const result = await deleteRemoteBranch(a.store, a.remote, BRANCH)
+    expect(result.status).toBe('deleted')
+    expect(gh.count('graphql-mutation')).toBe(1)
+    expect(gh.refs.has(`refs/heads/${BRANCH}`)).toBe(false)
+    expect(await a.remote.roster()).toEqual([])
+    expect(await a.remote.deleteBranch(BRANCH, vk.currentCommit)).toBe(false)
+    expect((await pushBranch(a.store, a.remote, BRANCH)).status).toBe('created')
+  })
+
+  it('leaves a session someone pushed to since', async () => {
+    const gh = new FakeGithub()
+    const a = await device(gh)
+    await commitN(a.store, 1, 'a')
+    await pushBranch(a.store, a.remote, BRANCH)
+    const b = await device(gh)
+    await pullBranch(b.store, b.remote, BRANCH)
+    const bVk = await commitN(b.store, 1, 'b')
+    await pushBranch(b.store, b.remote, BRANCH)
+
+    const result = await deleteRemoteBranch(a.store, a.remote, BRANCH)
+    expect(result).toMatchObject({ status: 'moved', remoteHead: bVk.currentCommit })
+    expect((await a.remote.listRefs()).map((r) => r.head)).toEqual([bVk.currentCommit])
+  })
+
+  it('loses cleanly when the session moves after it was read', async () => {
+    const gh = new FakeGithub()
+    const a = await device(gh)
+    const vk = await commitN(a.store, 1, 'a')
+    await pushBranch(a.store, a.remote, BRANCH)
+    gh.beforeMutation = () => {
+      gh.refs.set(`refs/heads/${BRANCH}`, gh.refs.get('refs/heads/main') as string)
+      gh.beforeMutation = null
+    }
+    expect(await a.remote.deleteBranch(BRANCH, vk.currentCommit)).toBe(false)
+    expect(gh.refs.has(`refs/heads/${BRANCH}`)).toBe(true)
+  })
+
+  it('tries again when the session was repacked meanwhile, its head the same', async () => {
+    const gh = new FakeGithub()
+    const a = await device(gh)
+    await commitN(a.store, 1, 'a')
+    await pushBranch(a.store, a.remote, BRANCH)
+    // a new git commit at the same kvgit head, as a repack makes,
+    // lands just before the delete
+    const ref = `refs/heads/${BRANCH}`
+    let mutations = 0
+    gh.beforeMutation = () => {
+      if (++mutations > 1) return
+      const tip = gh.commits.get(gh.refs.get(ref) as string)
+      if (tip === undefined) throw new Error('no session')
+      const again = { ...tip, oid: 'e'.repeat(40), parent: tip.oid }
+      gh.commits.set(again.oid, again)
+      gh.refs.set(ref, again.oid)
+    }
+    const result = await deleteRemoteBranch(a.store, a.remote, BRANCH)
+    expect(result.status).toBe('deleted')
+    expect(mutations).toBe(2)
+    expect(gh.refs.has(ref)).toBe(false)
+  })
+})
+
+describe('PackRemote pulls on a long history', () => {
+  it('read a few local records, not the history', async () => {
+    const gh = new FakeGithub()
+    const a = await device(gh)
+    await commitN(a.store, 200, 'a')
+    await pushBranch(a.store, a.remote, BRANCH)
+    const store = new Memory()
+    let reads = 0
+    const counted = new Proxy(store, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop, target)
+        if (prop === 'get') {
+          return (key: string) => {
+            reads++
+            return target.get(key)
+          }
+        }
+        if (prop === 'getMany') {
+          return (keys: Iterable<string>) => {
+            const list = [...keys]
+            reads += list.length
+            return target.getMany(list)
+          }
+        }
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+    const b = new PackRemote(gh.client(), counted)
+    await pullBranch(counted, b, BRANCH)
+
+    await commitN(a.store, 1, 'b')
+    await pushBranch(a.store, a.remote, BRANCH)
+    reads = 0
+    const pulled = await pullBranch(counted, b, BRANCH)
+    expect(pulled).toMatchObject({ status: 'fast-forwarded', transferred: 1 })
+    expect(reads).toBeLessThan(80)
+  })
+
+  it('skip what they hold of a folded pack', async () => {
+    const gh = new FakeGithub()
+    const a = await device(gh, { maxPacks: 4, keepRecent: 1 })
+    const b = await device(gh)
+    for (let i = 0; i < 6; i++) {
+      await commitN(a.store, 2, `t${i}-`)
+      await pushBranch(a.store, a.remote, BRANCH)
+      if (i === 1) await pullBranch(b.store, b.remote, BRANCH)
+    }
+    // the first four pushes folded into one, which holds what b has
+    expect(gh.filesAt(BRANCH).filter((p) => p.endsWith('.pack'))).toHaveLength(3)
+    const pulled = await pullBranch(b.store, b.remote, BRANCH)
+    expect(pulled).toMatchObject({ status: 'fast-forwarded', transferred: 8 })
   })
 })

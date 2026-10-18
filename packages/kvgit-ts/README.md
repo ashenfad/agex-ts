@@ -279,7 +279,8 @@ this layer:
   three-way machinery (`commit()` / merge fns). Remotes can therefore
   be *passive* — any object store with compare-and-swap on refs
   qualifies; no kvgit code needs to run on the far side. The protocol
-  is `Remote` (`listRefs` / `fetch` / `push`) in
+  is `Remote` (`listRefs` / `fetch` / `push`, and optionally
+  `deleteBranch`, by the same compare-and-swap) in
   [`src/sync/remote.ts`](./src/sync/remote.ts), with `MemoryRemote`
   as the reference implementation.
 - **Sync is fast-forward only.** `pullBranch` / `pushBranch` /
@@ -289,6 +290,19 @@ this layer:
   no ref moves and nothing merges automatically. A vanished
   previously-synced remote ref reports `'remote-gone'` (lifecycle
   conflict) for the caller to resolve.
+- **A remote branch is deleted only if nobody pushed to it since.**
+  `deleteRemoteBranch` deletes it at the head it last synced to here
+  (or a head the caller names) and reports `'moved'`, deleting
+  nothing, when someone has pushed since; once it's gone, the record
+  of where it synced goes too, so a later push of that name creates it
+  afresh.
+- **A sync costs the size of the change, not of the history.** Each
+  commit stores its parents' generations, so the questions a sync asks
+  (what one tip has that another lacks, whether one commit is
+  another's ancestor) are answered by searching down from both,
+  highest generation first, stopping where the two histories meet
+  ([`src/versioned/ancestry.ts`](./src/versioned/ancestry.ts)). History
+  written before generations were stored is searched whole.
 - **Parent order is significant.** A commit that merges after losing
   its race has `parents[0]` "theirs" (the head that won) and
   `parents[1]` "ours"; a branch merge has `[ours, theirs]`, so linear
@@ -341,8 +355,9 @@ await remote.roster() // every session: head, meta, packs, archived
   `GithubError`).
 - **`PackRemote`**: the `Remote`. `push` lands one pack per request,
   `fetch` reads the packs a receiver lacks, `roster` lists every
-  session, live and archived. `archiveBranch`, `restoreBranch` and
-  `emptyTrash` are one atomic, CAS-checked `updateRefs` each. `repack`
+  session, live and archived. `archiveBranch`, `restoreBranch`,
+  `deleteBranch` and `emptyTrash` are one atomic, CAS-checked
+  `updateRefs` each. `repack`
   folds a session's packs into one.
 - **Lost races are results, not throws:** a push whose expected head
   moved returns false (the sync layer reports `'diverged'`), with

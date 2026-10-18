@@ -377,6 +377,28 @@ describe('a device at the point a snapshot was taken, with nothing of its own', 
     expect(again.branch).toBe(NEXT)
     expect(await dump(again)).toEqual(await dump(a.db))
   })
+
+  it('refuses a rebase onto the epoch if it holds something else', async () => {
+    const remote = new MemoryRemote(new Memory())
+    const a = await device(remote)
+    await run(a.db, ['CREATE TABLE t (id INTEGER PRIMARY KEY NOT NULL, x TEXT)'])
+    await run(a.db, ["INSERT INTO t VALUES (1, 'a')"])
+    await push(a, remote)
+    const b = await device(remote)
+    await b.db.close()
+    // changed outside the log, and open before the epoch starts
+    const file = await openDatabaseFile(b.dir, NAME)
+    file.db.exec("UPDATE t SET x = 'other' WHERE id = 1")
+    file.close()
+    const again = await track(open(b.dir, b.repo, { epochs: false }))
+    await a.db.newEpoch()
+    await push(a, remote)
+    await pullBranch(b.store, remote, NEXT)
+    const err = await again.rebase().catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(DivergedError)
+    expect(err).toMatchObject({ branch: BRANCH, expected: await a.db.contentHash() })
+    expect(again.branch).toBe(BRANCH)
+  })
 })
 
 describe('entries pushed to an epoch while another device started the next', () => {

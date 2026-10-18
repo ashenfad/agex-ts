@@ -177,3 +177,27 @@ describe('IndexedDB — backend-specific', () => {
     expect(await vk2.commitInfo()).toEqual({ author: 'a' })
   })
 })
+
+describe('IndexedDB.deleteDatabase', () => {
+  it('waits for a connection that closes meanwhile, then deletes', async () => {
+    const dbName = uniqueDbName()
+    const a = await IndexedDB.open({ dbName })
+    await a.set('k', bytes('v'))
+    const deleting = IndexedDB.deleteDatabase(dbName)
+    await new Promise((r) => setTimeout(r, 50))
+    a.close()
+    await deleting
+    const again = await IndexedDB.open({ dbName })
+    openHandles.push(again)
+    expect(await again.get('k')).toBeNull()
+  })
+
+  it('rejects when a connection stays open past blockedMs', async () => {
+    const dbName = uniqueDbName()
+    const a = await IndexedDB.open({ dbName })
+    openHandles.push(a)
+    await expect(IndexedDB.deleteDatabase(dbName, { blockedMs: 100 })).rejects.toThrow(
+      /kept it open for 100 ms/,
+    )
+  })
+})

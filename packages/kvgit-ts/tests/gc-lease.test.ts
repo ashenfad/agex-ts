@@ -244,11 +244,13 @@ describe('writers under the lease', () => {
     const wt = await repo.worktree('main', { create: true })
     wt.set('k', bytes('v'))
     const commit = (await wt.commit()).commit as string
-    await store.set(GC_LEASE_KEY, liveLease(Date.now() / 1000 + 0.15))
+    const expires = Date.now() / 1000 + 0.15
+    await store.set(GC_LEASE_KEY, liveLease(expires))
 
-    const started = Date.now()
+    // Waiting the lease out means landing no earlier than its expiry,
+    // however long the runner took to get here.
     await repo.tags.create('t', commit)
-    expect(Date.now() - started).toBeGreaterThanOrEqual(100)
+    expect(Date.now() / 1000).toBeGreaterThanOrEqual(expires)
     await repo.branches.create('dev', commit)
     await wt.reset(ROOT_COMMIT)
     expect(await repo.tags.get('t')).toBe(commit)
@@ -278,12 +280,17 @@ describe('the lease itself', () => {
   it('refuses a second sweep with wait: false, and waits by default', async () => {
     const store = new Memory()
     await VersionedKV.open(store)
-    await store.set(GC_LEASE_KEY, liveLease(Date.now() / 1000 + 0.15))
+    // A lease that outlives the refusals, however slow the runner.
+    const held = liveLease(Date.now() / 1000 + 60)
+    await store.set(GC_LEASE_KEY, held)
     await expect(gcStore(store, { wait: false })).rejects.toThrow(GcBusy)
     const vk = await VersionedKV.open(store)
     await expect(vk.deepClean()).rejects.toThrow(GcBusy)
-    // cleanOrphans waits the holder out.
+    // cleanOrphans waits the holder out: a short lease, so the wait is.
+    const expires = Date.now() / 1000 + 0.15
+    expect(await store.cas(GC_LEASE_KEY, liveLease(expires), held)).toBe(true)
     expect(await vk.cleanOrphans()).toBe(0)
+    expect(Date.now() / 1000).toBeGreaterThanOrEqual(expires)
   })
 
   it('treats an expired or unreadable record as no lease', async () => {

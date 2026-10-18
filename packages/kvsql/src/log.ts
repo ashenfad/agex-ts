@@ -95,6 +95,7 @@ import {
   parseSnapshotInfo,
   readSnapshot,
   rebaseBranch,
+  rebaseTag,
   restoreBranch,
   restoreSnapshot,
   snapshotCommit,
@@ -1722,9 +1723,10 @@ export class LoggedDatabase {
    * the log's branch moves from `head` to that tip.
    *
    * A crash before the file commits leaves the database as it was, and
-   * after it, opening finishes the move (`#settleRebase`). A conflict
-   * drops the rebase's branch; any other failure leaves it, for opening
-   * to settle by where the file is.
+   * after it, opening finishes the move (`#settleRebase`), from the head
+   * the rebase's tag names. A conflict stops it before anything is
+   * written; any other failure leaves the rebase's branch and tag, for
+   * opening to settle by where the file is.
    */
   async #rebaseFile(
     head: string,
@@ -1828,6 +1830,10 @@ export class LoggedDatabase {
         }
       }
       line = await this.#commitLine(temp, onto, steps.lines)
+      // the head to move from, for a crash after the COMMIT
+      const tag = rebaseTag(logName(this.#branch))
+      if (await this.#repo.tags.has(tag)) await this.#repo.tags.delete(tag)
+      await this.#repo.tags.create(tag, head)
       const next: Meta = {
         base: line.head,
         baseSeq: line.seq,
@@ -1855,7 +1861,7 @@ export class LoggedDatabase {
     } catch (err) {
       this.#closeUnfinished(err)
     }
-    await this.#repo.branches.delete(temp).catch(() => {})
+    await this.#dropRebase()
     return { landed: line.head }
   }
 
@@ -1940,20 +1946,43 @@ export class LoggedDatabase {
   /**
    * Finish or drop a rebase a crash interrupted. If the file is at the
    * rebase branch's tip, the rebase committed it, and the log's branch
-   * moves there; otherwise the file is as it was before, and the
-   * rebase's branch is only dropped.
+   * moves there from the head the rebase's tag names; otherwise the
+   * file is as it was before, and the rebase's branch and tag are only
+   * dropped.
+   *
+   * @throws LogError if the file has the rebase but the branch has
+   *   moved on since from the head the rebase started from: moving it
+   *   would drop what it moved to, so both stay as they are.
    */
   async #settleRebase(): Promise<void> {
     const repo = this.#repo
-    const temp = rebaseBranch(logName(this.#branch))
-    if (!(await repo.branches.has(temp))) return
+    const log = logName(this.#branch)
+    const temp = rebaseBranch(log)
+    const tag = rebaseTag(log)
+    if (!(await repo.branches.has(temp))) {
+      if (await repo.tags.has(tag)) await repo.tags.delete(tag)
+      return
+    }
     const line = await repo.branches.get(temp)
     await this.#wt.refresh()
     const head = this.#wt.head
     if (this.#meta.base === line && !(await this.#holds(head, line))) {
+      const from = (await repo.tags.has(tag)) ? await repo.tags.get(tag) : null
+      if (head !== from) {
+        throw new LogError(
+          `a rebase of this database was cut short after the file took it, and branch '${this.#branch}' has moved since, to ${head}, from ${from ?? 'where the rebase started'}: moving it to the rebase (${line}, on branch '${temp}') would drop that, so both are left as they are`,
+        )
+      }
       await this.#moveBranch(head, line)
     }
-    await repo.branches.delete(temp)
+    await this.#dropRebase()
+  }
+
+  /** Drop the rebase's branch and tag. */
+  async #dropRebase(): Promise<void> {
+    const log = logName(this.#branch)
+    await this.#repo.branches.delete(rebaseBranch(log)).catch(() => {})
+    await this.#repo.tags.delete(rebaseTag(log)).catch(() => {})
   }
 
   /** Whether commit `ancestor` is `commit` or in its history. */

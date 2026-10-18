@@ -124,6 +124,29 @@ describe('checkpoints', () => {
     await db.close()
   })
 
+  it('are taken for schema changes made while an epoch is committed, once it is in', async () => {
+    const repo = await repoOver()
+    const db = await notes(new MemoryDirectory(), repo)
+    const epoch = db.newEpoch()
+    // made while the snapshot is committed, and flushes wait
+    const first = db.query('ALTER TABLE notes ADD COLUMN a TEXT')
+    const insert = db.query("INSERT INTO notes (id, body) VALUES (8, 'eight')")
+    const second = db.query('ALTER TABLE notes ADD COLUMN b TEXT')
+    const { seq } = await epoch
+    await Promise.all([first, insert, second])
+    const autos = (await db.checkpoints()).filter((c) => c.auto)
+    // before the first: the snapshot itself; before the second: after the insert
+    expect(autos.map((c) => [c.seq, c.label])).toEqual([
+      [seq, 'before ALTER TABLE notes ADD COLUMN a TEXT'],
+      [seq + 2, 'before ALTER TABLE notes ADD COLUMN b TEXT'],
+    ])
+    expect(await db.restore(autos[0]?.id as string)).toMatchObject({ how: 'epoch' })
+    expect((await db.query("SELECT count(*) AS n FROM pragma_table_info('notes')")).rows).toEqual([
+      { n: 2 },
+    ])
+    await db.close()
+  })
+
   it('go with the database: deleting its log deletes them', async () => {
     const repo = await repoOver()
     const db = await notes(new MemoryDirectory(), repo)
@@ -260,6 +283,107 @@ describe('restoring', () => {
     ])
     await db.close()
   })
+})
+
+/** A store whose `n`th read from when it is armed fails, once. */
+class FlakyReads {
+  reads = 0
+  #failAt: number | null = null
+  constructor(readonly inner: KVStore) {}
+  failRead(n: number): void {
+    this.#failAt = this.reads + n
+  }
+  #read(): void {
+    if (++this.reads === this.#failAt) throw new Error(`a read failed (${this.reads})`)
+  }
+  get(key: string) {
+    this.#read()
+    return this.inner.get(key)
+  }
+  has(key: string) {
+    this.#read()
+    return this.inner.has(key)
+  }
+  getMany(keys: Iterable<string>) {
+    this.#read()
+    return this.inner.getMany(keys)
+  }
+  keys(prefix?: string) {
+    this.#read()
+    return this.inner.keys(prefix)
+  }
+  items(prefix?: string) {
+    this.#read()
+    return this.inner.items(prefix)
+  }
+  set(key: string, value: Uint8Array) {
+    return this.inner.set(key, value)
+  }
+  remove(key: string) {
+    return this.inner.remove(key)
+  }
+  setMany(items: Iterable<readonly [string, Uint8Array]>) {
+    return this.inner.setMany(items)
+  }
+  removeMany(keys: Iterable<string>) {
+    return this.inner.removeMany(keys)
+  }
+  cas(key: string, value: Uint8Array, expected: Uint8Array | null) {
+    return this.inner.cas(key, value, expected)
+  }
+  casMany(
+    expected: ReadonlyMap<string, Uint8Array | null>,
+    writes: ReadonlyMap<string, Uint8Array>,
+    removes?: Iterable<string>,
+  ) {
+    return this.inner.casMany(expected, writes, removes)
+  }
+  clear() {
+    return this.inner.clear()
+  }
+}
+
+describe('a restore that fails', () => {
+  quietSqliteWarnings()
+
+  it('at any read leaves the database as it was or restored, its files free to open again', async () => {
+    const setup = async (store: KVStore) => {
+      const dir = new MemoryDirectory()
+      const db = await notes(dir, await repoOver(store))
+      const before = await dump(db)
+      const cp = await db.checkpoint()
+      await db.query('ALTER TABLE notes ADD COLUMN done INTEGER')
+      await scribble(db)
+      await db.flush()
+      return { dir, db, cp, before, after: await dump(db) }
+    }
+    const counting = new FlakyReads(new Memory())
+    const first = await setup(counting as unknown as KVStore)
+    const start = counting.reads
+    await first.db.restore(first.cp.id)
+    const reads = counting.reads - start
+    await first.db.close()
+    expect(reads).toBeGreaterThan(5)
+
+    for (let n = 1; n <= reads; n++) {
+      const inner = new Memory()
+      const flaky = new FlakyReads(inner)
+      const { dir, db, cp, before, after } = await setup(flaky as unknown as KVStore)
+      flaky.failRead(n)
+      const failed = await db.restore(cp.id).then(
+        () => false,
+        () => true,
+      )
+      // a database the failure left open closes as ever
+      if (!db.closed) await db.close()
+      const again = await open(dir, await repoOver(inner))
+      const state = await dump(again)
+      expect([before, after], `read ${n}`).toContainEqual(state)
+      if (!failed) expect(state, `read ${n}`).toEqual(before)
+      expect(await integrity(again), `read ${n}`).toBe('ok')
+      await again.close()
+    }
+  }, 120_000)
 })
 
 describe('crashes while restoring', () => {

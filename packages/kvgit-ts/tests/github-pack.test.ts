@@ -5,6 +5,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { Memory } from '../src/backends/memory'
+import { FakeGithub } from '../src/github/fake'
 import {
   GithubClient,
   MANIFEST_PATH,
@@ -14,7 +15,6 @@ import {
 } from '../src/github/index'
 import { VersionedKV, applyWire, pullBranch, pushBranch, walkDelta } from '../src/index'
 import type { WireCommit } from '../src/types'
-import { FakePackGithub } from './fake-pack-github'
 
 const enc = new TextEncoder()
 const dec = new TextDecoder()
@@ -23,7 +23,7 @@ const text = (b: Uint8Array | null | undefined): string | null => (b == null ? n
 
 const BRANCH = 'chat-1'
 
-async function device(gh: FakePackGithub, opts: ConstructorParameters<typeof PackRemote>[2] = {}) {
+async function device(gh: FakeGithub, opts: ConstructorParameters<typeof PackRemote>[2] = {}) {
   const store = new Memory()
   const remote = new PackRemote(gh.client(), store, opts)
   return { store, remote }
@@ -31,7 +31,7 @@ async function device(gh: FakePackGithub, opts: ConstructorParameters<typeof Pac
 
 describe('PackRemote id', () => {
   it('names the repo, case aside, and the API when not github.com', () => {
-    const gh = new FakePackGithub()
+    const gh = new FakeGithub()
     expect(new PackRemote(gh.client(), new Memory()).id).toBe('github:o/r')
     const client = new GithubClient({
       token: 't',
@@ -108,7 +108,7 @@ describe('pack codec', () => {
 
 describe('PackRemote push / fetch', () => {
   it('first push is one roster query and one mutation; fresh pull one query and one read', async () => {
-    const gh = new FakePackGithub()
+    const gh = new FakeGithub()
     const a = await device(gh)
     const vk = await commitN(a.store, 5, 'a')
 
@@ -130,7 +130,7 @@ describe('PackRemote push / fetch', () => {
   })
 
   it('incremental push adds one pack; incremental pull reads only it', async () => {
-    const gh = new FakePackGithub()
+    const gh = new FakeGithub()
     const a = await device(gh)
     await commitN(a.store, 3, 'a')
     await pushBranch(a.store, a.remote, BRANCH)
@@ -154,7 +154,7 @@ describe('PackRemote push / fetch', () => {
   })
 
   it('a pull that has part of a pack applies only what it lacks', async () => {
-    const gh = new FakePackGithub()
+    const gh = new FakeGithub()
     const a = await device(gh)
     await commitN(a.store, 2, 'a')
     await pushBranch(a.store, a.remote, BRANCH)
@@ -172,7 +172,7 @@ describe('PackRemote push / fetch', () => {
   })
 
   it('a stale expectedHeadOid loses cleanly: diverged, remote unchanged', async () => {
-    const gh = new FakePackGithub()
+    const gh = new FakeGithub()
     const a = await device(gh)
     await commitN(a.store, 2, 'a')
     await pushBranch(a.store, a.remote, BRANCH)
@@ -188,7 +188,7 @@ describe('PackRemote push / fetch', () => {
   })
 
   it('a race inside the CAS window returns false from push (no partial write)', async () => {
-    const gh = new FakePackGithub()
+    const gh = new FakeGithub()
     const a = await device(gh)
     const vk = await commitN(a.store, 2, 'a')
     await pushBranch(a.store, a.remote, BRANCH)
@@ -214,7 +214,7 @@ describe('PackRemote push / fetch', () => {
   })
 
   it('the FORBIDDEN shape of a lost race (ref moved mid-request) is a lost CAS too', async () => {
-    const gh = new FakePackGithub()
+    const gh = new FakeGithub()
     gh.raceStyle = 'forbidden'
     const a = await device(gh)
     const old = (await commitN(a.store, 1, 'a')).currentCommit
@@ -230,7 +230,7 @@ describe('PackRemote push / fetch', () => {
   })
 
   it('creation races: the second device to create loses', async () => {
-    const gh = new FakePackGithub()
+    const gh = new FakeGithub()
     const a = await device(gh)
     const b = await device(gh)
     await commitN(a.store, 1, 'a')
@@ -240,7 +240,7 @@ describe('PackRemote push / fetch', () => {
   })
 
   it('splits a push larger than maxPackBytes into several CAS-chained commits', async () => {
-    const gh = new FakePackGithub()
+    const gh = new FakeGithub()
     const a = await device(gh, { maxPackBytes: 150 })
     const vk = await commitN(a.store, 6, 'a') // ~80 bytes of values per commit
     expect((await pushBranch(a.store, a.remote, BRANCH)).status).toBe('created')
@@ -257,7 +257,7 @@ describe('PackRemote and manifests it cannot use', () => {
     ['text that is not JSON', '{"format": 1, "head":'],
   ] as const) {
     it(`never claims a branch whose manifest is ${what}: the push refuses, the roster skips it`, async () => {
-      const gh = new FakePackGithub()
+      const gh = new FakeGithub()
       gh.plant(BRANCH, { [MANIFEST_PATH]: text })
       const before = gh.refs.get(`refs/heads/${BRANCH}`)
       const a = await device(gh)
@@ -271,7 +271,7 @@ describe('PackRemote and manifests it cannot use', () => {
   }
 
   it('refuses a commit too large for one request, before sending it', async () => {
-    const gh = new FakePackGithub()
+    const gh = new FakeGithub()
     const a = await device(gh)
     const vk = await VersionedKV.open(a.store, { branch: BRANCH })
     // random bytes don't compress: 24MB stays over the 30MB base64 cap
@@ -287,7 +287,7 @@ describe('PackRemote and manifests it cannot use', () => {
 
 describe('PackRemote and branches that are not sessions', () => {
   it("never pushes onto the default branch, or a branch of the repo's own", async () => {
-    const gh = new FakePackGithub()
+    const gh = new FakeGithub()
     gh.plant('feature', { 'notes.md': 'mine' })
     for (const branch of ['main', 'feature']) {
       const store = new Memory()
@@ -302,7 +302,7 @@ describe('PackRemote and branches that are not sessions', () => {
   })
 
   it('claims a creation that never got its first commit (a ref at main)', async () => {
-    const gh = new FakePackGithub()
+    const gh = new FakeGithub()
     gh.setRef(BRANCH, gh.refs.get('refs/heads/main') as string)
     const a = await device(gh)
     await commitN(a.store, 1, 'a')
@@ -313,7 +313,7 @@ describe('PackRemote and branches that are not sessions', () => {
 
 describe('PackRemote packs over time', () => {
   it('folds older packs once a push would exceed maxPacks, still one mutation', async () => {
-    const gh = new FakePackGithub()
+    const gh = new FakeGithub()
     const a = await device(gh, { maxPacks: 4, keepRecent: 2 })
     let vk: VersionedKV | null = null
     for (let i = 0; i < 8; i++) {
@@ -331,7 +331,7 @@ describe('PackRemote packs over time', () => {
   })
 
   it('repack folds everything into one pack; a fresh pull is one query + one read', async () => {
-    const gh = new FakePackGithub()
+    const gh = new FakeGithub()
     const a = await device(gh)
     for (let i = 0; i < 5; i++) {
       await commitN(a.store, 2, `t${i}-`)
@@ -354,7 +354,7 @@ describe('PackRemote packs over time', () => {
 
 describe('PackRemote.repack and its request size', () => {
   it('refuses a history too large for one request, before sending it', async () => {
-    const gh = new FakePackGithub()
+    const gh = new FakeGithub()
     const a = await device(gh)
     const vk = await VersionedKV.open(a.store, { branch: BRANCH })
     // random bytes don't compress: two 12MB pushes fit, one 24MB pack doesn't
@@ -372,7 +372,7 @@ describe('PackRemote.repack and its request size', () => {
 
 describe('PackRemote roster and lifecycle', () => {
   it('throws a lifecycle error that is not a lost race, rather than reporting one', async () => {
-    const gh = new FakePackGithub()
+    const gh = new FakeGithub()
     const a = await device(gh)
     await commitN(a.store, 1, 'a')
     await pushBranch(a.store, a.remote, BRANCH)
@@ -386,7 +386,7 @@ describe('PackRemote roster and lifecycle', () => {
   })
 
   it('roster carries stub metadata from the manifest, in one query', async () => {
-    const gh = new FakePackGithub()
+    const gh = new FakeGithub()
     const a = await device(gh, { meta: (branch) => ({ title: `Title of ${branch}` }) })
     await commitN(a.store, 1, 'a')
     await pushBranch(a.store, a.remote, BRANCH)
@@ -404,7 +404,7 @@ describe('PackRemote roster and lifecycle', () => {
   })
 
   it('archive / restore / empty trash are single atomic updateRefs', async () => {
-    const gh = new FakePackGithub()
+    const gh = new FakeGithub()
     const a = await device(gh)
     await commitN(a.store, 1, 'a')
     await pushBranch(a.store, a.remote, BRANCH)
@@ -429,7 +429,7 @@ describe('PackRemote roster and lifecycle', () => {
   })
 
   it('archive loses cleanly when the branch moved after it was read', async () => {
-    const gh = new FakePackGithub()
+    const gh = new FakeGithub()
     const a = await device(gh)
     await commitN(a.store, 1, 'a')
     await pushBranch(a.store, a.remote, BRANCH)

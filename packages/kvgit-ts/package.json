@@ -50,6 +50,14 @@
     "./github": {
       "types": "./dist/github/index.d.ts",
       "import": "./dist/github/index.js"
+    },
+    "./github/fake": {
+      "types": "./dist/github/fake.d.ts",
+      "import": "./dist/github/fake.js"
+    },
+    "./github/fake-server": {
+      "types": "./dist/github/fake-server.d.ts",
+      "import": "./dist/github/fake-server.js"
     }
   },
   "files": ["dist", "README.md", "LICENSE"],
@@ -59,6 +67,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:browser": "vitest run --config vitest.browser.config.ts",
+    "fake-github": "node scripts/fake-github.mjs",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

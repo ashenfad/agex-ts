@@ -65,9 +65,11 @@ export interface SnapshotRecord {
    * file then, and the SHA-256 of the file's pending transactions then
    * encoded as one entry (null for none): so a file left there by a
    * crash before it moved over, and only that file, can finish the
-   * move. Null for none.
+   * move. Null for none. `seq`, when the snapshot is numbered past the
+   * file's last transaction (it came after another copy's too), is that
+   * transaction: the pending ones the digest covers end there.
    */
-  previous: { branch: string; base: string; pending: string | null } | null
+  previous: { branch: string; base: string; pending: string | null; seq?: number } | null
   /**
    * The database's content hash (`hash.ts`) as the snapshot holds it,
    * which a copy at the same point compares its own with. Absent from
@@ -105,7 +107,7 @@ function decodeRecord(bytes: unknown, commit: string): SnapshotRecord {
   }
   const { v, seq, schema, bytes: size, gzipped, digests, previous, hash } = raw ?? {}
   const prev = previous as
-    | { branch?: unknown; base?: unknown; pending?: unknown }
+    | { branch?: unknown; base?: unknown; pending?: unknown; seq?: unknown }
     | null
     | undefined
   if (
@@ -120,7 +122,8 @@ function decodeRecord(bytes: unknown, commit: string): SnapshotRecord {
     (prev !== null &&
       (typeof prev?.branch !== 'string' ||
         typeof prev.base !== 'string' ||
-        (prev.pending !== null && typeof prev.pending !== 'string')))
+        (prev.pending !== null && typeof prev.pending !== 'string') ||
+        (prev.seq !== undefined && !isCount(prev.seq))))
   ) {
     throw corrupt('its record is malformed')
   }
@@ -138,6 +141,7 @@ function decodeRecord(bytes: unknown, commit: string): SnapshotRecord {
             branch: prev.branch as string,
             base: prev.base as string,
             pending: prev.pending as string | null,
+            ...(prev.seq !== undefined && { seq: prev.seq as number }),
           },
     ...(hash !== undefined && { hash: hash as string }),
   }

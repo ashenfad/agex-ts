@@ -501,9 +501,11 @@ interface Shot {
   tmp: string
   seq: number
   schema: number
-  previous: { branch: string; base: string; pending: string | null }
+  previous: { branch: string; base: string; pending: string | null; seq?: number }
   /** Its content hash, once worked out. */
   hash?: string
+  /** The old epoch's tip the move expects, if not `previous.base`. */
+  from?: string
 }
 
 /** One entry of a rebase's new line: its pieces, and their encoding. */
@@ -1777,8 +1779,7 @@ export class LoggedDatabase {
     if (theirPieces.some((piece) => piece.kind === 'sql')) {
       // the log's changes can't be undone past a schema change: this
       // database's file becomes a new epoch's snapshot instead
-      if (head !== base) await this.#moveBranch(head, base)
-      const checkpoint = await this.#keepByEpoch(target, ends, at.schema, ownSql)
+      const checkpoint = await this.#keepByEpoch(target, ends, at.schema, ownSql, head)
       return result('kept', { kept: 'mine', checkpoint })
     }
     const checkpoint = await this.#tag(
@@ -1895,7 +1896,6 @@ export class LoggedDatabase {
       return result('kept', { kept: 'theirs', checkpoint })
     }
     if (keep === 'mine') {
-      await this.#flush()
       const checkpoint = await this.#keepByEpoch(tip, ends, at.schema, ownSql)
       return result('kept', { kept: 'mine', checkpoint })
     }
@@ -2007,24 +2007,23 @@ export class LoggedDatabase {
    * position `ends`) kept as a checkpoint. The snapshot comes after
    * every transaction of either side, and counts as a schema change if
    * either side made one since they parted (at schema version
-   * `partedSchema`). Pending transactions flush first, to the database's
-   * own epoch, which the move then leaves.
+   * `partedSchema`). Pending transactions go into the snapshot. The
+   * database's branch moves on only with the move, from `from` (its
+   * tip, if not the file's position): until then a failure leaves it,
+   * and the log's side, as they were.
    */
   async #keepByEpoch(
     target: string,
     ends: { seq: number; schema: number },
     partedSchema: number,
     ownSql: boolean,
+    from?: string,
   ): Promise<Checkpoint> {
     const parsed = parseEpoch(this.#branch)
     if (!parsed) {
       throw new LogError(
         `keeping this database's side here starts a new epoch, but the log's branch '${this.#branch}' isn't named for epochs ('<name>/<n>')`,
       )
-    }
-    await this.#flush()
-    if (this.#pending > 0) {
-      throw new LogError(`the database's ${this.#pending} pending transactions didn't flush`)
     }
     const checkpoint = await this.#tag(
       target,
@@ -2042,6 +2041,7 @@ export class LoggedDatabase {
       epochBranch(parsed.log, n),
       Math.max(this.seq, ends.seq) + 1,
       changed ? Math.max(this.#meta.schema, ends.schema) + 1 : this.#meta.schema,
+      from,
     )
     await this.#tidy()
     return checkpoint
@@ -2050,9 +2050,10 @@ export class LoggedDatabase {
   /**
    * Start epoch `branch` from the database as it stands, its snapshot
    * at transaction `seq` and schema version `schema`, and move onto it,
-   * all while calls wait.
+   * all while calls wait; the old epoch's branch must be at `from` (by
+   * default the file's position).
    */
-  async #epochAt(branch: string, seq: number, schema: number): Promise<EpochResult> {
+  async #epochAt(branch: string, seq: number, schema: number, from?: string): Promise<EpochResult> {
     const dir = this.#file.directory
     const tmp = snapshotName(this.name)
     try {
@@ -2064,8 +2065,14 @@ export class LoggedDatabase {
         tmp,
         seq,
         schema,
-        previous: { branch: this.#branch, base: this.#meta.base, pending },
+        previous: {
+          branch: this.#branch,
+          base: this.#meta.base,
+          pending,
+          ...(seq !== this.seq && { seq: this.seq }),
+        },
         hash: await hashFile(dir, tmp),
+        ...(from !== undefined && { from }),
       }
       let written: Awaited<ReturnType<typeof writeSnapshot>>
       const source = await dir.open(tmp)
@@ -2163,13 +2170,13 @@ export class LoggedDatabase {
     })
     if (entries.length === 0) return result('up-to-date')
     if (keep === 'mine') {
-      const ends = await this.#positionAt(tip)
-      const checkpoint = await this.#tag(
-        tip,
-        ends.seq,
-        ends.schema,
-        'changes synced to an older epoch, not taken into this one',
+      // kept once: an adopt run again finds its checkpoint
+      const label = 'changes synced to an older epoch, not taken into this one'
+      const kept = (await listCheckpoints(repo, logName(this.#branch))).find(
+        (c) => c.commit === tip && c.label === label,
       )
+      const ends = await this.#positionAt(tip)
+      const checkpoint = kept ?? (await this.#tag(tip, ends.seq, ends.schema, label))
       return result('kept', { kept: 'mine', checkpoint })
     }
     const pieces = (await Promise.all(entries.map((entry) => this.#readEntry(entry)))).flat()
@@ -2642,7 +2649,7 @@ export class LoggedDatabase {
     const commit = wt.head
     // nothing may reach the old epoch after the snapshot: one writer
     // holds the database, but a log can move by sync
-    if ((await repo.branches.get(shot.previous.branch)) !== shot.previous.base) {
+    if ((await repo.branches.get(shot.previous.branch)) !== (shot.from ?? shot.previous.base)) {
       await this.#dropEpoch(shot.branch)
       throw new LogError(
         `the log on branch '${shot.previous.branch}' moved while the new epoch's snapshot was committed, so the snapshot misses its new entries`,
@@ -3290,16 +3297,24 @@ async function prepareFile(
   if (
     previous?.branch === file.branch &&
     previous.base === file.base &&
-    (await pendingThrough(dir, name, file.baseSeq, record.seq)) === previous.pending
+    (await pendingThrough(dir, name, file.baseSeq, previous.seq ?? record.seq)) === previous.pending
   ) {
     // the file the snapshot was taken from, which a crash stopped moving,
     // or a copy at the same point: holding nothing past the snapshot, it
     // must hold what the snapshot does
-    if (record.hash !== undefined && file.nextSeq - 1 === record.seq) {
+    if (record.hash !== undefined && file.nextSeq - 1 === (previous.seq ?? record.seq)) {
       const hash = await hashFile(dir, name)
       if (hash !== record.hash) throw new DivergedError(file.branch, file.base, record.hash, hash)
     }
-    await anchor(dir, name, branch, await snapshotCommit(repo, tip), record.seq, true)
+    await anchor(
+      dir,
+      name,
+      branch,
+      await snapshotCommit(repo, tip),
+      record.seq,
+      true,
+      record.schema,
+    )
     return as(false)
   }
   // the snapshot holds the file's flushed transactions if the file's
@@ -3494,6 +3509,7 @@ async function anchor(
   commit: string,
   seq: number,
   dropPending: boolean,
+  schema?: number,
 ): Promise<void> {
   const file = await openDatabaseFile(dir, name)
   try {
@@ -3502,9 +3518,11 @@ async function anchor(
       if (dropPending) {
         file.db.exec({ sql: 'DELETE FROM _kvsql_pending WHERE seq <= ?', bind: [seq] })
       }
+      // a snapshot may come after the file's last transaction, and be a
+      // schema change
       file.db.exec({
-        sql: 'UPDATE _kvsql_meta SET branch = ?, base = ?, base_seq = ?, applied_seq = ? WHERE id = 1',
-        bind: [branch, commit, seq, seq],
+        sql: 'UPDATE _kvsql_meta SET branch = ?, base = ?, base_seq = ?, applied_seq = ?, next_seq = max(next_seq, ?), schema = max(schema, ?) WHERE id = 1',
+        bind: [branch, commit, seq, seq, seq + 1, schema ?? 0],
       })
       file.db.exec('COMMIT')
     } catch (err) {

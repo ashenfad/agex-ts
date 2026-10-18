@@ -25,6 +25,7 @@ import {
   StatementError,
 } from './errors'
 import type {
+  AdoptOptions,
   CopyResult,
   EpochPolicy,
   EpochResult,
@@ -187,6 +188,7 @@ export interface Ops {
   restore: { args: [id: string]; result: RestoreResult }
   contentHash: { args: []; result: string }
   rebase: { args: [onto: string | null, options: RebaseOptions]; result: RebaseResult }
+  adopt: { args: [tip: string, options: AdoptOptions]; result: RebaseResult }
   info: { args: []; result: DatabaseInfo }
   delete: { args: [options: DeleteOptions]; result: undefined }
   status: { args: []; result: Status }
@@ -199,7 +201,8 @@ export type Op = keyof Ops
  * Requests that are safe to run twice, so one sent to a worker that
  * went away before answering is sent again to the next one: reading
  * the state or the file, flushing whatever is pending, deleting, and
- * rebasing (a rebase that landed finds the database up to date). A query or a
+ * rebasing and adopting (one that landed finds the database up to
+ * date). A query or a
  * transaction might write, and might have committed, so it fails with
  * {@link ConnectionLostError} instead.
  */
@@ -212,6 +215,7 @@ export const RETRY_SAFE: ReadonlySet<Op> = new Set<Op>([
   'deleteCheckpoint',
   'rebase',
   'contentHash',
+  'adopt',
 ])
 
 /** Marks the message a client sends a worker to connect to a database. */

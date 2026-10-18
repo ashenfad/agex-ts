@@ -86,6 +86,7 @@ describe('a new epoch', () => {
       transactions: 1,
       rebased: 0,
       snapshot: true,
+      stayed: null,
     })
     expect(await dump(fresh)).toEqual(await dump(db))
     expect(await dump(fresh)).not.toEqual(before)

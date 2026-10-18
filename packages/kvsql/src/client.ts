@@ -11,6 +11,7 @@ import type { Checkpoint } from './checkpoint'
 import type { Params, Statement } from './entry'
 import { KvsqlError } from './errors'
 import type {
+  AdoptOptions,
   CopyResult,
   EpochResult,
   FlushResult,
@@ -49,6 +50,7 @@ export type {
   EpochResult,
   FlushResult,
   QueryResult,
+  AdoptOptions,
   RebaseOptions,
   RebaseResult,
   RebaseSide,
@@ -225,6 +227,14 @@ export class DatabaseClient {
    */
   rebase(onto?: string, options: RebaseOptions = {}): Promise<RebaseResult> {
     return this.#call('rebase', [onto ?? null, options])
+  }
+
+  /**
+   * Take in entries another copy pushed to the epoch the database moved
+   * on from, by the worker holding it (see `LoggedDatabase.adopt`).
+   */
+  adopt(tip: string, options: AdoptOptions = {}): Promise<RebaseResult> {
+    return this.#call('adopt', [tip, options])
   }
 
   /** The database's state, from the worker holding it. */

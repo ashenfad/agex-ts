@@ -539,6 +539,7 @@ describe('opening', () => {
       transactions: 0,
       rebased: 0,
       snapshot: false,
+      stayed: null,
     })
     expect(await dump(again)).toMatchObject({ t: [{ id: 'a' }, { id: 'b' }] })
     expect(await again.flush()).toMatchObject({ from: 3, to: 3 })

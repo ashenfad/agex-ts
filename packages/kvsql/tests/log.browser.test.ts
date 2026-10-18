@@ -20,6 +20,7 @@ it('logs, flushes and replays in a browser', async () => {
     transactions: 2,
     rebased: 0,
     snapshot: false,
+    stayed: null,
   })
   expect((await copy.query('SELECT id, v FROM t ORDER BY id')).rows).toEqual([
     { id: 'a', v: new Uint8Array([1, 2, 3]) },
@@ -46,6 +47,7 @@ it('starts a new epoch and rebuilds from its snapshot in a browser', async () =>
     transactions: 1,
     rebased: 0,
     snapshot: true,
+    stayed: null,
   })
   expect((await copy.query('SELECT id, length(v) AS n FROM t ORDER BY id')).rows).toEqual([
     { id: 1, n: 1000 },

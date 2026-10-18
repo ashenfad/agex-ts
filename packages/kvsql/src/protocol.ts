@@ -200,11 +200,12 @@ export type Op = keyof Ops
 /**
  * Requests that are safe to run twice, so one sent to a worker that
  * went away before answering is sent again to the next one: reading
- * the state or the file, flushing whatever is pending, deleting, and
- * rebasing and adopting (one that landed finds the database up to
- * date). A query or a
- * transaction might write, and might have committed, so it fails with
- * {@link ConnectionLostError} instead.
+ * the state or the file (its content hash too), flushing whatever is
+ * pending, and deleting. A query or a transaction might write, and
+ * might have committed, so it fails with {@link ConnectionLostError}
+ * instead; so do a rebase and an adopt, which may have started an
+ * epoch or kept a checkpoint: a caller that lost the reply syncs
+ * again, which finds where things stand.
  */
 export const RETRY_SAFE: ReadonlySet<Op> = new Set<Op>([
   'flush',
@@ -213,9 +214,7 @@ export const RETRY_SAFE: ReadonlySet<Op> = new Set<Op>([
   'delete',
   'checkpoints',
   'deleteCheckpoint',
-  'rebase',
   'contentHash',
-  'adopt',
 ])
 
 /** Marks the message a client sends a worker to connect to a database. */

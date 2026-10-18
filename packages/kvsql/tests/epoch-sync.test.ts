@@ -19,6 +19,7 @@ import {
 import { Memory } from '@agex-ts/kvgit/backends/memory'
 import { afterEach, describe, expect, it } from 'vitest'
 import { openDatabaseFile } from '../src/database'
+import { finished } from '../src/epoch'
 import {
   type CrashOp,
   CrashingDirectory,
@@ -388,6 +389,10 @@ describe('entries pushed to an epoch while another device started the next', () 
     expect(kept).toMatchObject({ status: 'kept', kept: 'mine' })
     expect(kept.checkpoint?.commit).toBe(tip)
     expect(await dump(a.db)).toEqual(before)
+    // run again, the same checkpoint
+    const again = await a.db.adopt(tip, { keep: 'mine' })
+    expect(again.checkpoint?.id).toBe(kept.checkpoint?.id)
+    expect((await a.db.checkpoints()).filter((c) => c.commit === tip)).toHaveLength(1)
   })
 })
 
@@ -449,4 +454,96 @@ describe('a rebase onto a new epoch cut short', () => {
       }
     }
   }, 180_000)
+})
+
+describe("keeping this device's side over a synced schema change, cut short", () => {
+  /** b with a pending change, its branch pulled ahead to a's schema change. */
+  async function advanced(store: KVStore, dir: Directory) {
+    const remote = new MemoryRemote(new Memory())
+    const a = await device(remote)
+    await run(
+      a.db,
+      ['CREATE TABLE t (id INTEGER PRIMARY KEY NOT NULL, x TEXT)'],
+      ["INSERT INTO t VALUES (1, 'x1')"],
+    )
+    await push(a, remote)
+    const b = await device(remote, store, dir)
+    await run(a.db, ['ALTER TABLE t ADD COLUMN z TEXT'])
+    await push(a, remote)
+    await run(b.db, ["UPDATE t SET x = 'b' WHERE id = 1"])
+    expect((await pullBranch(b.store, remote, BRANCH)).status).toBe('fast-forwarded')
+    return { b, head: await b.repo.branches.get(BRANCH) }
+  }
+
+  it('leaves the branch at the synced head, or the database on the new epoch', async () => {
+    const counting = new CrashingStore(new Memory())
+    const { b } = await advanced(counting, new MemoryDirectory())
+    const start = counting.writes
+    expect(await b.db.rebase(undefined, { keep: 'mine' })).toMatchObject({ status: 'kept' })
+    expect(b.db.branch).toBe(NEXT)
+    expect(await rows(b.db)).toEqual([{ id: 1, x: 'b' }])
+    const writes = counting.writes - start
+
+    for (let n = 1; n <= writes; n++) {
+      const inner = new Memory()
+      const crashing = new CrashingStore(inner)
+      const dir = new MemoryDirectory()
+      const victim = await advanced(crashing, dir)
+      crashing.crashAtWrite(n)
+      await victim.b.db.rebase(undefined, { keep: 'mine' }).catch(() => {})
+      const repo = await repoOver(inner)
+      const opened = await open(new MemoryDirectory(dir.image()), repo).catch((e: unknown) => e)
+      if (opened instanceof Error) {
+        // as before: the pending change still can't follow the schema change
+        expect(opened, `write ${n}`).toMatchObject({ name: 'RebaseRequiredError' })
+        expect(await repo.branches.get(BRANCH), `write ${n}`).toBe(victim.head)
+        expect(await finished(repo, NEXT), `write ${n}`).toBe(false)
+      } else {
+        const db = await track(Promise.resolve(opened as LoggedDatabase))
+        expect(db.branch, `write ${n}`).toBe(NEXT)
+        expect(await rows(db), `write ${n}`).toEqual([{ id: 1, x: 'b' }])
+        expect(await integrity(db), `write ${n}`).toBe('ok')
+      }
+    }
+  }, 120_000)
+
+  it('at every file write and sync, finishes the move from a snapshot numbered past the file', async () => {
+    const counting = new CrashingDirectory(new MemoryDirectory())
+    const { b } = await advanced(new Memory(), counting)
+    const before = { ...counting.ops }
+    await b.db.rebase(undefined, { keep: 'mine' })
+    const ops = Object.fromEntries(
+      (['write', 'sync', 'truncate'] as CrashOp[]).map((op) => [op, counting.ops[op] - before[op]]),
+    ) as Record<CrashOp, number>
+    let moved = 0
+    for (const op of ['write', 'sync', 'truncate'] as CrashOp[]) {
+      for (let n = 1; n <= ops[op]; n++) {
+        const store = new Memory()
+        const inner = new MemoryDirectory()
+        const dir = new CrashingDirectory(inner)
+        const victim = await advanced(store, dir)
+        dir.crashAt({ op, n, ...(op === 'write' && { torn: 100 }) })
+        await victim.b.db.rebase(undefined, { keep: 'mine' }).catch(() => {})
+        const repo = await repoOver(store)
+        const at = `${op} ${n}`
+        const opened = await open(new MemoryDirectory(inner.image()), repo).catch((e: unknown) => e)
+        if (opened instanceof Error) {
+          expect(opened, at).toMatchObject({ name: 'RebaseRequiredError' })
+          expect(await repo.branches.get(BRANCH), at).toBe(victim.head)
+          // only if the new epoch never finished
+          expect(await finished(repo, NEXT), at).toBe(false)
+        } else {
+          const db = await track(Promise.resolve(opened as LoggedDatabase))
+          expect(db.branch, at).toBe(NEXT)
+          expect(await rows(db), at).toEqual([{ id: 1, x: 'b' }])
+          expect(await integrity(db), at).toBe('ok')
+          // numbered past both sides, and the schema change counted
+          expect(db.seq, at).toBe(4)
+          expect(db.schemaVersion, at).toBe(3)
+          moved++
+        }
+      }
+    }
+    expect(moved).toBeGreaterThan(0)
+  }, 120_000)
 })

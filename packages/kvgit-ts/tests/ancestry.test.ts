@@ -153,6 +153,7 @@ describe('ancestry, against the whole-history walk', () => {
       }
       expect(await isAncestor(d.store, 'missing', d.commits.at(-1) as string)).toBe(false)
       expect(await isAncestor(d.store, d.commits[0] as string, 'missing')).toBe(false)
+      expect(await isAncestor(d.store, 'missing', 'missing')).toBe(false)
     })
 
     it(`holds at least what a receiver has above a generation (${kind})`, async () => {

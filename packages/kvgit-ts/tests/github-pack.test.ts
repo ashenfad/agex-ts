@@ -572,3 +572,19 @@ describe('PackRemote pulls on a long history', () => {
     expect(pulled).toMatchObject({ status: 'fast-forwarded', transferred: 8 })
   })
 })
+
+describe('PackRemote fetch and what the store lacks', () => {
+  it('takes a head it was told it has, but lacks, as not held', async () => {
+    const gh = new FakeGithub()
+    const a = await device(gh)
+    const vk = await commitN(a.store, 2, 'a')
+    await pushBranch(a.store, a.remote, BRANCH)
+    // a store claiming the remote head (a sync head whose commits a
+    // sweep took) still gets every commit
+    const b = await device(gh)
+    await b.remote.listRefs()
+    const got = await collect(b.remote.fetch(vk.currentCommit, [vk.currentCommit]))
+    expect(got.at(-1)?.hash).toBe(vk.currentCommit)
+    expect((await applyWire(b.store, got)).applied).toBe(got.length)
+  })
+})

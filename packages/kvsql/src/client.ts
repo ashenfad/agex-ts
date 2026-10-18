@@ -7,9 +7,10 @@
  * without either.
  */
 
+import type { Checkpoint } from './checkpoint'
 import type { Params, Statement } from './entry'
 import { KvsqlError } from './errors'
-import type { CopyResult, EpochResult, FlushResult, QueryResult } from './log'
+import type { CopyResult, EpochResult, FlushResult, QueryResult, RestoreResult } from './log'
 import {
   CONNECT,
   type ConnectMessage,
@@ -34,7 +35,15 @@ export type {
   Role,
   Status,
 } from './protocol'
-export type { CopyResult, EpochResult, FlushResult, QueryResult, Recovery } from './log'
+export type { Checkpoint } from './checkpoint'
+export type {
+  CopyResult,
+  EpochResult,
+  FlushResult,
+  QueryResult,
+  Recovery,
+  RestoreResult,
+} from './log'
 export type { Params, Statement } from './entry'
 
 /** Where a client sends its connect message: a `Worker`, usually. */
@@ -167,6 +176,30 @@ export class DatabaseClient {
    */
   newEpoch(): Promise<EpochResult> {
     return this.#call('epoch', [])
+  }
+
+  /** Take a checkpoint, by the worker holding the database (see `LoggedDatabase.checkpoint`). */
+  checkpoint(label = ''): Promise<Checkpoint> {
+    return this.#call('checkpoint', [label])
+  }
+
+  /** The database's checkpoints, oldest first. */
+  checkpoints(): Promise<Checkpoint[]> {
+    return this.#call('checkpoints', [])
+  }
+
+  /** Delete checkpoint `id`, if it's there. */
+  deleteCheckpoint(id: string): Promise<void> {
+    return this.#call('deleteCheckpoint', [id]) as Promise<never>
+  }
+
+  /**
+   * Bring the database back to checkpoint `id`, by the worker holding
+   * it (see `LoggedDatabase.restore`). Every tab sees the result: a
+   * restore is a write like any other.
+   */
+  restore(id: string): Promise<RestoreResult> {
+    return this.#call('restore', [id])
   }
 
   /** The database's state, from the worker holding it. */

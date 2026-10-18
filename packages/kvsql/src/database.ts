@@ -37,6 +37,18 @@ export const JOURNAL_MODE = 'persist'
  */
 export const JOURNAL_SIZE_LIMIT = 1 << 20
 
+/**
+ * The length of SQLite's magic string, `SQLite format 3\0`, which every
+ * database file starts with: SQLite reads a file that doesn't start
+ * with it as no database at all (`SQLITE_NOTADB`). So kvsql writes a
+ * file whole with these bytes last, after the rest is synced: one cut
+ * short, even mid-way through them, reads as no database, never as a
+ * corrupt one, and is written again. Writing the whole first page last
+ * wouldn't do: a write torn after its header leaves a header on a
+ * zeroed page, which SQLite reads as corrupt.
+ */
+export const MAGIC_BYTES = 16
+
 /** The suffix of a database's rollback journal, beside it in its directory. */
 const JOURNAL_SUFFIX = '-journal'
 
@@ -53,6 +65,14 @@ export function snapshotName(name: string): string {
   return `${name}${SNAPSHOT_SUFFIX}`
 }
 
+/** The suffix of the database a restore rebuilds beside a database, at a checkpoint. */
+const RESTORE_SUFFIX = '-restore'
+
+/** The name of database `name`'s restore file, beside it in its directory. */
+export function restoreName(name: string): string {
+  return `${name}${RESTORE_SUFFIX}`
+}
+
 const directoryIds = new WeakMap<Directory, number>()
 let nextDirectoryId = 0
 
@@ -67,17 +87,19 @@ function vfsPath(dir: Directory, name: string): string {
 }
 
 /**
- * A database name is one path segment, and doesn't end in the journal
- * or snapshot suffix: database `x-journal` would share its file with
- * database `x`'s journal, and `x-snapshot` with the snapshot `x` makes
- * for a new epoch, so one would overwrite or delete the other.
+ * A database name is one path segment, and doesn't end in the suffix
+ * of a file kvsql keeps beside a database: database `x-journal` would
+ * share its file with database `x`'s journal, `x-snapshot` with the
+ * snapshot `x` makes for a new epoch, and `x-restore` with the copy a
+ * restore of `x` rebuilds, so one would overwrite or delete the other.
  */
-function checkName(name: string): void {
+export function checkDatabaseName(name: string): void {
   if (name === '' || name.includes('/'))
     throw new Error(`bad database name: ${JSON.stringify(name)}`)
   for (const [suffix, what] of [
     [JOURNAL_SUFFIX, 'database journals'],
     [SNAPSHOT_SUFFIX, 'the snapshots databases make for new epochs'],
+    [RESTORE_SUFFIX, 'the databases restores rebuild'],
   ] as const) {
     if (name.endsWith(suffix)) {
       throw new Error(
@@ -120,9 +142,9 @@ export class DatabaseFile {
   /**
    * Writes the database file's bytes into `into`, a file of another
    * database, replacing what it held, and syncs it: the database as of
-   * its last commit, so call it with no transaction open. The first
-   * page goes last, so a copy cut short starts with zeros, which SQLite
-   * reads as no database at all. Returns the bytes copied.
+   * its last commit, so call it with no transaction open. The magic
+   * string goes last ({@link MAGIC_BYTES}), so a copy cut short reads as
+   * no database at all. Returns the bytes copied.
    */
   copyInto(into: SyncFile): number {
     if (this.released) throw new Error(`database is closed: ${this.name}`)
@@ -130,8 +152,7 @@ export class DatabaseFile {
     const size = from.size()
     const chunk = new Uint8Array(Math.min(COPY_CHUNK, size))
     into.truncate(0)
-    // The first page holds the header; any page is at least 512 bytes.
-    const head = Math.min(512, size)
+    const head = Math.min(MAGIC_BYTES, size)
     for (let at = head; at < size; at += chunk.byteLength) {
       const part = chunk.subarray(0, Math.min(chunk.byteLength, size - at))
       readFully(from, part, at)
@@ -200,17 +221,15 @@ function releaseFiles(vfs: KvsqlVfs, path: string, files: readonly SyncFile[]): 
  * worker or tab has open (its files' access handles are exclusive).
  */
 export async function openDatabase(dir: Directory, name: string): Promise<DatabaseFile> {
-  checkName(name)
-  return openFile(dir, name)
+  checkDatabaseName(name)
+  return openDatabaseFile(dir, name)
 }
 
-/** Open database `of`'s snapshot file (see {@link vacuumIntoSnapshot}) as a database. */
-export async function openSnapshot(dir: Directory, of: string): Promise<DatabaseFile> {
-  checkName(of)
-  return openFile(dir, snapshotName(of))
-}
-
-async function openFile(dir: Directory, name: string): Promise<DatabaseFile> {
+/**
+ * {@link openDatabase} without checking the name: for kvsql's own
+ * files beside a database, and names checked already.
+ */
+export async function openDatabaseFile(dir: Directory, name: string): Promise<DatabaseFile> {
   const sqlite3 = await loadSqlite()
   const vfs = kvsqlVfs(sqlite3)
   const path = vfsPath(dir, name)
@@ -258,17 +277,12 @@ async function openFile(dir: Directory, name: string): Promise<DatabaseFile> {
  * while a database left without its hot journal could be corrupt.
  */
 export async function deleteDatabase(dir: Directory, name: string): Promise<void> {
-  checkName(name)
-  await removeFiles(dir, name)
+  checkDatabaseName(name)
+  await deleteDatabaseFiles(dir, name)
 }
 
-/** Delete database `of`'s snapshot file, if it's there. */
-export async function deleteSnapshot(dir: Directory, of: string): Promise<void> {
-  checkName(of)
-  await removeFiles(dir, snapshotName(of))
-}
-
-async function removeFiles(dir: Directory, name: string): Promise<void> {
+/** {@link deleteDatabase} without checking the name, as {@link openDatabaseFile}. */
+export async function deleteDatabaseFiles(dir: Directory, name: string): Promise<void> {
   const vfs = kvsqlVfs(await loadSqlite())
   if (vfs.has(vfsPath(dir, name))) throw new Error(`database is open: ${name}`)
   await dir.delete(name)
@@ -286,7 +300,7 @@ export async function copyDatabase(
   dir: Directory,
   name: string,
 ): Promise<number> {
-  checkName(name)
+  checkDatabaseName(name)
   // The old journal goes too: one left hot beside the copy would be
   // rolled back into it.
   await deleteDatabase(dir, name)
@@ -312,29 +326,19 @@ export async function vacuumDatabase(
   name: string,
   exec: (sql: string) => void = (sql) => source.db.exec(sql),
 ): Promise<number> {
-  checkName(name)
-  return vacuumTo(source, dir, name, exec)
+  checkDatabaseName(name)
+  return vacuumInto(source, dir, name, exec)
 }
 
-/**
- * {@link vacuumDatabase} into the database's snapshot file beside it,
- * the first step of a new epoch.
- */
-export function vacuumIntoSnapshot(
-  source: DatabaseFile,
-  exec: (sql: string) => void,
-): Promise<number> {
-  return vacuumTo(source, source.directory, snapshotName(source.name), exec)
-}
-
-async function vacuumTo(
+/** {@link vacuumDatabase} without checking the name, as {@link openDatabaseFile}. */
+export async function vacuumInto(
   source: DatabaseFile,
   dir: Directory,
   name: string,
   exec: (sql: string) => void,
 ): Promise<number> {
   const vfs = kvsqlVfs(await loadSqlite())
-  await removeFiles(dir, name)
+  await deleteDatabaseFiles(dir, name)
   const path = vfsPath(dir, name)
   const files: SyncFile[] = []
   const registered: string[] = []

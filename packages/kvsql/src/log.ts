@@ -46,13 +46,22 @@ import {
   startSession,
 } from './changeset'
 import {
+  type Checkpoint,
+  checkpointId,
+  deleteCheckpoint,
+  listCheckpoints,
+  logName,
+  readCheckpoint,
+} from './checkpoint'
+import {
   type DatabaseFile,
+  checkDatabaseName,
   copyDatabase,
-  deleteSnapshot,
-  openDatabase,
-  openSnapshot,
+  deleteDatabaseFiles,
+  openDatabaseFile,
+  restoreName,
   snapshotName,
-  vacuumIntoSnapshot,
+  vacuumInto,
 } from './database'
 import {
   ENTRY_KEY,
@@ -79,6 +88,7 @@ import {
   finished,
   parseEpoch,
   readSnapshot,
+  restoreBranch,
   restoreSnapshot,
   snapshotCommit,
   writeSnapshot,
@@ -163,6 +173,13 @@ export interface LogOptions {
    */
   onFlushError?: (err: unknown) => void
   /**
+   * How many of the checkpoints the database takes itself, one before
+   * each schema change, it keeps: the oldest go past this many. Default
+   * 10; 0: it takes none. Checkpoints taken with `checkpoint()` are
+   * kept until deleted.
+   */
+  autoCheckpoints?: number
+  /**
    * When to start a new epoch by itself; false: only when `newEpoch()`
    * is called. Only a log on a branch named for epochs (`<name>/<n>`)
    * has them.
@@ -234,6 +251,26 @@ export interface QueryResult {
   lastInsertRowid: number | bigint
 }
 
+/** What a restore did. */
+export interface RestoreResult {
+  /** The checkpoint restored to. */
+  checkpoint: Checkpoint
+  /** How many transactions it undid. */
+  undone: number
+  /**
+   * How: `undo`, one transaction applying the inverse of the changes
+   * since, logged as any is; `epoch`, a new epoch whose snapshot is the
+   * database rebuilt at the checkpoint (a schema change since, or a
+   * checkpoint on an earlier epoch, can't be undone by a changeset);
+   * `none`, the database was at the checkpoint already.
+   */
+  how: 'undo' | 'epoch' | 'none'
+  /** The database's last transaction after: a restore moves forward. */
+  seq: number
+  /** The log's branch after (a new one for `epoch`). */
+  branch: string
+}
+
 /** A new epoch, which the database moved to. */
 export interface EpochResult {
   /** Its branch, which the database's log is on now. */
@@ -298,6 +335,7 @@ export const REPLAY_CHUNK_BYTES = 32 << 20
 
 const DEFAULT_EVERY = 100
 const DEFAULT_MAX_AGE_MS = 2000
+const DEFAULT_AUTO_CHECKPOINTS = 10
 const DEFAULT_EPOCH_RATIO = 0.5
 const DEFAULT_EPOCH_MIN_BYTES = 8 << 20
 
@@ -400,9 +438,10 @@ export class LoggedDatabase {
   readonly recovery: Recovery
 
   readonly #sqlite3: Sqlite3Static
-  readonly #file: DatabaseFile
-  readonly #db: Database
-  readonly #guard: SchemaGuard
+  readonly #options: Partial<LogOptions> & DetachedOptions
+  #file: DatabaseFile
+  #db: Database
+  #guard: SchemaGuard
   /** The log, unless the database is a detached copy. */
   #log: { repo: Repo<Uint8Array>; wt: Worktree<Uint8Array> } | null
   #branch: string
@@ -413,6 +452,7 @@ export class LoggedDatabase {
   readonly #onFlushError: ((err: unknown) => void) | undefined
   readonly #epochs: Required<EpochPolicy> | null
   readonly #onEpochError: ((err: unknown) => void) | undefined
+  readonly #autoCheckpoints: number
   /** The epoch being started, if one is. */
   #epoch: Promise<EpochResult> | null = null
   /** Whether flushes wait: a snapshot is being committed for a new epoch. */
@@ -439,6 +479,7 @@ export class LoggedDatabase {
     pending: number,
   ) {
     this.name = options.name
+    this.#options = options
     this.#branch = branch
     this.recovery = { ownFlush: false, entries: 0, transactions: 0, snapshot: false }
     this.#sqlite3 = sqlite3
@@ -459,6 +500,7 @@ export class LoggedDatabase {
             minBytes: options.epochs?.minBytes ?? DEFAULT_EPOCH_MIN_BYTES,
           }
     this.#onEpochError = options.onEpochError
+    this.#autoCheckpoints = options.autoCheckpoints ?? DEFAULT_AUTO_CHECKPOINTS
     this.#meta = meta
     this.#pending = pending
   }
@@ -466,6 +508,12 @@ export class LoggedDatabase {
   /** @internal Use {@link openLog}. */
   static async open(options: LogOptions): Promise<LoggedDatabase> {
     checkOptions(options)
+    checkDatabaseName(options.name)
+    return LoggedDatabase.#open(options)
+  }
+
+  /** Open, with `options` checked, but not the name: a restore's own may be kvsql's. */
+  static async #open(options: LogOptions): Promise<LoggedDatabase> {
     const branch = await currentEpoch(options.repo, options.branch)
     const rebuilt = await prepareFile(options, branch)
     const wt = await options.repo.worktree(branch, { create: true })
@@ -483,7 +531,8 @@ export class LoggedDatabase {
   }
 
   /** @internal Use {@link openDetached}. */
-  static openDetached(options: DetachedOptions): Promise<LoggedDatabase> {
+  static async openDetached(options: DetachedOptions): Promise<LoggedDatabase> {
+    checkDatabaseName(options.name)
     return LoggedDatabase.#start(options, DETACHED, null)
   }
 
@@ -493,7 +542,17 @@ export class LoggedDatabase {
     wt: Worktree<Uint8Array> | null,
   ): Promise<LoggedDatabase> {
     const sqlite3 = await loadSqlite()
-    const file = await openDatabase(options.dir, options.name)
+    const { file, guard, meta, pending } = await LoggedDatabase.#openFile(sqlite3, options, branch)
+    return new LoggedDatabase(options, branch, sqlite3, file, guard, wt, meta, pending)
+  }
+
+  /** Open the file on `branch`, behind the schema guard, and read its position. */
+  static async #openFile(
+    sqlite3: Sqlite3Static,
+    options: Partial<LogOptions> & DetachedOptions,
+    branch: string,
+  ): Promise<{ file: DatabaseFile; guard: SchemaGuard; meta: Meta; pending: number }> {
+    const file = await openDatabaseFile(options.dir, options.name)
     try {
       const foreignKeys = options.foreignKeys ?? true
       file.db.exec(`PRAGMA foreign_keys = ${foreignKeys ? 'ON' : 'OFF'}`)
@@ -502,11 +561,16 @@ export class LoggedDatabase {
         file.db,
         options.label === undefined ? {} : { label: options.label },
       )
-      const { meta, pending } = guard.trusted(() => {
-        initFile(file.db, branch)
-        return readPosition(file.db, branch)
-      })
-      return new LoggedDatabase(options, branch, sqlite3, file, guard, wt, meta, pending)
+      try {
+        const { meta, pending } = guard.trusted(() => {
+          initFile(file.db, branch)
+          return readPosition(file.db, branch)
+        })
+        return { file, guard, meta, pending }
+      } catch (err) {
+        guard.dispose()
+        throw err
+      }
     } catch (err) {
       file.close()
       throw err
@@ -631,6 +695,61 @@ export class LoggedDatabase {
   }
 
   /**
+   * Take a checkpoint: flush, then name the log's position, to
+   * `restore()` to later. Kept until `deleteCheckpoint()`. The database
+   * also takes one itself before each schema change (`autoCheckpoints`).
+   *
+   * @throws LogError for a database with no transactions yet, or a
+   *   detached copy.
+   */
+  checkpoint(label = ''): Promise<Checkpoint> {
+    if (this.#closing) return Promise.reject(closedError())
+    if (typeof label !== 'string')
+      return Promise.reject(new TypeError('checkpoint: label must be a string'))
+    return this.#afterEpoch(() =>
+      this.#serial(async () => {
+        await this.#flush()
+        if (this.#meta.baseSeq === 0) {
+          throw new LogError('the database has no transactions yet, so nothing to checkpoint')
+        }
+        return this.#checkpointAt(label, false, this.#meta.schema)
+      }),
+    )
+  }
+
+  /** The database's checkpoints, oldest first, across all its epochs. */
+  checkpoints(): Promise<Checkpoint[]> {
+    if (this.#closing) return Promise.reject(closedError())
+    return this.#serial(() => listCheckpoints(this.#repo, logName(this.#branch)))
+  }
+
+  /** Delete checkpoint `id`, if it's there. */
+  deleteCheckpoint(id: string): Promise<void> {
+    if (this.#closing) return Promise.reject(closedError())
+    return this.#serial(() => deleteCheckpoint(this.#repo, logName(this.#branch), id))
+  }
+
+  /**
+   * Bring the database back to checkpoint `id`: every transaction since
+   * is undone, by a transaction that moves the log forward, so other
+   * copies follow it as they follow any. Within the current epoch with
+   * no schema change since, that is one transaction applying the
+   * inverse of every change since; otherwise (a schema change since, or
+   * a checkpoint on an earlier epoch) the database is rebuilt at the
+   * checkpoint beside the file and becomes a new epoch's snapshot, which
+   * the file is then rebuilt from, and which counts as a schema change.
+   * Calls wait meanwhile. Everything written since the checkpoint is
+   * gone, other checkpoints aside.
+   *
+   * @throws LogError if there's no such checkpoint, or a restore that
+   *   needs a new epoch on a branch not named for epochs.
+   */
+  restore(id: string): Promise<RestoreResult> {
+    if (this.#closing) return Promise.reject(closedError())
+    return this.#afterEpoch(() => this.#serial(() => this.#restore(id)))
+  }
+
+  /**
    * The database as a standalone SQLite file: its tables, indexes,
    * views and triggers and `user_version`, without kvsql's own tables,
    * compacted, for any SQLite tool to open. Taken between calls, so it
@@ -691,7 +810,7 @@ export class LoggedDatabase {
     }
     await this.#checkTarget(dir, name)
     const bytes = await copyDatabase(this.#file, dir, name)
-    const copy = await openDatabase(dir, name)
+    const copy = await openDatabaseFile(dir, name)
     try {
       this.#mark(copy, DETACHED, true)
       if (logged) {
@@ -728,7 +847,7 @@ export class LoggedDatabase {
     if (!(await dir.exists(name))) return
     let file: DatabaseFile
     try {
-      file = await openDatabase(dir, name)
+      file = await openDatabaseFile(dir, name)
     } catch (err) {
       if (isNotADatabase(err)) return
       throw err
@@ -804,6 +923,7 @@ export class LoggedDatabase {
     checkStatements(statements)
     return this.#serial(async () => {
       const { results, logged, bytes } = this.#transact(statements, single)
+      if (logged === 'sql') await this.#autoCheckpoint(statements)
       if (logged && this.#reaches(bytes)) {
         // the new epoch's snapshot holds it, so it never becomes a log entry
         this.#startEpochReporting()
@@ -968,7 +1088,8 @@ export class LoggedDatabase {
     }
   }
 
-  async #flush(retried = false): Promise<FlushResult | null> {
+  /** Flush the pending transactions, or those through `through`. */
+  async #flush(retried = false, through = Number.POSITIVE_INFINITY): Promise<FlushResult | null> {
     this.#disarm()
     // Committing a snapshot for a new epoch: the switch to it arms again.
     if (this.#holding) return null
@@ -976,7 +1097,7 @@ export class LoggedDatabase {
     // A flush whose commit landed but whose delete didn't leaves the
     // file's base behind the log; settle that before writing another.
     if (this.#wt.head !== this.#meta.base) await this.#catchUp()
-    const items = this.#readPending()
+    const items = this.#readPending().filter((item) => item.seq <= through)
     const first = items[0]
     const last = items[items.length - 1]
     if (!first || !last) return null
@@ -998,7 +1119,7 @@ export class LoggedDatabase {
         // landed but reported failure (which catching up drops), or by
         // another copy's, which needs a rebase.
         await this.#catchUp()
-        return this.#flush(true)
+        return this.#flush(true, through)
       }
       throw err
     }
@@ -1013,6 +1134,7 @@ export class LoggedDatabase {
     this.#flushError = undefined
     this.#logBytes = total
     if (this.#reaches(total)) this.#startEpochReporting()
+    if (this.#pending > 0) this.#arm()
     return { commit, from: first.seq, to: last.seq, bytes: bytes.byteLength, pieces: pieces.length }
   }
 
@@ -1037,6 +1159,259 @@ export class LoggedDatabase {
     if (this.#timer === null) return
     clearTimeout(this.#timer)
     this.#timer = null
+  }
+
+  // --- Checkpoints and restore ---
+
+  /** Tag the log's position, the file's base, as a checkpoint. */
+  async #checkpointAt(label: string, auto: boolean, schema: number): Promise<Checkpoint> {
+    const repo = this.#repo
+    const { base: commit, baseSeq: seq } = this.#meta
+    const id = checkpointId(logName(this.#branch), seq)
+    const time = Date.now()
+    await repo.tags.create(id, commit, {
+      info: { v: 1, checkpoint: { seq, schema, label, auto, time } },
+    })
+    return { id, label, auto, seq, schema, time, commit }
+  }
+
+  /**
+   * After a transaction that changed the schema (the last pending one),
+   * checkpoint the database as it was before it: flush the transactions
+   * before it on their own, so a log commit holds that state, and tag
+   * it. Then let only `autoCheckpoints` of these stay. A failure is
+   * reported to `onFlushError`; the schema change stands.
+   */
+  async #autoCheckpoint(statements: readonly Statement[]): Promise<void> {
+    if (this.#autoCheckpoints === 0 || this.#holding || !this.#log) return
+    const before = this.seq - 1
+    // nothing before it to go back to
+    if (before === 0) return
+    try {
+      if (this.#meta.baseSeq < before) await this.#flush(false, before)
+      if (this.#meta.baseSeq !== before) return
+      const sql = (statements[0]?.[0] ?? '').replace(/\s+/g, ' ').trim()
+      const label = `before ${sql.length > 100 ? `${sql.slice(0, 99)}…` : sql}`
+      // the schema change's own item records the schema it ran under
+      const schema = this.#meta.schema - 1
+      await this.#checkpointAt(label, true, schema)
+      const autos = (await listCheckpoints(this.#repo, logName(this.#branch))).filter((c) => c.auto)
+      for (const old of autos.slice(0, Math.max(0, autos.length - this.#autoCheckpoints))) {
+        await deleteCheckpoint(this.#repo, logName(this.#branch), old.id)
+      }
+    } catch (err) {
+      this.#flushError = err
+      try {
+        this.#onFlushError?.(err)
+      } catch {}
+    }
+  }
+
+  async #restore(id: string): Promise<RestoreResult> {
+    const repo = this.#repo
+    const checkpoint = await readCheckpoint(repo, logName(this.#branch), id)
+    await this.#flush()
+    await this.#wt.refresh()
+    if (this.#wt.head !== this.#meta.base) await this.#catchUp()
+    if (this.#pending > 0) {
+      throw new LogError(
+        `the database's ${this.#pending} pending transactions didn't flush, so it can't be restored`,
+      )
+    }
+    const at = this.seq
+    const result = (how: RestoreResult['how']): RestoreResult => ({
+      checkpoint,
+      undone: at - checkpoint.seq,
+      how,
+      seq: this.seq,
+      branch: this.#branch,
+    })
+    if (checkpoint.commit === this.#meta.base) return result('none')
+    const since = await this.#entriesSince(checkpoint.commit)
+    if (since) {
+      const pieces = (await Promise.all(since.map((entry) => this.#readEntry(entry)))).flat()
+      if (pieces.every((piece) => piece.kind === 'changeset')) {
+        await this.#undo(checkpoint, pieces)
+        return result('undo')
+      }
+    }
+    await this.#rebuildAt(checkpoint)
+    return result('epoch')
+  }
+
+  /**
+   * The log entries after `commit`, oldest first, if `commit` is on the
+   * current epoch's line behind the file's base; null if it isn't.
+   */
+  async #entriesSince(commit: string): Promise<LogEntry[] | null> {
+    const entries: LogEntry[] = []
+    for (let at = this.#meta.base; at !== commit; ) {
+      if (at === ROOT_COMMIT) return null
+      const record = await this.#repo.getCommit(at)
+      const info = parseEntryInfo(record.info)
+      if (!info) return null
+      entries.push({ commit: at, ...info })
+      at = record.parents[0] ?? ROOT_COMMIT
+    }
+    return entries.reverse()
+  }
+
+  /**
+   * Undo `pieces` (changesets, every one since `checkpoint`) in one
+   * transaction, recorded and logged as any transaction is.
+   */
+  async #undo(checkpoint: Checkpoint, pieces: readonly Piece[]): Promise<void> {
+    const sqlite3 = this.#sqlite3
+    const bodies = pieces.map((piece) => piece.body)
+    const changes =
+      bodies.length === 1 ? (bodies[0] as Uint8Array) : combineChangesets(sqlite3, bodies)
+    this.#exec('BEGIN IMMEDIATE')
+    const session = startSession(sqlite3, this.#db)
+    try {
+      const applied = this.#guard.trusted(() =>
+        applyChangeset(sqlite3, this.#db, changes, { invert: true }),
+      )
+      if (!applied.applied) {
+        throw new LogError(
+          `undoing the changes since checkpoint ${checkpoint.id} conflicts with the database (${describeConflicts(applied.conflicts)})`,
+        )
+      }
+      const body = session.changeset()
+      session.dispose()
+      let next = this.#meta
+      if (body.byteLength > 0) {
+        this.#exec('INSERT INTO _kvsql_pending (seq, kind, body, schema) VALUES (?, ?, ?, ?)', [
+          next.nextSeq,
+          'changeset',
+          body,
+          next.schema,
+        ])
+        next = { ...next, nextSeq: next.nextSeq + 1 }
+        this.#saveMeta(next)
+      }
+      this.#exec('COMMIT')
+      this.#meta = next
+      if (body.byteLength > 0) this.#pending++
+    } catch (err) {
+      this.#rollback()
+      throw err
+    } finally {
+      session.dispose()
+    }
+    await this.#flushReporting()
+  }
+
+  /**
+   * Restore by a new epoch: rebuild the database at `checkpoint` beside
+   * the file (from its epoch's snapshot and log, on a branch of its own
+   * at the checkpoint), commit that as the new epoch's snapshot, then
+   * rebuild the file from it as opening does. The snapshot comes after
+   * every transaction so far, and counts as a schema change: its
+   * schema can't follow from the log's by any entry. A crash anywhere
+   * leaves the database as it was, or on the new epoch.
+   */
+  async #rebuildAt(checkpoint: Checkpoint): Promise<void> {
+    const parsed = parseEpoch(this.#branch)
+    if (!parsed) {
+      throw new LogError(
+        `restoring checkpoint ${checkpoint.id} starts a new epoch (a schema change since it, or an earlier epoch), but the log's branch '${this.#branch}' isn't named for epochs ('<name>/<n>')`,
+      )
+    }
+    const repo = this.#repo
+    const dir = this.#file.directory
+    const scratch = restoreName(this.name)
+    const temp = restoreBranch(parsed.log)
+    const branch = await this.#nextEpoch(parsed)
+    await deleteDatabaseFiles(dir, scratch)
+    if (await repo.branches.has(temp)) await repo.branches.delete(temp)
+    await repo.branches.create(temp, checkpoint.commit)
+    try {
+      const rebuilt = await LoggedDatabase.#open({
+        dir,
+        name: scratch,
+        repo,
+        branch: temp,
+        foreignKeys: this.#foreignKeys,
+        epochs: false,
+        autoCheckpoints: 0,
+        flush: { every: 0, maxAgeMs: 0 },
+      })
+      const seq = rebuilt.seq
+      await rebuilt.close()
+      if (seq !== checkpoint.seq) {
+        throw new LogError(
+          `checkpoint ${checkpoint.id} is at transaction ${checkpoint.seq}, but its log rebuilds to ${seq}`,
+        )
+      }
+    } finally {
+      await repo.branches.delete(temp).catch(() => {})
+    }
+    const tmp = snapshotName(this.name)
+    try {
+      const source = await openDatabaseFile(dir, scratch)
+      try {
+        await vacuumInto(source, dir, tmp, (sql) => source.db.exec(sql))
+      } finally {
+        source.close()
+      }
+      await deleteDatabaseFiles(dir, scratch)
+      const seq = this.seq + 1
+      const schema = this.#meta.schema + 1
+      await markSnapshot(dir, tmp, branch, seq, schema)
+      const file = await dir.open(tmp)
+      try {
+        await writeSnapshot(repo, branch, file, {
+          seq,
+          schema,
+          previous: { branch: this.#branch, base: this.#meta.base, pending: null },
+        })
+      } catch (err) {
+        await this.#dropEpoch(branch)
+        throw err
+      } finally {
+        file.close()
+      }
+    } finally {
+      await deleteDatabaseFiles(dir, tmp).catch(() => {})
+      await deleteDatabaseFiles(dir, scratch).catch(() => {})
+    }
+    await this.#reopen()
+  }
+
+  /**
+   * Close the file and open it again on the log's current epoch, as
+   * opening the database does: after a restore committed a new epoch,
+   * the file is rebuilt from its snapshot. If that fails, the database
+   * is closed, and opening it again finishes the job.
+   */
+  async #reopen(): Promise<void> {
+    const repo = this.#repo
+    this.#disarm()
+    this.#guard.dispose()
+    this.#file.close()
+    try {
+      const options = { ...this.#options, repo } as LogOptions
+      const branch = await currentEpoch(repo, this.#branch)
+      await prepareFile(options, branch)
+      const wt = await repo.worktree(branch, { create: true })
+      const opened = await LoggedDatabase.#openFile(this.#sqlite3, options, branch)
+      this.#file = opened.file
+      this.#db = opened.file.db
+      this.#guard = opened.guard
+      this.#meta = opened.meta
+      this.#pending = opened.pending
+      this.#branch = branch
+      this.#log = { repo, wt }
+      await this.#catchUp()
+      await this.#readEpoch()
+    } catch (err) {
+      this.#closing = Promise.resolve()
+      throw new LogError(
+        `the restore's new epoch is in the log, but the database file couldn't be rebuilt from it: open the database again to finish (${messageOf(err)})`,
+        { cause: err },
+      )
+    }
+    await this.#tidy()
   }
 
   // --- Epochs ---
@@ -1094,7 +1469,8 @@ export class LoggedDatabase {
     } finally {
       this.#epoch = null
       this.#holding = false
-      if (shot) await deleteSnapshot(this.#file.directory, this.name).catch(() => {})
+      if (shot)
+        await deleteDatabaseFiles(this.#file.directory, snapshotName(this.name)).catch(() => {})
       if (!this.#closing) {
         if (this.#every > 0 && this.#pending >= this.#every) {
           void this.#serial(() => this.#flushReporting())
@@ -1119,42 +1495,16 @@ export class LoggedDatabase {
         `the log's branch '${this.#branch}' isn't named for epochs ('<name>/<n>'), so it can't start a new one`,
       )
     }
-    const repo = this.#repo
     // The snapshot must hold every entry of the log it replaces.
     await this.#wt.refresh()
     if (this.#wt.head !== this.#meta.base) await this.#catchUp()
-    if (!Number.isSafeInteger(parsed.n + 1)) {
-      throw new LogError(
-        `the log's branch '${this.#branch}' is its last epoch: ${parsed.n} can't be counted past`,
-      )
-    }
-    const branch = epochBranch(parsed.log, parsed.n + 1)
-    if (await repo.branches.has(branch)) {
-      if (await finished(repo, branch)) {
-        throw new LogError(`the log's next epoch, '${branch}', already exists`)
-      }
-      // left by an epoch that didn't finish
-      await repo.branches.delete(branch)
-    }
+    const branch = await this.#nextEpoch(parsed)
     const dir = this.#file.directory
     const tmp = snapshotName(this.name)
-    await vacuumIntoSnapshot(this.#file, (sql) => this.#exec(sql))
+    await vacuumInto(this.#file, dir, tmp, (sql) => this.#exec(sql))
     const seq = this.seq
     const pending = await pendingDigest(this.#sqlite3, this.#readPending())
-    const snap = await openSnapshot(dir, this.name)
-    try {
-      // the pending rows' pages are freed as zeros, which gzip all but drops
-      snap.db.exec('PRAGMA secure_delete = ON')
-      snap.db.exec('BEGIN IMMEDIATE')
-      snap.db.exec('DELETE FROM _kvsql_pending')
-      snap.db.exec({
-        sql: 'UPDATE _kvsql_meta SET branch = ?, base = ?, base_seq = ?, applied_seq = ?, next_seq = ? WHERE id = 1',
-        bind: [branch, SNAPSHOT_BASE, seq, seq, seq + 1],
-      })
-      snap.db.exec('COMMIT')
-    } finally {
-      snap.close()
-    }
+    await markSnapshot(dir, tmp, branch, seq, this.#meta.schema)
     this.#holding = true
     return {
       branch,
@@ -1163,6 +1513,27 @@ export class LoggedDatabase {
       schema: this.#meta.schema,
       previous: { branch: this.#branch, base: this.#meta.base, pending },
     }
+  }
+
+  /**
+   * The branch of the log's next epoch, `<log>/<n+1>`, free: one left by
+   * an epoch that didn't finish is deleted.
+   */
+  async #nextEpoch(parsed: { log: string; n: number }): Promise<string> {
+    if (!Number.isSafeInteger(parsed.n + 1)) {
+      throw new LogError(
+        `the log's branch '${this.#branch}' is its last epoch: ${parsed.n} can't be counted past`,
+      )
+    }
+    const repo = this.#repo
+    const branch = epochBranch(parsed.log, parsed.n + 1)
+    if (await repo.branches.has(branch)) {
+      if (await finished(repo, branch)) {
+        throw new LogError(`the log's next epoch, '${branch}', already exists`)
+      }
+      await repo.branches.delete(branch)
+    }
+    return branch
   }
 
   /** Delete an epoch the file never moved to, if it's there. */
@@ -1272,7 +1643,11 @@ export class LoggedDatabase {
         }
       }
       const dir = this.#file.directory
-      if (await dir.exists(snapshotName(this.name))) await deleteSnapshot(dir, this.name)
+      for (const leftover of [snapshotName(this.name), restoreName(this.name)]) {
+        if (await dir.exists(leftover)) await deleteDatabaseFiles(dir, leftover)
+      }
+      const temp = parsed ? restoreBranch(parsed.log) : null
+      if (temp && (await this.#repo.branches.has(temp))) await this.#repo.branches.delete(temp)
     } catch (err) {
       this.#reportEpochError(err)
     }
@@ -1723,7 +2098,7 @@ async function peekFile(dir: Directory, name: string): Promise<Peeked> {
   if (!(await dir.exists(name))) return 'fresh'
   let file: DatabaseFile
   try {
-    file = await openDatabase(dir, name)
+    file = await openDatabaseFile(dir, name)
   } catch (err) {
     if (isNotADatabase(err)) return 'fresh'
     throw err
@@ -1831,7 +2206,7 @@ async function pendingThrough(
   baseSeq: number,
   seq: number,
 ): Promise<string | null | undefined> {
-  const file = await openDatabase(dir, name)
+  const file = await openDatabaseFile(dir, name)
   let items: PendingItem[]
   try {
     items = file.db.exec({
@@ -1849,6 +2224,35 @@ async function pendingThrough(
 }
 
 /**
+ * Make the database file `name` in `dir` (a compacted copy) a snapshot
+ * of epoch `branch` at transaction `seq` and schema version `schema`:
+ * nothing pending, and the base a snapshot's file records until it is
+ * opened on its epoch.
+ */
+async function markSnapshot(
+  dir: Directory,
+  name: string,
+  branch: string,
+  seq: number,
+  schema: number,
+): Promise<void> {
+  const snap = await openDatabaseFile(dir, name)
+  try {
+    // the pending rows' pages are freed as zeros, which gzip all but drops
+    snap.db.exec('PRAGMA secure_delete = ON')
+    snap.db.exec('BEGIN IMMEDIATE')
+    snap.db.exec('DELETE FROM _kvsql_pending')
+    snap.db.exec({
+      sql: 'UPDATE _kvsql_meta SET branch = ?, base = ?, base_seq = ?, applied_seq = ?, next_seq = ?, schema = ? WHERE id = 1',
+      bind: [branch, SNAPSHOT_BASE, seq, seq, seq + 1, schema],
+    })
+    snap.db.exec('COMMIT')
+  } finally {
+    snap.close()
+  }
+}
+
+/**
  * Give the file `name` in `dir` the log position `commit` (holding
  * transactions through `seq`) on `branch`, dropping its pending
  * transactions through `seq` if `dropPending`.
@@ -1861,7 +2265,7 @@ async function anchor(
   seq: number,
   dropPending: boolean,
 ): Promise<void> {
-  const file = await openDatabase(dir, name)
+  const file = await openDatabaseFile(dir, name)
   try {
     file.db.exec('BEGIN IMMEDIATE')
     try {
@@ -1922,6 +2326,7 @@ function readPosition(db: Database, branch: string): { meta: Meta; pending: numb
 }
 
 function checkCopyTarget(target: CopyTarget): void {
+  checkDatabaseName(target.name)
   if ((target.repo === undefined) !== (target.branch === undefined)) {
     throw new TypeError('copy: a logged copy needs both repo and branch, a detached one neither')
   }
@@ -1938,6 +2343,7 @@ function isNotADatabase(err: unknown): boolean {
 }
 
 function checkOptions(options: LogOptions): void {
+  checkDatabaseName(options.name)
   if (typeof options.branch !== 'string' || options.branch === '') {
     throw new TypeError('openLog: branch must be a non-empty string')
   }
@@ -1946,6 +2352,10 @@ function checkOptions(options: LogOptions): void {
     if (value !== undefined && !(Number.isSafeInteger(value) && value >= 0)) {
       throw new TypeError(`openLog: flush.${key} must be a whole number >= 0`)
     }
+  }
+  const auto = options.autoCheckpoints
+  if (auto !== undefined && !(Number.isSafeInteger(auto) && auto >= 0)) {
+    throw new TypeError('openLog: autoCheckpoints must be a whole number >= 0')
   }
   if (options.epochs !== undefined && options.epochs !== false) {
     const { ratio, minBytes } = options.epochs

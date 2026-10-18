@@ -26,7 +26,8 @@ import {
   type Worktree,
   cborCodec,
 } from '@agex-ts/kvgit'
-import { deleteDatabase } from './database'
+import { deleteCheckpoints } from './checkpoint'
+import { MAGIC_BYTES, deleteDatabaseFiles } from './database'
 import { sha256Hex } from './entry'
 import { CorruptSnapshotError } from './errors'
 import type { Directory, SyncFile } from './files'
@@ -45,9 +46,6 @@ export const chunkKey = (i: number): string => `snapshot/${i}`
 
 /** How many bytes of the file a snapshot reads, and a restore writes, at a time. */
 const IO_CHUNK = 1 << 20
-
-/** The first bytes of a database file, which hold its header: a restore writes them last. */
-const HEADER = 512
 
 /** What a snapshot records about itself, under {@link EPOCH_KEY}. */
 export interface SnapshotRecord {
@@ -198,13 +196,29 @@ export async function finished(repo: Repo<Uint8Array>, branch: string): Promise<
 }
 
 /**
- * Delete the log on `branch`: `branch`, and every other epoch of its
- * log. Deleting a log that's gone does nothing.
+ * The branch a restore of log `log` rebuilds the database from, at a
+ * checkpoint (`<log>/restore`, which no epoch's branch is), for as long
+ * as the rebuild takes.
+ */
+export function restoreBranch(log: string): string {
+  return `${log}/restore`
+}
+
+/**
+ * Delete the log on `branch`: `branch`, every other epoch of its log,
+ * its checkpoints, and a restore's branch left by a crash. Deleting a
+ * log that's gone does nothing.
  */
 export async function deleteLog(repo: Repo<Uint8Array>, branch: string): Promise<void> {
   const parsed = parseEpoch(branch)
+  const log = parsed?.log ?? branch
+  await deleteCheckpoints(repo, log)
   const branches = parsed ? (await epochsOf(repo, parsed.log)).map((e) => e.branch) : []
-  if (!branches.includes(branch)) branches.push(branch)
+  // the branch asked for, if the log hasn't moved on from it; a
+  // restore's, if a crash left it
+  for (const extra of [branch, restoreBranch(log)]) {
+    if (!branches.includes(extra) && (await repo.branches.has(extra))) branches.push(extra)
+  }
   for (const name of branches) {
     try {
       await repo.branches.delete(name)
@@ -355,8 +369,9 @@ export async function writeSnapshot(
  * Write the snapshot whose last commit is `commit` as the database
  * `name` in `dir`, replacing any there, which must not be open: each
  * chunk checked against its digest, the whole against gzip's own check
- * and the file's recorded size. The header goes last, so a restore cut
- * short leaves a file SQLite reads as no database at all.
+ * and the file's recorded size. The magic string goes last
+ * (`MAGIC_BYTES`), so a restore cut short leaves a file SQLite reads as
+ * no database at all.
  */
 export async function restoreSnapshot(
   repo: Repo<Uint8Array>,
@@ -368,7 +383,7 @@ export async function restoreSnapshot(
   const corrupt = (message: string, cause?: unknown) =>
     new CorruptSnapshotError(commit, message, cause === undefined ? undefined : { cause })
   const tree = await repo.snapshot({ commit })
-  await deleteDatabase(dir, name)
+  await deleteDatabaseFiles(dir, name)
   const into = await dir.open(name)
   // Failures of the store or the file, rather than of the snapshot.
   const own = new Set<unknown>()
@@ -398,7 +413,7 @@ export async function restoreSnapshot(
         throw err
       }
     })()
-    const head = new Uint8Array(Math.min(HEADER, record.bytes))
+    const head = new Uint8Array(Math.min(MAGIC_BYTES, record.bytes))
     let at = 0
     const writing = (async () => {
       const reader = gunzip.readable.getReader()

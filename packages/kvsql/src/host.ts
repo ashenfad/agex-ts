@@ -437,6 +437,14 @@ class DatabaseHost<C extends DatabaseConfig> {
         return this.#copy(db, args[0] as C)
       case 'epoch':
         return db.newEpoch()
+      case 'checkpoint':
+        return db.checkpoint(args[0] as string)
+      case 'checkpoints':
+        return db.checkpoints()
+      case 'deleteCheckpoint':
+        return db.deleteCheckpoint(args[0] as string)
+      case 'restore':
+        return db.restore(args[0] as string)
       case 'info':
         return {
           holder: this.#self,
@@ -497,7 +505,7 @@ class DatabaseHost<C extends DatabaseConfig> {
       try {
         this.#storage ??= await this.#opener(this.#config)
         const { dir, repo } = this.#storage
-        const { label, foreignKeys, flush, epochs, detached } = this.#config
+        const { label, foreignKeys, flush, epochs, autoCheckpoints, detached } = this.#config
         const options = {
           dir,
           name: this.#name,
@@ -513,6 +521,7 @@ class DatabaseHost<C extends DatabaseConfig> {
                 branch: this.#branch,
                 ...(flush !== undefined && { flush }),
                 ...(epochs !== undefined && { epochs }),
+                ...(autoCheckpoints !== undefined && { autoCheckpoints }),
                 onFlushError: (err) => this.#flushFailed(err),
                 onEpochError: (err) => this.#flushFailed(err),
               })

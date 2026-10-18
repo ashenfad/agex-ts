@@ -8,8 +8,8 @@ and sync between devices through any kvgit remote.
 > in OPFS (or in memory) through its own VFS, records and applies
 > changesets, guards the schema, keeps the changeset log in kvgit
 > with crash recovery and replay, copies a database, starts new epochs
-> from snapshots, and serves the database from a worker to every tab;
-> checkpoints and rebase come next. The design is agex-studio's
+> from snapshots, takes checkpoints and restores them, and serves the
+> database from a worker to every tab; rebase comes next. The design is agex-studio's
 > [`roadmap/app-db.md`](https://github.com/ashenfad/agex-studio/blob/rebuild/roadmap/app-db.md).
 
 ## How it will work
@@ -42,8 +42,9 @@ API and its session-extension exports.
 ## Opening a database
 
 A database is a file in a `Directory`, with its rollback journal beside
-it as `<name>-journal` (so a database's own name can't end in
-`-journal`). In a browser the directory is in OPFS, which
+it as `<name>-journal`, and, while a new epoch's snapshot or a restore
+is made, `<name>-snapshot` and `<name>-restore` (so a database's own
+name can't end in `-journal`, `-snapshot` or `-restore`). In a browser the directory is in OPFS, which
 works only in a dedicated worker (synchronous access handles exist only
 there):
 
@@ -179,13 +180,39 @@ await db.close() // flushes first
   A copy replaces only a copy: the target file must be missing, empty,
   not a database, or a detached copy. Any logged database is refused,
   even one on the source's own branch, which may hold transactions no
-  log has. The file's first page is written last, so a copy cut short
+  log has. The file's magic string is written last, so a copy cut short
   reads as no database, and a logged copy is marked detached until its
   branch exists, so either is replaced by the next try. A copy cut
   short in the moment between its last page and its mark, or between
   its branch and its mark, is refused like a database: delete the
   target to clear it. A detached copy can't be opened on a log, nor a
   logged database as a detached copy.
+- **Checkpoints.** `checkpoint(label)` flushes, then names the log's
+  position with a kvgit tag (`kvsql/checkpoint/<log>/<seq>-<random>`,
+  its info the label, the time, the transaction and schema version);
+  `checkpoints()` lists them oldest first, across every epoch, and
+  `deleteCheckpoint(id)` deletes one. The database takes one itself
+  before each schema change, labelled with its first statement, and
+  keeps the last 10 of those (`autoCheckpoints`; 0 takes none): it
+  flushes the transactions before the change as an entry of their own,
+  so a commit holds that state. A tag keeps its commit and its history
+  from being collected, so a checkpoint on an epoch since replaced keeps
+  that epoch's snapshot and log, though not its branch, until it goes.
+  Deleting a log deletes its checkpoints.
+- **Restore.** `restore(id)` brings the database back to a checkpoint,
+  everything written since gone, by moving the log forward, never by
+  rewriting it. Within the current epoch, with no schema change since,
+  it is one transaction applying the inverse of every change since
+  (combined, then inverted), logged as any transaction is, so copies
+  follow it as they follow any write, and a later checkpoint can be
+  restored past it. Otherwise (a schema change since, which a
+  changeset can't take back, or a checkpoint on an earlier epoch) the
+  database is rebuilt at the checkpoint beside its file
+  (`<name>-restore`, from that epoch's snapshot and log), becomes the
+  snapshot of a new epoch, and the file is rebuilt from it, as opening
+  does; that counts as a schema change. Calls wait while it runs. It
+  needs a branch named for epochs; a crash at any point leaves the
+  database as it was or restored.
 - **Epochs.** A log on a branch named `<name>/<n>` is epoch `n` of a
   series. `newEpoch()` starts the next, `<name>/<n+1>`: a snapshot of
   the database as it stands (compacted with `VACUUM INTO`, every
@@ -282,11 +309,13 @@ await db.close()
   with their `name` and fields, a DOMException as a DOMException.
 - **The config** names the database: `id` (required), and optionally
   `name` (the file, default `db.sqlite`), `branch` (default
-  `kvsql/<id>/0`), `label`, `foreignKeys`, `flush`, `epochs`, and
-  `detached` (a detached copy, which has no branch). Opening follows the
-  log to its newest epoch, so a config can keep naming the branch it
-  started with; `info().branch` says where the log is now, and
-  `db.newEpoch()` has the holder start the next. Every tab passes the same config
+  `kvsql/<id>/0`), `label`, `foreignKeys`, `flush`, `epochs`,
+  `autoCheckpoints`, and `detached` (a detached copy, which has no
+  branch). Opening follows the log to its newest epoch, so a config can
+  keep naming the branch it started with; `info().branch` says where
+  the log is now, and `db.newEpoch()` has the holder start the next.
+  `checkpoint`, `checkpoints`, `deleteCheckpoint` and `restore` run on
+  the holder too. Every tab passes the same config
   for the same database, and a worker refuses a second connect to an
   id with a different one.
 - **Copies:** `db.copy(config)` has the worker holding the database

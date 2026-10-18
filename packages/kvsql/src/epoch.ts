@@ -215,8 +215,19 @@ export function rebaseBranch(log: string): string {
 }
 
 /**
+ * The tag a rebase of log `log` marks the log's branch's head with
+ * (`kvsql/rebase/<log>`) while it runs: the head the branch moves from,
+ * which only a rebase interrupted after the file committed needs, to
+ * move the branch on from there and nowhere else.
+ */
+export function rebaseTag(log: string): string {
+  return `kvsql/rebase/${log}`
+}
+
+/**
  * Delete the log on `branch`: `branch`, every other epoch of its log,
- * its checkpoints, and a restore's or rebase's branch left by a crash.
+ * its checkpoints, and a restore's or rebase's branch (and a rebase's
+ * tag) left by a crash.
  * Deleting a log that's gone does nothing.
  */
 export async function deleteLog(repo: Repo<Uint8Array>, branch: string): Promise<void> {
@@ -229,6 +240,7 @@ export async function deleteLog(repo: Repo<Uint8Array>, branch: string): Promise
   for (const extra of [branch, restoreBranch(log), rebaseBranch(log)]) {
     if (!branches.includes(extra) && (await repo.branches.has(extra))) branches.push(extra)
   }
+  if (await repo.tags.has(rebaseTag(log))) await repo.tags.delete(rebaseTag(log))
   for (const name of branches) {
     try {
       await repo.branches.delete(name)

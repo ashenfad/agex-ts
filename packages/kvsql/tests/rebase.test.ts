@@ -6,7 +6,14 @@
  * rebase cut short by a crash finishes or leaves things as they were.
  */
 
-import { type KVStore, MemoryRemote, type Repo, pullBranch, pushBranch } from '@agex-ts/kvgit'
+import {
+  type KVStore,
+  MemoryRemote,
+  type Repo,
+  publishHead,
+  pullBranch,
+  pushBranch,
+} from '@agex-ts/kvgit'
 import { Memory } from '@agex-ts/kvgit/backends/memory'
 import { afterEach, describe, expect, it } from 'vitest'
 import { decodeEntry } from '../src/entry'
@@ -408,8 +415,9 @@ describe('a rebase cut short', () => {
     expect(await integrity(again), at).toBe('ok')
     const rows = (await again.query('SELECT * FROM t ORDER BY id')).rows
     expect([BEFORE, AFTER], at).toContainEqual(rows)
-    // a rebase's branch is finished or dropped
+    // a rebase's branch and tag are finished or dropped
     expect(await repo.branches.list(), at).toEqual([BRANCH])
+    expect(await repo.tags.list(), at).toEqual([])
     const result = await again.rebase(head)
     expect(['rebased', 'up-to-date'], at).toContain(result.status)
     expect((await again.query('SELECT * FROM t ORDER BY id')).rows, at).toEqual(AFTER)
@@ -436,6 +444,32 @@ describe('a rebase cut short', () => {
       await survives(inner, new MemoryDirectory(dir.image()), victim.head, `write ${n}`)
     }
   }, 120_000)
+
+  it('after the file took it, refuses to move a branch that moved since', async () => {
+    const counting = new CrashingStore(new Memory())
+    const { b, head } = await diverged(counting, new MemoryDirectory())
+    const start = counting.writes
+    await b.db.rebase(head)
+    // the last writes: the branch's move, then dropping the branch and tag
+    const move = counting.writes - start - 2
+
+    const inner = new Memory()
+    const crashing = new CrashingStore(inner)
+    const dir = new MemoryDirectory()
+    const victim = await diverged(crashing, dir)
+    const before = await (await repoOver(inner)).branches.get(BRANCH)
+    crashing.crashAtWrite(move)
+    await victim.b.db.rebase(victim.head).catch(() => {})
+    const repo = await repoOver(inner)
+    expect(await repo.branches.get(BRANCH)).toBe(before)
+    expect(await repo.branches.list()).toContain('db/test/rebase')
+    // the branch moves on meanwhile, to the other device's head
+    expect(await publishHead(inner, BRANCH, before, victim.head)).toBe(true)
+    await expect(open(new MemoryDirectory(dir.image()), repo)).rejects.toThrow(/has moved since/)
+    expect(await repo.branches.get(BRANCH)).toBe(victim.head)
+    expect(await repo.branches.list()).toContain('db/test/rebase')
+    expect(await repo.tags.list()).toEqual(['kvsql/rebase/db/test'])
+  })
 
   it('at every file write and sync', async () => {
     const counting = new CrashingDirectory(new MemoryDirectory())

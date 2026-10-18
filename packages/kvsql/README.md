@@ -267,8 +267,10 @@ await db.close() // flushes first
   the log's (not yet over a schema change of the log's). Either way the
   side not kept stays as a checkpoint, on this device only (`kept`).
   A crash leaves the database as it was or rebased: opening finishes
-  the branch's move if the file committed, and otherwise drops the
-  rebase's branch.
+  the branch's move if the file committed, from the head a tag
+  (`kvsql/rebase/<log>`) recorded and only from there (a branch that
+  moved on meanwhile is left as it is, and opening refuses), and
+  otherwise drops the rebase's branch and tag.
 - **Replay** combines runs of changesets and applies them in chunks of
   up to 100k transactions or 32 MiB, stopping at any conflict
   (`ReplayError`): in a log written only by appending there is none, so

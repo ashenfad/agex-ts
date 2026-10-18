@@ -73,6 +73,14 @@ export function restoreName(name: string): string {
   return `${name}${RESTORE_SUFFIX}`
 }
 
+/** The suffix of the database a rebase onto a new epoch builds beside a database. */
+const REBASE_SUFFIX = '-rebase'
+
+/** The name of database `name`'s rebase file, beside it in its directory. */
+export function rebaseName(name: string): string {
+  return `${name}${REBASE_SUFFIX}`
+}
+
 const directoryIds = new WeakMap<Directory, number>()
 let nextDirectoryId = 0
 
@@ -90,8 +98,9 @@ function vfsPath(dir: Directory, name: string): string {
  * A database name is one path segment, and doesn't end in the suffix
  * of a file kvsql keeps beside a database: database `x-journal` would
  * share its file with database `x`'s journal, `x-snapshot` with the
- * snapshot `x` makes for a new epoch, and `x-restore` with the copy a
- * restore of `x` rebuilds, so one would overwrite or delete the other.
+ * snapshot `x` makes for a new epoch, `x-restore` with the copy a
+ * restore of `x` rebuilds, and `x-rebase` with the copy a rebase of `x`
+ * onto a new epoch builds, so one would overwrite or delete the other.
  */
 export function checkDatabaseName(name: string): void {
   if (name === '' || name.includes('/'))
@@ -100,6 +109,7 @@ export function checkDatabaseName(name: string): void {
     [JOURNAL_SUFFIX, 'database journals'],
     [SNAPSHOT_SUFFIX, 'the snapshots databases make for new epochs'],
     [RESTORE_SUFFIX, 'the databases restores rebuild'],
+    [REBASE_SUFFIX, 'the databases rebases build'],
   ] as const) {
     if (name.endsWith(suffix)) {
       throw new Error(

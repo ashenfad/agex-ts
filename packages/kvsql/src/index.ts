@@ -64,6 +64,7 @@ export {
   openDetached,
   openLog,
   type QueryResult,
+  type AdoptOptions,
   type RebaseOptions,
   type RebaseResult,
   type RebaseSide,

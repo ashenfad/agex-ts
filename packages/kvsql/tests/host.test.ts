@@ -227,6 +227,7 @@ describe('tabs', () => {
       transactions: 0,
       rebased: 0,
       snapshot: false,
+      stayed: null,
     })
     expect((await b.query('SELECT id FROM t')).rows).toEqual([{ id: 1 }])
   })
@@ -266,6 +267,7 @@ describe('tabs', () => {
       transactions: 0,
       rebased: 0,
       snapshot: false,
+      stayed: null,
     })
     expect((await c.query('SELECT count(*) AS n FROM t')).rows).toEqual([{ n: 3 }])
     expect(await c.flush()).toMatchObject({ from: 2, to: 4 })
@@ -438,6 +440,7 @@ describe('delete', () => {
       transactions: 2,
       rebased: 0,
       snapshot: false,
+      stayed: null,
     })
     expect(info.pendingCount).toBe(0)
     expect((await b.query('SELECT id FROM t')).rows).toEqual([{ id: 1 }])
@@ -555,6 +558,7 @@ describe('epochs', () => {
       transactions: 1,
       rebased: 0,
       snapshot: true,
+      stayed: null,
     })
     expect((await a.query('SELECT id FROM t')).rows).toEqual([{ id: 1 }, { id: 2 }])
   })

@@ -229,6 +229,7 @@ describe('a logged copy', () => {
       transactions: 0,
       rebased: 0,
       snapshot: false,
+      stayed: null,
     })
     expect(await dump(copy)).toEqual(await dump(db))
     await copy.query("UPDATE notes SET body = 'mine' WHERE id = 'b'")

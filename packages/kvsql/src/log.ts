@@ -61,6 +61,7 @@ import {
   copyDatabase,
   deleteDatabaseFiles,
   openDatabaseFile,
+  rebaseName,
   restoreName,
   snapshotName,
   vacuumInto,
@@ -293,6 +294,28 @@ export interface RebaseOptions {
    * changes nothing.
    */
   keep?: RebaseSide
+  /**
+   * For a rebase onto a newer epoch: the last commit of the database's
+   * own epoch that the newer one holds, such as the one this copy last
+   * synced (everything a sync pushed to an epoch is in the next one by
+   * the time the old one goes). The database's changes after it are
+   * what moves. By default, where the newer epoch's snapshot was taken
+   * in the database's epoch, if the repository has that commit.
+   */
+  synced?: string
+}
+
+/** Options for {@link LoggedDatabase.adopt}. */
+export interface AdoptOptions {
+  /**
+   * Where the entries to take start: the commit of the old epoch after
+   * which they follow, such as the last this copy synced there. By
+   * default where `tip`'s line parted from the one the database's
+   * epoch's snapshot was taken on, if the repository has that commit.
+   */
+  since?: string
+  /** Settle a conflict by keeping this database's side: nothing is taken, and the entries stay as a checkpoint. */
+  keep?: 'mine'
 }
 
 /** What a rebase did. */
@@ -381,6 +404,13 @@ export interface Recovery {
    * no longer holds, rebased onto entries another copy wrote.
    */
   rebased: number
+  /**
+   * A newer epoch of the log that the file didn't move to, staying on
+   * its own (still in the repository): it holds changes of its own that
+   * the newer epoch's snapshot may not (another device's epoch, which
+   * `rebase()` moves the database onto). Null if none.
+   */
+  stayed: string | null
   /**
    * Whether the file was rebuilt from the epoch's snapshot first: it
    * was missing, or behind on an older epoch with nothing pending.
@@ -480,6 +510,8 @@ interface Shot {
 interface Line {
   pieces: Piece[]
   bytes: Uint8Array
+  /** For the last of entries taken by `adopt()`: the tip they were taken from. */
+  adopted?: string
 }
 
 /** Changesets gathered for one replay chunk. */
@@ -568,7 +600,14 @@ export class LoggedDatabase {
     this.name = options.name
     this.#options = options
     this.#branch = branch
-    this.recovery = { ownFlush: false, entries: 0, transactions: 0, rebased: 0, snapshot: false }
+    this.recovery = {
+      ownFlush: false,
+      entries: 0,
+      transactions: 0,
+      rebased: 0,
+      snapshot: false,
+      stayed: null,
+    }
     this.#sqlite3 = sqlite3
     this.#file = file
     this.#db = file.db
@@ -601,13 +640,17 @@ export class LoggedDatabase {
 
   /** Open, with `options` checked, but not the name: a restore's own may be kvsql's. */
   static async #open(options: LogOptions): Promise<LoggedDatabase> {
-    const branch = await currentEpoch(options.repo, options.branch)
-    const rebuilt = await prepareFile(options, branch)
+    await settleRebasedFile(options)
+    const prepared = await prepareFile(options, await currentEpoch(options.repo, options.branch))
+    const { branch } = prepared
     const wt = await options.repo.worktree(branch, { create: true })
     const log = await LoggedDatabase.#start(options, branch, wt)
     try {
       await log.#settleRebase()
-      Object.assign(log.recovery, await log.#catchUp(), { snapshot: rebuilt })
+      Object.assign(log.recovery, await log.#catchUp(), {
+        snapshot: prepared.rebuilt,
+        stayed: prepared.stayed,
+      })
       await log.#readEpoch()
     } catch (err) {
       log.#file.close()
@@ -870,7 +913,32 @@ export class LoggedDatabase {
     if (keep !== undefined && keep !== 'mine' && keep !== 'theirs') {
       return Promise.reject(new TypeError("rebase: keep must be 'mine' or 'theirs'"))
     }
-    return this.#afterEpoch(() => this.#serial(() => this.#rebase(onto, keep)))
+    const synced = options.synced
+    if (synced !== undefined && typeof synced !== 'string') {
+      return Promise.reject(new TypeError('rebase: synced must be a commit'))
+    }
+    return this.#afterEpoch(() => this.#serial(() => this.#rebase(onto, keep, synced)))
+  }
+
+  /**
+   * Take into the database entries another copy wrote to the epoch it
+   * has moved on from, after its snapshot was taken (another device's
+   * pushed while this one started the epoch): those on `tip`'s line
+   * after `options.since`, by default where that line parted from the
+   * one the snapshot was taken on.
+   * Pending transactions flush first; then the entries apply in one file
+   * transaction, as new entries numbered after the database's. A
+   * conflict with what the database did since changes nothing; keeping
+   * `'mine'` takes nothing and keeps `tip` as a checkpoint.
+   *
+   * @throws LogError for a detached copy, or `tip` not following `since`.
+   */
+  adopt(tip: string, options: AdoptOptions = {}): Promise<RebaseResult> {
+    if (this.#closing) return Promise.reject(closedError())
+    if (options.keep !== undefined && options.keep !== 'mine') {
+      return Promise.reject(new TypeError("adopt: keep must be 'mine'"))
+    }
+    return this.#afterEpoch(() => this.#serial(() => this.#adopt(tip, options.since, options.keep)))
   }
 
   /**
@@ -1540,8 +1608,8 @@ export class LoggedDatabase {
     try {
       await before?.()
       const options = { ...this.#options, repo } as LogOptions
-      const branch = await currentEpoch(repo, this.#branch)
-      await prepareFile(options, branch)
+      await settleRebasedFile(options)
+      const { branch } = await prepareFile(options, await currentEpoch(repo, this.#branch))
       const wt = await repo.worktree(branch, { create: true })
       opened = await LoggedDatabase.#openFile(this.#sqlite3, options, branch)
       this.#file = opened.file
@@ -1571,9 +1639,21 @@ export class LoggedDatabase {
 
   // --- Rebase ---
 
-  async #rebase(onto: string | undefined, keep: RebaseSide | undefined): Promise<RebaseResult> {
+  async #rebase(
+    onto: string | undefined,
+    keep: RebaseSide | undefined,
+    synced?: string,
+  ): Promise<RebaseResult> {
     if (!this.#log) throw new LogError('a detached copy has no log to rebase onto')
     const repo = this.#repo
+    const newer = await this.#newerEpoch()
+    if (newer !== null) {
+      const tip = await repo.branches.get(newer)
+      if (onto === undefined || onto === tip) return this.#rebaseAcross(newer, tip, keep, synced)
+      if (await holdsCommit(repo, tip, onto)) {
+        throw new LogError(`a rebase onto epoch '${newer}' goes onto its tip, ${tip}, not ${onto}`)
+      }
+    }
     await this.#wt.refresh()
     const head = this.#wt.head
     // this file's own flush, landed but not yet dropped from the file
@@ -1693,12 +1773,14 @@ export class LoggedDatabase {
       return result('kept', { kept: 'theirs', checkpoint })
     }
 
-    if (theirPieces.some((piece) => piece.kind === 'sql')) {
-      throw new LogError(
-        "keeping this database's changes over a schema change in the log isn't supported yet: keep the log's, or restore this database's from the checkpoint taken then",
-      )
-    }
     const ends = await this.#positionAt(target)
+    if (theirPieces.some((piece) => piece.kind === 'sql')) {
+      // the log's changes can't be undone past a schema change: this
+      // database's file becomes a new epoch's snapshot instead
+      if (head !== base) await this.#moveBranch(head, base)
+      const checkpoint = await this.#keepByEpoch(target, ends, at.schema, ownSql)
+      return result('kept', { kept: 'mine', checkpoint })
+    }
     const checkpoint = await this.#tag(
       target,
       ends.seq,
@@ -1727,6 +1809,391 @@ export class LoggedDatabase {
     lines.push(...(await ownEntries(theirCount + lines.length)))
     await this.#rebaseFile(head, target, at.schema, { undo: [], apply: [], redo: [], lines })
     return result('kept', { kept: 'mine', checkpoint })
+  }
+
+  /** A newer finished epoch of the database's log, if the repository has one. */
+  async #newerEpoch(): Promise<string | null> {
+    if (!parseEpoch(this.#branch)) return null
+    const current = await currentEpoch(this.#repo, this.#branch)
+    return current === this.#branch ? null : current
+  }
+
+  /**
+   * Rebase onto epoch `newer`, at `tip`: this database's changes on its
+   * own epoch since `synced` (by default, since where the newer epoch's
+   * snapshot was taken) follow the newer epoch's. Its snapshot folds in
+   * what changed before it, so there is no log to undo or apply: the
+   * database is rebuilt at `tip` beside its file, its changes applied
+   * there and committed after `tip`, and that file replaces the
+   * database's. With nothing of its own, the database just moves.
+   */
+  async #rebaseAcross(
+    newer: string,
+    tip: string,
+    keep: RebaseSide | undefined,
+    synced: string | undefined,
+  ): Promise<RebaseResult> {
+    const repo = this.#repo
+    // level with its own epoch's branch first
+    await this.#wt.refresh()
+    if (this.#wt.head !== this.#meta.base) await this.#catchUp()
+    const base = this.#meta.base
+    const record = await readSnapshot(repo, tip)
+    if (!record) throw new LogError(`epoch '${newer}' has no snapshot at ${tip}`)
+    const previous = record.previous?.branch === this.#branch ? record.previous : null
+    let parted = synced ?? null
+    if (parted === null && previous && (await holdsCommit(repo, previous.base, previous.base))) {
+      parted = await repo.mergeBase(base, previous.base)
+    }
+    if (parted === null) {
+      throw new LogError(
+        `which of this database's changes on '${this.#branch}' epoch '${newer}' holds isn't known here: rebase with \`synced\`, the last commit of '${this.#branch}' this copy synced`,
+      )
+    }
+    if (!(await holdsCommit(repo, base, parted))) {
+      throw new LogError(`commit ${parted} isn't in this database's log on '${this.#branch}'`)
+    }
+    const at = await this.#positionAt(parted)
+    const ends = await this.#positionAt(tip)
+    const own = await this.#walk(base, parted, at.seq)
+    const pending = this.#readPending()
+    const mine = own.reduce((n, e) => n + e.to - e.from + 1, 0) + pending.length
+    const result = (
+      status: RebaseResult['status'],
+      more: Partial<RebaseResult> = {},
+    ): RebaseResult => ({
+      status,
+      kept: null,
+      conflicts: [],
+      schemaChange: null,
+      mine,
+      theirs: Math.max(0, ends.seq - at.seq),
+      checkpoint: null,
+      seq: this.seq,
+      base: this.#meta.base,
+      ...more,
+    })
+
+    if (mine === 0) {
+      // at the very point the snapshot was taken, it must hold the same
+      if (previous?.base === base && previous.pending === null && record.hash !== undefined) {
+        const hash = await contentHash(this.#db, (fn) => this.#guard.trusted(fn))
+        if (hash !== record.hash) throw new DivergedError(this.#branch, base, record.hash, hash)
+      }
+      await this.#moveOnto(newer)
+      return result('fast-forwarded')
+    }
+    const ownPieces = [
+      ...(await Promise.all(own.map((entry) => this.#readEntry(entry)))).flat(),
+      ...pending.map(pieceOf),
+    ]
+    const ownSql = ownPieces.some((piece) => piece.kind === 'sql')
+
+    if (keep === 'theirs') {
+      const checkpoint = await this.#keepMine(base, pending)
+      await this.#moveOnto(newer)
+      return result('kept', { kept: 'theirs', checkpoint })
+    }
+    if (keep === 'mine') {
+      await this.#flush()
+      const checkpoint = await this.#keepByEpoch(tip, ends, at.schema, ownSql)
+      return result('kept', { kept: 'mine', checkpoint })
+    }
+    if (ownSql) return result('conflict', { schemaChange: 'mine' })
+    if (ends.schema !== at.schema) return result('conflict', { schemaChange: 'theirs' })
+    const by = ends.seq - at.seq
+    const lines: Line[] = await Promise.all(
+      own.map(async (entry) => {
+        const pieces = renumber(await this.#readEntry(entry), by)
+        return { pieces, bytes: encodePieces(pieces) }
+      }),
+    )
+    if (pending.length > 0) {
+      lines.push(
+        encodeEntry(
+          this.#sqlite3,
+          pending.map((p) => ({ ...p, seq: p.seq + by })),
+        ),
+      )
+    }
+    const built = await this.#buildOnto(newer, tip, ends.schema, ownPieces, lines)
+    if (built) return result('conflict', built)
+    return result('rebased')
+  }
+
+  /**
+   * Move the database onto epoch `newer`, with nothing of its own to
+   * take: its file is rebuilt from the epoch, as opening a missing one
+   * does, and its own epoch goes.
+   */
+  async #moveOnto(newer: string): Promise<void> {
+    await this.#reopen(`the database is moving to epoch '${newer}'`, async () => {
+      await deleteDatabaseFiles(this.#file.directory, this.name)
+    })
+  }
+
+  /**
+   * Build the database rebased onto epoch `newer` beside its file
+   * (`<name>-rebase`): rebuilt at `tip` on the rebase's branch, `pieces`
+   * applied, and `lines` committed after `tip`. Then, marked as the
+   * epoch's, it replaces the database's file as the database opens it
+   * again (`settleRebasedFile`), and the epoch's branch moves to it.
+   * Returns the conflicts applying `pieces` met, with nothing changed,
+   * or null once the database is on `newer`.
+   */
+  async #buildOnto(
+    newer: string,
+    tip: string,
+    schema: number,
+    pieces: Piece[],
+    lines: Line[],
+  ): Promise<{ conflicts: Conflict[]; schemaChange: RebaseSide | null } | null> {
+    const repo = this.#repo
+    const dir = this.#file.directory
+    const scratch = rebaseName(this.name)
+    const log = logName(this.#branch)
+    const temp = rebaseBranch(log)
+    const cleanUp = async () => {
+      await deleteDatabaseFiles(dir, scratch).catch(() => {})
+      for (const branch of [temp, rebaseBranch(temp)]) {
+        await repo.branches.delete(branch).catch(() => {})
+      }
+      await repo.tags.delete(rebaseTag(temp)).catch(() => {})
+    }
+    await cleanUp()
+    await repo.branches.create(temp, tip)
+    let built: LoggedDatabase | null = null
+    try {
+      built = await LoggedDatabase.#open({
+        dir,
+        name: scratch,
+        repo,
+        branch: temp,
+        foreignKeys: this.#foreignKeys,
+        epochs: false,
+        autoCheckpoints: 0,
+        flush: { every: 0, maxAgeMs: 0 },
+      })
+      const landed = await built.#rebaseFile(tip, tip, schema, {
+        undo: [],
+        apply: [],
+        redo: pieces,
+        lines,
+      })
+      await built.close()
+      built = null
+      if ('conflicts' in landed) {
+        await cleanUp()
+        return landed
+      }
+      // the head the epoch's branch moves from, then the file marked as
+      // the epoch's: from here, opening finishes the move
+      const tag = rebaseTag(log)
+      if (await repo.tags.has(tag)) await repo.tags.delete(tag)
+      await repo.tags.create(tag, tip)
+      await markBranch(dir, scratch, newer)
+    } catch (err) {
+      if (built) await built.close().catch(() => {})
+      await cleanUp()
+      throw err
+    }
+    await this.#reopen(`the rebase onto epoch '${newer}' is built`)
+    return null
+  }
+
+  /**
+   * Keep this database's side by making its file a new epoch's snapshot,
+   * after every epoch there is, the log's side (at `target`, the
+   * position `ends`) kept as a checkpoint. The snapshot comes after
+   * every transaction of either side, and counts as a schema change if
+   * either side made one since they parted (at schema version
+   * `partedSchema`). Pending transactions flush first, to the database's
+   * own epoch, which the move then leaves.
+   */
+  async #keepByEpoch(
+    target: string,
+    ends: { seq: number; schema: number },
+    partedSchema: number,
+    ownSql: boolean,
+  ): Promise<Checkpoint> {
+    const parsed = parseEpoch(this.#branch)
+    if (!parsed) {
+      throw new LogError(
+        `keeping this database's side here starts a new epoch, but the log's branch '${this.#branch}' isn't named for epochs ('<name>/<n>')`,
+      )
+    }
+    await this.#flush()
+    if (this.#pending > 0) {
+      throw new LogError(`the database's ${this.#pending} pending transactions didn't flush`)
+    }
+    const checkpoint = await this.#tag(
+      target,
+      ends.seq,
+      ends.schema,
+      "the synced changes, replaced by this copy's",
+    )
+    const epochs = await epochsOf(this.#repo, parsed.log)
+    const n = Math.max(parsed.n, ...epochs.map((e) => e.n)) + 1
+    if (!Number.isSafeInteger(n)) {
+      throw new LogError(`the log's epochs can't be counted past ${n - 1}`)
+    }
+    const changed = ownSql || ends.schema !== partedSchema
+    await this.#epochAt(
+      epochBranch(parsed.log, n),
+      Math.max(this.seq, ends.seq) + 1,
+      changed ? Math.max(this.#meta.schema, ends.schema) + 1 : this.#meta.schema,
+    )
+    await this.#tidy()
+    return checkpoint
+  }
+
+  /**
+   * Start epoch `branch` from the database as it stands, its snapshot
+   * at transaction `seq` and schema version `schema`, and move onto it,
+   * all while calls wait.
+   */
+  async #epochAt(branch: string, seq: number, schema: number): Promise<EpochResult> {
+    const dir = this.#file.directory
+    const tmp = snapshotName(this.name)
+    try {
+      await vacuumInto(this.#file, dir, tmp, (sql) => this.#exec(sql))
+      const pending = await pendingDigest(this.#sqlite3, this.#readPending())
+      await markSnapshot(dir, tmp, branch, seq, schema)
+      const shot: Shot = {
+        branch,
+        tmp,
+        seq,
+        schema,
+        previous: { branch: this.#branch, base: this.#meta.base, pending },
+        hash: await hashFile(dir, tmp),
+      }
+      let written: Awaited<ReturnType<typeof writeSnapshot>>
+      const source = await dir.open(tmp)
+      try {
+        written = await writeSnapshot(this.#repo, branch, source, shot)
+      } catch (err) {
+        await this.#dropEpoch(branch)
+        throw err
+      } finally {
+        source.close()
+      }
+      return await this.#moveTo(shot, written.wt, written.record)
+    } finally {
+      await deleteDatabaseFiles(dir, tmp).catch(() => {})
+    }
+  }
+
+  /** The tips `adopt()` took entries from into this epoch, newest first. */
+  async #adopted(): Promise<string[]> {
+    const out: string[] = []
+    for (let at = this.#wt.head; at !== ROOT_COMMIT; ) {
+      const commit = await this.#repo.getCommit(at)
+      if (!parseEntryInfo(commit.info)) break
+      const adopted = (commit.info as { adopted?: unknown }).adopted
+      if (typeof adopted === 'string') out.push(adopted)
+      at = commit.parents[0] ?? ROOT_COMMIT
+    }
+    return out
+  }
+
+  async #adopt(
+    tip: string,
+    since: string | undefined,
+    keep: 'mine' | undefined,
+  ): Promise<RebaseResult> {
+    if (!this.#log) throw new LogError('a detached copy has no log to take entries into')
+    const repo = this.#repo
+    await this.#flush()
+    if (this.#pending > 0) {
+      throw new LogError(`the database's ${this.#pending} pending transactions didn't flush`)
+    }
+    let from = since ?? null
+    // what an earlier adopt took: `tip` itself, or a commit it follows
+    for (const taken of await this.#adopted()) {
+      if (taken === tip) {
+        return {
+          status: 'up-to-date',
+          kept: null,
+          conflicts: [],
+          schemaChange: null,
+          mine: 0,
+          theirs: 0,
+          checkpoint: null,
+          seq: this.seq,
+          base: this.#meta.base,
+        }
+      }
+      if (from === null && (await holdsCommit(repo, tip, taken))) from = taken
+    }
+    if (from === null) {
+      // where the old epoch's line `tip` is on parted from the one the
+      // snapshot was taken on
+      const taken = (await readSnapshot(repo, this.#wt.head))?.previous?.base
+      if (taken !== undefined && (await holdsCommit(repo, taken, taken))) {
+        from = await repo.mergeBase(tip, taken).catch(() => null)
+      }
+    }
+    if (from === null) {
+      throw new LogError(
+        "where the entries to take start isn't known here: adopt `since` the last commit of the old epoch this copy synced",
+      )
+    }
+    if (!(await holdsCommit(repo, tip, from))) {
+      throw new LogError(
+        `commit ${tip} isn't in the history after ${from}, or isn't in the repository`,
+      )
+    }
+    const at = await this.#positionAt(from)
+    const entries = await this.#walk(tip, from, at.seq)
+    const theirs = entries.reduce((n, e) => n + e.to - e.from + 1, 0)
+    const result = (
+      status: RebaseResult['status'],
+      more: Partial<RebaseResult> = {},
+    ): RebaseResult => ({
+      status,
+      kept: null,
+      conflicts: [],
+      schemaChange: null,
+      mine: 0,
+      theirs,
+      checkpoint: null,
+      seq: this.seq,
+      base: this.#meta.base,
+      ...more,
+    })
+    if (entries.length === 0) return result('up-to-date')
+    if (keep === 'mine') {
+      const ends = await this.#positionAt(tip)
+      const checkpoint = await this.#tag(
+        tip,
+        ends.seq,
+        ends.schema,
+        'changes synced to an older epoch, not taken into this one',
+      )
+      return result('kept', { kept: 'mine', checkpoint })
+    }
+    const pieces = (await Promise.all(entries.map((entry) => this.#readEntry(entry)))).flat()
+    if (pieces.some((piece) => piece.kind === 'sql')) {
+      return result('conflict', { schemaChange: 'theirs' })
+    }
+    if (at.schema !== this.#meta.schema) return result('conflict', { schemaChange: 'mine' })
+    const by = this.seq - at.seq
+    const renumbered: Line[] = await Promise.all(
+      entries.map(async (entry) => {
+        const own = renumber(await this.#readEntry(entry), by)
+        return { pieces: own, bytes: encodePieces(own) }
+      }),
+    )
+    ;(renumbered[renumbered.length - 1] as Line).adopted = tip
+    const head = this.#wt.head
+    const landed = await this.#rebaseFile(head, head, this.#meta.schema, {
+      undo: [],
+      apply: [],
+      redo: pieces,
+      lines: renumbered,
+    })
+    if ('conflicts' in landed) return result('conflict', landed)
+    return result('rebased')
   }
 
   /**
@@ -1913,11 +2380,11 @@ export class LoggedDatabase {
     const wt = await repo.worktree(temp)
     let { seq, schema } = await this.#positionAt(onto)
     let total = parseEntryInfo((await repo.getCommit(onto)).info)?.total ?? 0
-    for (const { pieces, bytes } of lines) {
+    for (const { pieces, bytes, adopted } of lines) {
       total += bytes.byteLength
       const info = entryInfo(pieces, bytes, await sha256Hex(bytes), total)
       wt.set(ENTRY_KEY, bytes)
-      await wt.commit({ info: { ...info } })
+      await wt.commit({ info: { ...info, ...(adopted !== undefined && { adopted }) } })
       seq = info.to
       schema = info.schema
     }
@@ -2187,7 +2654,16 @@ export class LoggedDatabase {
           shot.seq,
         ]) as number,
     )
-    const next: Meta = { ...this.#meta, base: commit, baseSeq: shot.seq, appliedSeq: shot.seq }
+    // a snapshot may come after every transaction, and be a schema change
+    const next: Meta = {
+      ...this.#meta,
+      base: commit,
+      baseSeq: shot.seq,
+      appliedSeq: shot.seq,
+      nextSeq: Math.max(this.#meta.nextSeq, shot.seq + 1),
+      // a schema change made while its snapshot was committed is past it
+      schema: Math.max(this.#meta.schema, shot.schema),
+    }
     try {
       this.#inTransaction(() => {
         this.#exec('DELETE FROM _kvsql_pending WHERE seq <= ?', [shot.seq])
@@ -2253,7 +2729,11 @@ export class LoggedDatabase {
         }
       }
       const dir = this.#file.directory
-      for (const leftover of [snapshotName(this.name), restoreName(this.name)]) {
+      for (const leftover of [
+        snapshotName(this.name),
+        restoreName(this.name),
+        rebaseName(this.name),
+      ]) {
         if (await dir.exists(leftover)) await deleteDatabaseFiles(dir, leftover)
       }
       const temp = parsed ? restoreBranch(parsed.log) : null
@@ -2281,6 +2761,7 @@ export class LoggedDatabase {
       transactions: 0,
       rebased: 0,
       snapshot: false,
+      stayed: null,
     }
     await this.#wt.refresh()
     const tip = this.#wt.head
@@ -2766,36 +3247,45 @@ async function peekFile(dir: Directory, name: string): Promise<Peeked> {
 /**
  * Make the file ready to open on epoch `branch`, if the epoch has a
  * snapshot: rebuild it from the snapshot if it is fresh, or behind on
- * an older epoch with nothing pending; or, if it is where the snapshot
- * was taken from (a crash stopped the move), finish moving it over.
- * Anything else is left for opening to take or refuse. Whether the
- * file was rebuilt.
+ * an older epoch with nothing the snapshot doesn't hold; or, if it is
+ * where the snapshot was taken from (a crash stopped the move), finish
+ * moving it over. A file behind on an older epoch with changes the
+ * snapshot may not hold stays there, if that epoch's branch is still in
+ * the repository (another device's epoch: `rebase()` moves it). Anything
+ * else is left for opening to take or refuse.
+ *
+ * Returns the branch to open the file on, whether the file was rebuilt,
+ * and the newer epoch it stayed behind, if it did.
  */
-async function prepareFile(options: LogOptions, branch: string): Promise<boolean> {
+async function prepareFile(
+  options: LogOptions,
+  branch: string,
+): Promise<{ branch: string; rebuilt: boolean; stayed: string | null }> {
   const { repo, dir, name } = options
-  if (!(await repo.branches.has(branch))) return false
+  const as = (rebuilt: boolean) => ({ branch, rebuilt, stayed: null })
+  if (!(await repo.branches.has(branch))) return as(false)
   const tip = await repo.branches.get(branch)
   const record = await readSnapshot(repo, tip)
-  if (!record) return false
+  if (!record) return as(false)
   const file = await peekFile(dir, name)
-  if (file === 'other') return false
+  if (file === 'other') return as(false)
   const rebuild = async () => {
     const commit = await snapshotCommit(repo, tip)
     await restoreSnapshot(repo, commit, record, dir, name)
     await anchor(dir, name, branch, commit, record.seq, false)
-    return true
+    return as(true)
   }
   if (file === 'fresh') return rebuild()
   if (file.base === SNAPSHOT_BASE) {
     // rebuilt, and stopped before it was given the snapshot's commit
     if (file.baseSeq !== record.seq) return rebuild()
     await anchor(dir, name, branch, await snapshotCommit(repo, tip), record.seq, false)
-    return true
+    return as(true)
   }
-  if (file.branch === branch) return false
+  if (file.branch === branch) return as(false)
   const ours = parseEpoch(file.branch)
   const theirs = parseEpoch(branch)
-  if (!ours || !theirs || ours.log !== theirs.log || ours.n >= theirs.n) return false
+  if (!ours || !theirs || ours.log !== theirs.log || ours.n >= theirs.n) return as(false)
   const { previous } = record
   if (
     previous?.branch === file.branch &&
@@ -2810,8 +3300,20 @@ async function prepareFile(options: LogOptions, branch: string): Promise<boolean
       if (hash !== record.hash) throw new DivergedError(file.branch, file.base, record.hash, hash)
     }
     await anchor(dir, name, branch, await snapshotCommit(repo, tip), record.seq, true)
-    return false
+    return as(false)
   }
+  // the snapshot holds the file's flushed transactions if the file's
+  // position is in the history of where it was taken
+  const held =
+    previous?.branch === file.branch && (await holdsCommit(repo, previous.base, file.base))
+  if (file.pending === 0 && held) return rebuild()
+  if (await repo.branches.has(file.branch)) {
+    // its epoch is still here: another device's epoch replaced it, and
+    // what this file holds besides is for a rebase to take over
+    return { branch: file.branch, rebuilt: false, stayed: branch }
+  }
+  // Its epoch's branch is gone: this device moved off it, so what the
+  // file flushed is in the log the snapshot was taken from.
   if (file.pending > 0) {
     throw new LogError(
       `the database file is on epoch '${file.branch}', behind its log's current epoch '${branch}', and holds ${file.pending} transaction${file.pending === 1 ? '' : 's'} no log has, which rebuilding it from the epoch's snapshot would lose`,
@@ -2823,6 +3325,76 @@ async function prepareFile(options: LogOptions, branch: string): Promise<boolean
     )
   }
   return rebuild()
+}
+
+/** Whether `ancestor` is `commit` or in its history; false if either isn't in `repo`. */
+async function holdsCommit(
+  repo: Repo<Uint8Array>,
+  commit: string,
+  ancestor: string,
+): Promise<boolean> {
+  try {
+    if (commit === ancestor) {
+      await repo.getCommit(commit)
+      return true
+    }
+    return (await repo.mergeBase(commit, ancestor)) === ancestor
+  } catch (err) {
+    if (err instanceof UnknownCommitError) return false
+    throw err
+  }
+}
+
+/**
+ * Finish what a rebase onto a new epoch left beside database `name` in
+ * `dir` (`<name>-rebase`), before it opens. A rebase file that names
+ * the new epoch, at the tip of the rebase's branch, is the database
+ * rebased: the epoch's branch moves to the file's position, from the
+ * head the rebase's tag names (if it hasn't yet), the file replaces
+ * the database's, and goes. One that
+ * doesn't is a rebase cut short before then, and only goes.
+ *
+ * @throws LogError if the new epoch's branch has moved on since from
+ *   where the rebase started: both are left as they are.
+ */
+async function settleRebasedFile(options: LogOptions): Promise<void> {
+  const { dir, name, repo } = options
+  const scratch = rebaseName(name)
+  if (!(await dir.exists(scratch))) return
+  const log = logName(options.branch)
+  const file = await peekFile(dir, scratch)
+  // built and marked: at the rebase branch's tip, naming an epoch
+  const temp = rebaseBranch(log)
+  const ready =
+    typeof file === 'object' &&
+    parseEpoch(file.branch)?.log === log &&
+    (await repo.branches.has(file.branch)) &&
+    (await repo.branches.has(temp)) &&
+    (await repo.branches.get(temp)) === file.base
+  if (!ready) {
+    await deleteDatabaseFiles(dir, scratch)
+    return
+  }
+  const tip = await repo.branches.get(file.branch)
+  if (!(await holdsCommit(repo, tip, file.base))) {
+    const tag = rebaseTag(log)
+    const from = (await repo.tags.has(tag)) ? await repo.tags.get(tag) : null
+    if (tip !== from) {
+      throw new LogError(
+        `a rebase of this database onto epoch '${file.branch}' was cut short after it was built, and the epoch has moved since, to ${tip}: moving it to the rebase (${file.base}, in ${scratch}) would drop that, so both are left as they are`,
+      )
+    }
+    if (!(await publishHead(repo.store, file.branch, tip, file.base))) {
+      throw new LogError(`epoch '${file.branch}' moved while a rebase onto it was finished`)
+    }
+  }
+  const source = await openDatabaseFile(dir, scratch)
+  try {
+    await copyDatabase(source, dir, name)
+  } finally {
+    source.close()
+  }
+  await deleteDatabaseFiles(dir, scratch)
 }
 
 /** The content hash of the database file `name` in `dir`, which mustn't be open. */
@@ -2877,6 +3449,16 @@ async function pendingThrough(
  * nothing pending, and the base a snapshot's file records until it is
  * opened on its epoch.
  */
+/** Mark the database file `name` in `dir` as on branch `branch`. */
+async function markBranch(dir: Directory, name: string, branch: string): Promise<void> {
+  const file = await openDatabaseFile(dir, name)
+  try {
+    file.db.exec({ sql: 'UPDATE _kvsql_meta SET branch = ? WHERE id = 1', bind: [branch] })
+  } finally {
+    file.close()
+  }
+}
+
 async function markSnapshot(
   dir: Directory,
   name: string,

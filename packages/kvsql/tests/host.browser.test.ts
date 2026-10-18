@@ -304,6 +304,7 @@ describe('the worker host', () => {
         transactions: 0,
         rebased: 0,
         snapshot: false,
+        stayed: null,
       })
       expect((await other.query('SELECT count(*) AS n FROM t')).rows).toEqual([{ n: 3 }])
       expect((await other.query('PRAGMA integrity_check')).rows).toEqual([
@@ -401,6 +402,7 @@ describe('the worker host', () => {
         transactions: 2,
         rebased: 0,
         snapshot: false,
+        stayed: null,
       })
       expect((await a.query('SELECT id FROM t')).rows).toEqual([{ id: 1 }])
     },
@@ -455,6 +457,7 @@ describe('the worker host', () => {
         transactions: 1,
         rebased: 0,
         snapshot: true,
+        stayed: null,
       })
       expect((await a.query('SELECT id, hex(v) AS v FROM t ORDER BY id')).rows).toEqual(before)
     },

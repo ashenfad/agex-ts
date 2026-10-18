@@ -361,20 +361,41 @@ describe('a rebase across a schema change', () => {
     expect(await dump(b.db)).toEqual(mine)
   })
 
-  it("stops at the log's, and this device's side can't be kept over it yet", async () => {
+  it("stops at the log's, and keeping this device's side starts a new epoch", async () => {
     const { remote, a, b } = await pair()
     await run(a.db, ['ALTER TABLE t ADD COLUMN z TEXT'])
     await push(a, remote)
     await run(b.db, ["UPDATE t SET x = 'b' WHERE id = 1"])
+    const mine = await dump(b.db)
     const head = await fetchHead(b, remote)
-    const result = await b.db.rebase(head)
-    expect(result).toMatchObject({ status: 'conflict', schemaChange: 'theirs' })
-    await expect(b.db.rebase(head, { keep: 'mine' })).rejects.toThrow(/isn't supported yet/)
-    const err = await (async () => {
-      await b.db.close()
-      await pullBranch(b.store, remote, BRANCH)
-      return open(b.dir, await repoOver(b.store)).catch((e: unknown) => e)
-    })()
+    expect(await b.db.rebase(head)).toMatchObject({ status: 'conflict', schemaChange: 'theirs' })
+
+    const kept = await b.db.rebase(head, { keep: 'mine' })
+    expect(kept).toMatchObject({ status: 'kept', kept: 'mine' })
+    expect(b.db.branch).toBe('db/test/1')
+    expect(await dump(b.db)).toEqual(mine)
+    // after every transaction of both sides, and a schema change
+    expect(b.db.seq).toBe(4)
+    expect(b.db.schemaVersion).toBe(3)
+    expect(await b.repo.branches.list()).toEqual(['db/test/1'])
+    expect((await pushBranch(b.store, remote, 'db/test/1')).status).toBe('created')
+
+    // the other device, with nothing of its own, follows to the new epoch
+    const synced = await a.repo.branches.get(BRANCH)
+    expect((await pullBranch(a.store, remote, 'db/test/1')).status).toBe('created')
+    expect(await a.db.rebase(undefined, { synced })).toMatchObject({ status: 'fast-forwarded' })
+    expect(a.db.branch).toBe('db/test/1')
+    expect(await dump(a.db)).toEqual(mine)
+  })
+
+  it("refuses at open a pending change the log's schema change stops", async () => {
+    const { remote, a, b } = await pair()
+    await run(a.db, ['ALTER TABLE t ADD COLUMN z TEXT'])
+    await push(a, remote)
+    await run(b.db, ["UPDATE t SET x = 'b' WHERE id = 1"])
+    const image = new MemoryDirectory((b.dir as MemoryDirectory).image())
+    expect((await pullBranch(b.store, remote, BRANCH)).status).toBe('fast-forwarded')
+    const err = await open(image, await repoOver(b.store)).catch((e: unknown) => e)
     expect(err).toBeInstanceOf(RebaseRequiredError)
     expect(err).toMatchObject({ schemaChange: 'theirs' })
   })

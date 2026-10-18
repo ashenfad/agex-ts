@@ -381,6 +381,9 @@ describe('crash safety', () => {
       expect(outcomes.before).toBeGreaterThan(0)
       expect(outcomes.after).toBeGreaterThan(0)
     },
+    // A crash and a reopen at every operation: seconds of work, more on
+    // a loaded runner.
+    60_000,
   )
 
   it('rolls back a hot journal on the first read after opening', async () => {

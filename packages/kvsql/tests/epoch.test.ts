@@ -388,7 +388,9 @@ describe('the epoch policy', () => {
   })
 })
 
-describe('crashes while moving to a new epoch', () => {
+// A crash and a recovery at every operation: seconds of work, more on a
+// loaded runner.
+describe('crashes while moving to a new epoch', { timeout: 60_000 }, () => {
   quietSqliteWarnings()
 
   /**

@@ -185,6 +185,7 @@ export interface Ops {
   checkpoints: { args: []; result: Checkpoint[] }
   deleteCheckpoint: { args: [id: string]; result: undefined }
   restore: { args: [id: string]; result: RestoreResult }
+  contentHash: { args: []; result: string }
   rebase: { args: [onto: string | null, options: RebaseOptions]; result: RebaseResult }
   info: { args: []; result: DatabaseInfo }
   delete: { args: [options: DeleteOptions]; result: undefined }
@@ -210,6 +211,7 @@ export const RETRY_SAFE: ReadonlySet<Op> = new Set<Op>([
   'checkpoints',
   'deleteCheckpoint',
   'rebase',
+  'contentHash',
 ])
 
 /** Marks the message a client sends a worker to connect to a database. */

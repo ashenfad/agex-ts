@@ -445,6 +445,8 @@ class DatabaseHost<C extends DatabaseConfig> {
         return db.deleteCheckpoint(args[0] as string)
       case 'restore':
         return db.restore(args[0] as string)
+      case 'contentHash':
+        return db.contentHash()
       case 'rebase':
         return db.rebase((args[0] as string | null) ?? undefined, (args[1] ?? {}) as never)
       case 'info':

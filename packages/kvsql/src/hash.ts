@@ -7,8 +7,9 @@
  * name order), `user_version` and `application_id`, and every row of
  * every table, in primary-key order. kvsql's own tables and SQLite's
  * are left out, as the log leaves them out. Each row is its columns'
- * `quote()`, SQL literals that tell `1` from `1.0` from `'1'`, so two
- * copies agree only on values of the same type.
+ * `quote()`, SQL literals that tell `1` from `1.0` from `x'31'`, so two
+ * copies agree only on values of the same type; text goes as `T` and
+ * the hex of its bytes instead, since `quote()` stops at a NUL in it.
  *
  * The text is hashed in blocks of {@link HASH_BLOCK_ROWS} lines, and
  * the hash is the SHA-256 of their hashes: a database of any size is
@@ -78,7 +79,12 @@ export async function contentHash(
       .sort((a, b) => a[1] - b[1])
       .map(([name]) => quoteName(name))
     const order = keys.length > 0 ? keys.join(', ') : 'rowid'
-    const row = columns.map(([name]) => `quote(${quoteName(name)})`).join(" || ',' || ")
+    const row = columns
+      .map(([name]) => {
+        const c = quoteName(name)
+        return `CASE typeof(${c}) WHEN 'text' THEN 'T' || hex(${c}) ELSE quote(${c}) END`
+      })
+      .join(" || ',' || ")
     await line(`rows ${JSON.stringify(table)}`)
     // one statement per table, stepped row by row
     const stmt = run(() =>

@@ -213,6 +213,11 @@ export class DatabaseClient {
     return this.#call('restore', [id])
   }
 
+  /** The database's content hash, from the worker holding it (see `LoggedDatabase.contentHash`). */
+  contentHash(): Promise<string> {
+    return this.#call('contentHash', [])
+  }
+
   /**
    * Rebase the database onto `onto`, a commit of its log another copy
    * wrote, or its branch's tip, by the worker holding it (see

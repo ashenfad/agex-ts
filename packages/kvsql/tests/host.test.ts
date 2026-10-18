@@ -572,6 +572,20 @@ describe('epochs', () => {
   })
 })
 
+describe('content hash', () => {
+  it('is worked out by the holder, for a forwarding tab too', async () => {
+    const o = setup()
+    const a = client(o.worker('a').connect(CONFIG))
+    await a.query('CREATE TABLE t (id INTEGER PRIMARY KEY NOT NULL)')
+    await a.query('INSERT INTO t VALUES (1)')
+    const b = client(o.worker('b').connect(CONFIG))
+    await until(async () => (await role(b)) === 'forwarding', 3_000, 'forwarding')
+    const hash = await a.contentHash()
+    expect(hash).toMatch(/^[0-9a-f]{64}$/)
+    expect(await b.contentHash()).toBe(hash)
+  })
+})
+
 describe('checkpoints', () => {
   it('are taken and restored by the holder, for a forwarding tab too, and every tab sees it', async () => {
     const o = setup()

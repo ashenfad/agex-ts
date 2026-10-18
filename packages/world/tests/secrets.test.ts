@@ -181,16 +181,24 @@ describe('host objects made with the secrets', () => {
 describe('interrupting curl', () => {
   it('while it reads a body, the call ends interrupted', async () => {
     let pull!: ReadableStreamDefaultController<Uint8Array>
+    let reading!: () => void
+    const read = new Promise<void>((resolve) => {
+      reading = resolve
+    })
     const body = new ReadableStream<Uint8Array>({
       start(c) {
         pull = c
         c.enqueue(new TextEncoder().encode('partial'))
       },
+      // Asked for more once curl has taken the first chunk.
+      pull() {
+        reading()
+      },
     })
     const { fetch } = fakeFetch(() => new Response(body))
     const ws = await open(fetch)
     const running = ws.terminal('curl https://slow.test/stream')
-    await new Promise((r) => setTimeout(r, 20))
+    await read
     expect(ws.interrupt()).toBe(true)
     pull.error(new DOMException('aborted', 'AbortError'))
     const r = await running

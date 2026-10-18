@@ -117,9 +117,17 @@ describe('openDatabase on OPFS', () => {
     expect(got[5]?.state).toBe(after)
   })
 
+  // Timings are logged for a reader to compare, never asserted: a
+  // loaded runner is slow, not wrong. The timeout leaves room for that.
   it('times the basics', async () => {
-    const got = await run<Record<string, unknown>>('timings')
+    const got = await run<{
+      transactions: number
+      rowsRead: number
+      perMode: Record<string, { rows: unknown }>
+    }>('timings')
     console.log(`kvsql timings ${navigator.userAgent}: ${JSON.stringify(got)}`)
     expect(got.rowsRead).toBe(10000)
-  })
+    expect(Object.keys(got.perMode)).toEqual(['truncate', 'persist', 'delete'])
+    for (const mode of Object.values(got.perMode)) expect(mode.rows).toBe(got.transactions)
+  }, 60_000)
 })

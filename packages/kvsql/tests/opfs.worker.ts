@@ -19,6 +19,9 @@ const ROOT = 'kvsql-tests'
 
 type Row = { id: number; v: string }
 
+/** One-row transactions per timed run in the `timings` scenario. */
+const TIMED_TRANSACTIONS = 200
+
 async function withDirectory<T>(fn: (dir: OpfsDirectory, path: string) => Promise<T>): Promise<T> {
   const name = `run-${Date.now()}-${Math.random().toString(36).slice(2)}`
   const dir = await OpfsDirectory.at(ROOT, name)
@@ -186,13 +189,17 @@ const scenarios: Record<string, () => Promise<unknown>> = {
   },
 
   /**
-   * Rough timings: open, 1,000 one-row transactions, a 10k-row read and
-   * a reopen; and, per journal mode, the cost and file operations of a
-   * one-row transaction.
+   * Rough timings: open, a run of one-row transactions, a 10k-row read
+   * and a reopen; and, per journal mode, the cost and file operations
+   * of a one-row transaction. Each one-row transaction syncs, which is
+   * slow on some browsers' OPFS (several ms on Firefox), so the runs
+   * are kept short: enough for a per-transaction average, not more.
    */
   timings: () =>
     withDirectory(async (dir) => {
       const ms = (t0: number) => Math.round((performance.now() - t0) * 100) / 100
+      const transactions = TIMED_TRANSACTIONS
+      const perTransaction = (total: number) => Math.round((total / transactions) * 1000) / 1000
       const perMode: Record<string, unknown> = {}
       for (const mode of ['truncate', 'persist', 'delete']) {
         const counting = new CrashingDirectory(dir)
@@ -203,16 +210,16 @@ const scenarios: Record<string, () => Promise<unknown>> = {
         const insert = file.db.prepare('INSERT INTO t (v) VALUES (?)')
         const ops = { ...counting.ops }
         const t0 = performance.now()
-        for (let i = 0; i < 1000; i++) insert.bind([`row ${i}`]).stepReset()
+        for (let i = 0; i < transactions; i++) insert.bind([`row ${i}`]).stepReset()
         const total = ms(t0)
         insert.finalize()
         const count = file.db.selectValue('SELECT count(*) FROM t')
         perMode[mode] = {
-          msPerTransaction: Math.round(total) / 1000,
+          msPerTransaction: perTransaction(total),
           rows: count,
-          writes: (counting.ops.write - ops.write) / 1000,
-          truncates: (counting.ops.truncate - ops.truncate) / 1000,
-          syncs: (counting.ops.sync - ops.sync) / 1000,
+          writes: (counting.ops.write - ops.write) / transactions,
+          truncates: (counting.ops.truncate - ops.truncate) / transactions,
+          syncs: (counting.ops.sync - ops.sync) / transactions,
         }
         file.close()
       }
@@ -224,10 +231,12 @@ const scenarios: Record<string, () => Promise<unknown>> = {
       db.exec('CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)')
       const insert = db.prepare('INSERT INTO t (v) VALUES (?)')
       t0 = performance.now()
-      for (let i = 0; i < 1000; i++) insert.bind([`row ${i}`]).stepReset()
-      const inserts1000 = ms(t0)
+      for (let i = 0; i < transactions; i++) insert.bind([`row ${i}`]).stepReset()
+      const msPerInsert = perTransaction(ms(t0))
       db.exec('BEGIN')
-      for (let i = 0; i < 9000; i++) insert.bind([`bulk ${i} ${'x'.repeat(50)}`]).stepReset()
+      for (let i = transactions; i < 10000; i++) {
+        insert.bind([`bulk ${i} ${'x'.repeat(50)}`]).stepReset()
+      }
       db.exec('COMMIT')
       insert.finalize()
       t0 = performance.now()
@@ -239,7 +248,7 @@ const scenarios: Record<string, () => Promise<unknown>> = {
       const again = await openDatabase(dir, 'app.db')
       const reopen = ms(t0)
       again.close()
-      return { open, inserts1000, read10k, rowsRead: read.length, reopen, perMode }
+      return { transactions, open, msPerInsert, read10k, rowsRead: read.length, reopen, perMode }
     }),
 }
 

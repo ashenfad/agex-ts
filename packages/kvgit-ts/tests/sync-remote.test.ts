@@ -3,6 +3,7 @@ import { Memory } from '../src/backends/memory'
 import {
   MemoryRemote,
   VersionedKV,
+  deleteRemoteBranch,
   getSyncHead,
   pullBranch,
   pushBranch,
@@ -347,5 +348,85 @@ describe('one branch, two remotes', () => {
     await a.vk.commit({ updates: new Map([['k', bytes('1')]]) })
     await pushBranch(a.store, new MemoryRemote(store), BRANCH)
     expect(await getSyncHead(a.store, BRANCH, new MemoryRemote(store))).toBe(a.vk.currentCommit)
+  })
+})
+
+describe('deleting a remote branch', () => {
+  it('deletes it where it last synced, and a later push creates it afresh', async () => {
+    const remote = new MemoryRemote(new Memory())
+    const a = await device()
+    await a.vk.commit({ updates: new Map([['k', bytes('v')]]) })
+    await pushBranch(a.store, remote, BRANCH)
+
+    const result = await deleteRemoteBranch(a.store, remote, BRANCH)
+    expect(result).toEqual({ status: 'deleted', branch: BRANCH, remoteHead: null })
+    expect(await remote.listRefs()).toEqual([])
+    expect(await getSyncHead(a.store, BRANCH)).toBeNull()
+    // the local branch stays
+    expect((await VersionedKV.open(a.store, { branch: BRANCH })).currentCommit).toBe(
+      a.vk.currentCommit,
+    )
+    expect((await pushBranch(a.store, remote, BRANCH)).status).toBe('created')
+  })
+
+  it('leaves it when someone pushed to it since', async () => {
+    const remote = new MemoryRemote(new Memory())
+    const a = await device()
+    await a.vk.commit({ updates: new Map([['k', bytes('a')]]) })
+    await pushBranch(a.store, remote, BRANCH)
+    const b = new Memory()
+    await pullBranch(b, remote, BRANCH)
+    const bVk = await VersionedKV.open(b, { branch: BRANCH })
+    await bVk.commit({ updates: new Map([['k', bytes('b')]]) })
+    await pushBranch(b, remote, BRANCH)
+
+    const result = await deleteRemoteBranch(a.store, remote, BRANCH)
+    expect(result).toEqual({ status: 'moved', branch: BRANCH, remoteHead: bVk.currentCommit })
+    expect((await remote.listRefs()).map((r) => r.head)).toEqual([bVk.currentCommit])
+    expect(await getSyncHead(a.store, BRANCH)).toBe(a.vk.currentCommit)
+    // at the head named, it goes
+    const named = await deleteRemoteBranch(a.store, remote, BRANCH, {
+      expected: bVk.currentCommit,
+    })
+    expect(named.status).toBe('deleted')
+  })
+
+  it('reports one already gone, and forgets where it synced', async () => {
+    const remoteStore = new Memory()
+    const remote = new MemoryRemote(remoteStore)
+    const a = await device()
+    await a.vk.commit({ updates: new Map([['k', bytes('v')]]) })
+    await pushBranch(a.store, remote, BRANCH)
+    await remoteStore.remove(`__branch_head__${BRANCH}`)
+
+    expect((await deleteRemoteBranch(a.store, remote, BRANCH)).status).toBe('gone')
+    expect(await getSyncHead(a.store, BRANCH)).toBeNull()
+    expect((await pushBranch(a.store, remote, BRANCH)).status).toBe('created')
+  })
+
+  it('refuses a branch that never synced there, and a remote that cannot delete', async () => {
+    const remote = new MemoryRemote(new Memory())
+    const a = await device()
+    await expect(deleteRemoteBranch(a.store, remote, BRANCH)).rejects.toThrow(/never synced/)
+    const readOnly = {
+      listRefs: () => remote.listRefs(),
+      fetch: (want: string, have: Iterable<string>) => remote.fetch(want, have),
+      push: remote.push.bind(remote),
+    }
+    await expect(deleteRemoteBranch(a.store, readOnly, BRANCH)).rejects.toThrow(
+      /can't delete branches/,
+    )
+  })
+
+  it('a direct deleteBranch at a stale head deletes nothing', async () => {
+    const remote = new MemoryRemote(new Memory())
+    const a = await device()
+    await a.vk.commit({ updates: new Map([['k', bytes('v')]]) })
+    await pushBranch(a.store, remote, BRANCH)
+    expect(await remote.deleteBranch(BRANCH, 'f'.repeat(40))).toBe(false)
+    expect(await remote.deleteBranch('nope', a.vk.currentCommit)).toBe(false)
+    expect((await remote.listRefs()).length).toBe(1)
+    expect(await remote.deleteBranch(BRANCH, a.vk.currentCommit)).toBe(true)
+    expect(await remote.listRefs()).toEqual([])
   })
 })

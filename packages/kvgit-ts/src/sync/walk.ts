@@ -14,7 +14,9 @@
  * walk is a pure read over committed state and shouldn't be entangled
  * with a working tree's branch/HEAD bookkeeping.
  *
- * Cost: O(delta) store reads. Per emitted commit, the keyset diff vs
+ * Cost: O(delta) store reads, on history that stores generations
+ * (`versioned/ancestry.ts`); older history is walked whole to find
+ * what `have` holds. Per emitted commit, the keyset diff vs
  * the first parent is structural (`Keyset.diff` skips shared subtrees
  * by hash), so work is proportional to changed keys, not keyset size.
  */
@@ -22,11 +24,11 @@
 import { Keyset } from '../keyset'
 import { PyFloat } from '../pyjson'
 import type { KVStore, KeysetEntry, WireCommit } from '../types'
+import { ancestryDelta } from '../versioned/ancestry'
 import {
   COMMIT_ROOT,
   COMMIT_TIME,
   INFO_KEY,
-  PARENT_COMMIT,
   PARENT_GENS,
   loads,
   loadsExact,
@@ -60,26 +62,24 @@ export async function* walkDelta(
   opts: WalkDeltaOptions,
 ): AsyncIterable<WireCommit> {
   const { want } = opts
-
-  // Phase 1: everything the receiver already has. Missing commits are
-  // tolerated here — `have` reflects the receiver's claims, and a
-  // hash we can't resolve simply contributes nothing to the skip set.
-  const haveSet = new Set<string>()
-  for (const h of opts.have ?? []) {
-    await collectAncestors(store, h, haveSet, { tolerateMissing: true })
+  // Strict on `want`'s side: a missing record inside the delta means
+  // there's no valid transfer to make.
+  const parentsOf = await ancestryDelta(store, want, opts.have ?? [])
+  if (parentsOf.size === 0) return
+  const delta = [...parentsOf.keys()]
+  const times = await store.getMany(delta.map(COMMIT_TIME))
+  const missing = new Map<string, CommitRecord>()
+  for (const hash of delta) {
+    const timeRaw = times.get(COMMIT_TIME(hash))
+    const time = timeRaw !== undefined ? loadsExact(timeRaw) : null
+    missing.set(hash, {
+      parents: parentsOf.get(hash) as readonly string[],
+      time: time instanceof PyFloat ? time : new PyFloat(typeof time === 'number' ? time : 0),
+    })
   }
 
-  if (haveSet.has(want)) return
-
-  // Phase 2: the delta — ancestors of `want` minus `haveSet`. Strict:
-  // a missing record inside the delta means we can't produce a valid
-  // transfer.
-  const missing = new Map<string, CommitRecord>()
-  await collectDelta(store, want, haveSet, missing)
-
-  // Phase 3: topological order via Kahn's algorithm. In-degree counts
-  // only parents inside the delta (parents in `haveSet` — or beyond a
-  // tolerated-missing horizon — are already satisfied receiver-side).
+  // Topological order via Kahn's algorithm. In-degree counts only
+  // parents inside the delta (the rest the receiver has already).
   // Ready commits are popped oldest-first (time, then hash) so output
   // order is deterministic for a given history.
   const inDegree = new Map<string, number>()
@@ -137,68 +137,6 @@ export async function* walkDelta(
       `walkDelta: cycle detected in commit graph (emitted ${emitted}/${missing.size})`,
     )
   }
-}
-
-/** Walk all parents (iterative DFS — traversal order is irrelevant
- *  for set collection), adding every reachable commit to `into`. */
-async function collectAncestors(
-  store: KVStore,
-  start: string,
-  into: Set<string>,
-  opts: { tolerateMissing: boolean },
-): Promise<void> {
-  const stack: string[] = [start]
-  while (stack.length > 0) {
-    const current = stack.pop() as string
-    if (into.has(current)) continue
-    const parents = await loadParents(store, current)
-    if (parents === null) {
-      if (opts.tolerateMissing) continue
-      throw new Error(`walkDelta: commit record missing for ${current}`)
-    }
-    into.add(current)
-    for (const p of parents) {
-      if (!into.has(p)) stack.push(p)
-    }
-  }
-}
-
-/** Walk from `want` (iterative DFS), stopping at `haveSet`, recording
- *  commit records. Output order doesn't matter — Kahn re-orders. */
-async function collectDelta(
-  store: KVStore,
-  want: string,
-  haveSet: ReadonlySet<string>,
-  into: Map<string, CommitRecord>,
-): Promise<void> {
-  const stack: string[] = [want]
-  while (stack.length > 0) {
-    const current = stack.pop() as string
-    if (into.has(current) || haveSet.has(current)) continue
-    const parents = await loadParents(store, current)
-    if (parents === null) {
-      throw new Error(`walkDelta: commit record missing for ${current}`)
-    }
-    const timeRaw = await store.get(COMMIT_TIME(current))
-    const time = timeRaw !== null ? loadsExact(timeRaw) : null
-    into.set(current, {
-      parents,
-      time: time instanceof PyFloat ? time : new PyFloat(typeof time === 'number' ? time : 0),
-    })
-    for (const p of parents) {
-      if (!into.has(p) && !haveSet.has(p)) stack.push(p)
-    }
-  }
-}
-
-/** Load a commit's parent list, or null if the record is absent. */
-async function loadParents(store: KVStore, commit: string): Promise<readonly string[] | null> {
-  const raw = await store.get(PARENT_COMMIT(commit))
-  if (raw === null) return null
-  const parsed = safeLoads(raw)
-  if (typeof parsed === 'string') return [parsed]
-  if (Array.isArray(parsed)) return parsed.filter((p): p is string => typeof p === 'string')
-  return []
 }
 
 /** Diff a commit's keyset against its first parent and classify. */

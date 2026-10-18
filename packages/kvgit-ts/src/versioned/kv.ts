@@ -45,6 +45,7 @@ import type {
   MetaEntry,
   Versioned,
 } from '../types'
+import { type CommitRecord, NoGenerations, generationOfRecord, loadRecords } from './ancestry'
 import { VersionedBase } from './base'
 import { type ParentLoader, walkHistory } from './helpers'
 import {
@@ -506,50 +507,6 @@ async function walkAncestors(
   }
   return ancestors
 }
-
-/** A commit's parents, and their generations if the commit stores them. */
-interface CommitRecord {
-  readonly parents: readonly string[]
-  readonly gens: readonly number[] | null
-}
-
-/** Parents and parent generations of several commits, in one read. */
-async function loadRecords(
-  store: KVStore,
-  commits: Iterable<string>,
-): Promise<Map<string, CommitRecord>> {
-  const list = [...new Set(commits)]
-  const found = await store.getMany(list.flatMap((c) => [PARENT_COMMIT(c), PARENT_GENS(c)]))
-  const out = new Map<string, CommitRecord>()
-  for (const c of list) {
-    const parentsRaw = found.get(PARENT_COMMIT(c))
-    const parsed = parentsRaw === undefined ? null : safeLoads(parentsRaw)
-    const parents =
-      typeof parsed === 'string'
-        ? [parsed]
-        : Array.isArray(parsed)
-          ? parsed.filter((p): p is string => typeof p === 'string')
-          : []
-    const gensRaw = found.get(PARENT_GENS(c))
-    const gens = gensRaw === undefined ? null : safeLoads(gensRaw)
-    const valid =
-      Array.isArray(gens) &&
-      gens.length === parents.length &&
-      gens.every((g) => Number.isInteger(g) && (g as number) >= 0)
-    out.set(c, { parents, gens: valid ? (gens as number[]) : null })
-  }
-  return out
-}
-
-/** A commit's generation from its record; null if it stores none. */
-function generationOfRecord(record: CommitRecord): number | null {
-  if (record.parents.length === 0) return 0
-  if (record.gens === null) return null
-  return generationOf(record.gens)
-}
-
-/** The search reached history written before generations were stored. */
-class NoGenerations extends Error {}
 
 const FROM_A = 1
 const FROM_B = 2

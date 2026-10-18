@@ -27,16 +27,9 @@
  */
 
 import type { KVStore, WireCommit } from '../types'
-import {
-  BRANCH_HEAD,
-  BRANCH_HEAD_PREV,
-  COMMIT_ROOT,
-  PARENT_COMMIT,
-  dumps,
-  readBranchHead,
-  safeLoads,
-} from '../versioned/layout'
-import { applyWire, claimSyncHead, publishHead, setSyncHead } from './apply'
+import { isAncestor } from '../versioned/ancestry'
+import { COMMIT_ROOT, readBranchHead } from '../versioned/layout'
+import { applyWire, claimSyncHead, clearSyncHead, publishHead, setSyncHead } from './apply'
 import type { Remote } from './remote'
 import { walkDelta } from './walk'
 
@@ -250,6 +243,64 @@ export async function syncBranch(
   return { status, pull, push }
 }
 
+export type DeleteStatus =
+  | 'deleted'
+  | 'moved' // the remote ref isn't where it was expected; nothing deleted
+  | 'gone' // the remote ref was already gone
+
+export interface DeleteResult {
+  status: DeleteStatus
+  branch: string
+  /** Remote branch head as last observed (null = ref absent). */
+  remoteHead: string | null
+}
+
+/**
+ * Delete `branch` on `remote`, but only if nobody has pushed to it
+ * since this store last synced it: the remote ref must be at the head
+ * the branch last synced to there, or at `opts.expected`. When the ref
+ * moved, nothing is deleted (`'moved'`): pull what was pushed first.
+ *
+ * Once the ref is gone, deleted here or before, the record of what the
+ * branch last synced to there goes too, so a later push of the same
+ * name creates it afresh rather than reporting `'remote-gone'`. The
+ * local branch is left alone.
+ *
+ * @throws if the remote can't delete branches, or the branch never
+ *   synced with it and no `expected` is given.
+ */
+export async function deleteRemoteBranch(
+  store: KVStore,
+  remote: Remote,
+  branch: string,
+  opts: { expected?: string } = {},
+): Promise<DeleteResult> {
+  if (remote.deleteBranch === undefined) {
+    throw new Error("deleteRemoteBranch: this remote can't delete branches")
+  }
+  const expected = opts.expected ?? (await claimSyncHead(store, branch, remote))
+  if (expected === null) {
+    throw new Error(
+      `deleteRemoteBranch: '${branch}' never synced with this remote; pass the head to expect`,
+    )
+  }
+  // One retry: the ref can move without its head moving (a repack
+  // writes a new git commit at the same kvgit head).
+  let remoteHead: string | null = expected
+  for (let attempt = 0; attempt < 2 && remoteHead === expected; attempt++) {
+    if (await remote.deleteBranch(branch, expected)) {
+      await clearSyncHead(store, branch, remote)
+      return { status: 'deleted', branch, remoteHead: null }
+    }
+    remoteHead = await readRemoteHead(remote, branch)
+  }
+  if (remoteHead === null) {
+    await clearSyncHead(store, branch, remote)
+    return { status: 'gone', branch, remoteHead }
+  }
+  return { status: 'moved', branch, remoteHead }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -257,32 +308,6 @@ export async function syncBranch(
 async function readRemoteHead(remote: Remote, branch: string): Promise<string | null> {
   const refs = await remote.listRefs()
   return refs.find((r) => r.branch === branch)?.head ?? null
-}
-
-/** Is `ancestor` reachable from `from` (inclusive) in local history? */
-async function isAncestor(store: KVStore, ancestor: string, from: string): Promise<boolean> {
-  if (ancestor === from) return true
-  const seen = new Set<string>([from])
-  const stack: string[] = [from]
-  while (stack.length > 0) {
-    const current = stack.pop() as string
-    const raw = await store.get(PARENT_COMMIT(current))
-    if (raw === null) continue // unreachable record — treat as a root
-    const parsed = safeLoads(raw)
-    const parents = Array.isArray(parsed)
-      ? parsed.filter((p): p is string => typeof p === 'string')
-      : typeof parsed === 'string'
-        ? [parsed]
-        : []
-    for (const p of parents) {
-      if (p === ancestor) return true
-      if (!seen.has(p)) {
-        seen.add(p)
-        stack.push(p)
-      }
-    }
-  }
-  return false
 }
 
 /** Pass-through that counts yielded wire commits (for `transferred`). */

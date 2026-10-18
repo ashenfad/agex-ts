@@ -5,10 +5,10 @@
  * `KVStore` backend (that's the near-storage boundary; see the README's
  * "Sync & remotes" section). The protocol is deliberately minimal:
  * list refs, fetch a delta, push a delta with compare-and-swap ref
- * advancement. Merge is absent by design — reconciliation always
- * happens locally, so a remote can be *passive*: any object store
- * with CAS-able refs qualifies, and no kvgit code needs to run on the
- * far side.
+ * advancement, and (optionally) delete a ref by the same CAS. Merge is
+ * absent by design — reconciliation always happens locally, so a
+ * remote can be *passive*: any object store with CAS-able refs
+ * qualifies, and no kvgit code needs to run on the far side.
  *
  * `MemoryRemote` is the reference implementation (and test double): a
  * kvgit object store plus branch-head refs, composed directly from
@@ -21,9 +21,10 @@ import type { KVStore, WireCommit } from '../types'
 import {
   BRANCH_HEAD,
   BRANCH_HEAD_PREFIX,
+  BRANCH_HEAD_PREV,
   COMMIT_ROOT,
-  dumps,
   readBranchHead,
+  safeLoads,
 } from '../versioned/layout'
 import { applyWire, publishHead } from './apply'
 import { walkDelta } from './walk'
@@ -68,6 +69,13 @@ export interface Remote {
     newHead: string,
     commits: AsyncIterable<WireCommit> | Iterable<WireCommit>,
   ): Promise<boolean>
+
+  /**
+   * Delete the branch ref iff it currently equals `expectedHead`.
+   * Returns false, with nothing changed, when the ref is elsewhere or
+   * gone. Optional: on a remote without it, branches stay.
+   */
+  deleteBranch?(branch: string, expectedHead: string): Promise<boolean>
 }
 
 /**
@@ -114,5 +122,14 @@ export class MemoryRemote implements Remote {
       throw new Error(`MemoryRemote: pushed head ${newHead} not present after apply`)
     }
     return publishHead(this.store, branch, expectedOld, newHead, { inFlight: applied.inFlight })
+  }
+
+  async deleteBranch(branch: string, expectedHead: string): Promise<boolean> {
+    if (branch.length === 0) return false
+    const key = BRANCH_HEAD(branch)
+    const current = await this.store.get(key)
+    if (current === null || safeLoads(current) !== expectedHead) return false
+    // its objects stay, for a sweep to collect once nothing names them
+    return this.store.casMany(new Map([[key, current]]), new Map(), [key, BRANCH_HEAD_PREV(branch)])
   }
 }

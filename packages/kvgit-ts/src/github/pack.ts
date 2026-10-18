@@ -21,8 +21,8 @@
  * - `fetch`: one raw blob read per needed pack, concurrently. The
  *   manifest says which packs a receiver needs: walking back from the
  *   newest, until a pack's base is a commit the receiver has.
- * - `archiveBranch` / `restoreBranch` / `emptyTrash`: one atomic,
- *   CAS-checked `updateRefs`.
+ * - `archiveBranch` / `restoreBranch` / `deleteBranch` / `emptyTrash`:
+ *   one atomic, CAS-checked `updateRefs`.
  *
  * Packs accumulate one per push. When a push would exceed `maxPacks`,
  * it folds the older ones (all but `keepRecent`) into one, re-encoded
@@ -41,7 +41,8 @@ import type { RemoteRef } from '../sync/remote'
 import type { Remote } from '../sync/remote'
 import { walkDelta } from '../sync/walk'
 import type { KVStore, WireCommit } from '../types'
-import { PARENT_COMMIT, safeLoads, sha256Hex } from '../versioned/layout'
+import { ancestorsAbove, isAncestor } from '../versioned/ancestry'
+import { generationOf, sha256Hex } from '../versioned/layout'
 import { bytesToBase64 } from './base64'
 import type { GithubClient, GraphqlError, GraphqlResult } from './client'
 import { GithubError } from './errors'
@@ -415,8 +416,8 @@ export class PackRemote implements Remote {
       throw new Error(`PackRemote.fetch: no branch at kvgit head ${want.slice(0, 7)}`)
     }
     const { manifest } = found
-    const haveSet = await this.#expandLocalAncestors(have)
-    if (haveSet.has(want)) return
+    const haveList = [...have]
+    if (await this.#holds(haveList, want)) return
 
     // Newest back, until a pack builds on something we have.
     const needed: PackEntry[] = []
@@ -424,7 +425,7 @@ export class PackRemote implements Remote {
     for (let i = manifest.packs.length - 1; i >= 0; i--) {
       const pack = manifest.packs[i] as PackEntry
       needed.unshift(pack)
-      if (pack.base === null || haveSet.has(pack.base)) {
+      if (pack.base === null || (await this.#holds(haveList, pack.base))) {
         anchored = true
         break
       }
@@ -447,9 +448,19 @@ export class PackRemote implements Remote {
         )),
       )
     }
+    // What we hold of the packs' commits, from as far down as their
+    // lowest generation: a pack built on what we have can still repeat
+    // commits we hold (a fold re-sends its run whole).
+    let floor = Number.POSITIVE_INFINITY
+    let haveSet = new Set<string>()
     for (const [i, bytes] of stored.entries()) {
       const entry = needed[i] as PackEntry
       const pack = await decodePack(bytes)
+      const low = lowestGeneration(pack.commits)
+      if (haveList.length > 0 && low < floor) {
+        floor = low
+        haveSet = await ancestorsAbove(this.#store, haveList, floor)
+      }
       if (pack.kernel !== this.#kernel) {
         throw new Error(
           `PackRemote.fetch: pack kernel '${pack.kernel}', expected '${this.#kernel}'`,
@@ -757,6 +768,19 @@ export class PackRemote implements Remote {
     return this.#rename(`${ARCHIVED}${branch}`, branch)
   }
 
+  /** Delete `branch` if its kvgit head is still `expectedHead`, in one
+   *  CAS-checked `updateRefs` at the git commit holding that head.
+   *  False when it moved or is gone. Its packs go with it. */
+  async deleteBranch(branch: string, expectedHead: string): Promise<boolean> {
+    const st = await this.#readOne(branch)
+    if (st?.manifest?.head !== expectedHead) return false
+    const ok = await this.#updateRefs([
+      { name: `refs/heads/${branch}`, beforeOid: st.gitOid, afterOid: ZERO_OID },
+    ])
+    if (ok) this.#refs.delete(branch)
+    return ok
+  }
+
   /** Delete every archived session in one request. */
   async emptyTrash(): Promise<number> {
     await this.refresh()
@@ -856,23 +880,21 @@ export class PackRemote implements Remote {
     return null
   }
 
-  async #expandLocalAncestors(have: Iterable<string>): Promise<Set<string>> {
-    const out = new Set<string>()
-    const stack = [...have]
-    while (stack.length > 0) {
-      const current = stack.pop() as string
-      if (out.has(current)) continue
-      const raw = await this.#store.get(PARENT_COMMIT(current))
-      if (raw === null) continue
-      out.add(current)
-      const parsed = safeLoads(raw)
-      const parents = Array.isArray(parsed)
-        ? parsed.filter((p): p is string => typeof p === 'string')
-        : []
-      for (const p of parents) if (!out.has(p)) stack.push(p)
-    }
-    return out
+  /** Whether `commit` is one of `have` or reachable from one, here. */
+  async #holds(have: readonly string[], commit: string): Promise<boolean> {
+    for (const h of have) if (await isAncestor(this.#store, commit, h)) return true
+    return false
   }
+}
+
+/** The lowest generation among `commits`; 0 if one doesn't say. */
+function lowestGeneration(commits: readonly WireCommit[]): number {
+  let low = Number.POSITIVE_INFINITY
+  for (const wc of commits) {
+    const g = wc.parentGens === null ? 0 : generationOf(wc.parentGens)
+    if (g < low) low = g
+  }
+  return low
 }
 
 /** A manifest from its text, or why it can't be used. */

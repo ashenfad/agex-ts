@@ -107,4 +107,45 @@ describe('the fake GitHub over HTTP', () => {
     expect(err).toBeInstanceOf(GithubError)
     expect((err as GithubError).status).toBe(413)
   })
+
+  it('reads a Request as fetch does, and refuses another repo', async () => {
+    server = await serveFakeGithub({ repo: 'me/sync' })
+    const roster = (repo: string) =>
+      server?.github.fetch(
+        new Request(`${server.url}/graphql`, {
+          method: 'POST',
+          body: JSON.stringify({
+            query:
+              'query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { refs(refPrefix: "refs/heads/") { nodes { name } } } }',
+            variables: { owner: repo.split('/')[0], name: repo.split('/')[1] },
+          }),
+        }),
+      )
+    const ok = (await (await roster('Me/Sync'))?.json()) as { data: unknown }
+    expect(ok.data).not.toBeNull()
+    const other = (await (await roster('me/other'))?.json()) as {
+      data: unknown
+      errors: { type: string }[]
+    }
+    expect(other.data).toBeNull()
+    expect(other.errors[0]?.type).toBe('NOT_FOUND')
+
+    // a client configured for another repo fails at once, writing nothing
+    const store = new Memory()
+    await write(store, 'k', 'v')
+    const client = new GithubClient({
+      token: 'any',
+      repo: 'me/other',
+      apiBase: server.url,
+      maxRetries: 0,
+    })
+    await expect(pushBranch(store, new PackRemote(client, store), 'notes')).rejects.toThrow()
+    expect(server.github.filesAt('notes')).toEqual([])
+  })
+
+  it('gives an IPv6 host a URL a client can use', async () => {
+    server = await serveFakeGithub({ host: '::1' })
+    expect(server.url).toMatch(/^http:\/\/\[::1\]:\d+$/)
+    expect((await fetch(`${server.url}/graphql`, { method: 'OPTIONS' })).status).toBe(204)
+  })
 })

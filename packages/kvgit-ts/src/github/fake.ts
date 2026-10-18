@@ -53,6 +53,8 @@ export interface FakeFailure {
 }
 
 const ZERO = '0'.repeat(40)
+/** The node id of the fake's repository. */
+const REPO_ID = 'R_1'
 const enc = new TextEncoder()
 const dec = new TextDecoder()
 
@@ -142,10 +144,14 @@ export class FakeGithub {
   }
 
   /** Answer one request, as `fetch` would: a client's `fetchImpl`. */
-  readonly fetch = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
-    this.#handle(String(input instanceof Request ? input.url : input), init)) as typeof fetch
+  readonly fetch = (async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+    const request = new Request(input, init)
+    const body =
+      request.method === 'GET' || request.method === 'HEAD' ? undefined : await request.text()
+    return this.#handle(request.url, body)
+  }) as typeof fetch
 
-  async #handle(url: string, init?: RequestInit): Promise<Response> {
+  async #handle(url: string, body: string | undefined): Promise<Response> {
     for (const bytes of this.pending.splice(0)) this.blobs.set(await gitBlobSha1(bytes), bytes)
     const path = new URL(url, 'http://fake').pathname
     const at = this.#failures.findIndex((f) => f.path === undefined || path.endsWith(f.path))
@@ -153,7 +159,6 @@ export class FakeGithub {
       const [failure] = this.#failures.splice(at, 1) as [FakeFailure]
       return json(failure.status, failure.body ?? { message: 'injected failure' }, failure.headers)
     }
-    const body = typeof init?.body === 'string' ? init.body : undefined
     if (body !== undefined && new TextEncoder().encode(body).byteLength > this.maxBodyBytes) {
       return json(413, { message: 'Request body too large' })
     }
@@ -176,6 +181,18 @@ export class FakeGithub {
   }
 
   private graphql(query: string, vars: Record<string, unknown>): unknown {
+    const wrong = this.#otherRepo(vars)
+    if (wrong !== null) {
+      return {
+        data: null,
+        errors: [
+          {
+            type: 'NOT_FOUND',
+            message: `Could not resolve to a Repository with the name '${wrong}'.`,
+          },
+        ],
+      }
+    }
     if (query.trimStart().startsWith('mutation')) {
       this.beforeMutation?.()
       if (query.includes('updateRefs(')) {
@@ -225,6 +242,22 @@ export class FakeGithub {
     throw new Error(`FakePackGithub: unhandled query ${query.slice(0, 80)}`)
   }
 
+  /**
+   * The repo a request's variables name, if it isn't this fake's (by
+   * `owner` and `name`, `repo` as `owner/name`, or `repoId`): GitHub's
+   * names ignore case. Null if they name this one, or none.
+   */
+  #otherRepo(vars: Record<string, unknown>): string | null {
+    const mine = this.repo.toLowerCase()
+    if (typeof vars.owner === 'string' || typeof vars.name === 'string') {
+      const named = `${String(vars.owner)}/${String(vars.name)}`
+      if (named.toLowerCase() !== mine) return named
+    }
+    if (typeof vars.repo === 'string' && vars.repo.toLowerCase() !== mine) return vars.repo
+    if (typeof vars.repoId === 'string' && vars.repoId !== REPO_ID) return vars.repoId
+    return null
+  }
+
   /** GitHub reports a missing `Commit.file` as a NOT_FOUND error
    *  beside the data. */
   private missingManifests(
@@ -247,7 +280,7 @@ export class FakeGithub {
 
   private header(): Record<string, unknown> {
     return {
-      id: 'R_1',
+      id: REPO_ID,
       defaultBranchRef: { name: 'main', target: { oid: this.refs.get('refs/heads/main') } },
     }
   }

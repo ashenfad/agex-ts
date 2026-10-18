@@ -68,7 +68,8 @@ export async function serveFakeGithub(
   if (address === null || typeof address === 'string')
     throw new Error('the fake GitHub has no port')
   return {
-    url: `http://${host}:${address.port}`,
+    // an IPv6 literal goes in brackets in a URL
+    url: `http://${host.includes(':') ? `[${host}]` : host}:${address.port}`,
     github,
     close: () =>
       new Promise<void>((resolve, reject) => {

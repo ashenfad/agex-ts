@@ -45,6 +45,7 @@ import {
 quietSqliteWarnings()
 
 const NEXT = 'db/test/1'
+const THIRD = 'db/test/2'
 
 const opened: LoggedDatabase[] = []
 afterEach(async () => {
@@ -202,6 +203,74 @@ describe('a rebase onto another device’s new epoch', () => {
     expect(await b.repo.branches.list()).toEqual([NEXT])
   })
 
+  it('follows the snapshots back across an epoch between', async () => {
+    const remote = new MemoryRemote(new Memory())
+    const a = await device(remote)
+    await run(a.db, ['CREATE TABLE t (id INTEGER PRIMARY KEY NOT NULL, x TEXT, y TEXT)'])
+    await run(a.db, ["INSERT INTO t VALUES (1, 'x1', 'y1')"])
+    await push(a, remote)
+    const b = await device(remote)
+    await run(b.db, ["INSERT INTO t VALUES (2, 'b', 'b')"])
+    await a.db.newEpoch()
+    await push(a, remote)
+    await run(a.db, ["UPDATE t SET x = 'a' WHERE id = 1"])
+    await a.db.newEpoch()
+    expect(a.db.branch).toBe(THIRD)
+    await push(a, remote)
+    await pullBranch(b.store, remote, NEXT)
+    await pullBranch(b.store, remote, THIRD)
+    expect(await b.db.rebase()).toMatchObject({ status: 'rebased', mine: 1 })
+    expect(b.db.branch).toBe(THIRD)
+    expect(await rows(b.db)).toEqual([
+      { id: 1, x: 'a', y: 'y1' },
+      { id: 2, x: 'b', y: 'b' },
+    ])
+  })
+
+  it('moves a copy with nothing on its epoch, however far on, the epochs before gone', async () => {
+    const remote = new MemoryRemote(new Memory())
+    const a = await device(remote)
+    await run(a.db, ['CREATE TABLE t (id INTEGER PRIMARY KEY NOT NULL, x TEXT, y TEXT)'])
+    await run(a.db, ["INSERT INTO t VALUES (1, 'x1', 'y1')"])
+    await push(a, remote)
+    await a.db.newEpoch()
+    await a.db.newEpoch()
+    await push(a, remote)
+    expect((await deleteRemoteBranch(a.store, remote, BRANCH)).status).toBe('deleted')
+    // a new device: its own epoch 0 is empty, and not in the remote
+    const store = new Memory()
+    const c = await track(open(new MemoryDirectory(), await repoOver(store), { epochs: false }))
+    await pullBranch(store, remote, THIRD)
+    expect(await c.rebase()).toMatchObject({ status: 'fast-forwarded', mine: 0 })
+    expect(c.branch).toBe(THIRD)
+    expect(await dump(c)).toEqual(await dump(a.db))
+  })
+
+  it('takes every change on its epoch as its own with `synced` null', async () => {
+    const remote = new MemoryRemote(new Memory())
+    const a = await device(remote)
+    await run(a.db, ['CREATE TABLE t (id INTEGER PRIMARY KEY NOT NULL, x TEXT, y TEXT)'])
+    await a.db.newEpoch()
+    await push(a, remote)
+    // a new device that wrote before it ever synced
+    const store = new Memory()
+    const c = await track(open(new MemoryDirectory(), await repoOver(store), { epochs: false }))
+    await run(c, ['CREATE TABLE u (id INTEGER PRIMARY KEY NOT NULL)'])
+    await pullBranch(store, remote, NEXT)
+    await expect(c.rebase()).rejects.toThrow(/rebase with `synced`/)
+    expect(await c.rebase(undefined, { synced: null })).toMatchObject({
+      status: 'conflict',
+      mine: 1,
+      schemaChange: 'mine',
+    })
+    expect(await c.rebase(undefined, { synced: null, keep: 'theirs' })).toMatchObject({
+      status: 'kept',
+      kept: 'theirs',
+    })
+    expect(c.branch).toBe(NEXT)
+    expect(await dump(c)).toEqual(await dump(a.db))
+  })
+
   it('stops at a conflict with nothing changed', async () => {
     const { b, synced } = await replaced()
     await run(b.db, ["UPDATE t SET x = 'mine' WHERE id = 1"])
@@ -353,6 +422,20 @@ describe('entries pushed to an epoch while another device started the next', () 
     expect(await dump(b.db)).toEqual(await dump(a.db))
     // taken already
     expect(await a.db.adopt(tip)).toMatchObject({ status: 'up-to-date', theirs: 0 })
+  })
+
+  it('are taken from an epoch two back, and an epoch with nothing new takes nothing', async () => {
+    const { remote, a, tip } = await crossed()
+    const between = await a.repo.branches.get(NEXT)
+    await a.db.newEpoch()
+    expect(a.db.branch).toBe(THIRD)
+    await push(a, remote)
+    expect(await a.db.adopt(between)).toMatchObject({ status: 'up-to-date', theirs: 0 })
+    expect(await a.db.adopt(tip)).toMatchObject({ status: 'rebased', theirs: 1 })
+    expect(await rows(a.db)).toEqual([
+      { id: 1, x: 'a', y: 'b' },
+      { id: 2, x: 'x2', y: 'y2' },
+    ])
   })
 
   it('are taken once, and later ones after them', async () => {

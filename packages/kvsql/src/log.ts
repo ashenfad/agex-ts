@@ -299,10 +299,13 @@ export interface RebaseOptions {
    * own epoch that the newer one holds, such as the one this copy last
    * synced (everything a sync pushed to an epoch is in the next one by
    * the time the old one goes). The database's changes after it are
-   * what moves. By default, where the newer epoch's snapshot was taken
-   * in the database's epoch, if the repository has that commit.
+   * what moves. Null: this copy synced none of its epoch, so every
+   * change on it is its own. By default, where the newer epoch's
+   * snapshot was taken in the database's epoch, followed back through
+   * any epochs between that the repository has; or, for a database with
+   * nothing on its epoch, its epoch's start.
    */
-  synced?: string
+  synced?: string | null
 }
 
 /** Options for {@link LoggedDatabase.adopt}. */
@@ -310,8 +313,9 @@ export interface AdoptOptions {
   /**
    * Where the entries to take start: the commit of the old epoch after
    * which they follow, such as the last this copy synced there. By
-   * default where `tip`'s line parted from the one the database's
-   * epoch's snapshot was taken on, if the repository has that commit.
+   * default where `tip`'s line parted from the one the snapshot of the
+   * epoch after `tip`'s was taken on, followed back from the database's
+   * epoch through the epochs the repository has.
    */
   since?: string
   /** Settle a conflict by keeping this database's side: nothing is taken, and the entries stay as a checkpoint. */
@@ -916,7 +920,7 @@ export class LoggedDatabase {
       return Promise.reject(new TypeError("rebase: keep must be 'mine' or 'theirs'"))
     }
     const synced = options.synced
-    if (synced !== undefined && typeof synced !== 'string') {
+    if (synced !== undefined && synced !== null && typeof synced !== 'string') {
       return Promise.reject(new TypeError('rebase: synced must be a commit'))
     }
     return this.#afterEpoch(() => this.#serial(() => this.#rebase(onto, keep, synced)))
@@ -1644,7 +1648,7 @@ export class LoggedDatabase {
   async #rebase(
     onto: string | undefined,
     keep: RebaseSide | undefined,
-    synced?: string,
+    synced?: string | null,
   ): Promise<RebaseResult> {
     if (!this.#log) throw new LogError('a detached copy has no log to rebase onto')
     const repo = this.#repo
@@ -1821,18 +1825,19 @@ export class LoggedDatabase {
 
   /**
    * Rebase onto epoch `newer`, at `tip`: this database's changes on its
-   * own epoch since `synced` (by default, since where the newer epoch's
-   * snapshot was taken) follow the newer epoch's. Its snapshot folds in
-   * what changed before it, so there is no log to undo or apply: the
-   * database is rebuilt at `tip` beside its file, its changes applied
-   * there and committed after `tip`, and that file replaces the
-   * database's. With nothing of its own, the database just moves.
+   * own epoch since `synced` (by default, since where the snapshot chain
+   * back from the newer epoch left this one) follow the newer epoch's.
+   * Its snapshot folds in what changed before it, so there is no log to
+   * undo or apply: the database is rebuilt at `tip` beside its file, its
+   * changes applied there and committed after `tip`, and that file
+   * replaces the database's. With nothing of its own, the database just
+   * moves.
    */
   async #rebaseAcross(
     newer: string,
     tip: string,
     keep: RebaseSide | undefined,
-    synced: string | undefined,
+    synced: string | null | undefined,
   ): Promise<RebaseResult> {
     const repo = this.#repo
     // level with its own epoch's branch first
@@ -1841,11 +1846,13 @@ export class LoggedDatabase {
     const base = this.#meta.base
     const record = await readSnapshot(repo, tip)
     if (!record) throw new LogError(`epoch '${newer}' has no snapshot at ${tip}`)
-    const previous = record.previous?.branch === this.#branch ? record.previous : null
-    let parted = synced ?? null
+    let parted = synced === null ? await epochStart(repo, base) : (synced ?? null)
+    const previous = await takenOn(repo, tip, async (p) => p.branch === this.#branch)
     if (parted === null && previous && (await holdsCommit(repo, previous.base, previous.base))) {
       parted = await repo.mergeBase(base, previous.base)
     }
+    // nothing on its epoch: nothing of its own to take
+    if (parted === null && (await epochStart(repo, base)) === base) parted = base
     if (parted === null) {
       throw new LogError(
         `which of this database's changes on '${this.#branch}' epoch '${newer}' holds isn't known here: rebase with \`synced\`, the last commit of '${this.#branch}' this copy synced`,
@@ -1877,7 +1884,13 @@ export class LoggedDatabase {
 
     if (mine === 0) {
       // at the very point the snapshot was taken, it must hold the same
-      if (previous?.base === base && previous.pending === null && record.hash !== undefined) {
+      if (
+        previous !== null &&
+        previous === record.previous &&
+        previous.base === base &&
+        previous.pending === null &&
+        record.hash !== undefined
+      ) {
         const hash = await contentHash(this.#db, (fn) => this.#guard.trusted(fn))
         if (hash !== record.hash) throw new DivergedError(this.#branch, base, record.hash, hash)
       }
@@ -2132,13 +2145,17 @@ export class LoggedDatabase {
       }
       if (from === null && (await holdsCommit(repo, tip, taken))) from = taken
     }
-    if (from === null) {
-      // where the old epoch's line `tip` is on parted from the one the
-      // snapshot was taken on
-      const taken = (await readSnapshot(repo, this.#wt.head))?.previous?.base
-      if (taken !== undefined && (await holdsCommit(repo, taken, taken))) {
-        from = await repo.mergeBase(tip, taken).catch(() => null)
-      }
+    if (from === null && (await holdsCommit(repo, tip, tip))) {
+      // where `tip`'s line parted from the one the snapshot of the epoch
+      // after its was taken on
+      const on = await epochStart(repo, tip)
+      const taken = await takenOn(
+        repo,
+        this.#wt.head,
+        async (p) =>
+          (await holdsCommit(repo, p.base, p.base)) && (await epochStart(repo, p.base)) === on,
+      )
+      if (taken) from = await repo.mergeBase(tip, taken.base)
     }
     if (from === null) {
       throw new LogError(
@@ -3340,6 +3357,37 @@ async function prepareFile(
     )
   }
   return rebuild()
+}
+
+/**
+ * The start of the epoch commit `commit` is on: its snapshot's last
+ * commit, or the root commit for an epoch with no snapshot (a log's
+ * first).
+ */
+async function epochStart(repo: Repo<Uint8Array>, commit: string): Promise<string> {
+  return (await readSnapshot(repo, commit)) === null ? ROOT_COMMIT : snapshotCommit(repo, commit)
+}
+
+/**
+ * Where the snapshot chain back from epoch tip `tip` left the epoch
+ * `on` picks: each snapshot was taken at a commit of the epoch before
+ * (`previous`), so the chain is followed back through each earlier
+ * epoch the repository has, to the first link `on` accepts. Null if it
+ * ends, or reaches a commit the repository doesn't have, first.
+ */
+async function takenOn(
+  repo: Repo<Uint8Array>,
+  tip: string,
+  on: (previous: NonNullable<SnapshotRecord['previous']>) => Promise<boolean>,
+): Promise<NonNullable<SnapshotRecord['previous']> | null> {
+  let record = await readSnapshot(repo, tip)
+  while (record?.previous) {
+    const previous = record.previous
+    if (await on(previous)) return previous
+    if (!(await holdsCommit(repo, previous.base, previous.base))) return null
+    record = await readSnapshot(repo, previous.base)
+  }
+  return null
 }
 
 /** Whether `ancestor` is `commit` or in its history; false if either isn't in `repo`. */

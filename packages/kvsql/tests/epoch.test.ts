@@ -101,8 +101,10 @@ describe('a new epoch', () => {
     const flushed = db.flush()
     const result = await epoch
     await Promise.all(calls)
-    // the explicit flush waited for the move, and went to the new epoch
-    expect(await flushed).toMatchObject({ from: result.seq + 1, to: db.seq })
+    // the explicit flush waited for the move, and went to the new epoch,
+    // after the insert, flushed first for the checkpoint before the ALTER
+    expect(await flushed).toMatchObject({ from: result.seq + 2, to: db.seq })
+    expect((await db.checkpoints()).map((c) => [c.auto, c.seq])).toEqual([[true, result.seq + 1]])
     expect(result.seq).toBeLessThan(db.seq)
     expect(db.schemaVersion).toBe(2)
     const fresh = await replica(repo)

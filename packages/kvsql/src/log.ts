@@ -1883,12 +1883,13 @@ export class LoggedDatabase {
     })
 
     if (mine === 0) {
-      // at the very point the snapshot was taken, it must hold the same
+      // at the very point the newer epoch's snapshot was taken, it must
+      // hold the same
+      const taken = record.previous
       if (
-        previous !== null &&
-        previous === record.previous &&
-        previous.base === base &&
-        previous.pending === null &&
+        taken?.branch === this.#branch &&
+        taken.base === base &&
+        taken.pending === null &&
         record.hash !== undefined
       ) {
         const hash = await contentHash(this.#db, (fn) => this.#guard.trusted(fn))

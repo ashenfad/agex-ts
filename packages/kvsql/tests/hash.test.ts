@@ -63,6 +63,16 @@ describe('the content hash', () => {
     }
     expect(hashes.size).toBe(5)
 
+    // text that differs only past a NUL
+    const nul = new Set<string>()
+    for (const tail of ['a', 'b']) {
+      const db = await fresh()
+      await table(db)
+      await db.query("INSERT INTO t VALUES (1, 'x' || char(0) || ?)", [tail])
+      nul.add(await db.contentHash())
+    }
+    expect(nul.size).toBe(2)
+
     const db = await fresh()
     await table(db)
     const seen = [await db.contentHash()]

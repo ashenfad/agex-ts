@@ -201,17 +201,36 @@ export function encodeEntry(
     }
   }
   endRun()
+  return { bytes: encodePieces(pieces), pieces }
+}
 
+/** Encode `pieces`, consecutive and oldest first, as one entry, as they are. */
+export function encodePieces(pieces: readonly Piece[]): Uint8Array {
+  if (pieces.length === 0) throw new RangeError('an entry needs at least one piece')
+  pieces.forEach((p, i) => {
+    const prev = pieces[i - 1]
+    if (prev && p.from !== prev.to + 1) {
+      throw new RangeError(
+        `pieces ending at ${prev.to} and starting at ${p.from} aren't consecutive`,
+      )
+    }
+  })
   const body = cborCodec.encode(
     pieces.map((p) => [KIND_CODES[p.kind], p.from, p.to, p.schema, p.body]),
   )
   const bytes = new Uint8Array(body.byteLength + 1)
   bytes[0] = ENTRY_FORMAT
   bytes.set(body, 1)
-  return { bytes, pieces }
+  return bytes
 }
 
-function pieceOf(item: PendingItem): Piece {
+/** `pieces` numbered `by` transactions later (earlier, for a negative `by`). */
+export function renumber(pieces: readonly Piece[], by: number): Piece[] {
+  return pieces.map((p) => ({ ...p, from: p.from + by, to: p.to + by }))
+}
+
+/** A pending transaction as an entry's piece. */
+export function pieceOf(item: PendingItem): Piece {
   return {
     kind: item.kind,
     from: item.seq,

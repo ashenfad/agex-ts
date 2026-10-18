@@ -9,7 +9,8 @@ and sync between devices through any kvgit remote.
 > changesets, guards the schema, keeps the changeset log in kvgit
 > with crash recovery and replay, copies a database, starts new epochs
 > from snapshots, takes checkpoints and restores them, and serves the
-> database from a worker to every tab; rebase comes next. The design is agex-studio's
+> database from a worker to every tab, and rebases one device's
+> changes onto another's; sync between devices comes next. The design is agex-studio's
 > [`roadmap/app-db.md`](https://github.com/ashenfad/agex-studio/blob/rebuild/roadmap/app-db.md).
 
 ## How it will work
@@ -241,8 +242,33 @@ await db.close() // flushes first
   write are replayed (so an empty directory rebuilds the database from
   the log), and an entry matching its pending transactions is its own
   flush, interrupted before it could delete them. A file with pending
-  transactions on a branch that has entries it didn't write needs a
-  rebase, which isn't supported yet: `RebaseRequiredError`.
+  transactions on a branch that has entries it didn't write rebases
+  them onto those (`recovery.rebased`), as a flush onto a moved branch
+  does; if they conflict, it refuses with `RebaseRequiredError` and
+  changes nothing.
+- **Rebase.** `rebase(onto?, { keep? })` brings the database onto
+  `onto`, a commit of its log another copy wrote after the two parted
+  (another device's, fetched by a sync that found the two diverged),
+  or by default its branch's tip. Its own changes since then (pending
+  transactions, and entries only this copy has) follow the log's: in
+  one file transaction they are undone, the log's applied, and theirs
+  applied again; they become entries numbered after the log's, on a
+  branch beside the log's (`<log>/rebase`), and the log's branch moves
+  there (a compare-and-swap). Only this copy had those entries, so
+  nothing another copy holds is rewritten, and pushing afterwards is a
+  fast-forward. Changes to other rows, or other columns of one row,
+  follow cleanly (`rebased`). One column changed both ways, a row
+  deleted against a change, one key inserted on both, a constraint the
+  two break together, or a schema change on either side stops it with
+  nothing changed (`conflict`, with `conflicts` or `schemaChange`).
+  Rebasing again with `keep: 'theirs'` takes the log's side (the file
+  is rebuilt from the log when this copy's own schema change can't be
+  undone); `keep: 'mine'` keeps this copy's, after an entry that undoes
+  the log's (not yet over a schema change of the log's). Either way the
+  side not kept stays as a checkpoint, on this device only (`kept`).
+  A crash leaves the database as it was or rebased: opening finishes
+  the branch's move if the file committed, and otherwise drops the
+  rebase's branch.
 - **Replay** combines runs of changesets and applies them in chunks of
   up to 100k transactions or 32 MiB, stopping at any conflict
   (`ReplayError`): in a log written only by appending there is none, so

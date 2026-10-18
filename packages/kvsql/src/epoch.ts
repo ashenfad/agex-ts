@@ -205,9 +205,19 @@ export function restoreBranch(log: string): string {
 }
 
 /**
+ * The branch a rebase of log `log` builds the database's new line on
+ * (`<log>/rebase`, which no epoch's branch is): from the commit it
+ * rebases onto, with this database's own entries after it, until the
+ * log's branch moves there.
+ */
+export function rebaseBranch(log: string): string {
+  return `${log}/rebase`
+}
+
+/**
  * Delete the log on `branch`: `branch`, every other epoch of its log,
- * its checkpoints, and a restore's branch left by a crash. Deleting a
- * log that's gone does nothing.
+ * its checkpoints, and a restore's or rebase's branch left by a crash.
+ * Deleting a log that's gone does nothing.
  */
 export async function deleteLog(repo: Repo<Uint8Array>, branch: string): Promise<void> {
   const parsed = parseEpoch(branch)
@@ -215,8 +225,8 @@ export async function deleteLog(repo: Repo<Uint8Array>, branch: string): Promise
   await deleteCheckpoints(repo, log)
   const branches = parsed ? (await epochsOf(repo, parsed.log)).map((e) => e.branch) : []
   // the branch asked for, if the log hasn't moved on from it; a
-  // restore's, if a crash left it
-  for (const extra of [branch, restoreBranch(log)]) {
+  // restore's or rebase's, if a crash left it
+  for (const extra of [branch, restoreBranch(log), rebaseBranch(log)]) {
     if (!branches.includes(extra) && (await repo.branches.has(extra))) branches.push(extra)
   }
   for (const name of branches) {

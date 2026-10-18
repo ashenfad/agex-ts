@@ -4,6 +4,8 @@
  * on their face throw `TypeError`.
  */
 
+import type { Conflict } from './changeset'
+
 /** Base class for kvsql's errors. */
 export class KvsqlError extends Error {
   override readonly name: string = 'KvsqlError'
@@ -117,24 +119,40 @@ export class ReplayError extends LogError {
 }
 
 /**
- * The database file holds transactions not yet in the log, and the log
- * has entries this file didn't write (another copy of the database
- * flushed to the same branch). Those transactions would have to be
- * rebased onto the new entries, which this version doesn't do. The
- * file and the log are left as they were.
+ * The database holds transactions its log's branch doesn't (pending, or
+ * flushed to entries only it has), and the branch has entries this
+ * database didn't write (another copy's), and the two conflict, so its
+ * transactions can't be rebased onto those entries as they are. The
+ * file and the log are left as they were; `rebase()` with `keep`
+ * settles it.
  */
 export class RebaseRequiredError extends LogError {
   override readonly name: string = 'RebaseRequiredError'
+  /** What re-applying this database's transactions met. */
+  readonly conflicts: readonly Conflict[]
+  /** The side whose schema change stopped the rebase, if one did. */
+  readonly schemaChange: 'mine' | 'theirs' | null
 
   constructor(
-    /** How many transactions the file holds that the log doesn't. */
+    /** How many transactions the database holds that the log doesn't. */
     readonly pending: number,
-    /** How many log entries the file hasn't applied. */
+    /** How many log entries the database hasn't applied. */
     readonly entries: number,
+    detail: { conflicts?: readonly Conflict[]; schemaChange?: 'mine' | 'theirs' | null } = {},
   ) {
+    const conflicts = detail.conflicts ?? []
+    const schemaChange = detail.schemaChange ?? null
+    const why =
+      schemaChange === 'mine'
+        ? 'its own schema change'
+        : schemaChange === 'theirs'
+          ? "the log's schema change"
+          : `${conflicts.length} conflict${conflicts.length === 1 ? '' : 's'}`
     super(
-      `this database has ${pending} transaction${pending === 1 ? '' : 's'} not yet in its log, and the log has ${entries} entr${entries === 1 ? 'y' : 'ies'} it didn't write: they need a rebase, which isn't supported yet`,
+      `this database has ${pending} transaction${pending === 1 ? '' : 's'} not yet in its log, and the log has ${entries} entr${entries === 1 ? 'y' : 'ies'} it didn't write, which they can't follow (${why}): rebase keeping one side`,
     )
+    this.conflicts = conflicts
+    this.schemaChange = schemaChange
   }
 }
 

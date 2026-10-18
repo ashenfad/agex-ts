@@ -87,17 +87,39 @@ export class IndexedDB implements KVStore {
 
   /**
    * Delete an IndexedDB database entirely. Returns when the deletion
-   * succeeds. Rejects if the deletion is blocked by an open connection.
+   * succeeds.
+   *
+   * A connection still open is given `blockedMs` (default 5000) to
+   * close. IndexedDB fires `blocked` at once, even for a connection
+   * `close()`d just before whose last transaction is still finishing:
+   * that one closes when the transaction does, and the deletion goes
+   * ahead. Rejects if a connection is still open after `blockedMs`
+   * (another tab, say); the deletion then happens once it closes.
    */
-  static async deleteDatabase(dbName: string): Promise<void> {
+  static async deleteDatabase(dbName: string, opts: { blockedMs?: number } = {}): Promise<void> {
+    const blockedMs = opts.blockedMs ?? 5000
     return new Promise((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | undefined
       const req = globalThis.indexedDB.deleteDatabase(dbName)
-      req.onsuccess = () => resolve()
-      req.onerror = () => reject(req.error ?? new Error('IndexedDB deleteDatabase failed'))
-      req.onblocked = () =>
-        reject(
-          new Error(`IndexedDB delete of '${dbName}' is blocked. Close other tabs / connections.`),
+      req.onsuccess = () => {
+        clearTimeout(timer)
+        resolve()
+      }
+      req.onerror = () => {
+        clearTimeout(timer)
+        reject(req.error ?? new Error('IndexedDB deleteDatabase failed'))
+      }
+      req.onblocked = () => {
+        timer ??= setTimeout(
+          () =>
+            reject(
+              new Error(
+                `IndexedDB delete of '${dbName}' is blocked: another connection has kept it open for ${blockedMs} ms. Close other tabs / connections.`,
+              ),
+            ),
+          blockedMs,
         )
+      }
     })
   }
 

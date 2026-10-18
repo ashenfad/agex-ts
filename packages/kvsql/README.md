@@ -287,8 +287,10 @@ await db.close() // flushes first
   tip. The newer epoch's snapshot folds in what changed before it, so
   there is no log to undo or apply: the database's changes since
   `synced` (the last commit of its own epoch the newer one holds, such
-  as the one this copy last synced; by default, where the snapshot was
-  taken, if the repository has that commit) are applied to a copy
+  as the one this copy last synced, or null if it synced none of it; by
+  default, where the snapshot chain back from the newer epoch, through
+  any epochs between the repository has, left this one, or the epoch's
+  start for a database with nothing on it) are applied to a copy
   rebuilt at the tip beside the file (`<name>-rebase`), committed after
   the tip, and that copy replaces the file; the old epoch goes. With
   nothing of its own, the database just moves, comparing its content
@@ -301,7 +303,8 @@ await db.close() // flushes first
   entries another copy pushed to the epoch it moved on from, which its
   snapshot doesn't hold (pushed while it started the epoch): those on
   `tip`'s line after `since` (by default where that line parted from
-  the one the snapshot was taken on), applied in one file transaction
+  the one the snapshot of the epoch after `tip`'s was taken on, found
+  by following the snapshot chain back), applied in one file transaction
   as entries after the database's own. A conflict changes nothing;
   `keep: 'mine'` takes nothing and keeps `tip` as a checkpoint. The last
   entry records `tip`, so adopting it again does nothing, and a later

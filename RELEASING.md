@@ -1,6 +1,6 @@
 # Releasing
 
-This monorepo uses [Changesets](https://github.com/changesets/changesets) to manage versioning and per-package CHANGELOGs across its 4 published packages (`agex-ts`, `@agex-ts/world`, `@agex-ts/kvgit`, `@agex-ts/termish`), and publishes from GitHub Actions with npm OIDC provenance (see `.github/workflows/release.yml`). Each user-visible change ships with a markdown file in `.changeset/` describing what changed and how to bump the affected packages' versions.
+This monorepo uses [Changesets](https://github.com/changesets/changesets) to manage versioning and per-package CHANGELOGs across its 5 published packages (`agex-ts`, `@agex-ts/world`, `@agex-ts/kvgit`, `@agex-ts/kvsql`, `@agex-ts/termish`), and publishes from GitHub Actions with npm OIDC provenance (see `.github/workflows/release.yml`). Each user-visible change ships with a markdown file in `.changeset/` describing what changed and how to bump the affected packages' versions.
 
 ## Day-to-day: adding a changeset to a PR
 
@@ -98,7 +98,17 @@ On `v*` tag push (or manual dispatch from the Actions UI):
 1. Checks out the tagged commit on a clean Ubuntu runner.
 2. Runs `pnpm install --frozen-lockfile`, `pnpm build`, `pnpm check:dist`, `pnpm lint`, `pnpm typecheck`, `pnpm test`. Any failure aborts before publishing.
 3. Runs `pnpm publish -r --provenance --no-git-checks`. The `--provenance` flag triggers the OIDC handshake: GitHub Actions issues a short-lived JWT, npm verifies it against each package's Trusted Publisher config, and the published tarball is attested via Sigstore.
-4. pnpm publishes in topological order (`@agex-ts/kvgit` → `@agex-ts/termish` → `@agex-ts/world` → `agex-ts`) and skips any package whose current version is already on the registry — so partial-publish recovery is safe (re-running the workflow only ships what's actually new).
+4. pnpm publishes in topological order (`@agex-ts/kvgit` → `@agex-ts/termish` and `@agex-ts/kvsql` → `@agex-ts/world` → `agex-ts`) and skips any package whose current version is already on the registry — so partial-publish recovery is safe (re-running the workflow only ships what's actually new).
+
+### A new package's first publish
+
+Trusted publishing is set per package on npmjs.com (the package's
+settings → Trusted Publisher: GitHub Actions, `ashenfad/agex-ts`,
+workflow `release.yml`), and npm asks for a package that exists. So a
+new package's first version goes out by hand (see "Manual fallback"
+below: `pnpm publish --no-git-checks` in its directory), then its
+Trusted Publisher is added, and CI publishes every version after.
+The first version has no provenance attestation.
 
 ## What does *not* need a changeset
 

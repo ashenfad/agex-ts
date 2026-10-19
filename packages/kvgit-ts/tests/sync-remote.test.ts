@@ -2,9 +2,13 @@ import { describe, expect, it } from 'vitest'
 import { Memory } from '../src/backends/memory'
 import {
   MemoryRemote,
+  Repo,
   VersionedKV,
+  clearSyncHead,
   deleteRemoteBranch,
+  gcStore,
   getSyncHead,
+  hasSyncHead,
   pullBranch,
   pushBranch,
   syncBranch,
@@ -45,6 +49,25 @@ describe('two devices through a MemoryRemote', () => {
     const bVk = await VersionedKV.open(bStore, { branch: BRANCH })
     expect(bVk.currentCommit).toBe(a.vk.currentCommit)
     expect(text((await bVk.get('greeting')) as Uint8Array)).toBe('hello')
+  })
+
+  it('pulls a branch deleted here afresh once a sweep took its commits', async () => {
+    const remote = new MemoryRemote(new Memory())
+    const a = await device()
+    await a.vk.commit({ updates: new Map([['k', bytes('v1')]]) })
+    await pushBranch(a.store, remote, BRANCH)
+    const bStore = new Memory()
+    await pullBranch(bStore, remote, BRANCH)
+    // b deletes its copy and sweeps: its sync head names a commit it lacks
+    await (await Repo.open(bStore)).branches.delete(BRANCH)
+    await gcStore(bStore, { minAge: 0 })
+    await a.vk.commit({ updates: new Map([['k', bytes('v2')]]) })
+    await pushBranch(a.store, remote, BRANCH)
+
+    const pulled = await pullBranch(bStore, remote, BRANCH)
+    expect(pulled.status).toBe('created')
+    const bVk = await VersionedKV.open(bStore, { branch: BRANCH })
+    expect(text((await bVk.get('k')) as Uint8Array)).toBe('v2')
   })
 
   it('subsequent pushes send only the delta', async () => {
@@ -301,6 +324,23 @@ describe('one branch, two remotes', () => {
     expect(pushed.status).toBe('pushed')
     expect(pushed.push?.transferred).toBe(1)
     expect(await getSyncHead(a.store, BRANCH, one)).toBe(a.vk.currentCommit)
+  })
+
+  it('says whether a branch synced with any remote', async () => {
+    const one = new MemoryRemote(new Memory(), { id: 'one' })
+    const two = new MemoryRemote(new Memory(), { id: 'two' })
+    const a = await device()
+    await a.vk.commit({ updates: new Map([['k', bytes('1')]]) })
+    expect(await hasSyncHead(a.store, BRANCH)).toBe(false)
+    await syncBranch(a.store, one, BRANCH)
+    await syncBranch(a.store, two, BRANCH)
+    await clearSyncHead(a.store, BRANCH, one)
+    expect(await hasSyncHead(a.store, BRANCH)).toBe(true)
+    await clearSyncHead(a.store, BRANCH, two)
+    expect(await hasSyncHead(a.store, BRANCH)).toBe(false)
+    // the record shared by remotes without an id counts too
+    await syncBranch(a.store, new MemoryRemote(new Memory()), BRANCH)
+    expect(await hasSyncHead(a.store, BRANCH)).toBe(true)
   })
 
   it("reports a branch gone from one remote without the other's head standing in", async () => {

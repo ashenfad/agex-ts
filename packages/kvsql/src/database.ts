@@ -240,8 +240,9 @@ function releaseFiles(vfs: KvsqlVfs, path: string, files: readonly SyncFile[]): 
  * access.
  *
  * A new file is in incremental auto-vacuum mode, so the pages a large
- * delete frees can be given back (`reclaimPages`); one made before that
- * keeps its mode, and a copy `VACUUM INTO` makes of it takes this one.
+ * delete frees can be given back (`reclaimPages`); an existing one keeps
+ * its mode, and a copy `VACUUM INTO` makes of one without it (NONE) is
+ * in incremental mode.
  *
  * One connection per database: opening a database already open in
  * this realm fails, and in a browser so does opening one that another
@@ -281,9 +282,10 @@ export async function openDatabaseFile(dir: Directory, name: string): Promise<Da
     const mode = db.selectValue(`PRAGMA journal_mode=${JOURNAL_MODE}`)
     if (mode !== JOURNAL_MODE)
       throw new Error(`journal mode is ${String(mode)}, not ${JOURNAL_MODE}`)
-    // takes on a file with no tables yet, and for a `VACUUM INTO`; set
-    // again on a file in the mode, it would rewrite the header
-    if (db.selectValue('PRAGMA auto_vacuum') !== 2) db.exec('PRAGMA auto_vacuum = INCREMENTAL')
+    // takes on a file with no tables yet, and for a `VACUUM INTO`; only
+    // from NONE: on a file in FULL or INCREMENTAL it would rewrite the
+    // header, and turn FULL's truncation at each commit off
+    if (db.selectValue('PRAGMA auto_vacuum') === 0) db.exec('PRAGMA auto_vacuum = INCREMENTAL')
     return new DatabaseFile(db, dir, name, vfs, path, files)
   } catch (err) {
     vfs.takeError()

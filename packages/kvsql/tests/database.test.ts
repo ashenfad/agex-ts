@@ -229,22 +229,29 @@ describe('giving free pages back', () => {
     expect(reopened.image().get(NAME)).toEqual(image.get(NAME))
   })
 
-  it('leaves a file made without auto-vacuum as it is', async () => {
-    const dir = new MemoryDirectory()
-    // as files were made before: converted with a VACUUM
-    const raw = await openDatabase(dir, NAME)
-    raw.db.exec(
-      'CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT); PRAGMA auto_vacuum = NONE; VACUUM',
-    )
-    fill(raw.db, 2000)
-    raw.db.exec('DELETE FROM t')
-    raw.close()
-    const file = await openDatabase(dir, NAME)
-    expect(file.db.selectValue('PRAGMA auto_vacuum')).toBe(0)
-    expect(reclaimPages(file.db)).toBe(0)
-    expect(pages(file.db).free).toBeGreaterThan(0)
-    file.close()
-  })
+  for (const [mode, value] of [
+    ['NONE', 0],
+    ['FULL', 1],
+  ] as const) {
+    it(`leaves a file in ${mode} auto-vacuum mode as it is, writing nothing at open`, async () => {
+      const dir = new MemoryDirectory()
+      // as a file made elsewhere, or before: converted with a VACUUM
+      const raw = await openDatabase(dir, NAME)
+      raw.db.exec(
+        `CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT); PRAGMA auto_vacuum = ${mode}; VACUUM`,
+      )
+      fill(raw.db, 2000)
+      raw.db.exec('DELETE FROM t WHERE id > 100')
+      raw.close()
+      const image = dir.image()
+      const reopened = new MemoryDirectory(image)
+      const file = await openDatabase(reopened, NAME)
+      expect(file.db.selectValue('PRAGMA auto_vacuum')).toBe(value)
+      expect(reclaimPages(file.db)).toBe(0)
+      file.close()
+      expect(reopened.image().get(NAME)).toEqual(image.get(NAME))
+    })
+  }
 })
 
 describe('deleteDatabase', () => {

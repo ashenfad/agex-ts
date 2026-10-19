@@ -84,10 +84,11 @@ from a copy.
   them. A logged database calls it after each flush and new epoch,
   which drop the pending copy of what was written (a bulk insert's is
   as large as the rows; an update's holds the old values and the new),
-  and at open. A file made without the mode keeps it, and its free
-  pages: converting would take a `VACUUM`, which builds the whole
-  database again in memory. A copy `VACUUM INTO` makes of it (an
-  epoch's snapshot) is in the mode.
+  and at open. A file made before, or elsewhere, keeps its mode: in
+  FULL mode it shrinks at each commit, as it did; without one (NONE) it
+  keeps its free pages, since converting would take a `VACUUM`, which
+  builds the whole database again in memory. A copy `VACUUM INTO` makes
+  of one without (an epoch's snapshot) is in incremental mode.
 
 ### Your own directory
 

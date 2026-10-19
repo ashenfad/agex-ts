@@ -671,6 +671,12 @@ function parseTokens(
     currentPipelineCmds = []
   }
 
+  // every '&', before a branch takes one as a filename or a command
+  // (`> &`, `| & cat`): a background job, or bash's `&>`
+  tokens.forEach((token, t) => {
+    if (token === '&') found.add(at(t), BACKGROUND_ADVICE)
+  })
+
   let i = 0
   while (i < tokens.length) {
     const token = tokens[i] as string
@@ -684,11 +690,8 @@ function parseTokens(
       continue
     }
 
-    // a background job, or bash's `&>`: reported, and the script read on
-    if (token === '&') {
-      found.add(here, BACKGROUND_ADVICE)
-      continue
-    }
+    // reported above; the script is read on
+    if (token === '&') continue
 
     if (token === '|') {
       flushCommand()

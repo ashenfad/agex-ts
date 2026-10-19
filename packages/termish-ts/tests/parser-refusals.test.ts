@@ -156,6 +156,12 @@ describe('background jobs and tab-stripping heredocs', () => {
     )
   })
 
+  it("refuses '&' where a filename or a command is read, too", () => {
+    for (const script of ['echo hi > &', 'echo hi | & cat', 'cat < &', 'echo hi 2> &']) {
+      expect(parseError(script).message, script).toMatch(/: '&' is not supported: /)
+    }
+  })
+
   it("leaves '&' quoted or escaped, '&&' and '2>&1' alone", async () => {
     const fs = new MemoryFS()
     expect(await execute("echo 'a & b' a\\&b && echo ok 2>&1", fs)).toBe('a & b a&b\nok\n')

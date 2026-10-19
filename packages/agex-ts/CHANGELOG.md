@@ -1,5 +1,61 @@
 # agex-ts
 
+## 0.6.0
+
+### Minor Changes
+
+- a507f31: **Agent-defined tasks:** `agentTasks(agent)` grants `agex`, with which the agent's code defines a task (`agex.task({ name, instructions, params, returns })`, types as JSON Schema) and calls it or `.map`s it; each call runs a helper agent as a delegate of the calling world (or on a scratch world), and a helper that fails or asks throws `agex.TaskFailed` or `agex.TaskNeedsInput`. `standInTasks(answer?)` answers without a model, `AGEX_GUIDE` tells the model how, and `agex-ts/conformance` runs agex's code scenarios (`runCodeScenario`).
+- cba99fa: **AI SDK models:** `new Agent({ model })` takes any AI SDK `LanguageModelV4` and drives its `doStream` through `AiSdkProvider`, without the AI SDK's core. `settings.thinking` is the spec's reasoning effort, provider metadata (signatures, encrypted reasoning) is kept on the record's parts and sent back to its provider alone, `settings.extra` is provider options, and rate limits, overloads and unreachable providers interrupt a run. Depends on `@ai-sdk/provider`.
+- c2e9ed2: **Delegation:** `agent.session(ws, { sessions: true })` offers the world's `sessions` tool over the workspace's helper. Each delegate runs as a session of the asking agent (`Runner`) until nothing it waits on is outstanding, and answers ride the next tool result or open a woken turn. A new agent for the next turn finds the same jobs; `session.close()` waits for them.
+- 745d8ec: **Folding:** `new Agent({ compaction: new Policy(budget) })` folds the conversation into a summary written by the agent's own model when a request reaches the budget, within a run too. Each fold is recorded on `ws.compaction` and streamed as `Compacted`, summary calls count against `maxSteps` and in `Run.compaction` (with `Run.compactionCalls`), and a fold over a range is spliced where its range began. `ScriptedProvider` reports an estimate of the request for a step that gives no `input_tokens`.
+- 3f143b2: Breaking: agex-ts is rewritten as a loop over `@agex-ts/world`, with the run record (`Run`, `Message` and their parts, `loadRun`/`dumpRun`), the provider protocol (`Provider`, `stream` with an abort signal, `transient`), `ScriptedProvider`, and agex's shape corpus at `agex-ts/conformance`. The previous design's API is gone, and with it `@agex-ts/runtime-worker`, `@agex-ts/git`, `@agex-ts/anthropic`, `@agex-ts/openai` and `@agex-ts/gemini`, replaced by the world's kernel and ws-git and the AI SDK's providers.
+- 0a8dcc7: **Sessions:** `new Agent({model, primer, settings, maxSteps, maxToolCalls})` and `agent.session(ws)`, the loop over the world's turn: `say`, `stream` (TurnEvents as they happen), `resume`, `abandon`, `wake`, `cancel(reason)`, and the stored runs. `agexHarness` (`agex-ts/conformance`) runs it against nontainer's harness corpus.
+- 707259e: **Tasks:** `agent.task({ name, instructions, params, returns })` runs the agent on a scratch world (`new Agent({ profile, scratch })`) or a fork of `world`, and hands back a value checked against its Standard Schema; `task.success`, `task.fail` and `task.needsInput` end the agent's script, and a task that asks resumes through its outcome or by ref from its `__task__` plane. `live()` declares an input whose methods the code calls on the host, `fromJsonSchema` makes a Standard Schema of a JSON Schema literal, and `agex-ts/conformance` runs agex's task scenarios (`AgexTasks`).
+- 326eedf: Breaking: Node 22 or later is required (Node 20 is past its end of life, and the AI SDK's packages need 22).
+
+### Patch Changes
+
+- Updated dependencies [cbaa8ea]
+- Updated dependencies [6115187]
+- Updated dependencies [3c938b2]
+- Updated dependencies [f72a259]
+- Updated dependencies [f154ccc]
+- Updated dependencies [7de1515]
+- Updated dependencies [36a2042]
+- Updated dependencies [7ab2502]
+- Updated dependencies [1494f5c]
+- Updated dependencies [f65aaec]
+- Updated dependencies [d7a3f69]
+- Updated dependencies [62727b0]
+- Updated dependencies [1cfdbf5]
+- Updated dependencies [3f0b814]
+- Updated dependencies [b382ec7]
+- Updated dependencies [a574362]
+- Updated dependencies [231a95e]
+- Updated dependencies [bd9900f]
+- Updated dependencies [9b4cfef]
+- Updated dependencies [326eedf]
+- Updated dependencies [a05bdb1]
+- Updated dependencies [1c9308b]
+- Updated dependencies [701d47f]
+- Updated dependencies [cca0960]
+- Updated dependencies [b2c181f]
+- Updated dependencies [03c1930]
+- Updated dependencies [af5df2b]
+- Updated dependencies [c2e9ed2]
+- Updated dependencies [4d77423]
+- Updated dependencies [ef608ae]
+- Updated dependencies [a507f31]
+- Updated dependencies [f73fead]
+- Updated dependencies [056800c]
+- Updated dependencies [707259e]
+- Updated dependencies [d54e54f]
+- Updated dependencies [992eacf]
+- Updated dependencies [88439fe]
+- Updated dependencies [3f0b814]
+  - @agex-ts/kvgit@0.2.0
+  - @agex-ts/world@0.1.0
+
 ## 0.5.0
 
 ### Minor Changes

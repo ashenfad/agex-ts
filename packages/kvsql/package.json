@@ -1,6 +1,6 @@
 {
   "name": "@agex-ts/kvsql",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "SQLite in the browser on an OPFS file, with every change recorded in a kvgit log for checkpoints and sync between devices.",
   "publishConfig": {
     "access": "public"

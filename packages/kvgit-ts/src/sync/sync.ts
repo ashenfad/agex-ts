@@ -104,10 +104,17 @@ export async function pullBranch(
     return result('up-to-date')
   }
 
-  // Fetch the delta relative to everything we can claim.
+  // Fetch the delta relative to everything we can claim: not the sync
+  // head of a branch deleted here, once a sweep took its commits.
   const have: string[] = []
   if (localHead !== null) have.push(localHead)
-  if (syncHead !== null && syncHead !== localHead) have.push(syncHead)
+  if (
+    syncHead !== null &&
+    syncHead !== localHead &&
+    (await store.get(COMMIT_ROOT(syncHead))) !== null
+  ) {
+    have.push(syncHead)
+  }
   const applied = await applyWire(store, remote.fetch(remoteHead, have))
 
   // applyWire verifies every commit IN the stream, but an empty or

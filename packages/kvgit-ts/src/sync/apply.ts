@@ -350,6 +350,14 @@ export async function getSyncHead(
   return keys.length === 1 ? readHead(store, keys[0] as string) : null
 }
 
+/** Whether `branch` has a sync head on record with any remote: it has
+ *  synced somewhere, and was not forgotten since. */
+export async function hasSyncHead(store: KVStore, branch: string): Promise<boolean> {
+  if ((await store.get(SYNC_HEAD(branch))) !== null) return true
+  for await (const _ of store.keys(SYNC_HEADS_OF(branch))) return true
+  return false
+}
+
 /** Record `commit` as the head `branch` last synced to on `remote`
  *  (the branch's shared record when it has no id). A remote's own
  *  record retires the shared one, so another remote can't take it up. */

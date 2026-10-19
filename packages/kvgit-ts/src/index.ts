@@ -49,6 +49,7 @@ export {
   publishHead,
   clearSyncHead,
   getSyncHead,
+  hasSyncHead,
   setSyncHead,
   type ApplyWireOptions,
   type SyncHeadOwner,

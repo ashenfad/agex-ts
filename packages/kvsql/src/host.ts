@@ -15,7 +15,8 @@
  * on. A request that was sent to the old holder and not answered may
  * or may not have run; a query or transaction fails with
  * `ConnectionLostError`, while requests that are safe to run twice
- * (flush, info, delete) are sent again. A holder that closes on its own
+ * (`RETRY_SAFE`: flush, export, info, delete, the checkpoint list and
+ * deletes, the content hash) are sent again. A holder that closes on its own
  * answers every request it ran before it says it is releasing, so
  * whatever is unanswered then never ran and is sent again.
  *

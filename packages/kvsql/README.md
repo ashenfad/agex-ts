@@ -4,16 +4,17 @@ SQLite in the browser on an OPFS file, with every change recorded in a
 [kvgit](../kvgit-ts) log: checkpoints and restores, cheap test copies,
 and sync between devices through any kvgit remote.
 
-> **Status:** in development. This package so far runs SQLite on a file
-> in OPFS (or in memory) through its own VFS, records and applies
-> changesets, guards the schema, keeps the changeset log in kvgit
-> with crash recovery and replay, copies a database, starts new epochs
-> from snapshots, takes checkpoints and restores them, and serves the
-> database from a worker to every tab, and rebases one device's
-> changes onto another's; sync between devices comes next. The design is agex-studio's
+> **Status:** pre-alpha. It runs SQLite on a file in OPFS (or in
+> memory) through its own VFS, records and applies changesets, guards
+> the schema, keeps the changeset log in kvgit with crash recovery and
+> replay, copies a database, starts new epochs from snapshots, takes
+> checkpoints and restores them, hashes its content, serves the
+> database from a worker to every tab, and rebases and adopts one
+> device's changes onto another's, so an app syncs it through a kvgit
+> remote (see "Syncing"). The design is agex-studio's
 > [`roadmap/app-db.md`](https://github.com/ashenfad/agex-studio/blob/rebuild/roadmap/app-db.md).
 
-## How it will work
+## How it works
 
 - **The database** is a file in the origin-private file system (OPFS),
   run by the official [`@sqlite.org/sqlite-wasm`](https://sqlite.org/wasm)
@@ -43,9 +44,10 @@ API and its session-extension exports.
 ## Opening a database
 
 A database is a file in a `Directory`, with its rollback journal beside
-it as `<name>-journal`, and, while a new epoch's snapshot or a restore
-is made, `<name>-snapshot` and `<name>-restore` (so a database's own
-name can't end in `-journal`, `-snapshot` or `-restore`). In a browser the directory is in OPFS, which
+it as `<name>-journal`, and, while a new epoch's snapshot, a restore or
+a rebase onto a new epoch is made, `<name>-snapshot`, `<name>-restore`
+and `<name>-rebase` (so a database's own name can't end in `-journal`,
+`-snapshot`, `-restore` or `-rebase`). In a browser the directory is in OPFS, which
 works only in a dedicated worker (synchronous access handles exist only
 there):
 
@@ -111,7 +113,7 @@ const mem = new MemoryDirectory(image)
 const dir = new CrashingDirectory(mem)
 const file = await openDatabase(dir, 'app.db')
 dir.crashAt({ op: 'write', n: 3, torn: 100 })
-// ...run a transaction, which throws SimulatedCrash...
+// ...run a transaction, which fails: SQLite reports the crash as an I/O error...
 file.close()
 const after = await openDatabase(new MemoryDirectory(mem.image()), 'app.db')
 ```
@@ -262,8 +264,9 @@ await db.close() // flushes first
   gone holding transactions no log has is refused (`LogError`). `deleteLog(repo, branch)` deletes every epoch of
   a log.
 - **The content hash.** `contentHash()` is a SHA-256 of the database's
-  schema, header and every row in key order (each value `quote()`d, so
-  `1`, `1.0` and `'1'` differ), kvsql's own tables aside: the same for
+  schema, header and every row in key order (each value as its SQL
+  literal, text as its bytes in hex, so `1`, `1.0` and `'1'` differ),
+  hashed in blocks of 10,000 rows, kvsql's own tables aside: the same for
   any copy holding the same, however it came by it. Each snapshot
   records it (`hash` in its record). A copy that opens onto a new epoch
   from the very point its snapshot was taken, holding nothing past it,
@@ -278,7 +281,7 @@ await db.close() // flushes first
   them onto those (`recovery.rebased`), as a flush onto a moved branch
   does; if they conflict, it refuses with `RebaseRequiredError` and
   changes nothing.
-- **Rebase.** `rebase(onto?, { keep? })` brings the database onto
+- **Rebase.** `rebase(onto?, { keep?, synced? })` brings the database onto
   `onto`, a commit of its log another copy wrote after the two parted
   (another device's, fetched by a sync that found the two diverged),
   or by default its branch's tip. Its own changes since then (pending
@@ -333,6 +336,16 @@ await db.close() // flushes first
   (`kvsql/rebase/<log>`) recorded and only from there (a branch that
   moved on meanwhile is left as it is, and opening refuses), and
   otherwise drops the rebase's branch and tag.
+- **Syncing** is the app's to drive, with kvgit's sync calls over the
+  log's epoch branches (agex-studio's `db-sync.js` is one driver): flush,
+  then pull the newest finished epoch of the log the remote has; on a
+  newer epoch than its own, `rebase(undefined, { synced })` with the
+  head this copy last synced there; on its own epoch, pull it and
+  `rebase` onto what came in. Push its epoch (a fast-forward). Then, for
+  each older epoch the remote still has, pull it, `adopt` its tip and
+  delete it there at that tip (`deleteRemoteBranch`): epochs that
+  synced stay here until then (above). `currentEpoch`, `parseEpoch` and
+  `epochBranch` name a log's epochs.
 - **Replay** combines runs of changesets and applies them in chunks of
   up to 100k transactions or 32 MiB, stopping at any conflict
   (`ReplayError`): in a log written only by appending there is none, so
@@ -387,7 +400,8 @@ await db.close()
 ```
 
 - **The calls** are the logged database's (`query`, `transaction`,
-  `flush`, `export`, `close`), as promises, plus `copy(config)` (below),
+  `flush`, `export`, `close`, `contentHash`, `rebase`, `adopt`), as
+  promises, plus `copy(config)` (below),
   `info()` (the database's
   sequence number, pending count, recovery, last flush error) and
   `status()` (this tab's part, below). Values cross as structured
@@ -427,7 +441,8 @@ await db.close()
 - **Flushes on hide.** The client flushes when the page is hidden and
   on `pagehide`, which a worker can't see, best effort
   (`flushOnHide: false` turns it off). `onFlushError` hears of a flush
-  the policy started that failed, in whichever tab ran it.
+  the policy started that failed, in whichever tab ran it, and of an
+  epoch the policy started that failed.
 
 ### Your own worker
 
@@ -480,12 +495,16 @@ one: its access handles are exclusive.
   sent, not answered, and the worker running it went away, so it may or
   may not have committed. Nothing retries a query or transaction,
   since the client can't tell a read from a write; retry it yourself,
-  written so running it twice is safe. `flush()`, `export()`, `info()`
-  and `delete()` are safe to repeat, and are sent again to the next
-  holder.
+  written so running it twice is safe; the same goes for `rebase`,
+  `adopt`, `restore`, `checkpoint`, `newEpoch` and `copy`. `flush()`,
+  `export()`, `info()`, `contentHash()`, `checkpoints()`,
+  `deleteCheckpoint()` and `delete()` are safe to repeat, and are sent
+  again to the next holder.
 - **Delete through a client:** `db.delete()` runs on the holder, under
   the lock, after every call it received before: it closes the
-  database, deletes the file, its journal and the log's branch (and,
+  database, deletes the file, its journal and the log (`deleteLog`:
+  every epoch, its checkpoints, and a restore's or rebase's leftovers)
+  (and,
   with the default worker, the directory and IndexedDB database),
   closes every tab's connection, and keeps the lock until the other
   workers have left its queue, so none of them opens it again (a

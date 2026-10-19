@@ -1,6 +1,6 @@
 # @agex-ts/kvgit
 
-Versioned key-value store with branches, commits, and three-way merges. A TypeScript port of [agex-py's kvgit](https://github.com/ashenfad/kvgit), redesigned around async storage so it works equally well in Node and the browser.
+Versioned key-value store with branches, commits, and three-way merges. The TypeScript counterpart of Python's [kvgit](https://github.com/ashenfad/kvgit), on its v4 format byte for byte, redesigned around async storage so it works equally well in Node and the browser.
 
 > **Status:** Pre-alpha. Public API is unstable; pin a specific minor version.
 
@@ -10,7 +10,19 @@ A `Map<string, T>` with git-like history. Every `commit()` creates a checkpoint;
 
 ## Design
 
-The canonical type contracts live in [`src/types.ts`](./src/types.ts). For how @agex-ts/kvgit is used inside agex-ts, see [agex-ts's State & Sessions concepts doc](../../docs/concepts/state-and-sessions.md).
+The canonical type contracts live in [`src/types.ts`](./src/types.ts). `@agex-ts/world` keeps each session as a branch of one repository; [the design history](../../docs/design.md) has why the format follows Python's.
+
+## Storage backends
+
+A repository sits on a `KVStore`: get, set and remove of bytes, prefix
+scans, and an atomic compare-and-swap of one key (`cas`) or of several
+(`casMany`), which every head move and GC lease rides on. Three ship:
+
+| Backend | Import | |
+|---|---|---|
+| `Memory` | `@agex-ts/kvgit/backends/memory` | `new Memory()`: tests, scratch |
+| `IndexedDB` | `@agex-ts/kvgit/backends/idb` | `await IndexedDB.open({ dbName, storeName })` in the browser; `IndexedDB.deleteDatabase(name)` removes one |
+| `Sqlite` | `@agex-ts/kvgit/backends/sqlite` | `Sqlite.open({ path, wal })` on Node's `node:sqlite` (`:memory:` by default, WAL on for a file); refused in a browser build |
 
 ## Repo and worktrees
 
@@ -80,15 +92,18 @@ for await (const c of repo.log({ branch: 'main' })) console.log(c.hash, c.info)
   merge function over decoded values, consulted only where both sides
   changed a key (it may answer with a `MergeChoice` to keep one side),
   or a `MergeChoice` itself: a standing policy giving one side every
-  key it covers that either side changed. `postCheck` can refuse a
-  merged value as a conflict.
+  key it covers that either side changed. `text` (`textMerge`, or
+  `makeTextMerge({ oursLabel, theirsLabel, strict })`) merges lines as
+  git does, conflict markers and all, byte for byte with Python's
+  `kvgit.merges`. A `merge`, `apply`, `cherryPick` or `revert` also
+  takes `postCheck`, which can refuse a merged value as a conflict.
 - The common ancestor is found by generation: commits record their
   parents' generations, so the search for two tips that forked
   recently reads a few records whatever the history below.
 - Errors derive from `KvgitError`: `UnknownBranchError`,
   `UnknownTagError`, `UnknownCommitError`, `BranchExistsError`,
   `TagExistsError`, `CorruptHeadError`, `StorageVersionError`,
-  `MergeConflict`, `ConcurrencyError` and its subclass
+  `MergeConflict`, `GcBusy`, `ConcurrencyError` and its subclass
   `BranchMovedError`.
 
 `Worktree` and `Repo` sit on `VersionedKV`, which stays available (as
@@ -132,9 +147,9 @@ Two consequences for callers:
   number type, so a whole number in `info` is written as an integer.
   Wrap a value that must be a float in `PyFloat` (`new PyFloat(2)`
   writes `2.0`).
-- **Commit times are seconds**, as a float. `VersionedKV.open` takes a
-  `now` option (seconds) for a deterministic clock; it defaults to the
-  wall clock.
+- **Commit times are seconds**, as a float. `Repo.open(store, { now })`
+  takes a clock (a function returning seconds) for deterministic times;
+  it defaults to the wall clock.
 
 The golden test ([`tests/golden-v4.test.ts`](./tests/golden-v4.test.ts))
 replays a scripted history and compares every key and byte against
@@ -145,7 +160,8 @@ what Python kvgit wrote for it
 
 Resetting a branch, deleting one, or losing a race leaves commits
 nothing points at. `repo.gc({ minAge, deep })` (or `vk.cleanOrphans` /
-`vk.deepClean` on an engine handle) reclaims them, with everything only
+`vk.deepClean` on an engine handle, whose `minAge` is in milliseconds)
+reclaims them, with everything only
 they held: records, blobs and HAMT nodes.
 
 **It is safe beside concurrent writers,** as in Python kvgit:
@@ -184,8 +200,8 @@ of the value it held before its current one lives in
 `__branch_head_prev__<branch>`. If HEAD is unreadable — truncated
 bytes, a hash whose commit metadata is gone — head resolution falls
 back in tiers: the backup first, then the optional
-`recoverFromCorruptHead` callback you can pass to `VersionedKV.open`,
-then nothing. That third tier is caller-supplied here (kvgit-py's
+`recoverFromCorruptHead` callback you can pass to `Repo.open` (or
+`VersionedKV.open`), then nothing. That third tier is caller-supplied here (kvgit-py's
 built-in commit scan is not ported), so out of the box a branch
 recovers only as far back as its backup.
 
@@ -215,7 +231,8 @@ until someone repairs it.
 
 Two things persist a recovery:
 
-- `repairHead(store, branch)` — or `vk.repairHead()` — the explicit
+- `repo.repairHead(name)` — or `repairHead(store, branch)`, or
+  `vk.repairHead()` — the explicit
   maintenance call, and the one to reach for. It returns the commit
   HEAD names when it returns, which is not necessarily the one it
   recovered: if another writer repaired, advanced or deleted the
@@ -310,7 +327,8 @@ this layer:
   `parents[0]`.
 - Remote-tracking state (which remote commit a branch was last synced
   to) is kept per remote: a `Remote` with an `id` (a `PackRemote`'s is
-  `github:<owner>/<name>`) keeps its own record per branch, so one
+  `github:<owner>/<name>`, lowered, with the API's root before the repo
+  when it isn't github.com's) keeps its own record per branch, so one
   branch synced with two remotes, or with a remote swapped for another,
   never takes one's head for the other's. Remotes without an `id` share
   one record per branch, `__sync_head__<branch>`, which is also where
@@ -339,8 +357,10 @@ git protocol (GitHub's smart-HTTP endpoints don't send CORS headers):
 GraphQL and one REST read, on a token that lives in the browser. A
 fine-grained token scoped to one sync repo, with **Contents: read and
 write**, is enough. A push is one request whatever the number of
-commits, a pull is one query plus one read per pack, and the session
-list with each session's head and metadata is one query.
+commits (up to `maxPackBytes`, below), a pull is one query plus one
+read per pack, and the session list with each session's head and
+metadata is one query per hundred branches. Both sync calls take the
+repository's raw store, `repo.store`, as `kv` below.
 
 ```ts
 import { GithubClient, PackRemote } from '@agex-ts/kvgit/github'
@@ -383,7 +403,7 @@ Each session is one git branch; archived ones (the trash) are
   pack's `base` is the previous pack's `tip`. A manifest that isn't
   JSON, or has another `format`, makes the branch unusable here: it is
   never pushed over.
-- **`kvgit/packs/<seq>-<tip12>.pack`**: gzip of CBOR `{format: 1,
+- **`kvgit/packs/<seq>-<tip12>.pack`** (`<seq>` six digits, zero-padded): gzip of CBOR `{format: 1,
   kernel, base, tip, values, commits}`. `values` is a table of distinct
   byte strings (each value once, ordered by key, so versions of a file
   compress against each other); `commits` is parents first, each
@@ -393,7 +413,8 @@ Each session is one git branch; archived ones (the trash) are
   valueIndex]` pairs. A receiver recomputes every hash (`applyWire`).
 
 Each push is one git commit on the session's branch, headlined `kvgit
-<session> @ <head7> (+N)` with a `Kvgit-Head: <head>` trailer, made by
+<session> @ <head7> (+N)` with `Kvgit-Head: <head>` and
+`Kvgit-Pack-Format: 1` trailers, made by
 `createCommitOnBranch` with `expectedHeadOid` as the compare-and-swap.
 A new session's branch starts from the default branch's commit, its
 `createRef` in the same request. A fetch walks the manifest's packs
@@ -407,9 +428,11 @@ bytes it takes for text).
   several packs, each its own compare-and-swap. A single commit too
   large for one request (about 22 MB compressed) is refused before
   anything is sent.
-- Past `maxPacks` (16), a push also folds all but the newest
-  `keepRecent` (4) into one pack, re-encoded from the local store, in
-  the same request.
+- Past `maxPacks` (16), a push also folds older packs into one,
+  re-encoded from the local store, in the same request: of all but the
+  newest `keepRecent` (4), the newest run (two or more) that fits in
+  `maxPackBytes`. A fold that wouldn't fit in the push's request waits
+  for a later push.
 - Packs are opaque to git, so a repo grows with what is pushed (a
   small multiple of each session's size, with folding).
 - Live tests ([`tests/github-pack-live.test.ts`](./tests/github-pack-live.test.ts))

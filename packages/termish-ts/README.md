@@ -1,12 +1,72 @@
 # @agex-ts/termish
 
-Pure-TypeScript shell parser + builtin commands operating over an async `FileSystem`. A port of [agex-py's `termish`](https://github.com/ashenfad/termish), redesigned around async storage so it composes with browser-side and Node-side filesystems alike.
+Pure-TypeScript shell parser + builtin commands operating over an async `FileSystem`. The TypeScript counterpart of Python's [`termish`](https://github.com/ashenfad/termish), redesigned around async storage so it composes with browser-side and Node-side filesystems alike.
 
 > **Status:** Pre-alpha. Public API is unstable; pin a specific minor version.
 
 ## Concept
 
-A virtual terminal that runs inside your application. Parses shell text (`ls -la | grep .ts`), executes against a pluggable `FileSystem`, supports custom commands, and accepts literal heredocs such as `cat <<'EOF' > file`. Used by agex-ts to power agent `terminal` emissions.
+A virtual terminal that runs inside your application. Parses shell text (`ls -la | grep .ts`), executes against a pluggable `FileSystem`, supports custom commands, and accepts literal heredocs such as `cat <<'EOF' > file`. `@agex-ts/world` runs it as an agent's `terminal` tool.
+
+```ts
+import { execute } from '@agex-ts/termish'
+import { MemoryFS } from '@agex-ts/termish/fs/memory'
+
+const fs = new MemoryFS()
+await execute("mkdir -p /notes && echo hello > /notes/a.txt", fs)
+await execute('cat /notes/*.txt | wc -l', fs, {
+  env: { HOME: '/notes' },
+  maxOutputChars: 20_000, // bound what reaches a model
+}) // '1\n'
+```
+
+`execute(text, fs, options?)` parses and runs a script and resolves to
+its transcript; it throws `ParseError` for a script it won't run, and
+`TerminalError` (`exitCode`, `stderr`, `partialOutput`) when the last
+pipeline fails. `toScript` and `executeScript` split the two steps.
+The options:
+
+- **`commands`:** your own commands, a `Map` or an object of handlers,
+  overriding builtins of the same name.
+- **`env`:** the variables `$NAME` expands from, shared with commands as
+  `ctx.env` (a change a command makes is visible after).
+- **`signal`:** an `AbortSignal`; an aborted script exits 130.
+- **`maxOutputChars`:** caps the transcript (and a `TerminalError`'s
+  `partialOutput`), ending it with a marker that says how much was cut
+  and how to read the rest.
+
+### Your own commands
+
+A command is an async handler of a `CommandContext`: `args` (without
+the command's name), `stdin` (`bytes`, or `text()`), `stdout` (`write`
+text, `writeBytes`), the `fs`, `env`, `signal`, the `commands` in
+effect (for a command that runs others), and `agentSink` (whether its
+output reaches the caller rather than a pipe or a file). It resolves to
+nothing for success, or to `{ exitCode, stderr }`; throwing
+`TerminalError` stops the script. A `description` string on the handler
+is what `help` shows for it.
+
+```ts
+const greet = Object.assign(
+  async ({ args, stdout }: CommandContext) => stdout.write(`hello ${args[0] ?? 'world'}\n`),
+  { description: 'greet someone' },
+)
+await execute('greet you | tr a-z A-Z', fs, { commands: { greet } })
+```
+
+### The builtins
+
+- **Files and paths:** `pwd`, `cd`, `ls`, `mkdir`, `touch`, `cp`, `mv`,
+  `rm`, `basename`, `dirname`, `realpath`, `stat`, `du`, `file`
+- **Output:** `echo`, `printf`, `cat`, `head`, `tail`, `tee`
+- **Text:** `wc`, `sort`, `uniq`, `cut`, `tr`, `grep`, `sed`, `awk`,
+  `diff`, `paste`, `comm`, `rev`, `find`, `xargs`
+- **Archives:** `gzip`, `gunzip`, `zcat`, `gzcat`, `tar`, `zip`, `unzip`
+- **Checksums, numbers and time:** `md5sum`, `sha256sum`, `seq`, `date`
+- **The shell:** `help`, `which`, `command`, `test`, `[`, `true`, `false`
+
+No `jq`, `ln`, `rmdir` or `mktemp`; `help` lists what a script can run,
+a host's own commands included.
 
 ## The shell
 
@@ -56,19 +116,25 @@ delimiters have identical no-expansion semantics. Closing delimiters may be
 indented for agent ergonomics. Here-strings (`<<<`) and tab-stripping heredocs
 (`<<-`) are not supported.
 
-## Backends shipped in v1
+## Filesystems
 
-Every adapter throws `FsError` with a POSIX code (`ENOENT`, `EISDIR`,
-`ENOTDIR`, `EEXIST`, `ENOTEMPTY`), so builtins report the standard text
-(`cat: /x: No such file or directory`) whatever the filesystem. A host
-adapter should do the same; `describeFsError` also maps Node's codes.
-
+A `FileSystem` (the protocol, from the main entry or
+`@agex-ts/termish/fs/protocol`) is async and keeps its own cwd; its
+`readMany` and `isSymlink` are optional. Every adapter throws `FsError`
+with a POSIX code (`ENOENT`, `EISDIR`, `ENOTDIR`, `EEXIST`,
+`ENOTEMPTY`, `EINVAL`, `EROFS`, `EACCES`), so builtins report the
+standard text (`cat: /x: No such file or directory`) whatever the
+filesystem. A host adapter should do the same; `describeFsError` also
+maps Node's codes.
 
 | Adapter | Sub-path | When to reach for it |
 |---|---|---|
 | `MemoryFS` | `@agex-ts/termish/fs/memory` | Tests, ephemeral use, browser-side state with no persistence |
-| `RealFS` | `@agex-ts/termish/fs/real` | Hits the actual disk on Node — wraps `node:fs/promises` + tracks cwd |
-| `KvgitFS` | `@agex-ts/termish/fs/kvgit` | Versioned shell sessions backed by `@agex-ts/kvgit` (peer dep) |
+| `RealFS` | `@agex-ts/termish/fs/real` | Node only: `new RealFS({ root })` makes an absolute, existing host directory the virtual `/`, and refuses paths that would leave it |
+| `KvgitFS` | `@agex-ts/termish/fs/kvgit` | Files in a `@agex-ts/kvgit` `Staged` (`new KvgitFS(staged, { cwd? })`, its values encoded with `fileRecordEncoder`/`fileRecordDecoder`, or the `polymorphic*` pair to keep other values beside them); `.staged` to commit. Install `@agex-ts/kvgit` beside it |
+
+`@agex-ts/termish/glob` has the glob matching the shell uses (`glob`,
+`globMatch`, `compileGlob`, `hasGlobChars`), also on the main entry.
 
 ## Checking your own adapter
 

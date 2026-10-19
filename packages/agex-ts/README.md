@@ -5,7 +5,7 @@ versioned world. The TypeScript counterpart of
 [agex](https://github.com/ashenfad/agex), matching its meaning.
 
 An agent works in a workspace from
-[`@agex-ts/world`](../world): files, a shell, a code kernel in a
+[`@agex-ts/world`](https://github.com/ashenfad/agex-ts/tree/main/packages/world): files, a shell, a code kernel in a
 worker, and the conversation, all on one branch of a versioned store.
 A rewind is a checkout, a fork is cheap, and everything the agent did
 is a commit. agex-ts is the loop over it:
@@ -19,16 +19,18 @@ is a commit. agex-ts is the loop over it:
 - **Delegation:** an agent asks delegates, each on a fork of its world.
 - **Folding:** a long conversation is summarised as it grows, within a
   task as well as across turns.
-- **Any [AI SDK](https://ai-sdk.dev) model,** in Node or a browser.
+- **Any [AI SDK](https://ai-sdk.dev) model** (on its v4 provider
+  spec), in Node or a browser.
 
 ## Install
 
 ```bash
-npm install agex-ts @agex-ts/world @agex-ts/kvgit @ai-sdk/anthropic
+npm install agex-ts @agex-ts/world @agex-ts/kvgit @ai-sdk/anthropic zod
 ```
 
-Any AI SDK provider works in place of `@ai-sdk/anthropic`. Node 22 or
-later.
+Any AI SDK provider built on `@ai-sdk/provider` 4 works in place of
+`@ai-sdk/anthropic` (4 or later). `zod` is for task types (any Standard
+Schema that gives its JSON Schema works). Node 22 or later.
 
 ## Quick start
 
@@ -108,13 +110,19 @@ chat.cancel('stopped by the user') // the turn ends cancelled, its work kept
   each message with its parts and usage (`runUsage(run)` sums it). A
   checkout of the workspace rewinds them with the files.
 - **The agent holds nothing:** a change of model or primer is a new
-  `Agent` for the next turn, over the same workspace and inbox.
+  `Agent` for the next turn, over the same workspace; pass the old
+  session's inbox on (`agent.session(ws, { inbox: chat.inbox })`) so
+  notes still waiting reach it.
+- **`say` and `stream`** take `{ onEvent }` too; `chat.last` is the
+  latest outcome, and `chat.running` whether a turn runs.
 
 ## Models
 
-Any AI SDK model is a model: install its provider and hand the model to
-the agent. agex-ts drives its `doStream` directly, without the AI SDK's
-core, and depends on `@ai-sdk/provider` alone.
+Any AI SDK model on the v4 provider spec is a model: install its
+provider and hand the model to the agent (`aiSdk(model, { name })`
+wraps one with a name of your own). agex-ts drives its `doStream`
+directly, without the AI SDK's core, and depends on `@ai-sdk/provider`
+alone. An older provider package (spec v3 or before) isn't recognised.
 
 ```ts
 const agent = new Agent({ model, settings: { thinking: 'medium', maxTokens: 8000 } })
@@ -130,9 +138,12 @@ const agent = new Agent({ model, settings: { thinking: 'medium', maxTokens: 8000
 - **Errors:** a rate limit, an overload, a timeout or stall, a server
   error or a provider out of reach interrupts the turn (`resume()`
   continues it); a refused request fails it, in the provider's words.
-- **A `Provider` of your own** works too: `stream(messages, tools,
-  settings, { signal })` yields deltas and one `Reply`. `ScriptedProvider`
-  replies from a script, for tests.
+- **A `Provider` of your own** works too: a `name`, `stream(messages,
+  tools, settings, { signal })`, which yields deltas and one `Reply`,
+  and `transient(error)`, which says whether a failed request is worth
+  resuming (interrupting the turn rather than failing it); `describe(error)`,
+  optional, puts a failure in words. `ScriptedProvider` replies from a
+  script, for tests.
 
 ## Tasks
 
@@ -140,11 +151,11 @@ const agent = new Agent({ model, settings: { thinking: 'medium', maxTokens: 8000
 const rank = agent.task({
   name: 'rank',
   instructions: 'Rank the scores, best first.',
-  params: { scores: z.array(Score) }, // Standard Schemas: zod, valibot, arktype
+  params: { scores: z.array(Score) }, // Standard Schemas that give their JSON Schema (zod 4)
   returns: Ranking,
 })
 
-const ranking = await rank({ scores }) // the value, or TaskFailed / NeedsInput / TaskInterrupted
+const ranking = await rank({ scores }) // the value, or throws a TaskError (below)
 const out = await rank.run({ scores }, { world: ws, keep: true }) // an Outcome: .value, .ref
 const next = await out.resume?.('by total') // a task that asked carries on from the answer
 ```
@@ -152,22 +163,29 @@ const next = await out.resume?.('by total') // a task that asked carries on from
 A task runs the agent on a world of its own and hands back a typed
 value. The caller's world is never touched.
 
+- **What a call throws** when there's no value: `TaskFailed`,
+  `NeedsInput` (with the `question`, and the `ref` to resume by),
+  `TaskInterrupted`, or for a cancelled task their base, `TaskError`.
 - **Its world:** a scratch world built from the agent's `profile`, or a
   fork of `world`'s last commit, deleted when the task ends unless
   `keep`. Scratch worlds go on a memory store, or on
-  `new Agent({ scratch: store })`.
+  `new Agent({ scratch: store })`; `keep` needs one of the two (a
+  `world`, or a scratch store), or it throws.
 - **Inside it,** agent code sees each input by name and `task`:
   `await task.success(value)`, `task.fail(reason)` and
   `task.needsInput(question)`. A value that doesn't fit the return type
   is a `TypeError` at the call, which the agent can fix. The call that
   settles the task ends the script it's in.
 - **Inputs are checked at the call** and reach the code as a copy each
-  run. A `live()` input is an object on the host whose methods the code
-  calls; data with a live part in it is refused, as is a live return
-  type.
+  run. A `live({ name, description, methods })` input is an object on
+  the host whose methods the code calls: those `methods` only, each
+  checked, or without them any public method, unchecked. Data with a
+  live part in it is refused, as is a live return type.
 - **The model reads TypeScript,** never a schema: the brief shows each
   input's type and a preview of it, the declarations of the types they
-  name, and a live input's methods.
+  name, and a live input's methods. The types come from each schema's
+  JSON Schema (`~standard.jsonSchema`); a schema without one still
+  checks values, but the model sees `unknown`.
 - **A task that asks** keeps its world, and its `__task__` plane holds
   what it is, its inputs and how it stands. It resumes through the
   outcome, or by ref with `rank.resume(ref, answer, { world })`, after
@@ -198,7 +216,7 @@ const factor = agex.task({
   returns: { type: 'array', items: { type: 'integer' } },
 })
 const primes = await factor({ n: 391 })
-const all = await factor.map([{ n: 391 }, { n: 403 }]) // at most 4 at once
+const all = await factor.map([{ n: 391 }, { n: 403 }]) // at most 4 at once (agentTasks's maxParallel)
 ```
 
 - **A definition is checked where it's written,** in the worker, by
@@ -239,18 +257,23 @@ session of the asking agent.
 
 - **A delegate runs until it has nothing outstanding.** Its task is its
   first turn. If it ends that turn waiting on delegates of its own, or
-  with a note unread, it is woken when they come in. Its reply then is
-  its answer, and a turn that doesn't complete answers `failed`.
+  with a note unread, it is woken when they come in, up to ten woken
+  turns unless the ask sets a `budget`. Its reply then is its answer,
+  and a turn that doesn't complete answers `failed`.
 - **Answers come back like notes.** One that lands during a turn rides
   the next tool result; one that lands between turns waits for the
   next, and `wake()` runs a turn that opens with it.
 - **The jobs are the workspace's, not the agent's.** A new `Agent` for
-  the next turn finds the same helper (`Sessions.of(ws)`): its new
+  the next turn finds the same helper (`Sessions.of(ws)`, from
+  `@agex-ts/world`): its new
   delegates run on it, and those in flight finish on the agent that
   asked. Close the session only when done with the workspace.
 - **A delegate holds what its parent holds:** its fork opens with the
   parent's settings and profile, and nothing more. Its work stays on
-  its branch until the asking agent merges or takes it (`ws-git`).
+  its branch until the asking agent merges or takes it with `ws-git`,
+  which the profile grants:
+  `profile: { commands: { 'ws-git': wsGit } }` (`wsGit` from
+  `@agex-ts/world`). Without it, delegates' work can't come back.
 - A `Sessions` of your own (`{ sessions: helper }`) runs every ask on
   its own runner.
 
@@ -260,6 +283,8 @@ session of the asking agent.
 import { Policy } from 'agex-ts'
 
 const agent = new Agent({ model, compaction: new Policy(120_000) })
+// new Policy(budget, window): with the model's context length, a summary
+// request that wouldn't fit in it is made from a reduced history
 ```
 
 Past the budget, the conversation is folded into a summary in what the
@@ -285,15 +310,17 @@ the tools, the opening message).
 Between turns, an embedder can show and steer it:
 
 ```ts
-const { tokens, fold } = await session.context()  // the next request's size, as the policy measures it
-const folded = await session.fold()               // fold the turns so far now, whatever the budget
+const { tokens, fold } = await chat.context()  // the next request's size, as the policy measures it
+const folded = await chat.fold()               // fold the turns so far now, whatever the budget
 ```
 
 `fold()` makes the fold a budget would (the same cut, summary and
 fallback), commits it on its own (`{ tool: 'fold' }`, so a checkout
 before it takes it back), emits `Compacted` to `onEvent`, and returns
-it with the summary calls' usage; null when nothing is left to fold.
-It refuses while a turn runs, and `cancel` stops it.
+it with the summary calls' usage; null when nothing is left to fold or
+the summary couldn't be written. It refuses while a turn runs, after
+an interrupted turn (resume or abandon it first), and on another
+harness's conversation (`HarnessMismatchError`); `cancel` stops it.
 
 ## In a browser
 

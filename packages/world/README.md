@@ -25,7 +25,9 @@ await ws.tags.add('v1')
 const draft = await ws.fork('alice-draft') // O(1): a new branch
 await draft.files.write('notes/todo.md', '- done\n')
 
+await ws.files.write('notes/todo.md', '- skip the tests\n')
 await ws.checkout('v1') // a new commit restoring v1; history is kept
+await ws.close() // stops its code worker: a Node process waits on it
 ```
 
 ## Concepts
@@ -38,9 +40,10 @@ await ws.checkout('v1') // a new commit restoring v1; history is kept
 - **A workspace** is one session, opened with `store.open(id)`. A new
   session starts with its root directory (`/workspace` by default) and
   its working directory there, committed as `{tool: 'init'}`.
-- **Files:** `ws.files.read`, `readText`, `exists` and `list` read;
-  `write` (creating directories) and `remove` each commit
-  (`file_write`, `file_remove`). `ws.files.fs` is the whole
+- **Files:** `ws.files.read` (a range with `{ offset, size }`),
+  `readText`, `exists` and `list` read; `write` (creating
+  directories), `edit` (below) and `remove` each commit (`file_write`,
+  `file_edit`, `file_remove`). `ws.files.fs` is the whole
   filesystem, termish's `FileSystem`, for a shell or a kernel: its
   writes stay pending until something commits, and its `chdir` is
   stored with the session.
@@ -53,7 +56,13 @@ await ws.checkout('v1') // a new commit restoring v1; history is kept
 - **Checkout** restores the whole session (files, cache, working
   directory) as a new commit `{tool: 'checkout', target}`; the commits
   after the target stay in the log. With `paths`, it takes just those
-  files from the target.
+  files from the target. Nothing differing, it commits nothing.
+- **Where it stands:** `ws.head`, `ws.ref`, `ws.frozen` and
+  `ws.uncommitted`; `ws.resolveRef` and `ws.expandRef` turn a tag, a
+  short hash or `HEAD~n` into a commit.
+- **Closing:** `ws.close()` stops the session's code worker and drops
+  pending changes; later calls throw. Close a workspace that ran code
+  when done with it: in Node, its worker keeps the process alive.
 - **Fork** makes a child session from the current commit, or from
   `at`. `inherit: 'fresh'` leaves out the conversation and compaction's
   record.
@@ -99,6 +108,17 @@ const result = await ws.runCode(`
   `resolve` maps to URLs (``(name) => `https://esm.sh/${name}` ``). A
   module reaches the host objects through `import { db } from 'host'`;
   only the code run has them as bare names.
+- **Output** keeps at most `maxObservation` characters of stdout and of
+  stderr (32,000 by default), setting `truncated`; the terminal's
+  transcript is capped the same way.
+- **Its worker** is the package's built script (`@agex-ts/world/worker`,
+  or `/worker.node` for Node), found next to the module; a bundled app
+  whose bundler moves it gives `profile.code.worker.url` (and `target`:
+  `'browser'`, `'node'` or `'auto'`, the default).
+- **`fetch('/path')`** reads the world's files with
+  `profile.code.routeFetch`: true for every path (a miss goes to the
+  network), a list of prefixes (a miss is a 404), or false (the
+  default).
 - **Stopping:** a run longer than the profile's timeout (30 seconds by
   default, of the code's own time: a host object's call doesn't count,
   up to `hostTime`, 10 minutes by default)
@@ -119,7 +139,7 @@ JavaScript's values in place of Python's:
 |---|---|
 | a Plotly spec, `{data: [...], layout: {...}}` | `<name>.plotly.json` |
 | an array of row objects, or an Arrow table | `<name>.table.json`: `{columns, data, total, columnTypes}`, 200 rows at most |
-| an array of stat (`{label, value, sublabel?}`) and callout (`{type: 'callout', title, body, tone?}`) cards | `<name>.cards.json`: `{items}` |
+| an array of stat (`{label, value, sublabel?}`) and callout (`{type: 'callout', title, body, tone?}`) cards, or one callout | `<name>.cards.json`: `{items}` |
 | image bytes, a `data:image` URL, a Blob, an `OffscreenCanvas` | `<name>.png` (or `.jpg`, `.gif`, `.webp`) |
 | the path of a file the code saved | that file |
 
@@ -254,8 +274,11 @@ reaches the world.
 
 `worldTools(ws)` gives the tools an agent loop hands a model, with
 nontainer's names, schemas and result text: `terminal`, `file_write`,
-`file_edit`, `view_image` and `run_ts`, and `sessions` given a
-delegation helper (`worldTools(ws, {sessions})`). Each returns `{text, images,
+`file_edit`, `view_image` (unless `vision: false`, for a model that
+can't see) and `run_ts`, and `sessions` given a delegation helper
+(`worldTools(ws, {sessions})`, with `runner` for asks it runs itself).
+`terminalPrimer` and `codePrimer` add to the terminal's and the code
+tool's descriptions. Each returns `{text, images,
 written?, isError}`; a failure the agent can act on is an error result,
 and `toMcpResult(out)` is the MCP `CallToolResult` for it. The
 descriptions name what the world grants (variables, secrets, commands,
@@ -400,8 +423,9 @@ give it in the profile, and the shell has it.
 import { wsGit } from '@agex-ts/world'
 const ws = await store.open('main', { profile: { commands: { 'ws-git': wsGit } } })
 await ws.terminal('ws-git status')
-// stage/add, commit, status, diff, log, show, checkout, tag, stash,
-// branch, merge, revert, cherry-pick, worktree, sparse-checkout, help
+// stage/add, unstage, reset, commit, status, diff, log, show, checkout,
+// tag, stash, branch, merge, revert, cherry-pick, worktree,
+// sparse-checkout, help
 ```
 
 It is a port of nontainer's `ws-git`, and prints what it prints, word
@@ -505,10 +529,12 @@ await ws.merge(answer.branch) // or checkout(answer.branch, {paths}), or leave i
 - **`ask`** forks under a scoped pet name (`alice.sleepy-otter`) at a
   real commit (pending writes land first) and starts the run;
   `{wait: true}` returns the answer. `paths` narrows what the child
-  sees; `forkFrom` starts it elsewhere (a session as it is now, a store
-  tag, `session@commit`), carrying that state's conversation unless
-  `inherit: 'fresh'`; `resume` gives a child its next task on the same
-  branch. A child runs one task at a time.
+  sees. A fork of this session starts with a fresh conversation
+  (`inherit: 'full'` brings it along); `forkFrom` starts it elsewhere (a
+  session as it is now, a store tag, `session@commit`), carrying that
+  state's conversation unless `inherit: 'fresh'`; `resume` gives a child
+  its next task on the same branch. A child runs one task at a time, and
+  at most `maxWorkers` (4) run at once.
 - **Everything a delegate wrote is its answer.** One that never used
   ws-git answers at its branch head; one that committed and then wrote
   more has the remainder committed for it, unless a merge of its own is
@@ -517,8 +543,11 @@ await ws.merge(answer.branch) // or checkout(answer.branch, {paths}), or leave i
   `provenance.chain` names every hop behind it.
 - **Collecting:** `result` and `take()` share one mark, so an answer is
   handed over once; `wait()`, `answers()` and `onAnswer` say when one
-  lands. `answerNotes(sessions, inbox)` as a turn's source delivers each
+  lands. `answerNotes(sessions, inbox)` as a turn's source
+  (`sources: [(inbox) => answerNotes(sessions, inbox)]`) delivers each
   on the next tool result, framed as the mechanism speaking.
+  `sessions.list()` shows the jobs, and `outstanding()` the ones not
+  yet answered, which `untilSettled` waits on.
 - **`untilSettled(runTurn, sessions, inbox, {prompt})`** is the loop a
   runner drives a delegate with: a reply given while the delegate's own
   delegates are out, or a note is waiting, is it waiting, so it's woken

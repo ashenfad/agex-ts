@@ -204,6 +204,12 @@ export interface LogOptions {
    * Explicit `newEpoch()` calls throw instead.
    */
   onEpochError?: (err: unknown) => void
+  /**
+   * Called with the branches of the log's older epochs when they are
+   * deleted (after a move to a new epoch, or at open): what they alone
+   * held is left for a sweep of the repository (`repo.gc()`).
+   */
+  onEpochsDeleted?: (branches: string[]) => void
 }
 
 /** What a statement returned. */
@@ -573,6 +579,7 @@ export class LoggedDatabase {
   readonly #onFlushError: ((err: unknown) => void) | undefined
   readonly #epochs: Required<EpochPolicy> | null
   readonly #onEpochError: ((err: unknown) => void) | undefined
+  readonly #onEpochsDeleted: ((branches: string[]) => void) | undefined
   readonly #autoCheckpoints: number
   /** The epoch being started, if one is. */
   #epoch: Promise<EpochResult> | null = null
@@ -633,6 +640,7 @@ export class LoggedDatabase {
             minBytes: options.epochs?.minBytes ?? DEFAULT_EPOCH_MIN_BYTES,
           }
     this.#onEpochError = options.onEpochError
+    this.#onEpochsDeleted = options.onEpochsDeleted
     this.#autoCheckpoints = options.autoCheckpoints ?? DEFAULT_AUTO_CHECKPOINTS
     this.#meta = meta
     this.#pending = pending
@@ -2717,7 +2725,7 @@ export class LoggedDatabase {
     this.#logBytes = 0
     this.#snapshotGzipped = record.gzipped
     try {
-      await deleteOlderEpochs(repo, shot.branch)
+      this.#deleted(await deleteOlderEpochs(repo, shot.branch))
     } catch (err) {
       // the next open deletes them
       this.#reportEpochError(err)
@@ -2742,6 +2750,16 @@ export class LoggedDatabase {
     this.#snapshotGzipped = (await readSnapshot(this.#repo, tip))?.gzipped ?? 0
   }
 
+  /** Report older epochs deleted, if any, to `onEpochsDeleted`. */
+  #deleted(branches: string[]): void {
+    if (branches.length === 0) return
+    try {
+      this.#onEpochsDeleted?.(branches)
+    } catch (err) {
+      this.#reportEpochError(err)
+    }
+  }
+
   /**
    * Delete what an epoch that moved on, or one that didn't finish,
    * left: the log's older epochs (but those that synced, and those after
@@ -2750,7 +2768,7 @@ export class LoggedDatabase {
   async #tidy(): Promise<void> {
     try {
       const parsed = parseEpoch(this.#branch)
-      await deleteOlderEpochs(this.#repo, this.#branch)
+      this.#deleted(await deleteOlderEpochs(this.#repo, this.#branch))
       const dir = this.#file.directory
       for (const leftover of [
         snapshotName(this.name),

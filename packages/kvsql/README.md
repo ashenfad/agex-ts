@@ -220,7 +220,12 @@ await db.close() // flushes first
   transaction so far in it, flushed or not) is gzipped and committed to
   the new branch, the file moves onto it in one transaction, and the
   old epoch's branch is deleted, so the log behind the snapshot goes
-  without any branch being rewritten. Calls go on while the snapshot is
+  without any branch being rewritten. An older epoch that has synced
+  with a remote (kvgit has a sync head for it) stays, with every epoch
+  after it: what another device pushed to it is taken in from where the
+  next epoch's snapshot was taken, through the snapshots after (`adopt`,
+  below). The sync deletes it once the remote's copy is gone, and clears
+  its sync head; opening then deletes any left. Calls go on while the snapshot is
   committed; flushes wait, their transactions safe in the file, and go
   to the new epoch. The database also starts one by itself (`epochs`):
   when the epoch's log reaches half the snapshot's gzipped size, or one
@@ -230,7 +235,8 @@ await db.close() // flushes first
   failure there leaves the database on its epoch and calls
   `onEpochError`. A branch not named `<name>/<n>` has no epochs.
 - **Opening** follows the log to its newest finished epoch, whichever
-  of its branches it is asked for by, and deletes the older ones. A file
+  of its branches it is asked for by, and deletes the older ones (but
+  those kept for syncing, above). A file
   that is missing, or behind on an older epoch with nothing pending, is
   rebuilt from the epoch's snapshot (`recovery.snapshot`); the file the
   snapshot was taken from, left on the old epoch by a crash, finishes
@@ -292,10 +298,10 @@ await db.close() // flushes first
   any epochs between the repository has, left this one, or the epoch's
   start for a database with nothing on it) are applied to a copy
   rebuilt at the tip beside the file (`<name>-rebase`), committed after
-  the tip, and that copy replaces the file; the old epoch goes. With
-  nothing of its own, the database just moves, comparing its content
-  hash first if it is where the snapshot was taken. Conflicts and
-  `keep` work as within an epoch; keeping `'mine'` starts an epoch after
+  the tip, and that copy replaces the file; the old epoch goes (unless
+  kept for syncing). With nothing of its own, the database just moves,
+  comparing its content hash first if it is where the snapshot was
+  taken. Conflicts and `keep` work as within an epoch; keeping `'mine'` starts an epoch after
   the newer one. A crash leaves it on its old epoch or rebased: opening
   finishes a built copy (it names the new epoch, at the rebase branch's
   tip), moving the epoch's branch only from where the rebase started.

@@ -377,7 +377,8 @@ describe('a rebase across a schema change', () => {
     // after every transaction of both sides, and a schema change
     expect(b.db.seq).toBe(4)
     expect(b.db.schemaVersion).toBe(3)
-    expect(await b.repo.branches.list()).toEqual(['db/test/1'])
+    // its old epoch synced, so it stays until the sync deletes it
+    expect(await b.repo.branches.list()).toEqual([BRANCH, 'db/test/1'])
     expect((await pushBranch(b.store, remote, 'db/test/1')).status).toBe('created')
 
     // the other device, with nothing of its own, follows to the new epoch

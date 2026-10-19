@@ -89,6 +89,7 @@ import {
 import {
   type SnapshotRecord,
   currentEpoch,
+  deleteOlderEpochs,
   epochBranch,
   epochsOf,
   finished,
@@ -2649,7 +2650,7 @@ export class LoggedDatabase {
    * Move the file onto the new epoch, whose snapshot is in: one file
    * transaction drops the transactions the snapshot holds from the
    * pending table and moves the file's base to the snapshot. Then the
-   * old epoch's branch goes.
+   * old epoch's branch goes, unless it synced (`deleteOlderEpochs`).
    *
    * A transaction that throws may still have landed (a COMMIT that
    * failed after its journal was cleared), so the file says which: moved,
@@ -2716,10 +2717,10 @@ export class LoggedDatabase {
     this.#logBytes = 0
     this.#snapshotGzipped = record.gzipped
     try {
-      await repo.branches.delete(previous)
+      await deleteOlderEpochs(repo, shot.branch)
     } catch (err) {
-      // the next open deletes it
-      if (!(err instanceof UnknownBranchError)) this.#reportEpochError(err)
+      // the next open deletes them
+      this.#reportEpochError(err)
     }
     return {
       branch: shot.branch,
@@ -2743,16 +2744,13 @@ export class LoggedDatabase {
 
   /**
    * Delete what an epoch that moved on, or one that didn't finish,
-   * left: the log's older epochs, and a snapshot file.
+   * left: the log's older epochs (but those that synced, and those after
+   * them), and a snapshot file.
    */
   async #tidy(): Promise<void> {
     try {
       const parsed = parseEpoch(this.#branch)
-      if (parsed) {
-        for (const epoch of await epochsOf(this.#repo, parsed.log)) {
-          if (epoch.n < parsed.n) await this.#repo.branches.delete(epoch.branch)
-        }
-      }
+      await deleteOlderEpochs(this.#repo, this.#branch)
       const dir = this.#file.directory
       for (const leftover of [
         snapshotName(this.name),

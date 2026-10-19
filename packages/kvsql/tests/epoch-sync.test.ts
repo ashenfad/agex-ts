@@ -138,8 +138,9 @@ describe('a rebase onto another device’s new epoch', () => {
     expect(b.db.seq).toBe(5)
     expect(await rows(b.db)).toEqual(BOTH)
     expect(await integrity(b.db)).toBe('ok')
-    // its own epoch, the rebase's file, branch and tag all gone
-    expect(await b.repo.branches.list()).toEqual([NEXT])
+    // the rebase's file, branch and tag all gone; its own epoch stays,
+    // as it synced, until the sync deletes it
+    expect(await b.repo.branches.list()).toEqual([BRANCH, NEXT])
     expect(await b.repo.tags.list()).toEqual([])
     expect(await (b.dir as MemoryDirectory).exists(`${NAME}-rebase`)).toBe(false)
 
@@ -200,7 +201,7 @@ describe('a rebase onto another device’s new epoch', () => {
     })
     expect(b.db.branch).toBe(NEXT)
     expect(await dump(b.db)).toEqual(await dump(a.db))
-    expect(await b.repo.branches.list()).toEqual([NEXT])
+    expect(await b.repo.branches.list()).toEqual([BRANCH, NEXT])
   })
 
   it('follows the snapshots back across an epoch between', async () => {
@@ -294,7 +295,7 @@ describe('a rebase onto another device’s new epoch', () => {
     expect(kept).toMatchObject({ status: 'kept', kept: 'theirs' })
     expect(b.db.branch).toBe(NEXT)
     expect(await dump(b.db)).toEqual(await dump(a.db))
-    expect(await b.repo.branches.list()).toEqual([NEXT])
+    expect(await b.repo.branches.list()).toEqual([BRANCH, NEXT])
     await b.db.restore(kept.checkpoint?.id as string)
     expect(await dump(b.db)).toEqual(mine)
   })
@@ -307,7 +308,7 @@ describe('a rebase onto another device’s new epoch', () => {
     expect(kept).toMatchObject({ status: 'kept', kept: 'mine' })
     expect(b.db.branch).toBe('db/test/2')
     expect(await dump(b.db)).toEqual(mine)
-    expect(await b.repo.branches.list()).toEqual(['db/test/2'])
+    expect(await b.repo.branches.list()).toEqual([BRANCH, NEXT, THIRD])
     expect((await pushBranch(b.store, remote, 'db/test/2')).status).toBe('created')
 
     const aSynced = await a.repo.branches.get(NEXT)
@@ -472,6 +473,57 @@ describe('entries pushed to an epoch while another device started the next', () 
     expect((await a.db.adopt(later)).status).toBe('up-to-date')
   })
 
+  it('are taken in after a sweep of the store: the old epoch stays while it is synced', async () => {
+    const remote = new MemoryRemote(new Memory())
+    const a = await device(remote)
+    await run(
+      a.db,
+      ['CREATE TABLE t (id INTEGER PRIMARY KEY NOT NULL, x TEXT, y TEXT)'],
+      ["INSERT INTO t VALUES (1, 'x1', 'y1'), (2, 'x2', 'y2')"],
+    )
+    await push(a, remote)
+    const b = await device(remote)
+    // flushed but never pushed: only a has where its snapshot is taken
+    await run(a.db, ["UPDATE t SET x = 'a' WHERE id = 1"])
+    await a.db.flush()
+    await a.db.newEpoch()
+    expect(await push(a, remote)).toBe('created')
+    expect(await a.repo.branches.list()).toEqual([BRANCH, NEXT])
+    await run(b.db, ["UPDATE t SET y = 'b' WHERE id = 1"])
+    expect(await push(b, remote)).toBe('pushed')
+
+    await a.repo.gc({ minAge: 0 })
+    const tip = (await pullBranch(a.store, remote, BRANCH)).remoteHead as string
+    expect(await a.db.adopt(tip)).toMatchObject({ status: 'rebased', theirs: 1 })
+    expect(await rows(a.db)).toEqual([
+      { id: 1, x: 'a', y: 'b' },
+      { id: 2, x: 'x2', y: 'y2' },
+    ])
+
+    // with the remote's copy gone, and its sync head, opening deletes it
+    expect((await deleteRemoteBranch(a.store, remote, BRANCH, { expected: tip })).status).toBe(
+      'deleted',
+    )
+    await a.db.close()
+    const again = await track(open(a.dir, a.repo, { epochs: false }))
+    expect(again.branch).toBe(NEXT)
+    expect(await a.repo.branches.list()).toEqual([NEXT])
+  })
+
+  it('keep the oldest epoch that synced and every one after it, and delete the rest', async () => {
+    const remote = new MemoryRemote(new Memory())
+    const a = await device(remote)
+    await run(a.db, ['CREATE TABLE t (id INTEGER PRIMARY KEY NOT NULL)'])
+    await push(a, remote)
+    await a.db.newEpoch()
+    await a.db.newEpoch()
+    // epoch 1 never synced, but the snapshot chain back to 0 runs through it
+    expect(await a.repo.branches.list()).toEqual([BRANCH, NEXT, THIRD])
+    expect((await deleteRemoteBranch(a.store, remote, BRANCH)).status).toBe('deleted')
+    await a.db.newEpoch()
+    expect(await a.repo.branches.list()).toEqual(['db/test/3'])
+  })
+
   it('stop at a conflict, and can be left out, kept as a checkpoint', async () => {
     const remote = new MemoryRemote(new Memory())
     const a = await device(remote)
@@ -514,7 +566,7 @@ describe('a rebase onto a new epoch cut short', () => {
     expect(['rebased', 'up-to-date'], at).toContain(result.status)
     expect(await rows(again), at).toEqual(BOTH)
     expect(again.branch, at).toBe(NEXT)
-    expect(await repo.branches.list(), at).toEqual([NEXT])
+    expect(await repo.branches.list(), at).toEqual([BRANCH, NEXT])
     expect(await repo.tags.list(), at).toEqual([])
   }
 

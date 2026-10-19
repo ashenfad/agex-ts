@@ -4,6 +4,24 @@ Versioned key-value store with branches, commits, and three-way merges. The Type
 
 > **Status:** Pre-alpha. Public API is unstable; pin a specific minor version.
 
+## Install
+
+```bash
+npm install @agex-ts/kvgit
+```
+
+The `'cbor'` codec runs on [cbor-x](https://github.com/kriszyp/cbor-x).
+Its optional native decoder, `cbor-extract`, has a build script, and
+nothing needs it: cbor-x falls back to its pure-JS path (the one
+browsers use). npm and yarn need nothing. pnpm 11 stops the install on
+an unapproved build script (`ERR_PNPM_IGNORED_BUILDS`), so decline it
+in `pnpm-workspace.yaml`:
+
+```yaml
+allowBuilds:
+  cbor-extract: false
+```
+
 ## Concept
 
 A `Map<string, T>` with git-like history. Every `commit()` creates a checkpoint; branches are first-class; sessions can fork cheaply because the underlying HAMT shares structure across versions. Three-way merges are pluggable per key.

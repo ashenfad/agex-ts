@@ -31,6 +31,8 @@ npm install agex-ts @agex-ts/world @agex-ts/kvgit @ai-sdk/anthropic zod
 Any AI SDK provider built on `@ai-sdk/provider` 4 works in place of
 `@ai-sdk/anthropic` (4 or later). `zod` is for task types (any Standard
 Schema that gives its JSON Schema works). Node 22 or later.
+With pnpm 11, add the one `pnpm-workspace.yaml` entry in
+[kvgit's install note](../kvgit-ts/README.md#install).
 
 ## Quick start
 

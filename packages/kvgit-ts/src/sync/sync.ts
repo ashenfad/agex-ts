@@ -29,7 +29,14 @@
 import type { KVStore, WireCommit } from '../types'
 import { isAncestor } from '../versioned/ancestry'
 import { COMMIT_ROOT, readBranchHead } from '../versioned/layout'
-import { applyWire, claimSyncHead, clearSyncHead, publishHead, setSyncHead } from './apply'
+import {
+  applyWire,
+  claimSyncHead,
+  clearSyncHead,
+  markSyncing,
+  publishHead,
+  setSyncHead,
+} from './apply'
 import type { Remote } from './remote'
 import { walkDelta } from './walk'
 
@@ -157,9 +164,15 @@ export async function pushBranch(
   remote: Remote,
   branch: string,
 ): Promise<SyncResult> {
+  if ((await readBranchHead(store, branch)) === null) {
+    throw new Error(`pushBranch: local branch '${branch}' does not exist`)
+  }
+  // marked before the head is read: a delete unless synced lands before
+  // (and the branch is gone) or keeps it
+  await markSyncing(store, branch)
   const localHead = await readBranchHead(store, branch)
   if (localHead === null) {
-    throw new Error(`pushBranch: local branch '${branch}' does not exist`)
+    throw new Error(`pushBranch: local branch '${branch}' was deleted`)
   }
   const syncHead = await claimSyncHead(store, branch, remote)
 

@@ -24,6 +24,7 @@
  * `applyWire` itself never touches it.
  */
 
+import { UnknownBranchError } from '../errors'
 import { EMPTY_HASH } from '../hamt'
 import { Keyset } from '../keyset'
 import type { KVStore, KeysetEntry, WireCommit } from '../types'
@@ -39,6 +40,7 @@ import {
   SYNC_HEAD,
   SYNC_HEADS_OF,
   SYNC_HEAD_AT,
+  SYNC_MARK,
   blobKey,
   checkStorageVersion,
   commitHash,
@@ -49,6 +51,7 @@ import {
   safeLoads,
 } from '../versioned/layout'
 import { inFlightMarker, tryLand, waitForGc } from '../versioned/lease'
+import { rejectReservedBranch } from '../versioned/refs'
 
 export interface ApplyWireOptions {
   /**
@@ -350,12 +353,47 @@ export async function getSyncHead(
   return keys.length === 1 ? readHead(store, keys[0] as string) : null
 }
 
-/** Whether `branch` has a sync head on record with any remote: it has
- *  synced somewhere, and was not forgotten since. */
+const MARKED = dumps(true)
+
+/** Whether `branch` has a sync head on record with any remote, or a
+ *  push of it has begun: it syncs somewhere, and was not forgotten
+ *  since. */
 export async function hasSyncHead(store: KVStore, branch: string): Promise<boolean> {
+  if ((await store.get(SYNC_MARK(branch))) !== null) return true
   if ((await store.get(SYNC_HEAD(branch))) !== null) return true
   for await (const _ of store.keys(SYNC_HEADS_OF(branch))) return true
   return false
+}
+
+/** Mark `branch` as syncing, before a push reads it. */
+export async function markSyncing(store: KVStore, branch: string): Promise<void> {
+  if ((await store.get(SYNC_MARK(branch))) === null) await store.set(SYNC_MARK(branch), MARKED)
+}
+
+/**
+ * Delete `branch` unless it syncs with some remote (`hasSyncHead`);
+ * true if it went. The check and the delete are one step against a
+ * sync taking the branch up: a push marks the branch before reading
+ * it, so either the delete lands first and the push finds no branch,
+ * or the delete sees the mark and keeps it.
+ *
+ * @throws UnknownBranchError if there is no such branch.
+ */
+export async function deleteBranchUnlessSynced(store: KVStore, branch: string): Promise<boolean> {
+  rejectReservedBranch(branch)
+  const head = BRANCH_HEAD(branch)
+  for (;;) {
+    const current = await store.get(head)
+    if (current === null) throw new UnknownBranchError(branch)
+    if (await hasSyncHead(store, branch)) return false
+    const expected = new Map<string, Uint8Array | null>([
+      [head, current],
+      [SYNC_MARK(branch), null],
+      [SYNC_HEAD(branch), null],
+    ])
+    if (await store.casMany(expected, new Map(), [head, BRANCH_HEAD_PREV(branch)])) return true
+    // it moved, or began syncing: look again
+  }
 }
 
 /** Record `commit` as the head `branch` last synced to on `remote`
@@ -369,12 +407,23 @@ export async function setSyncHead(
 ): Promise<void> {
   const id = remote === undefined ? undefined : ownerId(remote)
   if (id === undefined) {
-    await store.set(SYNC_HEAD(branch), dumps(commit))
+    await store.casMany(
+      new Map(),
+      new Map([
+        [SYNC_HEAD(branch), dumps(commit)],
+        [SYNC_MARK(branch), MARKED],
+      ]),
+    )
     return
   }
-  await store.casMany(new Map(), new Map([[SYNC_HEAD_AT(branch, id), dumps(commit)]]), [
-    SYNC_HEAD(branch),
-  ])
+  await store.casMany(
+    new Map(),
+    new Map([
+      [SYNC_HEAD_AT(branch, id), dumps(commit)],
+      [SYNC_MARK(branch), MARKED],
+    ]),
+    [SYNC_HEAD(branch)],
+  )
 }
 
 /**
@@ -425,4 +474,8 @@ export async function clearSyncHead(
     for (const k of await keysUnder(store, SYNC_HEADS_OF(branch))) await store.remove(k)
   }
   await store.remove(SYNC_HEAD(branch))
+  // the mark goes with the last head
+  if ((await keysUnder(store, SYNC_HEADS_OF(branch))).length === 0) {
+    await store.remove(SYNC_MARK(branch))
+  }
 }

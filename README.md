@@ -9,10 +9,10 @@ fork is O(1). The TypeScript counterpart of
 them on meaning rather than bytes, and browser-native: code runs in a
 Web Worker, storage is IndexedDB.
 
-> **Status:** pre-alpha, rebuilt on the `rebuild` branch
-> ([`plan.md`](plan.md) is the plan and its decisions): termish-ts,
-> kvgit-ts, the world and agex-ts are done, and release together. The
-> published 0.5.x packages are the previous design.
+> **Status:** pre-alpha. Rebuilt in October 2026 as layers matching the
+> Python side (kvgit, nontainer, agex); the packages release together.
+> [`docs/design.md`](docs/design.md) has the decisions behind it, and
+> why.
 
 ## Packages
 
@@ -22,7 +22,7 @@ Web Worker, storage is IndexedDB.
 | [`@agex-ts/world`](packages/world) | The world: sessions as branches, the workspace, the code kernel, the tools, the turn, the inbox, delegation, the agent's git (`ws-git`), skills, compaction's record. nontainer's semantics. |
 | [`@agex-ts/kvgit`](packages/kvgit-ts) | Versioned key-value storage with branches, merges and sync; Python kvgit's v4 format, byte for byte. |
 | [`@agex-ts/termish`](packages/termish-ts) | A shell interpreter over an async filesystem protocol. |
-| [`@agex-ts/kvsql`](packages/kvsql) | SQLite in the browser on an OPFS file, with a kvgit changeset log for checkpoints and sync. In development. |
+| [`@agex-ts/kvsql`](packages/kvsql) | SQLite in the browser on an OPFS file, with a kvgit changeset log for checkpoints and sync. |
 
 ## A taste
 
@@ -41,8 +41,8 @@ const factor = agent.task({
 await factor({ n: 391 }) // [17, 23]
 ```
 
-[`packages/agex-ts`](packages/agex-ts) has the rest, and its `examples/`
-run end to end.
+[`packages/agex-ts`](packages/agex-ts) has the rest, and its
+`examples/quickstart.mjs` runs end to end.
 
 ## Working from a clone
 

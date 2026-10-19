@@ -319,8 +319,12 @@ this layer:
   write it with `getSyncHead` / `setSyncHead` / `clearSyncHead` in
   [`src/sync/apply.ts`](./src/sync/apply.ts), naming the remote;
   without one, `getSyncHead` answers with the branch's only sync head
-  and `clearSyncHead` forgets them all. `hasSyncHead` says whether a
-  branch has one with any remote.
+  and `clearSyncHead` forgets them all. A sync also marks the branch
+  (`__sync_mark__<branch>`) before a push reads it, and the mark goes
+  with its last head. `hasSyncHead` says whether a branch has a head
+  with any remote or the mark, and `deleteBranchUnlessSynced` deletes a
+  branch only if it has neither, in one step against a push taking it
+  up meanwhile.
 
 The storage layout and commit-identity primitives live in
 [`src/versioned/layout.ts`](./src/versioned/layout.ts) — the single

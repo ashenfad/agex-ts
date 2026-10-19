@@ -92,6 +92,11 @@ export const SYNC_HEADS_OF = (branch: string): string =>
 export const SYNC_HEAD_AT = (branch: string, remoteId: string): string =>
   `${SYNC_HEADS_OF(branch)}${encodeURIComponent(remoteId)}`
 
+/** That `branch` syncs with some remote: written before a push reads
+ *  the branch, and with any sync head, so a delete unless synced either
+ *  lands before a sync takes the branch up or fails. */
+export const SYNC_MARK = (branch: string): string => `__sync_mark__${branch}`
+
 /** Length of a commit hash in hex chars (sha-256 truncated to 40). */
 export const COMMIT_HASH_LEN = 40
 

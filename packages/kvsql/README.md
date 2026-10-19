@@ -220,11 +220,11 @@ await db.close() // flushes first
   transaction so far in it, flushed or not) is gzipped and committed to
   the new branch, the file moves onto it in one transaction, and the
   old epoch's branch is deleted, so the log behind the snapshot goes
-  without any branch being rewritten. An older epoch that has synced
-  with a remote (kvgit has a sync head for it) stays, with every epoch
-  after it: what another device pushed to it is taken in from where the
-  next epoch's snapshot was taken, through the snapshots after (`adopt`,
-  below). The sync deletes it once the remote's copy is gone, and clears
+  without any branch being rewritten. An older epoch that syncs with a
+  remote (kvgit has a sync head for it, or a push of it began) stays,
+  with every epoch after it: what another device pushed to it is taken
+  in from where the next epoch's snapshot was taken, through the
+  snapshots after (`adopt`, below). The sync deletes it once the remote's copy is gone, and clears
   its sync head; opening then deletes any left. `onEpochsDeleted` hears
   of each deletion: what those epochs alone held stays in the store
   until a sweep (`repo.gc()`). Calls go on while the snapshot is

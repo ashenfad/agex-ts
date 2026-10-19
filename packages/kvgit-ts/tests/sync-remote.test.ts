@@ -5,6 +5,7 @@ import {
   Repo,
   VersionedKV,
   clearSyncHead,
+  deleteBranchUnlessSynced,
   deleteRemoteBranch,
   gcStore,
   getSyncHead,
@@ -341,6 +342,36 @@ describe('one branch, two remotes', () => {
     // the record shared by remotes without an id counts too
     await syncBranch(a.store, new MemoryRemote(new Memory()), BRANCH)
     expect(await hasSyncHead(a.store, BRANCH)).toBe(true)
+  })
+
+  it('deletes a branch unless it syncs, with a push begun counting', async () => {
+    const remote = new MemoryRemote(new Memory())
+    const a = await device()
+    await a.vk.commit({ updates: new Map([['k', bytes('1')]]) })
+    // a delete tried while the push is under way, before its sync head is set
+    let during: boolean | null = null
+    const racing = new Proxy(remote, {
+      get(target, prop) {
+        if (prop === 'push') {
+          return async (...args: Parameters<MemoryRemote['push']>) => {
+            during = await deleteBranchUnlessSynced(a.store, BRANCH)
+            return target.push(...args)
+          }
+        }
+        const value = Reflect.get(target, prop)
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    })
+    expect((await pushBranch(a.store, racing, BRANCH)).status).toBe('created')
+    expect(during).toBe(false)
+    expect(await deleteBranchUnlessSynced(a.store, BRANCH)).toBe(false)
+    // forgotten everywhere, it goes
+    await clearSyncHead(a.store, BRANCH)
+    expect(await hasSyncHead(a.store, BRANCH)).toBe(false)
+    expect(await deleteBranchUnlessSynced(a.store, BRANCH)).toBe(true)
+    await expect(deleteBranchUnlessSynced(a.store, BRANCH)).rejects.toThrow(/chat-ab12cd34/)
+    // a push after the delete finds no branch
+    await expect(pushBranch(a.store, remote, BRANCH)).rejects.toThrow(/does not exist/)
   })
 
   it("reports a branch gone from one remote without the other's head standing in", async () => {

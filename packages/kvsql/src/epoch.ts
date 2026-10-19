@@ -25,7 +25,7 @@ import {
   UnknownBranchError,
   type Worktree,
   cborCodec,
-  hasSyncHead,
+  deleteBranchUnlessSynced,
 } from '@agex-ts/kvgit'
 import { deleteCheckpoints } from './checkpoint'
 import { MAGIC_BYTES, deleteDatabaseFiles } from './database'
@@ -180,8 +180,8 @@ export async function epochsOf(
 
 /**
  * Delete the epochs of `branch`'s log older than it, but for the oldest
- * that has synced with a remote (a sync head on record) and every one
- * after it: what another device pushed to that epoch is taken in
+ * that syncs with a remote (a sync head on record, or a push begun) and
+ * every one after it: what another device pushed to that epoch is taken in
  * (`adopt`) from where the next one's snapshot was taken, through the
  * snapshots of those after it. The sync deletes them once the remote's
  * copy is gone. Returns the epochs deleted.
@@ -192,9 +192,9 @@ export async function deleteOlderEpochs(repo: Repo<Uint8Array>, branch: string):
   const older = (await epochsOf(repo, parsed.log)).filter((e) => e.n < parsed.n).reverse()
   const deleted: string[] = []
   for (const epoch of older) {
-    if (await hasSyncHead(repo.store, epoch.branch)) break
     try {
-      await repo.branches.delete(epoch.branch)
+      // one step with the check, against a sync taking it up meanwhile
+      if (!(await deleteBranchUnlessSynced(repo.store, epoch.branch))) break
       deleted.push(epoch.branch)
     } catch (err) {
       if (!(err instanceof UnknownBranchError)) throw err

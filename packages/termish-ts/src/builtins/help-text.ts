@@ -11,6 +11,10 @@ export interface HelpEntry {
 
 export const HELP: Readonly<Record<string, HelpEntry>> = {
   '[': { summary: 'evaluate a condition (same as test)', usage: '[ EXPRESSION ]' },
+  awk: {
+    summary: 'scan and process text by patterns and fields',
+    usage: "awk [-F FS] [-v VAR=VALUE]... ('PROGRAM' | -f PROGFILE) [FILE...]",
+  },
   basename: { summary: 'strip the directory from a path', usage: 'basename PATH [SUFFIX]' },
   cat: {
     summary: 'print files',

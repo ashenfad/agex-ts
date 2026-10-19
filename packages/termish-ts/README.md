@@ -105,16 +105,16 @@ a host's own commands included.
   `\(...\)`, `\|`) unless given `-E`; `grep` exits 1 when nothing
   matches and 2 on an error.
 - **Refused, with advice:** loops, conditionals, `case`, function
-  definitions, variable assignment, `$(...)` and `$((...))` are parse
-  errors that say where they are (line and column) and what to use
+  definitions, variable assignment, `$(...)` and `$((...))`, and `&`
+  (a background job, or bash's `&>`) are parse errors that say where they are (line and column) and what to use
   instead (xargs, `find -exec`, `&&` / `||`). Every one in a script is
   reported at once, and nothing runs.
 
 Heredoc bodies are extracted before tokenization, so quotes, pipes, redirects,
 and backslashes inside them are literal. Bare, single-quoted, and double-quoted
 delimiters have identical no-expansion semantics. Closing delimiters may be
-indented for agent ergonomics. Here-strings (`<<<`) and tab-stripping heredocs
-(`<<-`) are not supported.
+indented for agent ergonomics. Here-strings (`<<<`) are not supported, and a
+tab-stripping heredoc (`<<-`) is refused, pointing at `<<`.
 
 ## Filesystems
 

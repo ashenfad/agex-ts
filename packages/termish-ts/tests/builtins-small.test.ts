@@ -9,6 +9,8 @@ import { describe, expect, it } from 'vitest'
 import { md5Hex } from '../src/builtins/checksum'
 import { strftime } from '../src/builtins/clock'
 import { duHuman } from '../src/builtins/fsinfo'
+import { HELP } from '../src/builtins/help-text'
+import { BUILTINS } from '../src/builtins/index'
 import { SEQ_MAX } from '../src/builtins/lines'
 import type { CommandHandler } from '../src/context'
 import { TerminalError } from '../src/errors'
@@ -50,6 +52,15 @@ describe('host commands', () => {
       commands: { ls: Object.assign(async () => undefined, { description: 'a host ls' }) },
     })
     expect(out).toBe('ls - a host ls\n')
+  })
+})
+
+describe('help', () => {
+  it('has a summary and a usage for every builtin', () => {
+    const missing = [...BUILTINS.keys()].filter(
+      (name) => !HELP[name]?.summary || !HELP[name]?.usage,
+    )
+    expect(missing).toEqual([])
   })
 })
 

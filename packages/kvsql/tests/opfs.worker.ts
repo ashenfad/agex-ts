@@ -13,6 +13,7 @@ import {
   deleteDatabase,
   journalName,
   openDatabase,
+  reclaimPages,
 } from '../src/index'
 
 const ROOT = 'kvsql-tests'
@@ -72,6 +73,25 @@ const scenarios: Record<string, () => Promise<unknown>> = {
         journal: await dir.exists(journalName('app.db')),
       }
       return { rows, journalMode, integrity, dbSize, journalHot, existsAfterDelete }
+    }),
+
+  /** A large delete's pages given back: the OPFS file shrinks. */
+  reclaim: () =>
+    withDirectory(async (dir) => {
+      const file = await openDatabase(dir, 'app.db')
+      file.db.exec(
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT); WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM s WHERE i < 4000) INSERT INTO t SELECT i, printf('%01000d', i) FROM s",
+      )
+      const full = await fileSize(dir, 'app.db')
+      file.db.exec('DELETE FROM t WHERE id > 400')
+      const deleted = await fileSize(dir, 'app.db')
+      const freed = reclaimPages(file.db)
+      const reclaimed = await fileSize(dir, 'app.db')
+      const integrity = file.db.selectValue('PRAGMA integrity_check')
+      const rows = file.db.selectValue('SELECT count(*) FROM t')
+      file.close()
+      await deleteDatabase(dir, 'app.db')
+      return { full, deleted, freed, reclaimed, integrity, rows }
     }),
 
   /** What a second connection, or a delete, does while a database is open. */

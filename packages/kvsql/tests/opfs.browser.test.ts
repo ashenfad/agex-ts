@@ -57,6 +57,22 @@ describe('openDatabase on OPFS', () => {
     expect(got.existsAfterDelete).toEqual({ db: false, journal: false })
   })
 
+  it("gives a large delete's pages back, shrinking the file", async () => {
+    const got = await run<{
+      full: number
+      deleted: number
+      freed: number
+      reclaimed: number
+      integrity: unknown
+      rows: number
+    }>('reclaim')
+    expect(got.deleted).toBe(got.full)
+    expect(got.freed).toBeGreaterThan(0)
+    expect(got.reclaimed).toBeLessThan(got.full / 4)
+    expect(got.integrity).toBe('ok')
+    expect(got.rows).toBe(400)
+  })
+
   it('allows one connection per database', async () => {
     const got = await run<Record<string, unknown>>('exclusive')
     console.log(`kvsql exclusive ${navigator.userAgent}: ${JSON.stringify(got)}`)

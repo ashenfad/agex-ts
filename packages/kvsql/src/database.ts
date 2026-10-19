@@ -38,6 +38,19 @@ export const JOURNAL_MODE = 'persist'
 export const JOURNAL_SIZE_LIMIT = 1 << 20
 
 /**
+ * The fewest free bytes a file gives back (`reclaimPages`): fewer, the
+ * next writes reuse them.
+ */
+export const RECLAIM_MIN_BYTES = 1 << 20
+
+/**
+ * The least share of a file its free pages must be before they're
+ * given back: a file whose writes keep reusing them doesn't shrink only
+ * to grow again.
+ */
+export const RECLAIM_SHARE = 0.25
+
+/**
  * The length of SQLite's magic string, `SQLite format 3\0`, which every
  * database file starts with: SQLite reads a file that doesn't start
  * with it as no database at all (`SQLITE_NOTADB`). So kvsql writes a
@@ -226,6 +239,10 @@ function releaseFiles(vfs: KvsqlVfs, path: string, files: readonly SyncFile[]): 
  * it; a hot journal left by a crash is rolled back by SQLite on first
  * access.
  *
+ * A new file is in incremental auto-vacuum mode, so the pages a large
+ * delete frees can be given back (`reclaimPages`); one made before that
+ * keeps its mode, and a copy `VACUUM INTO` makes of it takes this one.
+ *
  * One connection per database: opening a database already open in
  * this realm fails, and in a browser so does opening one that another
  * worker or tab has open (its files' access handles are exclusive).
@@ -264,6 +281,9 @@ export async function openDatabaseFile(dir: Directory, name: string): Promise<Da
     const mode = db.selectValue(`PRAGMA journal_mode=${JOURNAL_MODE}`)
     if (mode !== JOURNAL_MODE)
       throw new Error(`journal mode is ${String(mode)}, not ${JOURNAL_MODE}`)
+    // takes on a file with no tables yet, and for a `VACUUM INTO`; set
+    // again on a file in the mode, it would rewrite the header
+    if (db.selectValue('PRAGMA auto_vacuum') !== 2) db.exec('PRAGMA auto_vacuum = INCREMENTAL')
     return new DatabaseFile(db, dir, name, vfs, path, files)
   } catch (err) {
     vfs.takeError()
@@ -278,6 +298,34 @@ export async function openDatabaseFile(dir: Directory, name: string): Promise<Da
     }
     throw err
   }
+}
+
+/**
+ * Give `db`'s free pages back to the file system, shrinking its file,
+ * once they are at least {@link RECLAIM_MIN_BYTES} and
+ * {@link RECLAIM_SHARE} of it, in a file in incremental auto-vacuum
+ * mode; returns how many went. Outside a transaction: it runs one of its
+ * own. Each of its calls on `db` runs through `run` (a schema guard's
+ * `trusted`).
+ */
+export function reclaimPages(db: Database, run: <T>(fn: () => T) => T = (fn) => fn()): number {
+  return run(() => {
+    if (db.selectValue('PRAGMA auto_vacuum') !== 2) return 0
+    const free = Number(db.selectValue('PRAGMA freelist_count'))
+    const pages = Number(db.selectValue('PRAGMA page_count'))
+    const size = Number(db.selectValue('PRAGMA page_size'))
+    if (free * size < RECLAIM_MIN_BYTES || free < pages * RECLAIM_SHARE) return 0
+    // a page a step
+    const step = db.prepare('PRAGMA incremental_vacuum')
+    try {
+      while (step.step()) {
+        // freeing
+      }
+    } finally {
+      step.finalize()
+    }
+    return free - Number(db.selectValue('PRAGMA freelist_count'))
+  })
 }
 
 /**

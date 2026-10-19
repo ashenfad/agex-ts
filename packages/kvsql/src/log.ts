@@ -813,10 +813,11 @@ export class LoggedDatabase {
 
   /**
    * Commit every pending transaction to the log as one entry. Returns
-   * null if none were pending.
+   * null if none were pending. If another copy of the database flushed
+   * to the branch first, this one's transactions are rebased after its
+   * entries, then flushed.
    *
-   * @throws RebaseRequiredError if another copy of the database
-   *   flushed to the branch first.
+   * @throws RebaseRequiredError if they conflict with those entries.
    */
   flush(): Promise<FlushResult | null> {
     if (this.#closing) return Promise.reject(closedError())
@@ -915,11 +916,13 @@ export class LoggedDatabase {
    * on the other, one key inserted on both, a constraint the two break
    * together, or a schema change on either side. Rebasing again with
    * `keep` settles it, the other side kept as a checkpoint; keeping
-   * this database's changes over a schema change of the log's isn't
-   * supported yet.
+   * this database's changes over a schema change of the log's starts a
+   * new epoch from its file.
    *
-   * `onto` must be on the database's current epoch, and in the
-   * repository (a sync that found the two diverged has fetched it).
+   * `onto` must be in the repository (a sync that found the two
+   * diverged has fetched it). With a newer epoch of the log there, and
+   * no `onto`, the database moves onto it instead, its changes since
+   * `synced` with it.
    *
    * @throws LogError for a detached copy, or an `onto` that isn't in
    *   the repository or shares no history with the database's log.

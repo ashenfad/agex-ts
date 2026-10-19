@@ -63,6 +63,11 @@ export interface DatabaseStorage {
    * the opener made for it alone (its directory, its own store).
    */
   destroy?(): void | Promise<void>
+  /**
+   * Called when the log's older epochs are deleted (`onEpochsDeleted`):
+   * what they alone held is left for a sweep of the repository.
+   */
+  epochsDeleted?(branches: string[]): void
 }
 
 /**
@@ -510,7 +515,7 @@ class DatabaseHost<C extends DatabaseConfig> {
     for (;;) {
       try {
         this.#storage ??= await this.#opener(this.#config)
-        const { dir, repo } = this.#storage
+        const { dir, repo, epochsDeleted } = this.#storage
         const { label, foreignKeys, flush, epochs, autoCheckpoints, detached } = this.#config
         const options = {
           dir,
@@ -530,6 +535,9 @@ class DatabaseHost<C extends DatabaseConfig> {
                 ...(autoCheckpoints !== undefined && { autoCheckpoints }),
                 onFlushError: (err) => this.#flushFailed(err),
                 onEpochError: (err) => this.#flushFailed(err),
+                ...(epochsDeleted !== undefined && {
+                  onEpochsDeleted: (branches: string[]) => epochsDeleted(branches),
+                }),
               })
         this.#openError = undefined
         this.#role = 'holder'

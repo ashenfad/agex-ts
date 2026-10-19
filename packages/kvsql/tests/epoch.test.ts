@@ -95,6 +95,25 @@ describe('a new epoch', () => {
     await db.close()
   })
 
+  it('reports the older epochs it deletes, at the move and at open', async () => {
+    const repo = await repoOver()
+    const dir = new MemoryDirectory()
+    const deleted = vi.fn()
+    const db = await open(dir, repo, { onEpochsDeleted: deleted })
+    await db.query('CREATE TABLE t (id INTEGER PRIMARY KEY NOT NULL)')
+    await db.newEpoch()
+    expect(deleted.mock.calls).toEqual([[[BRANCH]]])
+    await db.close()
+
+    // one left behind goes at the next open; with none, nothing is reported
+    await repo.branches.create(BRANCH)
+    const again = await open(dir, repo, { branch: NEXT, onEpochsDeleted: deleted })
+    expect(deleted.mock.calls).toEqual([[[BRANCH]], [[BRANCH]]])
+    await again.close()
+    await (await open(dir, repo, { branch: NEXT, onEpochsDeleted: deleted })).close()
+    expect(deleted).toHaveBeenCalledTimes(2)
+  })
+
   it('takes calls while the snapshot is committed, and flushes them to the new epoch', async () => {
     const repo = await repoOver()
     const db = await seeded(new MemoryDirectory(), repo)

@@ -574,6 +574,20 @@ describe('epochs', () => {
     await db.delete()
     expect(await repo.branches.list()).toEqual([])
   })
+
+  it("tells the storage which of the log's epochs it deleted", async () => {
+    const o = setup()
+    const deleted: string[][] = []
+    const w = o.worker('a', async () => ({
+      dir: new MemoryDirectory(),
+      repo: await Repo.open(o.store),
+      epochsDeleted: (branches: string[]) => deleted.push(branches),
+    }))
+    const db = client(w.connect(CONFIG))
+    await db.query('CREATE TABLE t (id INTEGER PRIMARY KEY)')
+    await db.newEpoch()
+    expect(deleted).toEqual([['kvsql/test/0']])
+  })
 })
 
 describe('content hash', () => {

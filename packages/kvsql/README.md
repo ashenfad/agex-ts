@@ -225,7 +225,9 @@ await db.close() // flushes first
   after it: what another device pushed to it is taken in from where the
   next epoch's snapshot was taken, through the snapshots after (`adopt`,
   below). The sync deletes it once the remote's copy is gone, and clears
-  its sync head; opening then deletes any left. Calls go on while the snapshot is
+  its sync head; opening then deletes any left. `onEpochsDeleted` hears
+  of each deletion: what those epochs alone held stays in the store
+  until a sweep (`repo.gc()`). Calls go on while the snapshot is
   committed; flushes wait, their transactions safe in the file, and go
   to the new epoch. The database also starts one by itself (`epochs`):
   when the epoch's log reaches half the snapshot's gzipped size, or one
@@ -236,8 +238,7 @@ await db.close() // flushes first
   `onEpochError`. A branch not named `<name>/<n>` has no epochs.
 - **Opening** follows the log to its newest finished epoch, whichever
   of its branches it is asked for by, and deletes the older ones (but
-  those kept for syncing, above). A file
-  that is missing, or behind on an older epoch with nothing pending, is
+  those kept for syncing, above). A file that is missing, or behind on an older epoch with nothing pending, is
   rebuilt from the epoch's snapshot (`recovery.snapshot`); the file the
   snapshot was taken from, left on the old epoch by a crash, finishes
   its move (it is known by its position and its pending transactions'
@@ -432,9 +433,10 @@ serve(async (config) => ({ dir: await OpfsDirectory.at('dbs', config.id), repo: 
 
 The opener runs in the worker that takes the database's lock, each time
 it opens it, and in the worker that copies a database to it. It
-returns `{ dir, repo }` (a detached copy needs no `repo`), and may add `close()` (called
-after the database closes) and `destroy()` (called when it is deleted,
-to remove what was the database's alone). Config fields of the app's
+returns `{ dir, repo }` (a detached copy needs no `repo`), and may add
+`close()` (called after the database closes), `destroy()` (called when
+it is deleted, to remove what was the database's alone) and
+`epochsDeleted(branches)` (the log's `onEpochsDeleted`). Config fields of the app's
 own reach the opener as they are. `serve(open, { scope: null })`
 listens for nothing and leaves the app to pass `server.connect(config,
 port)` the ports from its own messages.

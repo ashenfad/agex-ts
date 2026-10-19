@@ -35,6 +35,9 @@ export {
   JOURNAL_SIZE_LIMIT,
   journalName,
   openDatabase,
+  RECLAIM_MIN_BYTES,
+  RECLAIM_SHARE,
+  reclaimPages,
   vacuumDatabase,
 } from './database'
 export {

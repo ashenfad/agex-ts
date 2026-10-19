@@ -77,6 +77,17 @@ from a copy.
   memory the VFS doesn't provide.
 - **Temp files in memory.** Temp tables, sorts and statement journals
   never reach the directory.
+- **Free pages given back.** A new file is in incremental auto-vacuum
+  mode, and `reclaimPages(db)` gives its free pages back to the file
+  system once they're at least 1 MiB and a quarter of the file
+  (`RECLAIM_MIN_BYTES`, `RECLAIM_SHARE`): fewer, the next writes reuse
+  them. A logged database calls it after each flush and new epoch,
+  which drop the pending copy of what was written (a bulk insert's is
+  as large as the rows; an update's holds the old values and the new),
+  and at open. A file made without the mode keeps it, and its free
+  pages: converting would take a `VACUUM`, which builds the whole
+  database again in memory. A copy `VACUUM INTO` makes of it (an
+  epoch's snapshot) is in the mode.
 
 ### Your own directory
 

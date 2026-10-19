@@ -12,6 +12,7 @@ import {
   journalName,
   loadSqlite,
   openDatabase,
+  reclaimPages,
 } from '../src/index'
 
 type Row = { id: number; v: string }
@@ -190,6 +191,59 @@ describe('openDatabase on a MemoryDirectory', () => {
     // A name that only contains the suffix is fine.
     const ok = await openDatabase(dir, 'app-journal-notes')
     ok.close()
+  })
+})
+
+describe('giving free pages back', () => {
+  const NAME = 'app.db'
+  const pages = (db: Database) => ({
+    pages: Number(db.selectValue('PRAGMA page_count')),
+    free: Number(db.selectValue('PRAGMA freelist_count')),
+  })
+  const fill = (db: Database, to: number) =>
+    db.exec(`INSERT INTO t SELECT value, printf('%01000d', value) FROM ${series(1, to)}`)
+
+  it("makes a new file incremental, and gives a large delete's pages back", async () => {
+    const dir = new MemoryDirectory()
+    const file = await openDatabase(dir, NAME)
+    file.db.exec('CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)')
+    expect(file.db.selectValue('PRAGMA auto_vacuum')).toBe(2)
+    fill(file.db, 3000)
+    // a small share free stays, for the next writes
+    file.db.exec('DELETE FROM t WHERE id > 2900')
+    expect(reclaimPages(file.db)).toBe(0)
+    file.db.exec('DELETE FROM t WHERE id > 500')
+    const before = pages(file.db)
+    expect(reclaimPages(file.db)).toBe(before.free)
+    expect(pages(file.db)).toEqual({ pages: before.pages - before.free, free: 0 })
+    expect(integrity(file.db)).toBe('ok')
+    expect(file.db.selectValue('SELECT count(*) FROM t')).toBe(500)
+    file.close()
+
+    // and opening it again writes nothing
+    const image = dir.image()
+    const reopened = new MemoryDirectory(image)
+    const again = await openDatabase(reopened, NAME)
+    expect(again.db.selectValue('PRAGMA auto_vacuum')).toBe(2)
+    again.close()
+    expect(reopened.image().get(NAME)).toEqual(image.get(NAME))
+  })
+
+  it('leaves a file made without auto-vacuum as it is', async () => {
+    const dir = new MemoryDirectory()
+    // as files were made before: converted with a VACUUM
+    const raw = await openDatabase(dir, NAME)
+    raw.db.exec(
+      'CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT); PRAGMA auto_vacuum = NONE; VACUUM',
+    )
+    fill(raw.db, 2000)
+    raw.db.exec('DELETE FROM t')
+    raw.close()
+    const file = await openDatabase(dir, NAME)
+    expect(file.db.selectValue('PRAGMA auto_vacuum')).toBe(0)
+    expect(reclaimPages(file.db)).toBe(0)
+    expect(pages(file.db).free).toBeGreaterThan(0)
+    file.close()
   })
 })
 

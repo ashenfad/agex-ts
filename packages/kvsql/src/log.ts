@@ -62,6 +62,7 @@ import {
   deleteDatabaseFiles,
   openDatabaseFile,
   rebaseName,
+  reclaimPages,
   restoreName,
   snapshotName,
   vacuumInto,
@@ -672,6 +673,7 @@ export class LoggedDatabase {
       throw err
     }
     await log.#tidy()
+    log.#reclaim()
     if (log.#pending > 0) log.#arm()
     return log
   }
@@ -1347,6 +1349,7 @@ export class LoggedDatabase {
       this.#exec('DELETE FROM _kvsql_pending WHERE seq <= ?', [last.seq])
       this.#saveMeta(next)
     })
+    this.#reclaim()
     this.#meta = next
     this.#pending -= items.length
     this.#flushError = undefined
@@ -2717,6 +2720,7 @@ export class LoggedDatabase {
         throw err
       }
     }
+    this.#reclaim()
     const previous = this.#branch
     this.#meta = next
     this.#pending -= dropped
@@ -3166,6 +3170,18 @@ export class LoggedDatabase {
   /** Run one of kvsql's own statements. */
   #exec(sql: string, bind?: readonly SqlValue[]): void {
     this.#guard.trusted(() => this.#db.exec({ sql, ...(bind !== undefined && { bind }) }))
+  }
+
+  /**
+   * Give the file's free pages back once they're many, as after a flush
+   * or a new epoch drops a large transaction's pending copy
+   * (`reclaimPages`). A failure leaves them for the next time: the file
+   * is only larger than it needs to be.
+   */
+  #reclaim(): void {
+    try {
+      reclaimPages(this.#db, (fn) => this.#guard.trusted(fn))
+    } catch {}
   }
 
   /** Run `fn` in a file transaction of kvsql's own. */

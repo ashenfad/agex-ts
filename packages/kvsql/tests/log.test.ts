@@ -564,6 +564,30 @@ describe('flushing', () => {
     ])
   })
 
+  it("gives back the pages a large transaction's pending copy held", async () => {
+    const { db } = await fresh({ flush: { every: 0 } })
+    await db.query('CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)')
+    const size = async () =>
+      (
+        await db.query(
+          'SELECT (SELECT page_count FROM pragma_page_count()) AS pages, (SELECT freelist_count FROM pragma_freelist_count()) AS free',
+        )
+      ).rows[0] as { pages: number; free: number }
+    // the rows, and their copy pending
+    await db.transaction(
+      Array.from(
+        { length: 3000 },
+        (_, i) => ['INSERT INTO t VALUES (?, ?)', [i, 'x'.repeat(1000)]] as const,
+      ),
+    )
+    const pending = await size()
+    await db.flush()
+    const flushed = await size()
+    expect(flushed.free).toBe(0)
+    expect(flushed.pages).toBeLessThan(pending.pages * 0.6)
+    expect(await db.query('SELECT count(*) AS n FROM t')).toMatchObject({ rows: [{ n: 3000 }] })
+  })
+
   it('flushes when the oldest pending transaction reaches the max age', async () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
     try {

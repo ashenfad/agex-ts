@@ -49,9 +49,11 @@ const CONDITIONAL_ADVICE =
   'control flow is not supported; test with [ ... ] and branch with && and || instead'
 const SUBSTITUTION_ADVICE =
   "Command substitution '$(...)' is not supported; run the inner command separately"
-const ARITHMETIC_ADVICE = 'arithmetic expansion $((...)) is not supported; compute it in run_ts'
+const ARITHMETIC_ADVICE = 'arithmetic expansion $((...)) is not supported; compute it in code'
 const ASSIGNMENT_ADVICE =
-  "variable assignment is not supported; write the value where it's used, or compute it in run_ts"
+  "variable assignment is not supported; write the value where it's used, or compute it in code"
+const BACKGROUND_ADVICE =
+  "'&' is not supported: commands run one at a time, in order (for both outputs in one file, use > FILE 2>&1)"
 
 /** A word that assigns a variable, as bash reads one in command
  *  position (`N=3`, `X="a b"`). */
@@ -350,6 +352,12 @@ function extractHeredocs(
     for (let operatorIndex = operators.length - 1; operatorIndex >= 0; operatorIndex--) {
       const position = operators[operatorIndex] as number
       const at = origin[position] as number
+      if (line[position + 2] === '-') {
+        found.fail(
+          at,
+          "'<<-' (a heredoc that strips tabs) is not supported; use '<<', whose closing delimiter may be indented",
+        )
+      }
       let cursor = position + 2
       while (cursor < line.length && (line[cursor] === ' ' || line[cursor] === '\t')) cursor++
       if (cursor >= line.length) found.fail(at, "Expected delimiter after '<<'")
@@ -673,6 +681,12 @@ function parseTokens(
       // Newlines act as `;` separators between pipelines.
       const op: Operator = token === '\n' ? ';' : (token as Operator)
       flushPipeline(op)
+      continue
+    }
+
+    // a background job, or bash's `&>`: reported, and the script read on
+    if (token === '&') {
+      found.add(here, BACKGROUND_ADVICE)
       continue
     }
 

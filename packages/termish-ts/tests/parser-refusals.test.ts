@@ -107,8 +107,8 @@ describe('where, and how many', () => {
   it('names the line and column of each, in order', () => {
     expect(parseError('echo a\necho $((2+3))\nN=3\necho "x $(date)"').message).toBe(
       [
-        'line 2, col 6: arithmetic expansion $((...)) is not supported; compute it in run_ts',
-        "line 3, col 1: N=3: variable assignment is not supported; write the value where it's used, or compute it in run_ts",
+        'line 2, col 6: arithmetic expansion $((...)) is not supported; compute it in code',
+        "line 3, col 1: N=3: variable assignment is not supported; write the value where it's used, or compute it in code",
         "line 4, col 9: Command substitution '$(...)' is not supported; run the inner command separately",
       ].join('\n'),
     )
@@ -123,7 +123,7 @@ describe('where, and how many', () => {
   it('reports a structural error with the problems before it', () => {
     expect(parseError('N=1\necho a | | b').message).toBe(
       [
-        "line 1, col 1: N=1: variable assignment is not supported; write the value where it's used, or compute it in run_ts",
+        "line 1, col 1: N=1: variable assignment is not supported; write the value where it's used, or compute it in code",
         "line 2, col 10: Expected command after '|', got '|'",
       ].join('\n'),
     )
@@ -143,6 +143,28 @@ describe('where, and how many', () => {
 
   it('leaves $(...) and $((...)) alone in single quotes and escaped', () => {
     expect(() => toScript("echo '$((1))' \\$(x) '$(y)'")).not.toThrow()
+  })
+})
+
+describe('background jobs and tab-stripping heredocs', () => {
+  it("refuses '&', bash's '&>' included, every one reported", () => {
+    expect(parseError('echo a & echo b\nls &> out').message).toBe(
+      [
+        "line 1, col 8: '&' is not supported: commands run one at a time, in order (for both outputs in one file, use > FILE 2>&1)",
+        "line 2, col 4: '&' is not supported: commands run one at a time, in order (for both outputs in one file, use > FILE 2>&1)",
+      ].join('\n'),
+    )
+  })
+
+  it("leaves '&' quoted or escaped, '&&' and '2>&1' alone", async () => {
+    const fs = new MemoryFS()
+    expect(await execute("echo 'a & b' a\\&b && echo ok 2>&1", fs)).toBe('a & b a&b\nok\n')
+  })
+
+  it("refuses '<<-', pointing at '<<'", () => {
+    expect(parseError('cat <<-EOF\n\thi\n\tEOF').message).toBe(
+      "line 1, col 5: '<<-' (a heredoc that strips tabs) is not supported; use '<<', whose closing delimiter may be indented",
+    )
   })
 })
 

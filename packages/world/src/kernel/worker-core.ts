@@ -27,12 +27,14 @@ import { describe, inspect } from '../values/inspect'
 import { wrapAgentFs } from './agent-fs'
 import {
   CACHE_METHODS,
+  type CompiledModule,
   FS_METHODS,
   type Host2Worker,
   type Image,
   type Worker2Host,
   serializeError,
 } from './messages'
+import { isWorldPath, resolveVfsPath } from './modules'
 import { type UiHarvest, harvestUi } from './ui-values'
 import type { WorkerPort } from './worker-port'
 
@@ -61,7 +63,7 @@ class Bridge {
   constructor(readonly runId: number) {}
 
   call(
-    target: 'fs' | 'cache' | 'host' | 'resolve',
+    target: 'fs' | 'cache' | 'host' | 'resolve' | 'import',
     method: string,
     args: readonly unknown[],
     subject?: string,
@@ -421,16 +423,54 @@ async function run(msg: RunMessage): Promise<void> {
       ...msg.values,
       ...(msg.ui && { ui: {} }),
     }
-    const registered = { host: bindings.host }
+    const registered: Record<string, unknown> = { host: bindings.host }
     const modules: Record<string, Record<string, unknown>> = {}
-    for (const m of msg.modules) {
-      const body = new AsyncFunction('__exports', '__modules', '__registered', '__load', m.body)
-      // A body returns its exports object (another spelling of a
-      // module returns that module's).
-      modules[m.path] = (await body({}, modules, registered, loader)) as Record<string, unknown>
+    // Each module is evaluated once per run, however many imports
+    // (static or dynamic, at once or not) reach it.
+    const evaluating = new Map<string, Promise<void>>()
+    const evaluate = (m: CompiledModule): Promise<void> => {
+      let done = evaluating.get(m.path)
+      if (done === undefined) {
+        const body = new AsyncFunction(
+          '__exports',
+          '__modules',
+          '__registered',
+          '__load',
+          '__import',
+          m.body,
+        )
+        done = (async () => {
+          // A body returns its exports object (another spelling of a
+          // module returns that module's).
+          modules[m.path] = (await body({}, modules, registered, loader, importer)) as Record<
+            string,
+            unknown
+          >
+        })()
+        evaluating.set(m.path, done)
+      }
+      return done
     }
-    const names = [...Object.keys(bindings), '__modules', '__load', '__ui']
-    const values = [...Object.values(bindings), modules, loader, uiRef]
+    // A dynamic import, resolved as a static import from `base` would
+    // be: a world module not yet loaded is compiled on the host, with
+    // what it imports, and evaluated here.
+    const importer = async (base: string, specifier: unknown): Promise<unknown> => {
+      const spec = String(specifier)
+      if (isWorldPath(spec)) {
+        const path = resolveVfsPath(spec, base)
+        if (!evaluating.has(path)) {
+          const compiled = (await bridge.call('import', 'compile', [path])) as CompiledModule[]
+          for (const m of compiled) await evaluate(m)
+        }
+        await evaluating.get(path)
+        return modules[path]
+      }
+      if (Object.hasOwn(registered, spec)) return registered[spec]
+      return loader(spec)
+    }
+    for (const m of msg.modules) await evaluate(m)
+    const names = [...Object.keys(bindings), '__modules', '__load', '__import', '__ui']
+    const values = [...Object.values(bindings), modules, loader, importer, uiRef]
     // An inner function, so the code may declare a name a binding has
     // (`const { db } = host`). On the header's line, so the code's
     // lines keep their numbers.

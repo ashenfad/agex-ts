@@ -34,8 +34,8 @@ export interface HostObjectSurface {
 }
 
 /** A module from the world's files, compiled for the worker: the body
- *  of `async (__exports, __modules, __registered, __load) => …`, which
- *  returns the module's exports. */
+ *  of `async (__exports, __modules, __registered, __load, __import) =>
+ *  …`, which returns the module's exports. */
 export interface CompiledModule {
   readonly path: string
   readonly body: string
@@ -92,11 +92,13 @@ export type Worker2Host =
   | {
       /** A call the code made to the host. `target` is the binding:
        *  `fs`, `cache`, a host object (`host`, with `subject` its
-       *  name), or `resolve` (a bare import specifier to a URL). */
+       *  name), `resolve` (a bare import specifier to a URL), or
+       *  `import` (a world module a dynamic import reaches, compiled
+       *  with what it imports). */
       readonly type: 'call'
       readonly runId: number
       readonly callId: number
-      readonly target: 'fs' | 'cache' | 'host' | 'resolve'
+      readonly target: 'fs' | 'cache' | 'host' | 'resolve' | 'import'
       readonly subject?: string
       readonly method: string
       readonly args: readonly unknown[]

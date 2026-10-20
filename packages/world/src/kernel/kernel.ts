@@ -30,7 +30,7 @@ import {
   type Worker2Host,
   serializeError,
 } from './messages'
-import { prepareCode } from './modules'
+import { prepareCode, prepareModule } from './modules'
 import type { UiHarvest } from './ui-values'
 
 /** ts-blank-space, loaded by the first run that needs it: it brings the
@@ -141,7 +141,7 @@ export class Kernel {
 
     let prepared: Awaited<ReturnType<typeof prepareCode>>
     try {
-      const transform = this.#settings.transform ?? stripTypes
+      const transform = this.#transform
       prepared = await prepareCode(await transform(code), ctx.fs, ctx.fs.getcwd(), transform)
     } catch (e) {
       return failed(e)
@@ -293,6 +293,10 @@ export class Kernel {
 
   // ---------- internals ----------
 
+  get #transform(): (code: string) => string | Promise<string> {
+    return this.#settings.transform ?? stripTypes
+  }
+
   #render(
     out: Omit<KernelOutput, 'duration' | 'truncated'>,
     started: number,
@@ -425,6 +429,9 @@ export class Kernel {
     if (target === 'resolve') {
       const resolve = this.#settings.resolve
       return resolve === undefined ? null : await resolve(String(args[0]))
+    }
+    if (target === 'import') {
+      return await prepareModule(String(args[0]), ctx.fs, this.#transform)
     }
     const name = msg.subject as string
     const entry = ctx.hostObjects.get(name)

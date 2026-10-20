@@ -521,6 +521,87 @@ describe('imports', () => {
     expect(out.error?.message).toMatch(/Cannot find module 'lodash'/)
     await ws.close()
   })
+
+  it('resolves a dynamic import of a world path as a static import', async () => {
+    const ws = await open()
+    await ws.files.write('lib/math.ts', 'export const double = (x: number): number => x * 2\n')
+    await ws.files.write(
+      'lib/lazy.ts',
+      "export const quad = async (x: number) => {\n  const { double } = await import('./math')\n  return double(double(x))\n}\n",
+    )
+    const out = await ws.runCode(`
+      const rel = await import('./lib/math.ts')
+      const abs = await import('/workspace/lib/math')
+      const name = 'lazy'
+      const { quad } = await import(\`./lib/\${name}.ts\`)
+      return [rel === abs, rel.double(3), await quad(2)]
+    `)
+    expect(out.error).toBeNull()
+    expect(out.value).toBe('[true,6,8]')
+    await ws.close()
+  })
+
+  it('shares a module between static and dynamic imports', async () => {
+    let loads = 0
+    const ws = await open({ hostObjects: { tally: { hit: () => ++loads } } })
+    await ws.files.write(
+      'dep.ts',
+      "import { tally } from 'host'\nexport const n = await tally.hit()\n",
+    )
+    const out = await ws.runCode(`
+      import * as a from './dep'
+      const [b, c] = await Promise.all([import('./dep.ts'), import('./dep')])
+      return [a === b, b === c, b.n]
+    `)
+    expect(out.error).toBeNull()
+    expect(out.value).toBe('[true,true,1]')
+    expect(loads).toBe(1)
+    await ws.close()
+  })
+
+  it("dynamically imports 'host', URLs and bare names", async () => {
+    const mod = `data:text/javascript,${encodeURIComponent('export default 7')}`
+    const ws = await open({
+      hostObjects: { counter: { add: (n: number) => n + 1 } },
+      code: { resolve: (name) => (name === 'seven' ? mod : null) },
+    })
+    await ws.files.write(
+      'use.ts',
+      "export const run = async () => {\n  const { counter } = await import('host')\n  return [await counter.add(1), (await import('seven')).default]\n}\n",
+    )
+    const out = await ws.runCode(`
+      const { run } = await import('./use')
+      const { counter } = await import('host')
+      return [...(await run()), await counter.add(2), (await import('${mod}')).default]
+    `)
+    expect(out.error).toBeNull()
+    expect(out.value).toBe('[2,7,3,7]')
+    const missing = await ws.runCode(`await import('./missing')`)
+    expect(missing.error?.message).toMatch(/Cannot find module '\/workspace\/missing'/)
+    await ws.close()
+  })
+
+  it('leaves import() inside strings, comments and templates alone', async () => {
+    const ws = await open()
+    await ws.files.write('m.ts', 'export const x = 3\n')
+    const out = await ws.runCode(
+      "// import('./nope')\nconst s = \"import('./a')\" + ` import('./b')`\nimport('./m').then((m) => console.log(m.x))\nawait new Promise((r) => setTimeout(r, 10))\nreturn s",
+    )
+    expect(out.error).toBeNull()
+    expect(out.stdout).toBe('3')
+    expect(out.value).toBe("import('./a') import('./b')")
+    await ws.close()
+  })
+
+  it('keeps line numbers around a dynamic import', async () => {
+    const ws = await open()
+    await ws.files.write('m.ts', 'export const boom = () => {\n  throw new Error("boom")\n}\n')
+    const out = await ws.runCode("const { boom } = await import(\n  './m'\n)\nboom()")
+    expect(out.error?.message).toBe('boom')
+    expect(out.error?.stack).toMatch(/at line 4/)
+    expect(out.error?.stack).toMatch(/\/workspace\/m\.ts:2/)
+    await ws.close()
+  })
 })
 
 describe('fetch from the files', () => {

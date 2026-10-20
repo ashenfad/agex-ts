@@ -241,13 +241,16 @@ function compileHelperBody(stripped: string, sourcePath: string, dirOfHelper: st
   return `${rewriteDynamicImports(body, dirOfHelper)}\n${exportAssignments}\nreturn __exports;\n//# sourceURL=${sourcePath}\n`
 }
 
-/** `import(` expressions (not `import.meta`, not a method named
- *  `import`), outside strings, templates and comments. */
+/** `import(` outside strings, templates and comments, and not a call
+ *  of a property named `import` (`x.import(`). */
 const DYNAMIC_IMPORT = /(?<![\w$]|\.\s*)import\s*\(/g
 
 /** Rewrite each dynamic `import(specifier)` to `__import(baseDir,
  *  specifier)`, which the worker resolves as it would a static import
- *  from `baseDir`. The rewrite stays on the line it was on. */
+ *  from `baseDir`. The rewrite stays on the line it was on. A method
+ *  named `import` (`{ import(x) { … } }`, `static import() { … }`) is
+ *  left alone: its parameter list is followed by `{`, which never
+ *  follows an import expression. */
 function rewriteDynamicImports(code: string, baseDir: string): string {
   const masked = maskTemplatesAndComments(code, true)
   const call = `__import(${JSON.stringify(baseDir)}, `
@@ -255,10 +258,27 @@ function rewriteDynamicImports(code: string, baseDir: string): string {
   let last = 0
   for (const m of masked.matchAll(DYNAMIC_IMPORT)) {
     const start = m.index ?? 0
+    const end = start + m[0].length
+    if (isMethodDefinition(masked, end)) continue
     out += code.slice(last, start) + call
-    last = start + m[0].length
+    last = end
   }
   return out + code.slice(last)
+}
+
+/** Whether the parenthesized list opened just before `from` (in masked
+ *  source) is followed by `{`: a method's parameters and body. */
+function isMethodDefinition(masked: string, from: number): boolean {
+  let depth = 1
+  let i = from
+  for (; i < masked.length && depth > 0; i++) {
+    const c = masked[i]
+    if (c === '(') depth++
+    else if (c === ')') depth--
+  }
+  if (depth > 0) return false
+  while (i < masked.length && /\s/.test(masked[i] as string)) i++
+  return masked[i] === '{'
 }
 
 // ---------------------------------------------------------------------------

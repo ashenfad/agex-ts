@@ -593,6 +593,31 @@ describe('imports', () => {
     await ws.close()
   })
 
+  it('leaves methods named import alone', async () => {
+    const ws = await open()
+    await ws.files.write('m.ts', 'export const x = 3\n')
+    await ws.files.write(
+      'store.ts',
+      'export class Store {\n  import(x: number) { return x + 1 }\n  static import(x: number) {\n    return x + 2\n  }\n}\nexport const loader = { import(p: string) { return import(p) } }\n',
+    )
+    const out = await ws.runCode(`
+      import { Store, loader } from './store'
+      const obj = { import(x) { return x * 2 }, get import2() { return 'got' } }
+      class A {
+        async import(x: number)
+        {
+          return x * 3
+        }
+      }
+      const { x } = await import('./m')
+      const viaLoader = await loader.import('/workspace/m.ts')
+      return [obj.import(x), obj.import2, await new A().import(x), new Store().import(x), Store.import(x), viaLoader.x]
+    `)
+    expect(out.error).toBeNull()
+    expect(out.value).toBe('[6,"got",9,4,5,3]')
+    await ws.close()
+  })
+
   it('keeps line numbers around a dynamic import', async () => {
     const ws = await open()
     await ws.files.write('m.ts', 'export const boom = () => {\n  throw new Error("boom")\n}\n')

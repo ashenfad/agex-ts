@@ -107,7 +107,9 @@ const result = await ws.runCode(`
   directory, or absolute), `'host'`, URLs, and bare names the profile's
   `resolve` maps to URLs (``(name) => `https://esm.sh/${name}` ``). A
   module reaches the host objects through `import { db } from 'host'`;
-  only the code run has them as bare names.
+  only the code run has them as bare names. A dynamic `import(spec)`,
+  in the code or a module, resolves as a static import from the same
+  place would, computed specifiers included.
 - **Output** keeps at most `maxObservation` characters of stdout and of
   stderr (32,000 by default), setting `truncated`; the terminal's
   transcript is capped the same way.

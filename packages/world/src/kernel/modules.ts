@@ -16,6 +16,12 @@
  * - **Anything else** (`'arquero'`, `'https://…'`) is loaded in the
  *   worker: a URL directly, a bare name through the profile's resolver.
  *
+ * A dynamic `import(specifier)` resolves the same way, from the same
+ * place, when it runs: it becomes `__import(baseDir, specifier)`, so a
+ * computed specifier works, and a world module it reaches is compiled
+ * on the host then (with what it imports) and evaluated once per run,
+ * shared with the static imports.
+ *
  * Top-level `await` works in modules, and re-exports (`export { x }
  * from`, `export * from`, `export * as ns from`) do. The emulation has
  * no live bindings (a module's exports are copied when it finishes),
@@ -39,7 +45,8 @@ export interface PreparedCode {
     /** The path the code's lookups use (as imported, extension or
      *  not). */
     readonly path: string
-    /** Body of `async (__exports, __modules, __registered, __load)`. */
+    /** Body of `async (__exports, __modules, __registered, __load,
+     *  __import)`. */
     readonly body: string
   }>
 }
@@ -89,8 +96,55 @@ export async function prepareCode(
   transform: (src: string) => string | Promise<string>,
 ): Promise<PreparedCode> {
   const imports = parseImports(source)
-  if (imports.length === 0) return { code: source, modules: [] }
+  const { modules, walk } = moduleWalker(fs, transform)
+  for (const imp of imports) {
+    if (isWorldPath(imp.path)) await walk(imp.path, cwd)
+  }
 
+  let out = source
+  for (const imp of [...imports].reverse()) {
+    let replacement: string
+    if (imp.isReexport) {
+      // Re-exports mean nothing in the code run.
+      replacement = '/* re-export skipped */'
+    } else if (isWorldPath(imp.path)) {
+      replacement = rewriteAsLookup(imp.binding, resolveVfsPath(imp.path, cwd))
+    } else if (REGISTERED.has(imp.path)) {
+      replacement = rewriteAsRegisteredAccess(imp.binding, imp.path)
+    } else {
+      replacement = rewriteAsUrlLoad(imp.binding, imp.path)
+    }
+    out =
+      out.slice(0, imp.start) +
+      keepLines(out.slice(imp.start, imp.end), replacement) +
+      out.slice(imp.end)
+  }
+  return { code: rewriteDynamicImports(out, cwd), modules }
+}
+
+/**
+ * Compile the world module at `path` (absolute) and the world modules
+ * it imports, dependencies first: what a dynamic import of it needs.
+ */
+export async function prepareModule(
+  path: string,
+  fs: ModuleSource,
+  transform: (src: string) => string | Promise<string>,
+): Promise<PreparedCode['modules']> {
+  const { modules, walk } = moduleWalker(fs, transform)
+  await walk(path, '/')
+  return modules
+}
+
+/** Compiles world modules into `modules`, each once, dependencies
+ *  first. */
+function moduleWalker(
+  fs: ModuleSource,
+  transform: (src: string) => string | Promise<string>,
+): {
+  modules: Array<{ path: string; body: string }>
+  walk: (importPath: string, baseDir: string) => Promise<void>
+} {
   const modules: Array<{ path: string; body: string }> = []
   const compiled = new Set<string>()
   const inFlight = new Set<string>()
@@ -128,29 +182,7 @@ export async function prepareCode(
     }
   }
 
-  for (const imp of imports) {
-    if (isWorldPath(imp.path)) await walk(imp.path, cwd)
-  }
-
-  let out = source
-  for (const imp of [...imports].reverse()) {
-    let replacement: string
-    if (imp.isReexport) {
-      // Re-exports mean nothing in the code run.
-      replacement = '/* re-export skipped */'
-    } else if (isWorldPath(imp.path)) {
-      replacement = rewriteAsLookup(imp.binding, resolveVfsPath(imp.path, cwd))
-    } else if (REGISTERED.has(imp.path)) {
-      replacement = rewriteAsRegisteredAccess(imp.binding, imp.path)
-    } else {
-      replacement = rewriteAsUrlLoad(imp.binding, imp.path)
-    }
-    out =
-      out.slice(0, imp.start) +
-      keepLines(out.slice(imp.start, imp.end), replacement) +
-      out.slice(imp.end)
-  }
-  return { code: out, modules }
+  return { modules, walk }
 }
 
 /** Body for another spelling of a module (`/lib/util` for
@@ -165,10 +197,11 @@ function aliasBody(primaryPath: string): string {
 // ---------------------------------------------------------------------------
 
 /** Compile a module's JavaScript into the body of
- *  `async (__exports, __modules, __registered, __load) => …`, a string
- *  the worker evaluates. Its imports become lookups as the code's do:
- *  world paths in `__modules`, `'host'` in `__registered`, anything
- *  else `await __load(specifier)`. */
+ *  `async (__exports, __modules, __registered, __load, __import) => …`,
+ *  a string the worker evaluates. Its imports become lookups as the
+ *  code's do: world paths in `__modules`, `'host'` in `__registered`,
+ *  anything else `await __load(specifier)`; its dynamic imports call
+ *  `__import` from its own directory. */
 function compileHelperBody(stripped: string, sourcePath: string, dirOfHelper: string): string {
   // Pass 1: rewrite re-exports first (`export { x } from '/path'`,
   // `export * from '/path'`). They become `__exports.X = __modules['/path'].X`
@@ -205,7 +238,27 @@ function compileHelperBody(stripped: string, sourcePath: string, dirOfHelper: st
   const exportAssignments = exportNames
     .map((n) => `__exports[${JSON.stringify(n)}] = ${n};`)
     .join('\n')
-  return `${body}\n${exportAssignments}\nreturn __exports;\n//# sourceURL=${sourcePath}\n`
+  return `${rewriteDynamicImports(body, dirOfHelper)}\n${exportAssignments}\nreturn __exports;\n//# sourceURL=${sourcePath}\n`
+}
+
+/** `import(` expressions (not `import.meta`, not a method named
+ *  `import`), outside strings, templates and comments. */
+const DYNAMIC_IMPORT = /(?<![\w$]|\.\s*)import\s*\(/g
+
+/** Rewrite each dynamic `import(specifier)` to `__import(baseDir,
+ *  specifier)`, which the worker resolves as it would a static import
+ *  from `baseDir`. The rewrite stays on the line it was on. */
+function rewriteDynamicImports(code: string, baseDir: string): string {
+  const masked = maskTemplatesAndComments(code, true)
+  const call = `__import(${JSON.stringify(baseDir)}, `
+  let out = ''
+  let last = 0
+  for (const m of masked.matchAll(DYNAMIC_IMPORT)) {
+    const start = m.index ?? 0
+    out += code.slice(last, start) + call
+    last = start + m[0].length
+  }
+  return out + code.slice(last)
 }
 
 // ---------------------------------------------------------------------------
@@ -363,14 +416,15 @@ function rewriteHelperExports(code: string): { code: string; exportNames: string
  * line structure stay aligned with the original source (the caller
  * slices replacements into the original by offset). Single/double-
  * quoted strings are tracked (so a quote can't open a fake template
- * or comment) but NOT masked — import specifiers live in them.
+ * or comment) but masked only when `strings` is set: static import
+ * specifiers live in them, while a scan for `import(` must skip them.
  * Template interpolations (`${...}`) re-enter live-code scanning,
  * including nested templates. Regex literals are not tracked — a
  * quote/backtick inside one can desync the scanner (rare in agent
  * code; the failure mode is a missed rewrite, which surfaces as a
  * clear eval-time syntax error rather than silent corruption).
  */
-export function maskTemplatesAndComments(src: string): string {
+export function maskTemplatesAndComments(src: string, strings = false): string {
   const out = src.split('')
   /** Template-nesting stack: 'tpl' = inside a template's literal
    *  text (masked); {depth} = inside a `${...}` interpolation
@@ -403,15 +457,20 @@ export function maskTemplatesAndComments(src: string): string {
       continue
     }
     if (str !== null) {
-      // Tracked but not masked — see doc comment.
       if (c === '\\') {
         // Skip the full CRLF after a line-continuation backslash so the
         // trailing '\n' doesn't trip the recovery heuristic below.
-        if (src[i + 1] === '\r' && src[i + 2] === '\n') i += 3
-        else i += 2
+        const skip = src[i + 1] === '\r' && src[i + 2] === '\n' ? 3 : 2
+        if (strings) {
+          for (let j = i; j < i + skip && j < src.length; j++) {
+            if (src[j] !== '\n') out[j] = ' '
+          }
+        }
+        i += skip
         continue
       }
       if (c === str || c === '\n') str = null
+      else if (strings) out[i] = ' '
       i++
       continue
     }
@@ -496,7 +555,7 @@ export function parseImports(source: string): ImportStatement[] {
   const out: ImportStatement[] = []
   const masked = maskTemplatesAndComments(source)
   const importRe =
-    /(?<=^|;)[ \t]*import\b((?:[\s\S](?!^[ \t]*(?:import|export)\b))*?)['"]([^'"]+)['"][ \t]*(?:;|$)/gm
+    /(?<=^|;)[ \t]*import\b(?!\s*[(.])((?:[\s\S](?!^[ \t]*(?:import|export)\b))*?)['"]([^'"]+)['"][ \t]*(?:;|$)/gm
   for (const m of masked.matchAll(importRe)) {
     const start = m.index ?? 0
     const end = start + m[0].length
@@ -683,11 +742,11 @@ function keepLines(original: string, replacement: string): string {
 
 /** A specifier naming one of the world's files: absolute, or relative
  *  with `./` or `../`. */
-function isWorldPath(p: string): boolean {
+export function isWorldPath(p: string): boolean {
   return p.startsWith('/') || p.startsWith('./') || p.startsWith('../')
 }
 
-function resolveVfsPath(path: string, base: string): string {
+export function resolveVfsPath(path: string, base: string): string {
   if (path.startsWith('/')) return normalize(path)
   const baseDir = base.endsWith('/') ? base : `${base}/`
   return normalize(`${baseDir}${path}`)

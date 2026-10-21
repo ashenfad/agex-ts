@@ -1,5 +1,14 @@
 # @agex-ts/world
 
+## 0.1.1
+
+### Patch Changes
+
+- 1ad4048: **Dynamic imports resolve:** `await import(spec)` in code and world modules resolves as a static import does: a world path relative to the working directory or the importing module, `'host'`, a URL, or a bare name through the profile's `resolve`, instead of fetching from the page's origin.
+- 347162d: **A failed terminal command's stderr appears once, as it was written:** `stderr` is empty after `2>&1`, `2>/dev/null`, `2>file` or a silent failure such as `grep` with no match (no more `grep: exited with code 1`), and reads `ls: ...` rather than `ls: ls: ...`.
+- Updated dependencies [b26bbb7]
+  - @agex-ts/termish@0.3.1
+
 ## 0.1.0
 
 ### Minor Changes

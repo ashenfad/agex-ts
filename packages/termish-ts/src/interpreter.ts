@@ -35,7 +35,7 @@ import { expandBraces, parameterEnd } from './brace'
 import { BUILTINS } from './builtins/index'
 import { ByteStdin, ByteStdout, EMPTY, concat, decode, encode } from './bytes'
 import type { CommandContext, CommandHandler, CommandResult } from './context'
-import { TerminalError } from './errors'
+import { TerminalError, commandFailure } from './errors'
 import { describeFsError } from './fs/errors'
 import { resolve } from './fs/path'
 import type { FileSystem } from './fs/protocol'
@@ -186,6 +186,7 @@ export async function executeScript(
       partialOutput: cap(decode(concat(transcript))),
       exitCode: lastError.exitCode,
       stderr: lastError.stderr,
+      displayStderr: lastError.displayStderr,
     })
   }
   return cap(decode(concat(transcript)))
@@ -331,12 +332,7 @@ async function executePipeline(pipeline: Pipeline, run: Run): Promise<void> {
       // A failure with a diagnostic still stops it.
       const silentMidStage = stage !== lastStage && !result?.stderr
       if (result !== undefined && result.exitCode !== 0 && !silentMidStage) {
-        throw new TerminalError(
-          result.stderr
-            ? `${name}: ${result.stderr}`
-            : `${name}: exited with code ${result.exitCode}`,
-          { exitCode: result.exitCode, stderr: result.stderr },
-        )
+        throw commandFailure(name, result)
       }
     } catch (e) {
       const error =

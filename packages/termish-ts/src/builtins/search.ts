@@ -21,7 +21,7 @@ import { describeFsError } from '../fs/errors'
 import type { FileInfo, FileSystem } from '../fs/protocol'
 import { globMatch } from '../glob'
 import { parseArgs } from './_argparse'
-import { type Dispatched, dispatchArgv } from './_dispatch'
+import { type Dispatched, dispatchArgv, stderrOf } from './_dispatch'
 import { breToJs } from './_regex'
 
 const decoder = new TextDecoder('utf-8', { fatal: false })
@@ -504,7 +504,7 @@ async function runExec(
     return true
   } catch (e) {
     if (!(e instanceof TerminalError)) throw e
-    const said = e.stderr === undefined ? e.message : e.stderr
+    const said = stderrOf(e)
     if (said) report.stderr.push(said)
     return false
   }

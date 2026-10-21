@@ -7,7 +7,13 @@
 
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { MemoryFS } from '../src/fs/memory'
-import { type CommandHandler, TerminalError, execute } from '../src/index'
+import {
+  type CommandHandler,
+  type CommandResult,
+  ParseError,
+  TerminalError,
+  execute,
+} from '../src/index'
 
 const bytes = (s: string): Uint8Array => new TextEncoder().encode(s)
 const text = (b: Uint8Array): string => new TextDecoder().decode(b)
@@ -260,5 +266,176 @@ describe('/dev/null', () => {
   it('leaves other targets as files', async () => {
     await execute('echo hi > /out.txt', fs)
     expect(text(await fs.read('/out.txt'))).toBe('hi\n')
+  })
+})
+
+/** A failed script's `displayStderr` is what reached stderr
+ *  unredirected: the final command's own diagnostic, named once, or
+ *  nothing when it failed silently or its stderr went elsewhere. */
+describe('displayStderr', () => {
+  const MISSING = "ls: cannot access '/nope': No such file or directory"
+  let fs: MemoryFS
+
+  beforeEach(async () => {
+    fs = new MemoryFS()
+    await fs.mkdir('/w')
+    await fs.write('/w/f.txt', bytes('hello\n'))
+    await fs.write('/w/out.txt', bytes('old\n'))
+  })
+
+  const fail = async (
+    script: string,
+    commands: Record<string, CommandHandler> = {},
+  ): Promise<TerminalError> => {
+    const error = await execute(script, fs, { commands }).catch((e: unknown) => e)
+    if (!(error instanceof TerminalError)) throw new Error(`${script} did not fail`)
+    return error
+  }
+
+  it("doesn't prefix a stderr that starts with the name", async () => {
+    // ls with several operands returns its own "ls: ..." stderr
+    const e = await fail('ls /w /nope')
+    expect(e.exitCode).toBe(2)
+    expect(e.partialOutput).toBe('/w:\nf.txt\nout.txt\n')
+    expect(e.stderr).toBe(`${MISSING}\n`)
+    expect(e.message).toBe(`${MISSING}\n`)
+    expect(e.displayStderr).toBe(`${MISSING}\n`)
+  })
+
+  it('prefixes a stderr without the name', async () => {
+    const tool: CommandHandler = async () => ({ exitCode: 2, stderr: 'usage: tool <path>' })
+    const e = await fail('tool', { tool })
+    expect(e.stderr).toBe('usage: tool <path>')
+    expect(e.message).toBe('tool: usage: tool <path>')
+    expect(e.displayStderr).toBe('tool: usage: tool <path>')
+  })
+
+  it('reads a name inside the text as no prefix', async () => {
+    const tool: CommandHandler = async () => ({ exitCode: 1, stderr: 'toolbox: broken' })
+    expect((await fail('tool', { tool })).displayStderr).toBe('tool: toolbox: broken')
+  })
+
+  it('shows the message of a failure that is only a message', async () => {
+    const e = await fail('cat /nope')
+    expect(e.stderr).toBeUndefined()
+    expect(e.displayStderr).toBe('cat: /nope: No such file or directory')
+  })
+
+  it('is empty when 2>&1 merged it into stdout', async () => {
+    const e = await fail('ls /w /nope 2>&1')
+    expect(e.exitCode).toBe(2)
+    // once, in the transcript, where 2>&1 sent it
+    expect(e.partialOutput).toBe(`/w:\nf.txt\nout.txt\n${MISSING}\n`)
+    expect(e.stderr).toBe('')
+    expect(e.displayStderr).toBe('')
+  })
+
+  it('is empty when it was discarded', async () => {
+    const e = await fail('ls /w /nope 2>/dev/null')
+    expect(e.exitCode).toBe(2)
+    expect(e.partialOutput).toBe('/w:\nf.txt\nout.txt\n')
+    expect(e.displayStderr).toBe('')
+  })
+
+  it('is empty when it went to a file', async () => {
+    const e = await fail('ls /w /nope 2>/w/err.txt')
+    expect(e.exitCode).toBe(2)
+    expect(e.displayStderr).toBe('')
+    expect(text(await fs.read('/w/err.txt'))).toBe(`${MISSING}\n`)
+  })
+
+  it('is empty for grep without a match', async () => {
+    for (const script of ['grep zebra /w/f.txt', 'cd /w && grep -r zebra .']) {
+      const e = await fail(script)
+      expect(e.exitCode).toBe(1)
+      expect(e.stderr).toBe('')
+      expect(e.displayStderr).toBe('')
+      expect(e.message).toBe('grep: exited with code 1')
+    }
+  })
+
+  it('is empty for a false test', async () => {
+    const e = await fail('test -f /nope')
+    expect(e.exitCode).toBe(1)
+    expect(e.displayStderr).toBe('')
+  })
+
+  it('is empty for a handler that gave no stderr', async () => {
+    const quiet: CommandHandler = async () => ({ exitCode: 3 }) as unknown as CommandResult
+    const e = await fail('quiet', { quiet })
+    expect(e.exitCode).toBe(3)
+    expect(e.stderr).toBe('')
+    expect(e.displayStderr).toBe('')
+  })
+
+  it('leaves an earlier failure in the transcript', async () => {
+    const e = await fail('cat /a; echo mid; ls /w /nope')
+    expect(e.partialOutput).toBe('cat: /a: No such file or directory\nmid\n/w:\nf.txt\nout.txt\n')
+    expect(e.displayStderr).toBe(`${MISSING}\n`)
+  })
+
+  it('is empty when a silent failure follows an earlier one', async () => {
+    const e = await fail('ls /w /nope; grep zebra /w/f.txt')
+    expect(e.exitCode).toBe(1)
+    expect(e.partialOutput).toBe(`/w:\nf.txt\nout.txt\n${MISSING}\n`)
+    expect(e.displayStderr).toBe('')
+  })
+
+  it('leaves a parse error alone', async () => {
+    await expect(execute('echo $(pwd)', fs)).rejects.toBeInstanceOf(ParseError)
+  })
+
+  it('names the command once under xargs', async () => {
+    const e = await fail('echo /w /nope | xargs ls')
+    expect(e.exitCode).toBe(2)
+    expect(e.displayStderr).toBe(`${MISSING}\n`)
+  })
+
+  /** A command that warns on its first run and fails on the next. */
+  const warnThen = (failure: CommandResult): Record<string, CommandHandler> => {
+    let calls = 0
+    return {
+      warn: async () => (++calls === 1 ? { exitCode: 0, stderr: 'warn: careful\n' } : failure),
+    }
+  }
+
+  it('shows xargs warnings before a silent failure', async () => {
+    const e = await fail('echo a b | xargs -n 1 warn', warnThen({ exitCode: 7, stderr: '' }))
+    expect(e.exitCode).toBe(7)
+    // the message still names the failure; the screen shows only what
+    // reached stderr, the warning
+    expect(e.message).toBe('warn: careful\nwarn: exited with code 7\n')
+    expect(e.displayStderr).toBe('warn: careful\n')
+    expect(e.stderr).toBe('warn: careful\n')
+  })
+
+  it('shows xargs warnings before a failure with a diagnostic', async () => {
+    const e = await fail(
+      'echo a b | xargs -n 1 warn',
+      warnThen({ exitCode: 7, stderr: 'warn: broke' }),
+    )
+    expect(e.exitCode).toBe(7)
+    expect(e.message).toBe('warn: careful\nwarn: broke\n')
+    expect(e.displayStderr).toBe('warn: careful\nwarn: broke\n')
+  })
+
+  it('is empty for xargs warnings and a failure all redirected', async () => {
+    const e = await fail(
+      'echo a b | xargs -n 1 warn 2>/dev/null',
+      warnThen({ exitCode: 7, stderr: '' }),
+    )
+    expect(e.exitCode).toBe(7)
+    expect(e.displayStderr).toBe('')
+  })
+
+  it('takes an explicit displayStderr first', () => {
+    const e = new TerminalError('x: exited with code 3', {
+      exitCode: 3,
+      stderr: 'w\n',
+      displayStderr: 'w\n',
+    })
+    expect(e.displayStderr).toBe('w\n')
+    expect(new TerminalError('boom').displayStderr).toBe('boom')
+    expect(new TerminalError('x: exited with code 1', { stderr: '' }).displayStderr).toBe('')
   })
 })

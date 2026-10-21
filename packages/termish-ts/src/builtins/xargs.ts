@@ -18,7 +18,7 @@
 
 import type { CommandHandler } from '../context'
 import { TerminalError } from '../errors'
-import { dispatchArgv } from './_dispatch'
+import { dispatchArgv, joinStderr, stderrOf } from './_dispatch'
 
 const MAX_DEPTH = 16
 let xargsDepth = 0
@@ -115,20 +115,32 @@ export const xargs: CommandHandler = async (ctx) => {
     }
   }
 
-  if (replace !== null) {
-    for (const item of items) {
-      if (ctx.signal.aborted) throw new TerminalError('xargs: aborted')
-      const subbed = cmdBaseArgs.map((a) => a.replaceAll(replace, item))
-      await runOne(subbed)
+  try {
+    if (replace !== null) {
+      for (const item of items) {
+        if (ctx.signal.aborted) throw new TerminalError('xargs: aborted')
+        const subbed = cmdBaseArgs.map((a) => a.replaceAll(replace, item))
+        await runOne(subbed)
+      }
+    } else if (maxArgs !== null) {
+      for (let i = 0; i < items.length; i += maxArgs) {
+        if (ctx.signal.aborted) throw new TerminalError('xargs: aborted')
+        const batch = items.slice(i, i + maxArgs)
+        await runOne([...cmdBaseArgs, ...batch])
+      }
+    } else {
+      await runOne([...cmdBaseArgs, ...items])
     }
-  } else if (maxArgs !== null) {
-    for (let i = 0; i < items.length; i += maxArgs) {
-      if (ctx.signal.aborted) throw new TerminalError('xargs: aborted')
-      const batch = items.slice(i, i + maxArgs)
-      await runOne([...cmdBaseArgs, ...batch])
-    }
-  } else {
-    await runOne([...cmdBaseArgs, ...items])
+  } catch (e) {
+    if (!(e instanceof TerminalError) || warnings.length === 0) throw e
+    // The warnings of the runs before it are shown too. The message
+    // still names the failure (a silent one included); the screen shows
+    // only what reached stderr.
+    throw new TerminalError(joinStderr([...warnings, e.message]), {
+      exitCode: e.exitCode,
+      stderr: joinStderr([...warnings, stderrOf(e)]),
+      displayStderr: joinStderr([...warnings, e.displayStderr]),
+    })
   }
-  return warnings.length > 0 ? { exitCode: 0, stderr: warnings.join('\n') } : undefined
+  return warnings.length > 0 ? { exitCode: 0, stderr: joinStderr(warnings) } : undefined
 }

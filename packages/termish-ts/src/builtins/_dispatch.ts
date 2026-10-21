@@ -7,7 +7,7 @@
 
 import { ByteStdin, ByteStdout } from '../bytes'
 import type { CommandContext, CommandResult } from '../context'
-import { TerminalError } from '../errors'
+import { TerminalError, commandFailure } from '../errors'
 import type { FileSystem } from '../fs/protocol'
 
 export interface Dispatched {
@@ -53,10 +53,21 @@ export async function dispatchArgv(
     )
   }
   if (result !== undefined && result.exitCode !== 0) {
-    throw new TerminalError(
-      result.stderr ? `${name}: ${result.stderr}` : `${name}: exited with code ${result.exitCode}`,
-      { exitCode: result.exitCode, stderr: result.stderr },
-    )
+    throw commandFailure(name, result)
   }
   return { output: stdout.value(), stderr: result?.stderr ?? '' }
+}
+
+/** What a failure shows on stderr (`''` if it failed silently). */
+export function stderrOf(e: TerminalError): string {
+  return e.stderr === undefined ? e.message : e.stderr
+}
+
+/** Several commands' stderr as one, each as written: a newline is
+ *  added only where one is missing, so blank lines survive. */
+export function joinStderr(parts: readonly string[]): string {
+  return parts
+    .filter((p) => p !== '')
+    .map((p) => (p.endsWith('\n') ? p : `${p}\n`))
+    .join('')
 }

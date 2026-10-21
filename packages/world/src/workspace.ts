@@ -195,7 +195,10 @@ export interface TerminalResult {
   /** 0 on success; the failing command's code (127 for a command not
    *  found, 2 for a script that doesn't parse, 130 when interrupted). */
   readonly exitCode: number
-  /** Why the script failed; empty on success. */
+  /** What the failing final command wrote to stderr, named once (`ls:
+   *  cannot access ...`), or `parse error: ...`; empty on success, and
+   *  when the command failed silently (`grep` with no match) or its
+   *  stderr was redirected (`2>&1`, `2>/dev/null`, `2>file`). */
   readonly stderr: string
   /** stdout or stderr was cut to the profile's `maxObservation`. */
   readonly truncated: boolean
@@ -676,9 +679,13 @@ export class Workspace {
           exitCode = 2
           stderr = `parse error: ${e.message}`
         } else if (e instanceof TerminalError) {
+          // Only what reached the screen: the failing command's own
+          // diagnostic, named once, or '' when it failed silently or its
+          // stderr was redirected (2>&1 put it in stdout already).
+          // Earlier failures the script ran past are in stdout.
           stdout = e.partialOutput
           exitCode = e.exitCode
-          stderr = e.message
+          stderr = e.displayStderr
         } else {
           throw e
         }

@@ -110,9 +110,11 @@ describe('curl', () => {
     const r = await ws.terminal('curl -f https://h.test/x')
     expect(r).toMatchObject({ exitCode: 22 })
     expect(r.stderr).toBe('curl: (22) The requested URL returned error: 404')
-    expect((await ws.terminal('curl -fs https://h.test/x')).stderr).toBe(
-      'curl: exited with code 22',
-    )
+    // -s silences it: the exit code says what failed, stderr is empty
+    expect(await ws.terminal('curl -fs https://h.test/x')).toMatchObject({
+      exitCode: 22,
+      stderr: '',
+    })
     await ws.close()
   })
 

@@ -381,10 +381,18 @@ function ownBuffer(value: Uint8Array): Uint8Array {
 }
 
 /**
- * Build an `IDBKeyRange` covering all keys with the given prefix.
- * `'￿'` is the highest BMP code point — well beyond any sensible
- * suffix character.
+ * The `IDBKeyRange` of every key starting with `prefix`.
+ *
+ * IndexedDB compares strings by UTF-16 code units, so the least string
+ * greater than all of them is `prefix` with its last code unit bumped
+ * by one, after dropping trailing units already at 0xFFFF. The range
+ * runs up to that bound, exclusive; with no such unit (an empty
+ * prefix, or all 0xFFFF) nothing is greater, and it is open above.
  */
 function prefixRange(prefix: string): IDBKeyRange {
-  return IDBKeyRange.bound(prefix, `${prefix}￿`, false, false)
+  let end = prefix.length
+  while (end > 0 && prefix.charCodeAt(end - 1) === 0xffff) end--
+  if (end === 0) return IDBKeyRange.lowerBound(prefix)
+  const upper = prefix.slice(0, end - 1) + String.fromCharCode(prefix.charCodeAt(end - 1) + 1)
+  return IDBKeyRange.bound(prefix, upper, false, true)
 }

@@ -200,6 +200,14 @@
     "exitCode": 1
   },
   {
+    "name": "a file named like a backup suffix, after --",
+    "files": {
+      "/w/-i.bak": "a\n"
+    },
+    "script": "cd /w && sed -- 's/a/b/' -i.bak",
+    "stdout": "b\n"
+  },
+  {
     "name": "BSD's -i '' refused",
     "files": {
       "/f": "a\n"

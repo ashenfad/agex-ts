@@ -628,6 +628,7 @@ function applyReplacement(repl: string, match: string, groups: unknown[]): strin
 
 export const sed: CommandHandler = async (ctx) => {
   for (const arg of ctx.args) {
+    if (arg === '--') break // the rest are operands, whatever they look like
     // GNU's -iSUFFIX (and --in-place=SUFFIX) keeps a backup; here -i doesn't.
     if (/^-i[^a-zA-Z]/.test(arg) || arg.startsWith('--in-place=')) {
       throw unsupported('-i takes no backup suffix')

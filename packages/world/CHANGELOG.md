@@ -1,5 +1,19 @@
 # @agex-ts/world
 
+## 0.1.2
+
+### Patch Changes
+
+- 0e4eb83: **`fs.write` in code creates parent directories:** as `file_write` does, while a write under a file still fails `ENOTDIR` and one on a frozen workspace `EROFS`; `file_write` under a file now says `Not a directory` rather than `File exists`.
+  **`fs.mkdir` takes `{ recursive: true }`:** Node's spelling, which makes missing parents and accepts an existing directory; `mkdir`, `list` and `listDetailed` refuse an option they don't know instead of ignoring it.
+  **Code's filesystem errors say where a relative path went:** `No such file or directory: app/x.js (resolved to /workspace/app/systems/app/x.js; cwd /workspace/app/systems)`.
+  **Tool text says a turn's calls run in order:** several `file_edit`s to one file may share a turn.
+- **`ws-git add /` no longer stages the whole workspace:** a path above the root is refused like any path outside it, and on a frozen view `add -A` with nothing to stage reports the view frozen rather than succeeding.
+- a586ab3: **`ws-git stage` is `ws-git add` under its own name, and a verb given arguments it doesn't take answers in one line:** `stage -A`, `stage .` and `stage <dir>` work as `add` does, and an argument error prints what was wrong, the verb's synopsis and `see 'ws-git help'` instead of the whole usage text.
+- Updated dependencies [feab74b]
+- Updated dependencies
+  - @agex-ts/termish@0.3.2
+
 ## 0.1.1
 
 ### Patch Changes

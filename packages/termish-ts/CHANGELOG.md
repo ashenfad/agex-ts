@@ -1,5 +1,12 @@
 # @agex-ts/termish
 
+## 0.3.2
+
+### Patch Changes
+
+- feab74b: **`help sed` lists what sed supports, and sed names what it doesn't:** `{...}` blocks, `!`, hold space, `N`, branches, `-i.bak` and the like (and a pattern holding a newline, which never matches) fail with a message naming the construct and pointing at `help sed`. Only `\n` ends a line, `\0` in a replacement is the whole match, and spaces may separate an address from its command.
+- **`sed -in` no longer empties the file:** GNU and BSD read `-in` as `-i` with the backup suffix `n`, where it was taken as `-i -n`; any `-iSUFFIX`, letters included, is now refused, and `--` ends the scan so a file named `-i.bak` can follow it.
+
 ## 0.3.1
 
 ### Patch Changes

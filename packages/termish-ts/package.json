@@ -1,6 +1,6 @@
 {
   "name": "@agex-ts/termish",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Pure-TypeScript shell parser + builtins over an async FileSystem. The TypeScript port of Python's termish (minus jq).",
   "publishConfig": {
     "access": "public"

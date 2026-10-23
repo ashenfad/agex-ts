@@ -18,6 +18,7 @@ import {
   ReadOnlyError,
   Store,
   type Workspace,
+  wsGit,
 } from '../src/index'
 import { newKV } from './backends'
 
@@ -530,6 +531,21 @@ describe('a frozen view', () => {
     await expect(snap.index.discard()).rejects.toThrow(ReadOnlyError)
     expect((await snap.index.status()).unstaged).toEqual([])
     expect(await snap.index.head()).toBe(await ws.index.head())
+    await ws.close()
+  })
+
+  it('refuses ws-git stage even when there is nothing to stage', async () => {
+    const store = await Store.open(await newKV())
+    const ws = await store.open('s', { profile: { commands: { 'ws-git': wsGit } } })
+    await ws.terminal('mkdir src && echo one > src/a.txt')
+    await ws.index.commit('one')
+    await ws.tags.add('v1')
+    const snap = await ws.tags.at('v1')
+    for (const args of ['-A', 'src']) {
+      const out = await snap.terminal(`ws-git stage ${args}`)
+      expect(out.exitCode).toBe(1)
+      expect(out.stderr).toMatch(/frozen view/)
+    }
     await ws.close()
   })
 

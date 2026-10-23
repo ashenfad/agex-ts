@@ -367,8 +367,15 @@ async function stage(v: Verb, verb: string, rest: string[]): Promise<Out> {
   let wanted: string[]
   if (named.length === 0) wanted = modified
   else {
+    const root = v.ws.root.replace(/\/+$/, '')
     wanted = []
     for (const path of named) {
+      if (root !== '' && path !== root && !path.startsWith(`${root}/`)) {
+        // Outside the root, `/` included: never expanded, so the index
+        // refuses it in its own words.
+        wanted.push(path)
+        continue
+      }
       const prefix = path === '/' ? '/' : `${path.replace(/\/+$/, '')}/`
       const under = modified.filter((m) => m.startsWith(prefix))
       if (under.length > 0 || (await v.ws.files.fs.isDir(path))) {
@@ -380,7 +387,8 @@ async function stage(v: Verb, verb: string, rest: string[]): Promise<Out> {
       } else wanted.push(path)
     }
   }
-  if (wanted.length > 0) await v.git.stage(wanted)
+  // Even with nothing to stage: a frozen view still refuses.
+  await v.git.stage(wanted)
   return
 }
 

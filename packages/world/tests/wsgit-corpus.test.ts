@@ -35,9 +35,16 @@ interface Script {
 }
 
 /** Steps known to differ from nontainer's, `script#step` → why. */
+const TRACE =
+  "nontainer's worktree add takes --trace (and show reads .trace/); the world's has no trace yet"
 const KNOWN: Readonly<Record<string, string>> = {
   'a-narrowed-branch#11':
     "nontainer's hint names its Python spelling (paths=None); the world's says to leave paths out",
+  'the-edges#3': TRACE,
+  'the-edges#4': TRACE,
+  'worktrees#0': TRACE,
+  'worktrees#18': TRACE,
+  'worktrees#24': TRACE,
 }
 
 const dir = new URL('./wsgit-corpus/', import.meta.url)

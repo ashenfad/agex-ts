@@ -35,7 +35,7 @@ import { repr } from '../repr'
 import { parseView } from '../views'
 import type { Workspace } from '../workspace'
 import { splitLinesKeepEnds, unifiedDiff } from './difflib'
-import { EDGE, HELP, SUPPORTED, USAGE, VERBS, WORKTREE_FORMS } from './texts'
+import { EDGE, FORMS, HELP, USAGE, VERBS, WORKTREE_FORMS } from './texts'
 
 /** A refusal in ws-git's own words: exit 1, the message on stderr. */
 class Refusal extends Error {}
@@ -46,7 +46,10 @@ const dec = new TextDecoder()
 type Out = CommandResult | undefined
 
 const fail = (exitCode: number, stderr = ''): CommandResult => ({ exitCode, stderr })
-const usage = (detail: string): CommandResult => fail(2, `${detail}\n${USAGE}\n${SUPPORTED}`)
+/** A verb given arguments it doesn't take: what was wrong and the
+ *  verb's synopsis, on one line. `ws-git help` has the rest. */
+const usage = (verb: string, detail: string): CommandResult =>
+  fail(2, `${detail} usage: ws-git ${FORMS[verb]}; see 'ws-git help'`)
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
 
@@ -221,7 +224,7 @@ class Verb {
  *  wsGit}`): the agent's git over its session and its neighbours. */
 export const wsGit: CommandFactory = commandFactory(({ ws }) => makeWsGit(ws), {
   description:
-    "the agent's git over this session and its neighbours: ws-git (stage|unstage|commit|reset|status|diff|log|show|checkout|tag|stash|branch|merge|revert|cherry-pick|worktree|sparse-checkout) [...]; ws-git help for the whole surface",
+    "the agent's git over this session and its neighbours: ws-git (stage|add|unstage|commit|reset|status|diff|log|show|checkout|tag|stash|branch|merge|revert|cherry-pick|worktree|sparse-checkout) [...]; ws-git help for the whole surface",
 })
 
 function makeWsGit(ws: Workspace): CommandHandler {
@@ -237,7 +240,7 @@ function makeWsGit(ws: Workspace): CommandHandler {
     const edge = EDGE[verb]
     if (edge !== undefined) return fail(1, edge)
     if (!VERBS.includes(verb)) {
-      return fail(2, `${repr(verb)} is not a ws-git command. See 'ws-git help'.\n${SUPPORTED}`)
+      return fail(2, `${repr(verb)} is not a ws-git command. ${USAGE}; see 'ws-git help'`)
     }
     const v = new Verb(ws, ctx)
     try {
@@ -261,9 +264,8 @@ function dispatch(v: Verb, verb: string, rest: string[]): Promise<Out> {
     case 'status':
       return status(v, rest)
     case 'stage':
-      return stage(v, rest)
     case 'add':
-      return add(v, rest)
+      return stage(v, verb, rest)
     case 'unstage':
       return unstage(v, rest)
     case 'commit':
@@ -311,7 +313,7 @@ async function mergeHash(v: Verb, source: string): Promise<string | null> {
 async function status(v: Verb, rest: string[]): Promise<Out> {
   for (const flag of rest) {
     if (!['--porcelain', '-s', '--short'].includes(flag)) {
-      return usage(`status takes no ${repr(flag)} (porcelain is the default).`)
+      return usage('status', `status takes no ${repr(flag)} (porcelain is the default).`)
     }
   }
   const st = await v.git.status()
@@ -342,26 +344,24 @@ async function status(v: Verb, rest: string[]): Promise<Out> {
   return
 }
 
-async function stage(v: Verb, rest: string[]): Promise<Out> {
-  if (rest.length === 0 || rest.some((a) => a.startsWith('-'))) {
-    return usage('stage needs at least one path.')
-  }
-  await v.git.stage(rest.map((a) => v.abspath(a)))
-  return
-}
-
-async function add(v: Verb, rest: string[]): Promise<Out> {
+/**
+ * `stage`, and `add`, git's name for it and the one agents type: one
+ * verb under two names. A directory (`.` included) stages what is
+ * modified under it, deletions too; `-A` (`--all`) with no path stages
+ * everything modified, and with paths it is those paths, as in git.
+ * The index takes file paths only, so both expand to the modified
+ * paths they cover, and a directory with nothing modified under it
+ * stages nothing, silently, as git does.
+ */
+async function stage(v: Verb, verb: string, rest: string[]): Promise<Out> {
   let every = false
   const named: string[] = []
   for (const arg of rest) {
     if (arg === '-A' || arg === '--all') every = true
-    else if (arg.startsWith('-')) {
-      return usage(
-        "add takes paths, or -A for everything modified (it is ws-git stage under git's name).",
-      )
-    } else named.push(v.abspath(arg))
+    else if (arg.startsWith('-')) return usage(verb, `${verb} takes no ${repr(arg)}.`)
+    else named.push(v.abspath(arg))
   }
-  if (!every && named.length === 0) return usage('add needs at least one path, or -A.')
+  if (!every && named.length === 0) return usage(verb, `${verb} needs at least one path, or -A.`)
   const st = await v.git.status()
   const modified = [...new Set([...st.unstaged, ...st.staged])].sort()
   let wanted: string[]
@@ -371,8 +371,13 @@ async function add(v: Verb, rest: string[]): Promise<Out> {
     for (const path of named) {
       const prefix = path === '/' ? '/' : `${path.replace(/\/+$/, '')}/`
       const under = modified.filter((m) => m.startsWith(prefix))
-      if (under.length > 0 || (await v.ws.files.fs.isDir(path))) wanted.push(...under)
-      else wanted.push(path)
+      if (under.length > 0 || (await v.ws.files.fs.isDir(path))) {
+        wanted.push(...under)
+        // A file now where the head has a directory, or the other way
+        // round: the path itself changed too, and git stages it with
+        // what was under it.
+        if (modified.includes(path)) wanted.push(path)
+      } else wanted.push(path)
     }
   }
   if (wanted.length > 0) await v.git.stage(wanted)
@@ -381,7 +386,7 @@ async function add(v: Verb, rest: string[]): Promise<Out> {
 
 async function unstage(v: Verb, rest: string[]): Promise<Out> {
   if (rest.length === 0 || rest.some((a) => a.startsWith('-'))) {
-    return usage('unstage needs at least one path.')
+    return usage('unstage', 'unstage needs at least one path.')
   }
   await v.git.unstage(rest.map((a) => v.abspath(a)))
   return
@@ -394,8 +399,8 @@ async function commit(v: Verb, rest: string[]): Promise<Out> {
     const flag = args.shift() as string
     if ((flag === '-m' || flag === '--message') && args.length > 0) message = args.shift() as string
     else if (flag === '-a')
-      return usage('commit stages nothing itself (no -a) — stage first, then commit.')
-    else return usage('commit takes the staged set only (no pathspec; try: -m MSG).')
+      return usage('commit', 'commit stages nothing itself (no -a) — stage first, then commit.')
+    else return usage('commit', 'commit takes the staged set only (no pathspec; try: -m MSG).')
   }
   const { commit: id, files } = await v.git.commitFiles(message)
   v.write(
@@ -407,6 +412,7 @@ async function commit(v: Verb, rest: string[]): Promise<Out> {
 async function reset(v: Verb, rest: string[]): Promise<Out> {
   if (rest.length > 0) {
     return usage(
+      'reset',
       'reset is mixed-only (no --soft/--hard) — going back to a commit is: ws-git checkout <ref>.',
     )
   }
@@ -422,9 +428,9 @@ async function checkout(v: Verb, rest: string[]): Promise<Out> {
     const head = rest.slice(0, cut)
     const paths = rest.slice(cut + 1)
     if (head.length > 1 || head.some((a) => a.startsWith('-'))) {
-      return usage('checkout takes one ref before --.')
+      return usage('checkout', 'checkout takes one ref before --.')
     }
-    if (paths.length === 0) return usage('checkout -- needs at least one path.')
+    if (paths.length === 0) return usage('checkout', 'checkout -- needs at least one path.')
     const want = head[0] ?? 'HEAD'
     const base = await v.git.base()
     const ref =
@@ -437,7 +443,7 @@ async function checkout(v: Verb, rest: string[]): Promise<Out> {
     return
   }
   if (rest.length !== 1 || (rest[0] as string).startsWith('-')) {
-    return usage('checkout takes one ref (a commit from ws-git log).')
+    return usage('checkout', 'checkout takes one ref (a commit from ws-git log).')
   }
   const id = await v.git.resolve(rest[0] as string)
   await v.git.requireUnmerged('checkout')
@@ -469,7 +475,7 @@ async function tag(v: Verb, rest: string[]): Promise<Out> {
   }
   if (rest[0] === '-d') {
     if (rest.length !== 2 || (rest[1] as string).startsWith('-'))
-      return usage('tag -d takes one name.')
+      return usage('tag', 'tag -d takes one name.')
     const id = await v.git.tags.delete(rest[1] as string)
     v.write(`Deleted tag ${repr(rest[1] as string)} (was ${id.slice(0, 7)})\n`)
     return
@@ -478,6 +484,7 @@ async function tag(v: Verb, rest: string[]): Promise<Out> {
   const args = force ? rest.slice(1) : rest
   if (args.length < 1 || args.length > 2 || args.some((a) => a.startsWith('-'))) {
     return usage(
+      'tag',
       'tag takes a name and optionally a commit (try: -f to move a name that is taken, -d to drop one).',
     )
   }
@@ -551,14 +558,14 @@ async function stash(v: Verb, rest: string[]): Promise<Out> {
     args = rest.slice(1)
   }
   if (!['push', 'list', 'pop', 'drop', 'show'].includes(sub)) {
-    return usage(`stash takes no ${repr(sub)} (push, list, pop, drop, show).`)
+    return usage('stash', `stash takes no ${repr(sub)} (push, list, pop, drop, show).`)
   }
   if (sub === 'push') return stashPush(v, args)
   if (args.length > 1 || args.some((a) => a.startsWith('-'))) {
-    return usage(`stash ${sub} takes one stash at most.`)
+    return usage('stash', `stash ${sub} takes one stash at most.`)
   }
   if (sub === 'list') {
-    if (args.length > 0) return usage('stash list takes no arguments.')
+    if (args.length > 0) return usage('stash', 'stash list takes no arguments.')
     const lines = (await stashes(v)).map(([, message], i) => `stash@{${i}}: ${message}`)
     v.write(`${(lines.length > 0 ? lines : ['(none)']).join('\n')}\n`)
     return
@@ -575,7 +582,7 @@ async function stashPush(v: Verb, rest: string[]): Promise<Out> {
   while (args.length > 0) {
     const flag = args.shift() as string
     if ((flag === '-m' || flag === '--message') && args.length > 0) message = args.shift() as string
-    else return usage('stash push takes a message only (-m MSG).')
+    else return usage('stash', 'stash push takes a message only (-m MSG).')
   }
   await v.git.requireUnmerged('stash')
   const head = await v.git.head()
@@ -649,7 +656,7 @@ async function branch(v: Verb, rest: string[]): Promise<Out> {
     return
   }
   const name = rest[0] as string
-  if (name.startsWith('-')) return usage('branch takes a name first.')
+  if (name.startsWith('-')) return usage('branch', 'branch takes a name first.')
   let at: string | undefined
   let fresh = false
   let paths: string[] | undefined
@@ -662,9 +669,12 @@ async function branch(v: Verb, rest: string[]): Promise<Out> {
       paths = []
       while (args.length > 0 && !(args[0] as string).startsWith('-'))
         paths.push(args.shift() as string)
-      if (paths.length === 0) return usage('--paths needs at least one path.')
+      if (paths.length === 0) return usage('branch', '--paths needs at least one path.')
     } else {
-      return usage(`branch takes no ${repr(flag)} (try: --at <ref>, --fresh, --paths <paths>).`)
+      return usage(
+        'branch',
+        `branch takes no ${repr(flag)} (try: --at <ref>, --fresh, --paths <paths>).`,
+      )
     }
   }
   try {
@@ -688,7 +698,7 @@ async function merge(v: Verb, rest: string[]): Promise<Out> {
     return
   }
   if (rest.length !== 1 || (rest[0] as string).startsWith('-')) {
-    return usage('merge takes one session name (ws-git branch lists them), or --abort.')
+    return usage('merge', 'merge takes one session name (ws-git branch lists them), or --abort.')
   }
   const source = rest[0] as string
   await v.settle()
@@ -726,7 +736,7 @@ function merged(v: Verb, out: MergeOutcome, source: string, note = ''): Out {
 
 async function revert(v: Verb, rest: string[]): Promise<Out> {
   if (rest.length !== 1 || (rest[0] as string).startsWith('-')) {
-    return usage('revert takes one commit (a commit from ws-git log).')
+    return usage('revert', 'revert takes one commit (a commit from ws-git log).')
   }
   const id = await v.git.resolve(rest[0] as string)
   await v.settle()
@@ -741,6 +751,7 @@ async function cherryPick(v: Verb, rest: string[]): Promise<Out> {
   ) {
     const named = rest[0] !== undefined && !rest[0].startsWith('-') ? rest[0] : '<session>'
     return usage(
+      'cherry-pick',
       `cherry-pick takes one commit of another session, spelled <session>@<commit> (ws-git log ${named} lists them).`,
     )
   }
@@ -797,13 +808,13 @@ async function worktree(v: Verb, rest: string[]): Promise<Out> {
   const args = rest.slice(1)
   if (sub === 'add') return worktreeAdd(v, args)
   if (sub === 'list') {
-    if (args.length > 0) return usage('worktree list takes no arguments.')
+    if (args.length > 0) return usage('worktree', 'worktree list takes no arguments.')
     const lines = await worktreeLines(v)
     v.write(`${(lines.length > 0 ? lines : ['(none)']).join('\n')}\n`)
     return
   }
   if (sub === 'remove') return worktreeRemove(v, args)
-  return usage(`worktree takes no ${repr(sub)} (add, list, remove).`)
+  return usage('worktree', `worktree takes no ${repr(sub)} (add, list, remove).`)
 }
 
 /** `session@commit` → the session and seven characters of the commit;
@@ -822,6 +833,7 @@ async function worktreeLines(v: Verb): Promise<string[]> {
 async function worktreeAdd(v: Verb, rest: string[]): Promise<Out> {
   if (rest.length !== 2 || rest.some((a) => a.startsWith('-'))) {
     return usage(
+      'worktree',
       'worktree add takes a directory and a session (ws-git branch lists them) or a store tag.',
     )
   }
@@ -874,7 +886,7 @@ async function worktreeAdd(v: Verb, rest: string[]): Promise<Out> {
 
 async function worktreeRemove(v: Verb, rest: string[]): Promise<Out> {
   if (rest.length !== 1 || (rest[0] as string).startsWith('-')) {
-    return usage('worktree remove takes one directory.')
+    return usage('worktree', 'worktree remove takes one directory.')
   }
   const where = rest[0] as string
   const point = v.abspath(where)
@@ -882,6 +894,7 @@ async function worktreeRemove(v: Verb, rest: string[]): Promise<Out> {
   if (!held.includes(point)) {
     const known = held.map((p) => v.show(p)).join(', ')
     return usage(
+      'worktree',
       `no worktree at ${repr(where)} (${held.length > 0 ? `worktrees here: ${known}` : 'no worktrees here'}).`,
     )
   }
@@ -892,10 +905,11 @@ async function worktreeRemove(v: Verb, rest: string[]): Promise<Out> {
 async function sparseCheckout(v: Verb, rest: string[]): Promise<Out> {
   if (rest.length > 0 && rest[0] !== 'list') {
     return usage(
+      'sparse-checkout',
       `sparse-checkout takes no ${repr(rest[0] as string)} (list is all there is): a view is given when the session is forked (ws-git branch <name> --paths <paths>) and cannot be changed here.`,
     )
   }
-  if (rest.length > 1) return usage('sparse-checkout list takes no arguments.')
+  if (rest.length > 1) return usage('sparse-checkout', 'sparse-checkout list takes no arguments.')
   const seed = await v.seedPaths()
   v.write(`${(seed.length > 0 ? seed : ['(full)']).join('\n')}\n`)
   return
@@ -906,6 +920,7 @@ async function sparseCheckout(v: Verb, rest: string[]): Promise<Out> {
 async function showVerb(v: Verb, rest: string[]): Promise<Out> {
   if (rest.length !== 1 || (rest[0] as string).startsWith('-')) {
     return usage(
+      'show',
       'show takes one ref (a commit from ws-git log), or <ref>:<path> for one file at that state.',
     )
   }
@@ -969,7 +984,10 @@ async function tagCommit(v: Verb, session: string, part: string): Promise<string
 
 async function showPath(v: Verb, ref: string, path: string): Promise<Out> {
   if (ref === '') {
-    return usage('show :<path> needs a ref before the colon (HEAD:<path> for your last commit).')
+    return usage(
+      'show',
+      'show :<path> needs a ref before the colon (HEAD:<path> for your last commit).',
+    )
   }
   const id = await commitForRead(v, ref)
   const target = refPath(v, path)
@@ -1181,20 +1199,24 @@ async function diff(v: Verb, rest: string[]): Promise<Out> {
     else if (flag === '--cached') cached = true
     else if (flag === '--check') check = true
     else if (flag === '--stat') stat = true
-    else if (flag.startsWith('-')) return usage(`diff takes no ${repr(flag)}.`)
+    else if (flag.startsWith('-')) return usage('diff', `diff takes no ${repr(flag)}.`)
     else words.push(flag)
   }
   if (after !== null) {
-    if (words.length > 1) return usage('diff takes one ref before --.')
+    if (words.length > 1) return usage('diff', 'diff takes one ref before --.')
     const ref = words[0] ?? null
     words = after
     if (ref !== null) {
       const tagged = await v.storeTagRef(ref)
       if (tagged === null && !(await v.isSession(ref))) {
-        return usage(`diff ${ref} -- <paths>: ${repr(ref)} is not a session or a store tag.`)
+        return usage(
+          'diff',
+          `diff ${ref} -- <paths>: ${repr(ref)} is not a session or a store tag.`,
+        )
       }
       if (cached || check) {
         return usage(
+          'diff',
           'diff <session> takes no --cached or --check: those read your own composition.',
         )
       }
@@ -1213,6 +1235,7 @@ async function diff(v: Verb, rest: string[]): Promise<Out> {
     if (tagged !== null || (await v.isSession(words[0] as string))) {
       if (cached || check) {
         return usage(
+          'diff',
           'diff <session> takes no --cached or --check: those read your own composition.',
         )
       }
@@ -1463,7 +1486,10 @@ async function log(v: Verb, rest: string[]): Promise<Out> {
     else if (flag === '--all') every = true
     else if (!flag.startsWith('-') && session === null) session = flag
     else {
-      return usage(`log takes no ${repr(flag)} (try: -n N, -N, --oneline, --all, -S <string>).`)
+      return usage(
+        'log',
+        `log takes no ${repr(flag)} (try: -n N, -N, --oneline, --all, -S <string>).`,
+      )
     }
   }
   if (session !== null && session !== v.ws.session) {

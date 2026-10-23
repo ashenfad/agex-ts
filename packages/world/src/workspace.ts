@@ -52,7 +52,7 @@ import {
   UnknownSessionError,
   WorldError,
 } from './errors'
-import { type KeyReader, WorldFS } from './fs'
+import { type KeyReader, WorldFS, writeWithParents } from './fs'
 import { Patterns, whyIgnored } from './ignore'
 import { DEFAULT_MAX_OBSERVATION, Kernel } from './kernel/kernel'
 import type { Image, SerializedError } from './kernel/messages'
@@ -1608,9 +1608,7 @@ export class WorkspaceFiles {
     const data = typeof content === 'string' ? enc.encode(content) : content
     return this.#inner.run('file_write', async () => {
       const created = !(await this.#fs.exists(path))
-      const parent = dirname(resolve(path, this.#fs.getcwd()))
-      if (parent !== '/') await this.#fs.mkdir(parent, { parents: true, existOk: true })
-      await this.#fs.write(path, data)
+      await writeWithParents(this.#fs, path, data)
       return {
         path,
         size: data.byteLength,

@@ -246,6 +246,19 @@ describe('the tools', () => {
     await ws.close()
   })
 
+  it('file_write refuses a path under a file, as not a directory', async () => {
+    const ws = await open()
+    const write = tool(worldTools(ws), 'file_write')
+    await ws.files.write('notes.txt', 'n')
+    for (const path of ['notes.txt/x.js', 'notes.txt/deeper/x.js']) {
+      expect(await write.call({ path, content: 'x' })).toMatchObject({
+        text: `write failed: ${path}: Not a directory`,
+        isError: true,
+      })
+    }
+    await ws.close()
+  })
+
   it('file_edit replaces, reports how it matched, and says why it failed', async () => {
     const ws = await open()
     const edit = tool(worldTools(ws), 'file_edit')
@@ -306,7 +319,9 @@ describe('the tools', () => {
       '[error]\nError: in lib\n    at boom (/workspace/lib.ts:2)\n    at line 3',
     )
     const fsErr = await run.call({ code: "await fs.read('nope.txt')" })
-    expect(fsErr.text).toBe('[error]\nFsError: No such file or directory: nope.txt\n    at line 1')
+    expect(fsErr.text).toBe(
+      '[error]\nFsError: No such file or directory: nope.txt (resolved to /workspace/nope.txt; cwd /workspace)\n    at line 1',
+    )
     const required = await run.call({ code: "const _ = require('lodash')" })
     expect(required.text).toMatch(/\[hint: code here is an ES module body/)
     const pkg = await run.call({ code: "import _ from 'lodash'" })

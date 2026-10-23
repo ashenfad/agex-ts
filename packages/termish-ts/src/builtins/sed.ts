@@ -101,6 +101,17 @@ function unsupported(what: string): TerminalError {
   return new TerminalError(`sed: ${what}${SEE_HELP}`)
 }
 
+/** A short-option cluster with -i and something after it: the flags
+ *  before the i, and what GNU reads as the backup suffix. */
+const SUFFIXED = /^-([nEr]*)i([\s\S]+)$/
+
+function suffixRefusal(arg: string, flags: string, suffix: string): string {
+  if (!/^[a-zA-Z]/.test(suffix)) return '-i takes no backup suffix'
+  const why = `-i takes no backup suffix, and ${arg} is -i with the suffix '${suffix}'`
+  if (/^[nEr]+$/.test(suffix)) return `${why}; for both, put -i last: -${flags}${suffix}i`
+  return why
+}
+
 /**
  * Refuse a pattern holding a newline (literal, or `\n` outside a
  * bracket expression): lines are edited one at a time, so it would
@@ -629,9 +640,12 @@ function applyReplacement(repl: string, match: string, groups: unknown[]): strin
 export const sed: CommandHandler = async (ctx) => {
   for (const arg of ctx.args) {
     if (arg === '--') break // the rest are operands, whatever they look like
-    // GNU's -iSUFFIX (and --in-place=SUFFIX) keeps a backup; here -i doesn't.
-    if (/^-i[^a-zA-Z]/.test(arg) || arg.startsWith('--in-place=')) {
-      throw unsupported('-i takes no backup suffix')
+    if (arg.startsWith('--in-place=')) throw unsupported('-i takes no backup suffix')
+    // GNU's -iSUFFIX keeps a backup, and everything after the i is the
+    // suffix, letters too: -in is not -i -n. Here -i keeps none.
+    const suffixed = SUFFIXED.exec(arg)
+    if (suffixed) {
+      throw unsupported(suffixRefusal(arg, suffixed[1] as string, suffixed[2] as string))
     }
   }
   let parsed: ParsedArgs

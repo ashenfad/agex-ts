@@ -191,6 +191,41 @@
     "exitCode": 1
   },
   {
+    "name": "-in is -i with the suffix n, refused",
+    "files": {
+      "/f": "a\n"
+    },
+    "script": "sed -in 's/a/b/' /f",
+    "error": "sed: -i takes no backup suffix, and -in is -i with the suffix 'n'; for both, put -i last: -ni (see: help sed)",
+    "exitCode": 1
+  },
+  {
+    "name": "-ie is -i with the suffix e, refused",
+    "files": {
+      "/f": "a\n"
+    },
+    "script": "sed -ie 's/a/b/' /f",
+    "error": "sed: -i takes no backup suffix, and -ie is -i with the suffix 'e' (see: help sed)",
+    "exitCode": 1
+  },
+  {
+    "name": "a suffix after other flags, refused",
+    "files": {
+      "/f": "a\n"
+    },
+    "script": "sed -Ei.bak 's/a/b/' /f",
+    "error": "sed: -i takes no backup suffix (see: help sed)",
+    "exitCode": 1
+  },
+  {
+    "name": "-i last in a cluster edits in place",
+    "files": {
+      "/f": "a\n"
+    },
+    "script": "sed -Ei 's/(a)/b\\1/' /f && cat /f",
+    "stdout": "ba\n"
+  },
+  {
     "name": "--in-place with a backup suffix refused",
     "files": {
       "/f": "a\n"

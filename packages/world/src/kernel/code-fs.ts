@@ -46,8 +46,9 @@ export async function callFs(
     }
     if (method === 'mkdir') {
       const { recursive, ...opts } = (args[1] ?? {}) as MkdirOptions
+      // Node's recursive means both, whatever else came with it
       const node = recursive === true ? { parents: true, existOk: true } : {}
-      return await fs.mkdir(args[0] as string, { ...node, ...opts })
+      return await fs.mkdir(args[0] as string, { ...opts, ...node })
     }
     const fn = (fs as unknown as Record<string, (...a: unknown[]) => unknown>)[method]
     return await (fn as (...a: unknown[]) => unknown).apply(fs, [...args])

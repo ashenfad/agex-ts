@@ -174,6 +174,8 @@ describe('the files from code', () => {
     const out = await ws.runCode(`
       await fs.mkdir('a/b/c', { recursive: true })
       await fs.mkdir('a/b/c', { recursive: true })
+      await fs.mkdir('a/b/c', { recursive: true, existOk: false })
+      await fs.mkdir('r/s', { recursive: true, parents: false })
       await fs.mkdir('p/q', { parents: true })
       const errors = []
       for (const call of [
@@ -185,7 +187,7 @@ describe('the files from code', () => {
       ]) {
         try { await call() } catch (e) { errors.push(e.name + ': ' + e.message) }
       }
-      return [await fs.isDir('a/b/c'), await fs.isDir('p/q'), await fs.exists('m'), errors]
+      return [await fs.isDir('a/b/c') && await fs.isDir('r/s'), await fs.isDir('p/q'), await fs.exists('m'), errors]
     `)
     expect(out.error).toBeNull()
     expect(JSON.parse(out.value as string)).toEqual([

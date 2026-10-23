@@ -36,7 +36,7 @@ and a lot of context to answer what grep answers in one. Line numbers
 make the next file_edit far likelier to land.
 
 Make ONE terminal call per turn: batch related commands into a single
-multiline script with ; or && — mutations are then safely sequential.
+multiline script with ; or &&.
 
 There is no node, npm or npx: run TypeScript with run_ts.`
 
@@ -47,8 +47,9 @@ function: top-level await works, and \`return value\` shows the value.
 Types are stripped, not checked (no enums or namespaces). Script
 semantics per call: variables do NOT persist between calls. What does
 persist:
-- files: \`await fs.read(path, 'utf8')\`, \`await fs.write(path, text)\`,
-  and list, exists, mkdir, remove, rename (all async), visible to the
+- files: \`await fs.read(path, 'utf8')\`, \`await fs.write(path, text)\`
+  (makes missing directories), and list, exists, mkdir (parents with
+  \`{ recursive: true }\`), remove, rename (all async), visible to the
   terminal too (but to READ or SEARCH a file, use the terminal's
   grep/sed; and to CHANGE one, use file_edit, not string surgery, which
   will silently hit the wrong occurrence)
@@ -67,8 +68,8 @@ Replace an exact string in a workspace file. old_string must match the
 file EXACTLY (including whitespace) and appear exactly once — include
 enough surrounding context to make it unique, or set replace_all=true
 to replace every occurrence. Prefer this over sed for code edits.
-Edits to DIFFERENT files may share a turn; multiple edits to the SAME
-file should be sequential turns (parallel order is not guaranteed).`
+Several edits may share a turn, to one file or many: a turn's calls
+run one after another, in order, so each edit sees the one before.`
 
 export const VIEW_IMAGE_DESCRIPTION = `\
 View an image file from the workspace — a rendered chart, a downloaded
@@ -225,9 +226,8 @@ function instructionsText(commits: string): string {
   return `\
 You have a persistent workspace (files, shell, and TypeScript). Make ONE
 terminal / run_ts call per turn, batching related commands/code within
-it — mutations are then safely sequential. file_write/file_edit are
-different: you MAY issue several in one turn (they execute safely), but
-keep edits to the SAME file to one per turn since parallel-call order
-is not guaranteed. The workspace persists across the whole
-session${commits}.`
+it. file_write/file_edit are different: issue as many in one turn as
+the step needs. A turn's calls run one after another, in the order you
+give them, so several edits to the SAME file are fine: each sees the
+one before. The workspace persists across the whole session${commits}.`
 }

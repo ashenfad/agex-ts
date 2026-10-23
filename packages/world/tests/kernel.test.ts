@@ -205,6 +205,42 @@ describe('the files from code', () => {
     await ws.close()
   })
 
+  it("remove takes fs.rm's recursive and force, and rmdir recursive", async () => {
+    const ws = await open()
+    await ws.files.write('old/a.txt', 'a')
+    await ws.files.write('old/deep/b.txt', 'b')
+    await ws.files.write('also/c.txt', 'c')
+    await ws.files.write('keep.txt', 'k')
+    const out = await ws.runCode(`
+      const errors = []
+      for (const call of [
+        () => fs.remove('old'),
+        () => fs.remove('gone.txt'),
+        () => fs.remove('old', { recursive: true, maxRetries: 3 }),
+        () => fs.remove('/', { recursive: true }),
+      ]) {
+        try { await call() } catch (e) { errors.push(e.name + ': ' + e.message) }
+      }
+      await fs.remove('old/', { recursive: true })
+      await fs.rmdir('also', { recursive: true })
+      await fs.remove('gone.txt', { force: true })
+      await fs.remove('keep.txt', { recursive: true })
+      return [await fs.list('.'), errors]
+    `)
+    expect(out.error).toBeNull()
+    expect(JSON.parse(out.value as string)).toEqual([
+      [],
+      [
+        'FsError: Is a directory: old (resolved to /workspace/old; cwd /workspace)',
+        'FsError: No such file or directory: gone.txt (resolved to /workspace/gone.txt; cwd /workspace)',
+        "TypeError: fs.remove: unknown option 'maxRetries' (it takes recursive, force)",
+        'FsError: Cannot remove the root: /',
+      ],
+    ])
+    expect(await ws.terminal('ls -a')).toMatchObject({ stdout: '' })
+    await ws.close()
+  })
+
   it('names the resolved path and the cwd when a relative path fails', async () => {
     const ws = await open()
     await ws.files.write('app/systems/research/index.js', 'r')

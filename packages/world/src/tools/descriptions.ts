@@ -49,7 +49,8 @@ semantics per call: variables do NOT persist between calls. What does
 persist:
 - files: \`await fs.read(path, 'utf8')\`, \`await fs.write(path, text)\`
   (makes missing directories), and list, exists, mkdir (parents with
-  \`{ recursive: true }\`), remove, rename (all async), visible to the
+  \`{ recursive: true }\`), remove (a folder with \`{ recursive: true }\`),
+  rename (all async), visible to the
   terminal too (but to READ or SEARCH a file, use the terminal's
   grep/sed; and to CHANGE one, use file_edit, not string surgery, which
   will silently hit the wrong occurrence)

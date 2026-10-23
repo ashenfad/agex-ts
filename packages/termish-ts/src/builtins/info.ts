@@ -79,6 +79,7 @@ export const help: CommandHandler = async (ctx): Promise<CommandResult | undefin
     }
     ctx.stdout.write(`${name} - ${entry.summary}\n`)
     if (entry.usage !== '') ctx.stdout.write(`usage: ${entry.usage}\n`)
+    if (entry.notes !== undefined) ctx.stdout.write(`${entry.notes}\n`)
     return undefined
   }
   const names = [...ctx.commands.keys()].sort()

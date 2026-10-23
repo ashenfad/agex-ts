@@ -1,7 +1,11 @@
 /**
  * `sed` — stream editor.
  *
- * Direct port of termish-py's `sed.py`. Full surface:
+ * Direct port of termish-py's `sed.py`: a subset of GNU sed that edits
+ * one line at a time, which `help sed` lists. Constructs outside the
+ * subset that an agent is likely to write (`{...}` blocks, `!`, hold
+ * space, `N`, branches, ...) fail with a message naming the construct,
+ * rather than a bare parse error. The surface:
  *
  * | Command | Meaning |
  * |---|---|
@@ -17,15 +21,15 @@
  * Addresses: line numbers (`3`), last line (`$`), regex (`/pat/`),
  * or a comma-separated range (`3,5`, `/start/,/end/`).
  *
- * Replacement syntax: `&` is the whole match, `\1`-`\9` are
- * backrefs, `\&` is a literal ampersand, `\n`/`\t`/`\\` are escapes.
- * Translated to JS `$&`/`$1`-`$9` at compile time.
+ * Replacement syntax: `&` or `\0` is the whole match, `\1`-`\9` are
+ * backrefs, `\n`/`\t` are escapes, and any other escaped character
+ * stands for itself. Translated to JS `$&`/`$1`-`$9` at compile time.
  */
 
 import type { CommandHandler } from '../context'
 import { TerminalError } from '../errors'
 import { describeFsError } from '../fs/errors'
-import { parseArgs } from './_argparse'
+import { type ParsedArgs, parseArgs } from './_argparse'
 import { breToJs } from './_regex'
 
 const decoder = new TextDecoder('utf-8', { fatal: false })
@@ -61,6 +65,81 @@ interface SedCommand {
 // ---------------------------------------------------------------------------
 // Parsing helpers
 // ---------------------------------------------------------------------------
+
+/** Ends every message about a construct outside the subset. */
+const SEE_HELP = ' (see: help sed)'
+
+const BLOCKS = "'{...}' blocks are not supported"
+const HOLD = 'hold space commands (h H g G x) are not supported'
+const MULTILINE = 'multi-line commands (n N P D) are not supported: lines are edited one at a time'
+const BRANCHES = 'branches and labels (b t T :label) are not supported'
+
+/** Commands outside the subset, each with the name its group fails with. */
+const UNSUPPORTED_COMMANDS: Readonly<Record<string, string>> = {
+  '{': BLOCKS,
+  '}': BLOCKS,
+  '!': "'!' (negated addresses) is not supported",
+  h: HOLD,
+  H: HOLD,
+  g: HOLD,
+  G: HOLD,
+  x: HOLD,
+  n: MULTILINE,
+  N: MULTILINE,
+  P: MULTILINE,
+  D: MULTILINE,
+  b: BRANCHES,
+  t: BRANCHES,
+  T: BRANCHES,
+  ':': BRANCHES,
+}
+
+/** Flags of GNU's `s` outside the subset (a digit is the Nth-match flag). */
+const UNSUPPORTED_S_FLAGS = '0123456789wImMe'
+
+function unsupported(what: string): TerminalError {
+  return new TerminalError(`sed: ${what}${SEE_HELP}`)
+}
+
+/**
+ * Refuse a pattern holding a newline (literal, or `\n` outside a
+ * bracket expression): lines are edited one at a time, so it would
+ * never match.
+ */
+function checkOneLine(pattern: string): void {
+  if (hasNewline(pattern)) {
+    throw unsupported("a pattern can't match across lines: lines are edited one at a time")
+  }
+}
+
+function hasNewline(pattern: string): boolean {
+  let i = 0
+  let inBracket = false
+  while (i < pattern.length) {
+    const ch = pattern[i] as string
+    if (ch === '\n') return true
+    if (inBracket) {
+      if (ch === ']') inBracket = false
+      i++
+      continue
+    }
+    if (ch === '\\' && i + 1 < pattern.length) {
+      if (pattern[i + 1] === 'n') return true
+      i += 2
+      continue
+    }
+    if (ch === '[') {
+      inBracket = true
+      // A `]` right after `[` or `[^` is a member, not the end.
+      i++
+      if (pattern[i] === '^') i++
+      if (pattern[i] === ']') i++
+      continue
+    }
+    i++
+  }
+  return false
+}
 
 /** Read forward from `pos` until an unescaped `delim`. */
 function scanDelimited(text: string, pos: number, delim: string): [string, number] {
@@ -111,13 +190,15 @@ function translateReplacement(repl: string): string {
         out.push('\t')
       } else if (next === '\\') {
         out.push('\\')
+      } else if (next === '0') {
+        out.push('$&')
       } else if (/[1-9]/.test(next)) {
         out.push(`$${next}`)
       } else if (next === '$') {
         // Literal `$` — must be escaped for JS replacement syntax.
         out.push('$$')
       } else {
-        // Unknown escape — sed treats `\X` as literal `X`.
+        // Any other escaped character stands for itself.
         out.push(next)
       }
       i += 2
@@ -142,11 +223,15 @@ function parseAddress(text: string, pos: number, extended: boolean): [Address | 
   if (/\d/.test(ch)) {
     let end = pos
     while (end < text.length && /\d/.test(text[end] as string)) end++
-    return [{ line: Number.parseInt(text.slice(pos, end), 10) }, end]
+    if (text[end] === '~') throw unsupported("'first~step' addresses are not supported")
+    const line = Number.parseInt(text.slice(pos, end), 10)
+    if (line === 0) throw unsupported('line address 0 (as in 0,/RE/) is not supported')
+    return [{ line }, end]
   }
   if (ch === '$') return [{ last: true }, pos + 1]
   if (ch === '/') {
     const [content, newPos] = scanDelimited(text, pos + 1, '/')
+    checkOneLine(content)
     let regex: RegExp
     try {
       regex = new RegExp(extended ? content : breToJs(content))
@@ -177,7 +262,11 @@ function parseSubstitution(
     flags += text[i] as string
     i++
   }
+  if (i < text.length && UNSUPPORTED_S_FLAGS.includes(text[i] as string)) {
+    throw unsupported(`the 's' flag '${text[i]}' is not supported`)
+  }
   if (pattern.length === 0) throw new TerminalError('sed: empty regex in substitution')
+  checkOneLine(pattern)
 
   let regex: RegExp
   try {
@@ -203,13 +292,20 @@ function parseSingleCommand(rawText: string, extended: boolean): SedCommand {
   if (addr1 !== null && pos < text.length && text[pos] === ',') {
     pos++
     ;[addr2, pos] = parseAddress(text, pos, extended)
-    if (addr2 === null) throw new TerminalError('sed: invalid address range')
+    if (addr2 === null) {
+      if (text[pos] === '+' || text[pos] === '~') {
+        throw unsupported(`'addr,${text[pos]}N' addresses are not supported`)
+      }
+      throw new TerminalError(`sed: invalid address range${SEE_HELP}`)
+    }
   }
   const addressRange: AddressRange = {
     ...(addr1 !== null && { addr1 }),
     ...(addr2 !== null && { addr2 }),
   }
 
+  // Spaces may come between the address and the command.
+  while (text[pos] === ' ') pos++
   if (pos >= text.length) throw new TerminalError('sed: missing command')
   const cmdChar = text[pos] as string
   pos++
@@ -243,12 +339,16 @@ function parseSingleCommand(rawText: string, extended: boolean): SedCommand {
     rest = rest.replaceAll('\\n', '\n')
     cmd = { address: addressRange, command: cmdChar, text: rest }
     pos = text.length
+  } else if (cmdChar in UNSUPPORTED_COMMANDS) {
+    throw unsupported(UNSUPPORTED_COMMANDS[cmdChar] as string)
   } else {
-    throw new TerminalError(`sed: unknown command: '${cmdChar}'`)
+    throw new TerminalError(`sed: unknown command: '${cmdChar}'${SEE_HELP}`)
   }
 
   const trailing = text.slice(pos).trim()
-  if (trailing.length > 0) throw new TerminalError(`sed: trailing characters: '${trailing}'`)
+  if (trailing.length > 0) {
+    throw new TerminalError(`sed: trailing characters: '${trailing}'${SEE_HELP}`)
+  }
   return cmd
 }
 
@@ -398,11 +498,11 @@ function processContent(
 ): string {
   if (content.length === 0) return ''
 
-  const lines = splitLinesKeepEnds(content)
+  // Only `\n` ends a line (`\r`, `\f` and the like are ordinary
+  // characters), and every line is processed with its `\n`.
   const hadTrailingNewline = content.endsWith('\n')
-  if (lines.length > 0 && !(lines[lines.length - 1] as string).endsWith('\n')) {
-    lines[lines.length - 1] = `${lines[lines.length - 1] as string}\n`
-  }
+  const body = hadTrailingNewline ? content.slice(0, -1) : content
+  const lines = body.split('\n').map((line) => `${line}\n`)
 
   const totalLines = lines.length
   const rangeActive: boolean[] = new Array(commands.length).fill(false)
@@ -527,20 +627,39 @@ function applyReplacement(repl: string, match: string, groups: unknown[]): strin
 // ---------------------------------------------------------------------------
 
 export const sed: CommandHandler = async (ctx) => {
-  const parsed = parseArgs(
-    ctx.args,
-    {
-      flags: {
-        quiet: { aliases: ['-n', '--quiet', '--silent'] },
-        inPlace: { aliases: ['-i', '--in-place'] },
-        expression: { aliases: ['-e', '--expression'], multi: true },
-        // -E/-r: extended regex, which JS RegExp reads as it is; without
-        // it, patterns are POSIX BRE.
-        extended: { aliases: ['-E', '-r', '--regexp-extended'] },
+  for (const arg of ctx.args) {
+    // GNU's -iSUFFIX (and --in-place=SUFFIX) keeps a backup; here -i doesn't.
+    if (/^-i[^a-zA-Z]/.test(arg) || arg.startsWith('--in-place=')) {
+      throw unsupported('-i takes no backup suffix')
+    }
+  }
+  let parsed: ParsedArgs
+  try {
+    parsed = parseArgs(
+      ctx.args,
+      {
+        flags: {
+          quiet: { aliases: ['-n', '--quiet', '--silent'] },
+          inPlace: { aliases: ['-i', '--in-place'] },
+          expression: { aliases: ['-e', '--expression'], multi: true },
+          // -E/-r: extended regex, which JS RegExp reads as it is; without
+          // it, patterns are POSIX BRE.
+          extended: { aliases: ['-E', '-r', '--regexp-extended'] },
+        },
       },
-    },
-    'sed',
-  )
+      'sed',
+    )
+  } catch (e) {
+    if (e instanceof TerminalError && e.message.startsWith('sed: unknown option:')) {
+      throw new TerminalError(`${e.message}${SEE_HELP}`)
+    }
+    throw e
+  }
+
+  if (parsed.flags.inPlace === true && parsed.positional[0] === '') {
+    // BSD's `sed -i '' SCRIPT FILE`, where the '' is a backup suffix.
+    throw unsupported("-i takes no backup suffix, so drop the ''")
+  }
 
   const explicitExprs = parsed.flags.expression as string[]
   let expressions: string[]
@@ -595,30 +714,6 @@ export const sed: CommandHandler = async (ctx) => {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function splitLinesKeepEnds(text: string): string[] {
-  if (text.length === 0) return []
-  const lines: string[] = []
-  let i = 0
-  let lineStart = 0
-  while (i < text.length) {
-    const c = text[i] as string
-    if (c === '\n') {
-      lines.push(text.slice(lineStart, i + 1))
-      i++
-      lineStart = i
-    } else if (c === '\r') {
-      const end = text[i + 1] === '\n' ? i + 2 : i + 1
-      lines.push(text.slice(lineStart, end))
-      i = end
-      lineStart = end
-    } else {
-      i++
-    }
-  }
-  if (lineStart < text.length) lines.push(text.slice(lineStart))
-  return lines
-}
 
 function describeError(e: unknown): string {
   return describeFsError(e)

@@ -1,0 +1,223 @@
+[
+  {
+    "name": "help sed lists what is supported and what isn't",
+    "script": "help sed",
+    "stdout": "sed - edit text as a stream\nusage: sed [-n] [-i] [-E] (-e SCRIPT)... | SCRIPT [FILE...]\nSupported (a subset of GNU sed):\n  -n          print only what p (or s///p) prints\n  -i          edit FILEs in place (no backup suffix)\n  -E, -r      extended regex; without it, basic (\\( \\) \\{ \\} \\| \\+ \\?)\n  addresses   N, $, /RE/, or a range A,B of those\n  commands    s/RE/REPL/[gip] (any delimiter), y/SRC/DST/, p, d, q,\n              a TEXT, i TEXT, c TEXT; separate them with ; or newlines\n  REPL        & or \\0 (the match), \\1-\\9 (groups), \\n, \\t\nLines are edited one at a time: a pattern never matches across a newline.\nFor more than this, use awk, or edit the file another way.\nNot supported: {...} blocks, ! (negation), first~step, A,+N, 0,/RE/,\n  hold space (h H g G x), n N P D, branches (b t T :label), = l r w,\n  s flags other than g i p (N, w, I, m, e), -i SUFFIX, -s, -z\n"
+  },
+  {
+    "name": "s with another delimiter and & in the replacement",
+    "script": "echo a/b | sed 's|/|[&]|'",
+    "stdout": "a[/]b\n"
+  },
+  {
+    "name": "s flags g, i and p with -n",
+    "script": "echo aAa | sed -n 's/a/x/gip'",
+    "stdout": "xxx\n"
+  },
+  {
+    "name": "s BRE groups and backreferences",
+    "script": "echo ab | sed 's/\\(a\\)\\(b\\)/\\2\\1/'",
+    "stdout": "ba\n"
+  },
+  {
+    "name": "s -E groups and backreferences",
+    "script": "echo ab | sed -E 's/(a)(b)/\\2\\1/'",
+    "stdout": "ba\n"
+  },
+  {
+    "name": "s \\0 is the whole match",
+    "script": "echo abc | sed 's/b/[\\0]/'",
+    "stdout": "a[b]c\n"
+  },
+  {
+    "name": "s escaped characters stand for themselves",
+    "script": "echo a | sed 's/a/\\$\\q\\&/'",
+    "stdout": "$q&\n"
+  },
+  {
+    "name": "s [^\\n] is not a newline in the pattern",
+    "script": "echo abc | sed 's/[^\\n]b/X/'",
+    "stdout": "Xc\n"
+  },
+  {
+    "name": "y transliterates",
+    "script": "echo abc | sed 'y/abc/xyz/'",
+    "stdout": "xyz\n"
+  },
+  {
+    "name": "line, last-line and regex addresses",
+    "script": "printf 'a\\nb\\nc\\nd\\n' | sed -n '1p;/c/p;$p'",
+    "stdout": "a\nc\nd\n"
+  },
+  {
+    "name": "a range of regex addresses",
+    "script": "printf 'a\\nb\\nc\\nd\\n' | sed '/b/,/c/d'",
+    "stdout": "a\nd\n"
+  },
+  {
+    "name": "spaces between an address and its command",
+    "script": "printf 'a\\nb\\n' | sed '1 d'",
+    "stdout": "b\n"
+  },
+  {
+    "name": "a, i and c",
+    "script": "printf 'a\\nb\\nc\\n' | sed -e '1a after' -e '2i before' -e '3c changed'",
+    "stdout": "a\nafter\nbefore\nb\nchanged\n"
+  },
+  {
+    "name": "q quits after the line",
+    "script": "printf 'a\\nb\\n' | sed 2q; printf 'a\\nb\\n' | sed 1q",
+    "stdout": "a\nb\na\n"
+  },
+  {
+    "name": "-i edits the file in place",
+    "files": {
+      "/f": "a\n"
+    },
+    "script": "sed -i 's/a/b/' /f; cat /f",
+    "stdout": "b\n"
+  },
+  {
+    "name": "only a newline ends a line",
+    "files": {
+      "/f": "a\fb\rc\n"
+    },
+    "script": "sed 's/b/B/' /f",
+    "stdout": "a\fB\rc\n"
+  },
+  {
+    "name": "{...} blocks refused by name",
+    "script": "printf 'a\\n\\nb\\n' | sed '2{/^$/d}'",
+    "error": "sed: '{...}' blocks are not supported (see: help sed)",
+    "exitCode": 1
+  },
+  {
+    "name": "a stray } refused as a block",
+    "script": "echo a | sed '}'",
+    "error": "sed: '{...}' blocks are not supported (see: help sed)",
+    "exitCode": 1
+  },
+  {
+    "name": "! refused by name",
+    "script": "echo a | sed '$!d'",
+    "error": "sed: '!' (negated addresses) is not supported (see: help sed)",
+    "exitCode": 1
+  },
+  {
+    "name": "first~step refused by name",
+    "script": "echo a | sed -n '1~2p'",
+    "error": "sed: 'first~step' addresses are not supported (see: help sed)",
+    "exitCode": 1
+  },
+  {
+    "name": "addr,+N refused by name",
+    "script": "echo a | sed '1,+2d'",
+    "error": "sed: 'addr,+N' addresses are not supported (see: help sed)",
+    "exitCode": 1
+  },
+  {
+    "name": "addr,~N refused by name",
+    "script": "echo a | sed '1,~2d'",
+    "error": "sed: 'addr,~N' addresses are not supported (see: help sed)",
+    "exitCode": 1
+  },
+  {
+    "name": "0,/RE/ refused by name",
+    "script": "echo a | sed '0,/a/d'",
+    "error": "sed: line address 0 (as in 0,/RE/) is not supported (see: help sed)",
+    "exitCode": 1
+  },
+  {
+    "name": "hold space refused by name",
+    "script": "echo a | sed 'h;G'",
+    "error": "sed: hold space commands (h H g G x) are not supported (see: help sed)",
+    "exitCode": 1
+  },
+  {
+    "name": "N refused by name",
+    "script": "echo a | sed 'N;s/a/b/'",
+    "error": "sed: multi-line commands (n N P D) are not supported: lines are edited one at a time (see: help sed)",
+    "exitCode": 1
+  },
+  {
+    "name": "branches refused by name",
+    "script": "echo a | sed ':a;ba'",
+    "error": "sed: branches and labels (b t T :label) are not supported (see: help sed)",
+    "exitCode": 1
+  },
+  {
+    "name": "another command names help",
+    "script": "echo a | sed '='",
+    "error": "sed: unknown command: '=' (see: help sed)",
+    "exitCode": 1
+  },
+  {
+    "name": "the Nth-match flag refused by name",
+    "script": "echo aaa | sed 's/a/b/2'",
+    "error": "sed: the 's' flag '2' is not supported (see: help sed)",
+    "exitCode": 1
+  },
+  {
+    "name": "the w flag refused by name",
+    "script": "echo a | sed 's/a/b/w out'",
+    "error": "sed: the 's' flag 'w' is not supported (see: help sed)",
+    "exitCode": 1
+  },
+  {
+    "name": "a pattern with \\n refused",
+    "script": "printf 'foo\\nbar\\n' | sed 's/foo\\nbar/X/'",
+    "error": "sed: a pattern can't match across lines: lines are edited one at a time (see: help sed)",
+    "exitCode": 1
+  },
+  {
+    "name": "a pattern with a newline refused",
+    "script": "printf 'foo\\nbar\\n' | sed 's/foo\nbar/X/'",
+    "error": "sed: a pattern can't match across lines",
+    "exitCode": 1
+  },
+  {
+    "name": "an address with \\n refused",
+    "script": "printf 'foo\\nbar\\n' | sed '/foo\\nbar/d'",
+    "error": "sed: a pattern can't match across lines",
+    "exitCode": 1
+  },
+  {
+    "name": "-i with a backup suffix refused",
+    "files": {
+      "/f": "a\n"
+    },
+    "script": "sed -i.bak 's/a/b/' /f",
+    "error": "sed: -i takes no backup suffix (see: help sed)",
+    "exitCode": 1
+  },
+  {
+    "name": "--in-place with a backup suffix refused",
+    "files": {
+      "/f": "a\n"
+    },
+    "script": "sed --in-place=.bak 's/a/b/' /f",
+    "error": "sed: -i takes no backup suffix (see: help sed)",
+    "exitCode": 1
+  },
+  {
+    "name": "BSD's -i '' refused",
+    "files": {
+      "/f": "a\n"
+    },
+    "script": "sed -i '' 's/a/b/' /f",
+    "error": "sed: -i takes no backup suffix, so drop the '' (see: help sed)",
+    "exitCode": 1
+  },
+  {
+    "name": "an unknown option names help",
+    "script": "echo a | sed -z 's/a/b/'",
+    "error": "sed: unknown option: -z (see: help sed)",
+    "exitCode": 1
+  },
+  {
+    "name": "trailing characters name help",
+    "script": "echo a | sed 'q5'",
+    "error": "sed: trailing characters: '5' (see: help sed)",
+    "exitCode": 1
+  }
+]

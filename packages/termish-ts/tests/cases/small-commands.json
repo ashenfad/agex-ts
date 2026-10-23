@@ -513,6 +513,11 @@
     "stdout": "seq - print a sequence of numbers\nusage: seq [-s SEP] [-w] [FIRST [INCR]] LAST\n"
   },
   {
+    "name": "help for awk",
+    "script": "help awk",
+    "stdout": "awk - scan and process text by patterns and fields\nusage: awk [-F FS] [-v VAR=VALUE]... ('PROGRAM' | -f PROGFILE) [FILE...]\n"
+  },
+  {
     "name": "help lists the commands",
     "script": "help",
     "stdoutRegex": "^Commands \\(help NAME shows how one is used\\):\\n(.+\\n)*seq +print a sequence of numbers\\n"

@@ -1,13 +1,31 @@
 /**
  * What `help` says of each builtin: a one-line summary for the list,
- * and its usage for `help NAME`. The same text as termish-py's
- * `help_text.py`, entry for entry.
+ * its usage for `help NAME`, and for a command that is a subset of the
+ * GNU one, notes on what it reads and what it doesn't. The same text as
+ * termish-py's `help_text.py`, entry for entry.
  */
 
 export interface HelpEntry {
   readonly summary: string
   readonly usage: string
+  readonly notes?: string
 }
+
+const SED_NOTES = [
+  'Supported (a subset of GNU sed):',
+  '  -n          print only what p (or s///p) prints',
+  '  -i          edit FILEs in place (no backup suffix)',
+  String.raw`  -E, -r      extended regex; without it, basic (\( \) \{ \} \| \+ \?)`,
+  '  addresses   N, $, /RE/, or a range A,B of those',
+  '  commands    s/RE/REPL/[gip] (any delimiter), y/SRC/DST/, p, d, q,',
+  '              a TEXT, i TEXT, c TEXT; separate them with ; or newlines',
+  String.raw`  REPL        & or \0 (the match), \1-\9 (groups), \n, \t`,
+  'Lines are edited one at a time: a pattern never matches across a newline.',
+  'For more than this, use awk, or edit the file another way.',
+  'Not supported: {...} blocks, ! (negation), first~step, A,+N, 0,/RE/,',
+  '  hold space (h H g G x), n N P D, branches (b t T :label), = l r w,',
+  '  s flags other than g i p (N, w, I, m, e), -i SUFFIX, -s, -z',
+].join('\n')
 
 export const HELP: Readonly<Record<string, HelpEntry>> = {
   '[': { summary: 'evaluate a condition (same as test)', usage: '[ EXPRESSION ]' },
@@ -93,6 +111,7 @@ export const HELP: Readonly<Record<string, HelpEntry>> = {
   sed: {
     summary: 'edit text as a stream',
     usage: 'sed [-n] [-i] [-E] (-e SCRIPT)... | SCRIPT [FILE...]',
+    notes: SED_NOTES,
   },
   seq: {
     summary: 'print a sequence of numbers',

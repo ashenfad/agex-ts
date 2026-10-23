@@ -20,6 +20,7 @@ import {
   callAware,
 } from '../profile'
 import { Mismatch, check, findLive } from '../values'
+import { callFs } from './code-fs'
 import { type ResolvedTarget, type WorkerHandle, createWorkerHandle, detectTarget } from './handle'
 import {
   CACHE_METHODS,
@@ -417,8 +418,7 @@ export class Kernel {
     const { target, method, args } = msg
     if (target === 'fs') {
       if (!FS_SET.has(method)) throw new TypeError(`fs.${method} is not a function`)
-      const fn = (ctx.fs as unknown as Record<string, (...a: unknown[]) => unknown>)[method]
-      return await (fn as (...a: unknown[]) => unknown).apply(ctx.fs, [...args])
+      return await callFs(ctx.fs, method, args)
     }
     if (target === 'cache') {
       if (ctx.cache === null) throw new Error('this workspace has no cache')

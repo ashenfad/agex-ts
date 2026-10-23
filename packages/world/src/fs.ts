@@ -79,6 +79,30 @@ export async function readManyOf(
   return found
 }
 
+/**
+ * Write a file, creating the directories it needs, as `file_write` and
+ * code's `fs.write` do. Only a missing directory on the way is made:
+ * the write fails as a plain one would when a file stands where a
+ * directory should (`ENOTDIR`) or the filesystem is read-only
+ * (`EROFS`).
+ */
+export async function writeWithParents(
+  fs: FileSystem,
+  path: string,
+  content: Uint8Array,
+  mode?: 'w' | 'a',
+): Promise<void> {
+  try {
+    await fs.write(path, content, mode)
+  } catch (e) {
+    if (!(e instanceof FsError && e.code === 'ENOENT')) throw e
+    const parent = dirname(resolve(path, fs.getcwd()))
+    if (parent === '/') throw e
+    await fs.mkdir(parent, { parents: true, existOk: true })
+    await fs.write(path, content, mode)
+  }
+}
+
 export class WorldFS implements FileSystem {
   readonly #view: KeyReader
   readonly #persistCwd: boolean

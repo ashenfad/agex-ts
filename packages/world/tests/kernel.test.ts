@@ -136,6 +136,113 @@ describe('running code', () => {
   })
 })
 
+describe('the files from code', () => {
+  it('writes and appends into directories that are missing, as file_write does', async () => {
+    const ws = await open()
+    const out = await ws.runCode(`
+      await fs.write('app/systems/hearth/index.js', 'one')
+      await fs.write('/workspace/logs/today/run.log', 'a', 'a')
+      await fs.write('logs/today/run.log', 'b', 'a')
+      return [
+        await fs.read('app/systems/hearth/index.js', 'utf8'),
+        await fs.read('logs/today/run.log', 'utf8'),
+        await fs.isDir('app/systems'),
+      ]
+    `)
+    expect(out.error).toBeNull()
+    expect(out.value).toBe('["one","ab",true]')
+    expect(await ws.files.readText('app/systems/hearth/index.js')).toBe('one')
+    await ws.close()
+  })
+
+  it('refuses a write under a file, making no directories', async () => {
+    const ws = await open()
+    await ws.files.write('notes.txt', 'n')
+    const out = await ws.runCode(`
+      const codes = []
+      for (const path of ['notes.txt/x.js', 'notes.txt/deeper/x.js']) {
+        try { await fs.write(path, 'x') } catch (e) { codes.push([e.name, e.code]) }
+      }
+      return [codes, await fs.list('.')]
+    `)
+    expect(out.value).toBe('[[["FsError","ENOTDIR"],["FsError","ENOTDIR"]],["notes.txt"]]')
+    await ws.close()
+  })
+
+  it("mkdir takes Node's recursive, and refuses options it doesn't know", async () => {
+    const ws = await open()
+    const out = await ws.runCode(`
+      await fs.mkdir('a/b/c', { recursive: true })
+      await fs.mkdir('a/b/c', { recursive: true })
+      await fs.mkdir('p/q', { parents: true })
+      const errors = []
+      for (const call of [
+        () => fs.mkdir('a/b/c', { parents: true }),
+        () => fs.mkdir('m', { mode: 0o755 }),
+        () => fs.mkdir('m', { recursive: true, mode: 0o755, force: true }),
+        () => fs.mkdir('m', 0o755),
+        () => fs.list('.', { withFileTypes: true }),
+      ]) {
+        try { await call() } catch (e) { errors.push(e.name + ': ' + e.message) }
+      }
+      return [await fs.isDir('a/b/c'), await fs.isDir('p/q'), await fs.exists('m'), errors]
+    `)
+    expect(out.error).toBeNull()
+    expect(JSON.parse(out.value as string)).toEqual([
+      true,
+      true,
+      false,
+      [
+        'FsError: File exists: a/b/c (resolved to /workspace/a/b/c; cwd /workspace)',
+        "TypeError: fs.mkdir: unknown option 'mode' (it takes parents, existOk, recursive)",
+        "TypeError: fs.mkdir: unknown options 'mode', 'force' (it takes parents, existOk, recursive)",
+        'TypeError: fs.mkdir: options must be an object (it takes parents, existOk, recursive)',
+        "TypeError: fs.list: unknown option 'withFileTypes' (it takes recursive)",
+      ],
+    ])
+    await ws.close()
+  })
+
+  it('names the resolved path and the cwd when a relative path fails', async () => {
+    const ws = await open()
+    await ws.files.write('app/systems/research/index.js', 'r')
+    await ws.terminal('cd /workspace/app/systems')
+    const out = await ws.runCode(`
+      const errors = []
+      for (const call of [
+        () => fs.read('app/systems/research/index.js'),
+        () => fs.read('/workspace/missing.js'),
+        () => fs.read('research'),
+        () => fs.chdir('../nowhere'),
+        () => fs.mkdir('x/y'),
+      ]) {
+        try { await call() } catch (e) { errors.push([e.code, e.message]) }
+      }
+      return [await fs.read('research/index.js', 'utf8'), errors]
+    `)
+    expect(JSON.parse(out.value as string)).toEqual([
+      'r',
+      [
+        [
+          'ENOENT',
+          'No such file or directory: app/systems/research/index.js (resolved to /workspace/app/systems/app/systems/research/index.js; cwd /workspace/app/systems)',
+        ],
+        ['ENOENT', 'No such file or directory: /workspace/missing.js'],
+        [
+          'EISDIR',
+          'Is a directory: research (resolved to /workspace/app/systems/research; cwd /workspace/app/systems)',
+        ],
+        [
+          'ENOENT',
+          'No such file or directory: ../nowhere (resolved to /workspace/app/nowhere; cwd /workspace/app/systems)',
+        ],
+        ['ENOENT', 'No such file or directory: /workspace/app/systems/x'],
+      ],
+    ])
+    await ws.close()
+  })
+})
+
 describe('bounded output', () => {
   it('keeps no more than maxObservation of a stream while code prints', async () => {
     const ws = await open({ code: { maxObservation: 5000 } })
@@ -654,9 +761,13 @@ describe.each(BACKENDS)('on %s', (_, make) => {
     const view = await store.resolve(`s@${tag}`, { profile: { code: code() } })
     const out = await view.runCode(`
       const text = await fs.read('/workspace/f.txt', 'utf8')
-      try { await fs.write('/workspace/f.txt', 'v3') } catch (e) { return [text, e.name, e.code] }
+      const codes = []
+      for (const path of ['/workspace/f.txt', 'new/dir/f.txt']) {
+        try { await fs.write(path, 'v3') } catch (e) { codes.push(e.code) }
+      }
+      return [text, codes, await fs.exists('new')]
     `)
-    expect(out.value).toBe('["v1","FsError","EROFS"]')
+    expect(out.value).toBe('["v1",["EROFS","EROFS"],false]')
     expect(out.commit).toBeNull()
     await view.close()
     await ws.close()

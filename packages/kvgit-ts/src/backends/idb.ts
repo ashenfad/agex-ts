@@ -409,6 +409,7 @@ function openDatabase(
         ? globalThis.indexedDB.open(dbName)
         : globalThis.indexedDB.open(dbName, version)
     req.onupgradeneeded = () => {
+      clearTimeout(timer)
       const db = req.result
       if (!db.objectStoreNames.contains(storeName)) db.createObjectStore(storeName)
     }

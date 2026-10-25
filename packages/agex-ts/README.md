@@ -109,8 +109,10 @@ chat.cancel('stopped by the user') // the turn ends cancelled, its work kept
 - **Limits:** `maxSteps` model calls per run, and `maxToolCalls`, past
   which the model is told to reply and further calls aren't run.
 - **The record:** `chat.runs()` reads the stored runs, oldest first,
-  each message with its parts and usage (`runUsage(run)` sums it). A
-  checkout of the workspace rewinds them with the files.
+  each message with its parts and usage (`runUsage(run)` sums it);
+  `readRuns(ws)` reads the same from a workspace alone, with no agent,
+  as a page restoring a chat's history needs. A checkout of the
+  workspace rewinds them with the files.
 - **The agent holds nothing:** a change of model or primer is a new
   `Agent` for the next turn, over the same workspace; pass the old
   session's inbox on (`agent.session(ws, { inbox: chat.inbox })`) so

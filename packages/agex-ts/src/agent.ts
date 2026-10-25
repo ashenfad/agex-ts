@@ -53,9 +53,9 @@ import {
   type Usage,
   addUsage,
   dumpRun,
-  loadRun,
   messageText,
   newId,
+  readRuns,
 } from './record'
 import { type Params, type Task, type TaskOptions, makeTask } from './task'
 
@@ -345,11 +345,8 @@ export class Session {
   }
 
   /** The runs the workspace holds, oldest first. */
-  async runs(): Promise<Run[]> {
-    const index = await this.ws.conversation.index()
-    if (index === null) return []
-    const bodies = await this.ws.conversation.runs(index.runs)
-    return index.runs.filter((id) => bodies.has(id)).map((id) => loadRun(bodies.get(id)))
+  runs(): Promise<Run[]> {
+    return readRuns(this.ws)
   }
 
   /**

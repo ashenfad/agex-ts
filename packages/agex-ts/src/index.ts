@@ -26,6 +26,7 @@ export {
   loadRun,
   messageText,
   newId,
+  readRuns,
   runUsage,
 } from './record'
 export {

@@ -14,7 +14,7 @@
  * message id, so an id never changes once the message is stored.
  */
 
-import type { RunStatus } from '@agex-ts/world'
+import type { RunStatus, Workspace } from '@agex-ts/world'
 
 /** The record's format version. Bumped only when a stored field changes
  *  meaning or goes away; an added optional field doesn't bump it. */
@@ -168,6 +168,20 @@ export function runUsage(run: Run): Usage {
   let total = run.compaction ?? NO_USAGE
   for (const message of run.messages) if (message.usage) total = addUsage(total, message.usage)
   return total
+}
+
+/**
+ * The runs a workspace holds, oldest first, read from its conversation
+ * plane. Needs no agent or model: a page rebuilding a chat's history
+ * reads it straight from the workspace. `session.runs()` is the same.
+ *
+ * @throws RecordError for a stored run that doesn't fit the format.
+ */
+export async function readRuns(ws: Workspace): Promise<Run[]> {
+  const index = await ws.conversation.index()
+  if (index === null) return []
+  const bodies = await ws.conversation.runs(index.runs)
+  return index.runs.filter((id) => bodies.has(id)).map((id) => loadRun(bodies.get(id)))
 }
 
 /** A run as JSON data, the stored form. */

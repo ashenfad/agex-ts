@@ -25,6 +25,7 @@ import {
   limitReached,
   messageText,
   newId,
+  readRuns,
   unanswered,
 } from '../src/index'
 
@@ -159,6 +160,17 @@ describe('a turn', () => {
       'first',
       'second',
     ])
+  })
+
+  it('reads the runs from the workspace, without an agent', async () => {
+    expect(await readRuns(ws)).toEqual([])
+    const session = agent([says('one'), says('two')]).session(ws)
+    await session.say('first')
+    await session.say('second')
+    const reopened = await store.open('s')
+    const runs = await readRuns(reopened)
+    expect(runs.map((r) => messageText(r.messages[0] as Message))).toEqual(['first', 'second'])
+    expect(runs).toEqual(await session.runs())
   })
 
   it('a new session continues the stored conversation', async () => {

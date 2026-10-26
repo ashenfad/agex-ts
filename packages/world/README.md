@@ -276,6 +276,16 @@ follows no redirect; a plain string goes wherever it is asked to. A
 secret a response echoes back is replaced by its reference before it
 reaches the world.
 
+A secret given as `{origins}` alone is declared: the host holds its
+value somewhere the world can't reach (another process, a page's
+parent). The world lists it and gives its reference as for any secret,
+but `curl`, `httpHost()` and `request()` refuse a request carrying it
+(`secret STRIPE_KEY has no value here: …`) rather than send the
+reference; `secrets.get` throws `DeclaredSecretError` for it, and
+`secrets.declared(name)` tells it apart. A host object that sends the
+request on to where the value is held, reference and all, has it filled
+there.
+
 ## The tools
 
 `worldTools(ws)` gives the tools an agent loop hands a model, with

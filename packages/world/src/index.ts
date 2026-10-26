@@ -126,7 +126,13 @@ export {
   type NetResponse,
   request,
 } from './net'
-export { SecretOriginError, Secrets, type SecretSpec, secretRef } from './secrets'
+export {
+  DeclaredSecretError,
+  SecretOriginError,
+  Secrets,
+  type SecretSpec,
+  secretRef,
+} from './secrets'
 export { EditError, type EditMode, type EditResult, applyEdit, findSimilarLines } from './editing'
 export {
   type CommandFactory,

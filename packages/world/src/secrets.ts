@@ -7,13 +7,19 @@
  * A secret may be bound to the origins it may be sent to, so a request
  * elsewhere is refused rather than leaking it. A plain string is
  * unbound: the host's choice.
+ *
+ * A secret may also be declared without a value: the world names it and
+ * has its reference, but its value is held further out, by a host
+ * object that sends the request on and has it filled there. The world's
+ * own requests refuse to carry it, since they have nothing to fill.
  */
 
 import { InvalidNameError } from './errors'
 
 /** A secret as a profile gives it: a value, or a value with the origins
- *  it may be sent to (`['https://abc.supabase.co']`). */
-export type SecretSpec = string | { readonly value: string; readonly origins: readonly string[] }
+ *  it may be sent to (`['https://abc.supabase.co']`), or only those
+ *  origins, for a secret declared here whose value the host holds. */
+export type SecretSpec = string | { readonly value?: string; readonly origins: readonly string[] }
 
 /** A secret's reference, as the shell expands it and `secret(name)`
  *  gives it in code. */
@@ -31,11 +37,26 @@ export class SecretOriginError extends Error {
   }
 }
 
+/** A secret declared without a value was asked for one (filled into a
+ *  request, or read with `get`): the host holds it, so only a host
+ *  object that fills it can send the request. */
+export class DeclaredSecretError extends Error {
+  override readonly name = 'DeclaredSecretError'
+  constructor(readonly secret: string) {
+    super(
+      `secret ${secret} has no value here: the host holds it, so the request must go through a host object that fills it`,
+    )
+  }
+}
+
 const REF = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g
 
 /** The secrets of a profile, as host code reaches them. */
 export class Secrets {
-  readonly #values = new Map<string, { value: string; origins: ReadonlySet<string> | null }>()
+  readonly #values = new Map<
+    string,
+    { value: string | null; origins: ReadonlySet<string> | null }
+  >()
 
   constructor(specs: Readonly<Record<string, SecretSpec>> = {}) {
     for (const [name, spec] of Object.entries(specs)) {
@@ -43,7 +64,7 @@ export class Secrets {
         this.#values.set(name, { value: spec, origins: null })
       } else {
         this.#values.set(name, {
-          value: spec.value,
+          value: spec.value ?? null,
           origins: new Set(spec.origins.map((o) => originOf(o, name))),
         })
       }
@@ -55,10 +76,22 @@ export class Secrets {
     return [...this.#values.keys()].sort()
   }
 
-  /** A secret's value, for host code that builds a client with it (the
-   *  origins are then that code's to keep). */
+  /**
+   * A secret's value, for host code that builds a client with it (the
+   * origins are then that code's to keep).
+   *
+   * @throws DeclaredSecretError for a secret declared without a value.
+   */
   get(name: string): string | undefined {
-    return this.#values.get(name)?.value
+    const secret = this.#values.get(name)
+    if (secret?.value === null) throw new DeclaredSecretError(name)
+    return secret?.value
+  }
+
+  /** Whether a secret is declared without a value (false for a name
+   *  that isn't a secret). */
+  declared(name: string): boolean {
+    return this.#values.get(name)?.value === null
   }
 
   /** The origins a secret may be sent to; null when unbound. */
@@ -73,6 +106,7 @@ export class Secrets {
    *
    * @throws SecretOriginError for a bound secret `to` isn't one of its
    *   origins.
+   * @throws DeclaredSecretError for a secret declared without a value.
    */
   fill(text: string, to: URL): string {
     return text.replace(REF, (whole, a, b) => {
@@ -82,6 +116,7 @@ export class Secrets {
       if (secret.origins !== null && !secret.origins.has(to.origin)) {
         throw new SecretOriginError(name, to.origin)
       }
+      if (secret.value === null) throw new DeclaredSecretError(name)
       return secret.value
     })
   }
@@ -94,11 +129,12 @@ export class Secrets {
     return false
   }
 
-  /** `text` with any secret value in it replaced by its reference. */
+  /** `text` with any secret value in it replaced by its reference (a
+   *  declared secret has none to replace). */
   scrub(text: string): string {
     let out = text
     for (const [name, { value }] of this.#values) {
-      if (value.length >= 4) out = out.split(value).join(secretRef(name))
+      if (value !== null && value.length >= 4) out = out.split(value).join(secretRef(name))
     }
     return out
   }
@@ -114,15 +150,20 @@ function originOf(url: string, secret: string): string {
   }
 }
 
-/** Check a profile's secrets: names, values and origins. */
+/** Check a profile's secrets: names, values and origins. A secret
+ *  without a value is bound to origins all the same. */
 export function checkSecrets(specs: Readonly<Record<string, SecretSpec>>): void {
   for (const [name, spec] of Object.entries(specs)) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
       throw new InvalidNameError(`secret ${JSON.stringify(name)}: a name is [A-Za-z_][A-Za-z0-9_]*`)
     }
     if (typeof spec === 'string') continue
-    if (typeof spec !== 'object' || spec === null || typeof spec.value !== 'string') {
-      throw new TypeError(`secret ${name}: a string, or {value, origins}`)
+    if (
+      typeof spec !== 'object' ||
+      spec === null ||
+      (spec.value !== undefined && typeof spec.value !== 'string')
+    ) {
+      throw new TypeError(`secret ${name}: a string, {value, origins}, or {origins}`)
     }
     if (!Array.isArray(spec.origins) || spec.origins.length === 0) {
       throw new TypeError(`secret ${name}: origins is a non-empty list of URLs`)

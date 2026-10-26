@@ -252,7 +252,10 @@ export interface Profile {
    * (`$NAME`, `secret('NAME')`), which the host's own code (a command,
    * a host object) fills at the request that needs one. A secret given
    * as `{value, origins}` is filled only for requests to those origins;
-   * a plain string goes wherever it is asked to.
+   * a plain string goes wherever it is asked to. One given as `{origins}`
+   * alone is declared: the world names it and has its reference, but the
+   * host holds its value, so only a host object that sends the request
+   * on to the host can have it filled.
    */
   readonly secrets?: Readonly<Record<string, SecretSpec>>
   /** Terminal commands, by name, beside termish's own (a name of

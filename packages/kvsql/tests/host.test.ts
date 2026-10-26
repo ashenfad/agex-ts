@@ -696,6 +696,16 @@ describe('procedures', () => {
       tx.query("INSERT INTO kv VALUES (?, x'00')", [key])
       return () => key
     },
+    putThenFickle(tx: Transaction, key: string) {
+      tx.query("INSERT INTO kv VALUES (?, x'00')", [key])
+      let reads = 0
+      // a value the first clone can carry and a second couldn't
+      return {
+        get v() {
+          return ++reads === 1 ? 1 : () => reads
+        },
+      }
+    },
   }
 
   function worker(o: Origin, name: string, procedures: Procedures = PROCEDURES): FakeWorker {
@@ -725,6 +735,9 @@ describe('procedures', () => {
     await expect(db.call('putThenFunction', 'y')).rejects.toMatchObject({ name: 'DataCloneError' })
     expect((await db.query('SELECT count(*) AS n FROM kv')).rows).toEqual([{ n: 1 }])
     expect(await db.info()).toMatchObject({ seq: 3 })
+    // The value sent is the one cloned before the commit.
+    expect(await db.call('putThenFickle', 'z')).toEqual({ v: 1 })
+    expect(await db.info()).toMatchObject({ seq: 4 })
   })
 
   it('fails a call to a procedure the holder lacks, naming it', async () => {

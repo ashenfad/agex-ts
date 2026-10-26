@@ -178,6 +178,7 @@ export interface DeleteOptions {
 export interface Ops {
   query: { args: [sql: string, params: unknown]; result: QueryResult }
   transaction: { args: [statements: unknown]; result: QueryResult[] }
+  call: { args: [name: string, args: unknown]; result: unknown }
   flush: { args: []; result: FlushResult | null }
   export: { args: []; result: Uint8Array }
   copy: { args: [target: DatabaseConfig]; result: CopyResult }
@@ -201,11 +202,11 @@ export type Op = keyof Ops
  * Requests that are safe to run twice, so one sent to a worker that
  * went away before answering is sent again to the next one: reading
  * the state or the file (its content hash too), flushing whatever is
- * pending, and deleting. A query or a transaction might write, and
- * might have committed, so it fails with {@link ConnectionLostError}
- * instead; so do a rebase and an adopt, which may have started an
- * epoch or kept a checkpoint: a caller that lost the reply syncs
- * again, which finds where things stand.
+ * pending, and deleting. A query, a transaction or a procedure's call
+ * might write, and might have committed, so it fails with
+ * {@link ConnectionLostError} instead; so do a rebase and an adopt,
+ * which may have started an epoch or kept a checkpoint: a caller that
+ * lost the reply syncs again, which finds where things stand.
  */
 export const RETRY_SAFE: ReadonlySet<Op> = new Set<Op>([
   'flush',

@@ -20,6 +20,7 @@ import {
   type Locks,
   MemoryDirectory,
   type Opener,
+  type ServeOptions,
   type Server,
   serve,
 } from '../src/index'
@@ -224,9 +225,11 @@ export class Origin {
     repo: await Repo.open(this.store),
   })
 
-  worker(name: string, open: Opener = this.open): FakeWorker {
+  /** A worker serving with `open`, and `options` beside the fakes' own. */
+  worker(name: string, open: Opener = this.open, options: ServeOptions = {}): FakeWorker {
     const ports: MessagePort[] = []
     const server = serve(open, {
+      ...options,
       scope: null,
       locks: this.locks.for(name),
       channel: this.channels.for(name),

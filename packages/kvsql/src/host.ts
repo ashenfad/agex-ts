@@ -13,10 +13,10 @@
  * next worker in the queue takes it, announces itself, opens the file
  * (the log's open-time recovery runs) and serves every tab from then
  * on. A request that was sent to the old holder and not answered may
- * or may not have run; a query or transaction fails with
- * `ConnectionLostError`, while requests that are safe to run twice
- * (`RETRY_SAFE`: flush, export, info, delete, the checkpoint list and
- * deletes, the content hash) are sent again. A holder that closes on its own
+ * or may not have run; a query, a transaction or a procedure's call
+ * fails with `ConnectionLostError`, while requests that are safe to
+ * run twice (`RETRY_SAFE`: flush, export, info, delete, the checkpoint
+ * list and deletes, the content hash) are sent again. A holder that closes on its own
  * answers every request it ran before it says it is releasing, so
  * whatever is unanswered then never ran and is sent again.
  *
@@ -29,7 +29,13 @@ import { deleteDatabase } from './database'
 import { deleteLog } from './epoch'
 import { ConnectionLostError, KvsqlError } from './errors'
 import type { Directory } from './files'
-import { type CopyResult, type LoggedDatabase, openDetached, openLog } from './log'
+import {
+  type CopyResult,
+  type LoggedDatabase,
+  type Transaction,
+  openDetached,
+  openLog,
+} from './log'
 import {
   CONNECT,
   type ChannelMessage,
@@ -107,7 +113,25 @@ export interface MessageScope {
   addEventListener(type: 'message', listener: (event: { data: unknown }) => void): void
 }
 
+/**
+ * A procedure a client runs by name (`call(name, args)`): the worker
+ * holding the database runs it inside one transaction
+ * (`LoggedDatabase.transact`), so it can read, decide and write as one.
+ * `args` is what the client passed, as a structured clone: a procedure
+ * declares the type it takes. Its result goes back as a clone too.
+ */
+export type Procedure = (tx: Transaction, args: never) => unknown
+
+/** Procedures by name, for `serve`. */
+export type Procedures = Readonly<Record<string, Procedure>>
+
 export interface ServeOptions {
+  /**
+   * The procedures clients can `call` by name. The worker holding the
+   * database runs them, whichever tab's client called, so every tab's
+   * worker passes the same ones.
+   */
+  procedures?: Procedures
   /**
    * Where connect messages arrive. Default `globalThis`, the worker
    * itself. Null: listen nowhere, and pass ports to `server.connect`.
@@ -159,6 +183,7 @@ export function serve<C extends DatabaseConfig>(
     openRetryMs: options.openRetryMs ?? 10_000,
     deleteDrainMs: options.deleteDrainMs ?? 2_000,
     handledDeletes: new Set(),
+    procedures: checkProcedures(options.procedures),
   }
   const hosts = new Map<string, DatabaseHost<C>>()
   const incarnations = new Map<string, number>()
@@ -216,6 +241,8 @@ interface Env {
    * a host made since.
    */
   handledDeletes: Set<string>
+  /** The procedures clients can call, by name, in an object with no prototype. */
+  procedures: Procedures
 }
 
 /**
@@ -435,6 +462,8 @@ class DatabaseHost<C extends DatabaseConfig> {
         return db.query(args[0] as string, args[1] as never)
       case 'transaction':
         return db.transaction(args[0] as never)
+      case 'call':
+        return this.#call(db, args[0], args[1])
       case 'flush':
         return db.flush()
       case 'export':
@@ -473,6 +502,28 @@ class DatabaseHost<C extends DatabaseConfig> {
       default:
         throw new TypeError(`kvsql: unknown request ${JSON.stringify(op)}`)
     }
+  }
+
+  /**
+   * Run the procedure `name` on `args` as one transaction. Its result is
+   * cloned inside it, so one the reply couldn't carry fails the call
+   * before it commits rather than after.
+   */
+  #call(db: LoggedDatabase, name: unknown, args: unknown): Promise<unknown> {
+    const { procedures } = this.#env
+    const procedure =
+      typeof name === 'string' && Object.hasOwn(procedures, name) ? procedures[name] : undefined
+    if (!procedure) {
+      throw new KvsqlError(
+        `kvsql: the worker holding ${this.#config.label ?? 'the database'} has no procedure ${JSON.stringify(name)}: every tab's worker must pass the same procedures to serve()`,
+      )
+    }
+    return db.transact((tx) => {
+      const result = procedure(tx, args as never)
+      // transact refuses a promise with an error of its own
+      if (!(result instanceof Promise)) structuredClone(result)
+      return result
+    })
   }
 
   // --- The lock ---
@@ -945,6 +996,22 @@ class DatabaseHost<C extends DatabaseConfig> {
 }
 
 // --- Helpers ---
+
+/** `procedures` checked, in an object with no prototype. */
+function checkProcedures(procedures: Procedures | undefined): Procedures {
+  const out: Record<string, Procedure> = Object.create(null)
+  if (procedures === undefined) return out
+  if (typeof procedures !== 'object' || procedures === null) {
+    throw new TypeError('serve: procedures must be an object of functions by name')
+  }
+  for (const [name, procedure] of Object.entries(procedures)) {
+    if (typeof procedure !== 'function') {
+      throw new TypeError(`serve: procedure ${JSON.stringify(name)} is not a function`)
+    }
+    out[name] = procedure
+  }
+  return out
+}
 
 /** A logged database's repository, which its opener must give. */
 function needRepo(repo: Repo<Uint8Array> | undefined, config: DatabaseConfig): Repo<Uint8Array> {

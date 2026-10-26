@@ -21,6 +21,7 @@ import {
   RefusedError,
   ReplayError,
   StatementError,
+  type Transaction,
   loadSqlite,
   openDatabase,
   startSession,
@@ -494,6 +495,223 @@ describe('transactions', () => {
     const { db } = await fresh()
     await expect(db.transaction([['SELECT 1', 5 as never]])).rejects.toThrow(TypeError)
     await expect(db.transaction(['SELECT 1' as never])).rejects.toThrow(TypeError)
+  })
+})
+
+describe('transact', () => {
+  const KV = 'CREATE TABLE kv (key TEXT PRIMARY KEY NOT NULL, value BLOB NOT NULL)'
+
+  /** kvgit's compare-and-swap: write `value` if `key` holds `expected` (null: nothing). */
+  function cas(tx: Transaction, key: string, value: Uint8Array, expected: Uint8Array | null) {
+    const row = tx.query('SELECT value FROM kv WHERE key = ?', [key]).rows[0]
+    const current = row === undefined ? null : (row.value as Uint8Array)
+    const same =
+      current === null || expected === null ? current === expected : bytesEqual(current, expected)
+    if (!same) return false
+    tx.query(
+      'INSERT INTO kv VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value',
+      [key, value],
+    )
+    return true
+  }
+
+  function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
+    return a.byteLength === b.byteLength && a.every((x, i) => x === b[i])
+  }
+
+  it("commits the function's statements as one transaction, and resolves with its result", async () => {
+    const { db } = await fresh()
+    await db.query(KV)
+    const { seq, pendingCount } = db
+    const one = new Uint8Array([1])
+    expect(await db.transact((tx) => cas(tx, 'a', one, null))).toBe(true)
+    expect([db.seq, db.pendingCount]).toEqual([seq + 1, pendingCount + 1])
+    expect(await db.transact((tx) => cas(tx, 'a', new Uint8Array([2]), null))).toBe(false)
+    expect(await db.transact((tx) => cas(tx, 'a', new Uint8Array([2]), one))).toBe(true)
+    expect((await db.query('SELECT key, value FROM kv')).rows).toEqual([
+      { key: 'a', value: new Uint8Array([2]) },
+    ])
+    // tx.query gives what query does.
+    const result = await db.transact((tx) => tx.query("INSERT INTO kv VALUES ('b', x'00')"))
+    expect(result).toEqual({ rows: [], changes: 1, lastInsertRowid: 2 })
+    expect([db.seq, db.pendingCount]).toEqual([seq + 3, pendingCount + 3])
+  })
+
+  it('rolls back and rethrows when the function throws', async () => {
+    const { db } = await fresh()
+    await db.query(KV)
+    await db.query("INSERT INTO kv VALUES ('a', x'01')")
+    const before = await dump(db)
+    const { seq, pendingCount } = db
+    const thrown = new RangeError('changed my mind')
+    const err = await db
+      .transact((tx) => {
+        tx.query("UPDATE kv SET value = x'02'")
+        tx.query("INSERT INTO kv VALUES ('b', x'03')")
+        throw thrown
+      })
+      .catch((e: unknown) => e)
+    expect(err).toBe(thrown)
+    expect(await dump(db)).toEqual(before)
+    expect([db.seq, db.pendingCount]).toEqual([seq, pendingCount])
+    // A failing statement the function lets through rolls back alike.
+    await expect(
+      db.transact((tx) => {
+        tx.query("INSERT INTO kv VALUES ('c', x'04')")
+        tx.query("INSERT INTO kv VALUES ('a', x'05')")
+      }),
+    ).rejects.toThrow(/UNIQUE constraint failed: kv\.key/)
+    expect(await dump(db)).toEqual(before)
+  })
+
+  it('logs nothing for a function that changes nothing', async () => {
+    const { db } = await fresh()
+    await db.query(KV)
+    await db.query("INSERT INTO kv VALUES ('a', x'01')")
+    const { seq, pendingCount } = db
+    expect(await db.transact((tx) => tx.query('SELECT count(*) AS n FROM kv').rows)).toEqual([
+      { n: 1 },
+    ])
+    expect(await db.transact((tx) => cas(tx, 'a', new Uint8Array([9]), null))).toBe(false)
+    await db.transact((tx) => {
+      tx.query("INSERT INTO kv VALUES ('b', x'02')")
+      tx.query("DELETE FROM kv WHERE key = 'b'")
+    })
+    expect([db.seq, db.pendingCount]).toEqual([seq, pendingCount])
+  })
+
+  it('logs its changes as a changeset, as a transaction of the same statements', async () => {
+    const statements = [
+      ["INSERT INTO kv VALUES ('a', x'01'), ('b', x'02')"],
+      ["UPDATE kv SET value = x'03' WHERE key = 'a'"],
+      ["DELETE FROM kv WHERE key = 'b'"],
+    ] as const
+    const viaFunction = await fresh()
+    await viaFunction.db.query(KV)
+    await viaFunction.db.transact((tx) => {
+      for (const [sql] of statements) tx.query(sql)
+    })
+    await viaFunction.db.flush()
+    const viaList = await fresh()
+    await viaList.db.query(KV)
+    await viaList.db.transaction(statements)
+    await viaList.db.flush()
+
+    const entries = await logEntries(viaFunction.repo)
+    expect(entries.map((e) => e.pieces.map((p) => p.kind))).toEqual([['sql'], ['changeset']])
+    expect(entries[1]?.pieces).toEqual((await logEntries(viaList.repo))[1]?.pieces)
+    const copy = await track(replica(viaFunction.repo))
+    expect(await dump(copy)).toEqual(await dump(viaFunction.db))
+    expect(await dump(copy)).toMatchObject({ kv: [{ key: 'a', value: new Uint8Array([3]) }] })
+  })
+
+  it('refuses a schema change, rolling the call back', async () => {
+    const { db } = await fresh()
+    await db.query(KV)
+    const before = await dump(db)
+    const { seq, schemaVersion } = db
+    for (const sql of [
+      'CREATE TABLE more (id TEXT PRIMARY KEY NOT NULL)',
+      'ALTER TABLE kv ADD COLUMN at INTEGER',
+      'CREATE INDEX kv_value ON kv (value)',
+      'PRAGMA user_version = 3',
+    ]) {
+      const err = await db
+        .transact((tx) => {
+          tx.query("INSERT INTO kv VALUES ('a', x'01')")
+          tx.query(sql)
+        })
+        .catch((e: unknown) => e)
+      expect(err).toBeInstanceOf(RefusedError)
+      expect((err as Error).message).toMatch(
+        /^The schema of agex\.db can't change inside transact\(\): schema changes are replayed as SQL/,
+      )
+    }
+    expect(await dump(db)).toEqual(before)
+    expect([db.seq, db.schemaVersion]).toEqual([seq, schemaVersion])
+    // DDL that changes nothing logs as rows, as in any call.
+    await db.transact((tx) => {
+      tx.query(KV.replace('CREATE TABLE', 'CREATE TABLE IF NOT EXISTS'))
+      tx.query("INSERT INTO kv VALUES ('a', x'01')")
+    })
+    expect([db.seq, db.schemaVersion]).toEqual([seq + 1, schemaVersion])
+  })
+
+  it("refuses what the schema guard refuses, and keeps callers out of kvsql's tables", async () => {
+    const { db } = await fresh()
+    await db.query(KV)
+    for (const sql of ['BEGIN', 'COMMIT', 'SELECT * FROM _kvsql_pending', "ATTACH '' AS x"]) {
+      await expect(db.transact((tx) => tx.query(sql))).rejects.toBeInstanceOf(RefusedError)
+    }
+    // A function may catch a refusal or a failed statement and go on.
+    const outcome = await db.transact((tx) => {
+      tx.query("INSERT INTO kv VALUES ('a', x'01')")
+      const caught: unknown[] = []
+      for (const sql of ['ROLLBACK', "INSERT INTO kv VALUES ('a', x'02')"]) {
+        try {
+          tx.query(sql)
+        } catch (err) {
+          caught.push(err)
+        }
+      }
+      return caught.map((e) => (e as Error).name)
+    })
+    expect(outcome).toEqual(['RefusedError', 'SQLite3Error'])
+    expect((await db.query('SELECT key, value FROM kv')).rows).toEqual([
+      { key: 'a', value: new Uint8Array([1]) },
+    ])
+  })
+
+  it('runs nothing more once a failed statement rolled the transaction back', async () => {
+    const { db } = await fresh()
+    await db.query(KV)
+    await db.query("INSERT INTO kv VALUES ('a', x'01')")
+    const before = await dump(db)
+    const { seq, pendingCount } = db
+    const swallow = (fn: () => void) => {
+      try {
+        fn()
+      } catch {}
+    }
+    // `OR ROLLBACK` ends the transaction on its conflict.
+    const conflict = "INSERT OR ROLLBACK INTO kv VALUES ('a', x'02')"
+    await expect(
+      db.transact((tx) => {
+        tx.query("INSERT INTO kv VALUES ('b', x'02')")
+        swallow(() => tx.query(conflict))
+        tx.query("INSERT INTO kv VALUES ('c', x'03')")
+      }),
+    ).rejects.toThrow(/rolled back by a statement that failed/)
+    await expect(
+      db.transact((tx) => {
+        tx.query("INSERT INTO kv VALUES ('b', x'02')")
+        swallow(() => tx.query(conflict))
+      }),
+    ).rejects.toThrow(/rolled back by a statement that failed/)
+    expect(await dump(db)).toEqual(before)
+    expect([db.seq, db.pendingCount]).toEqual([seq, pendingCount])
+  })
+
+  it('refuses a function that returns a promise, and a transaction used after its call', async () => {
+    const { db } = await fresh()
+    await db.query(KV)
+    const before = await dump(db)
+    await expect(
+      db.transact(async (tx) => {
+        tx.query("INSERT INTO kv VALUES ('a', x'01')")
+      }),
+    ).rejects.toThrow(/must be synchronous/)
+    expect(await dump(db)).toEqual(before)
+    let kept: Transaction | undefined
+    await db.transact((tx) => {
+      kept = tx
+    })
+    expect(() => kept?.query('SELECT 1')).toThrow(/the transaction is over/)
+    await expect(db.transact('SELECT 1' as never)).rejects.toThrow(TypeError)
+    await expect(db.transact((tx) => tx.query(5 as never))).rejects.toThrow(TypeError)
+    await expect(db.transact((tx) => tx.query('SELECT ?', 5 as never))).rejects.toThrow(TypeError)
+    await db.close()
+    await expect(db.transact(() => 1)).rejects.toThrow('the database is closed')
   })
 })
 

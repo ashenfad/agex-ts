@@ -506,8 +506,8 @@ class DatabaseHost<C extends DatabaseConfig> {
 
   /**
    * Run the procedure `name` on `args` as one transaction. Its result is
-   * cloned inside it, so one the reply couldn't carry fails the call
-   * before it commits rather than after.
+   * cloned inside it and the clone is what's sent, so one the reply
+   * couldn't carry fails the call before it commits rather than after.
    */
   #call(db: LoggedDatabase, name: unknown, args: unknown): Promise<unknown> {
     const { procedures } = this.#env
@@ -521,8 +521,7 @@ class DatabaseHost<C extends DatabaseConfig> {
     return db.transact((tx) => {
       const result = procedure(tx, args as never)
       // transact refuses a promise with an error of its own
-      if (!(result instanceof Promise)) structuredClone(result)
-      return result
+      return result instanceof Promise ? result : structuredClone(result)
     })
   }
 

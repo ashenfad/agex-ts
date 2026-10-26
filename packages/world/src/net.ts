@@ -4,7 +4,9 @@
  *
  * - References to secrets (`${NAME}`) are filled in the URL and the
  *   headers, never the body. A secret bound to origins is filled only
- *   for those, and a request carrying one follows no redirect.
+ *   for those, and a request carrying one follows no redirect. A secret
+ *   declared without a value can't be filled here: a request carrying
+ *   one is refused, never sent with the reference in it.
  * - A response past the size cap is refused.
  * - A secret a text response echoes back is replaced by its reference.
  * - In a browser, a server that doesn't allow the page's origin (CORS)
@@ -13,7 +15,7 @@
  * Failures are {@link NetError}s carrying curl's exit code for them.
  */
 
-import { SecretOriginError, type Secrets } from './secrets'
+import { DeclaredSecretError, SecretOriginError, type Secrets } from './secrets'
 
 export interface NetOptions {
   /** The fetch to use (default `globalThis.fetch`). */
@@ -88,6 +90,7 @@ export async function request(
     }
   } catch (e) {
     if (e instanceof SecretOriginError) throw new NetError(3, `URL rejected: ${e.message}`)
+    if (e instanceof DeclaredSecretError) throw new NetError(3, e.message)
     throw new NetError(3, 'URL rejected: malformed URL')
   }
 

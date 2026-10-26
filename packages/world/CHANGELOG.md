@@ -1,5 +1,17 @@
 # @agex-ts/world
 
+## 0.1.3
+
+### Patch Changes
+
+- 9414881: **A browser code worker of another origin starts:** a world loaded from a CDN starts its worker through a same-origin `blob:` module that imports the script, where the browser refused the cross-origin module worker.
+- adde488: **`fs.remove` in code takes `fs.rm`'s `{ recursive, force }`:** a folder goes with everything under it, and a missing path is fine with `force`, where `recursive` was ignored and a folder failed `Is a directory`; `rmdir` takes `recursive` too, and both refuse an option they don't know.
+- Updated dependencies [8a29999]
+- Updated dependencies [ee3020b]
+- Updated dependencies [e3b247f]
+- Updated dependencies [83c2b5b]
+  - @agex-ts/kvgit@0.2.1
+
 ## 0.1.2
 
 ### Patch Changes

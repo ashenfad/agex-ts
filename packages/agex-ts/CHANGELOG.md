@@ -1,5 +1,19 @@
 # agex-ts
 
+## 0.6.1
+
+### Patch Changes
+
+- 69ac7c5: **`readRuns(ws)` reads a workspace's runs without an agent:** a page restoring a chat's history reads them from the workspace alone, where it needed a session, and so a model, to call `runs()`.
+- Updated dependencies [8a29999]
+- Updated dependencies [ee3020b]
+- Updated dependencies [e3b247f]
+- Updated dependencies [83c2b5b]
+- Updated dependencies [9414881]
+- Updated dependencies [adde488]
+  - @agex-ts/kvgit@0.2.1
+  - @agex-ts/world@0.1.3
+
 ## 0.6.0
 
 ### Minor Changes

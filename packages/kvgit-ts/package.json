@@ -1,6 +1,6 @@
 {
   "name": "@agex-ts/kvgit",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Versioned key-value store with branches, commits, and three-way merges. The TypeScript port of Python's kvgit, its v4 format byte for byte.",
   "publishConfig": {
     "access": "public"

@@ -1,13 +1,10 @@
 # @agex-ts/kvsql
 
-## 0.2.0
-
-### Minor Changes
-
-- 1b8a9d3: **`transact(fn)` and procedures:** a function runs as one transaction through `tx.query`, so a write can depend on what it read, and `serve(open, { procedures })` lets clients `call(name, args)` such functions by name.
+## 0.1.1
 
 ### Patch Changes
 
+- 1b8a9d3: **`transact(fn)` and procedures:** a function runs as one transaction through `tx.query`, so a write can depend on what it read, and `serve(open, { procedures })` lets clients `call(name, args)` such functions by name.
 - Updated dependencies [8a29999]
 - Updated dependencies [ee3020b]
 - Updated dependencies [e3b247f]

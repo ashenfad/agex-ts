@@ -15,7 +15,15 @@ import {
   RefusedError,
   StatementError,
 } from '../src/client'
-import { type DatabaseConfig, MemoryDirectory, type Opener, lockName, openLog } from '../src/index'
+import {
+  type DatabaseConfig,
+  MemoryDirectory,
+  type Opener,
+  type Procedures,
+  type Transaction,
+  lockName,
+  openLog,
+} from '../src/index'
 import { Disk, type FakeWorker, Origin, until } from './host-fakes'
 import { CrashingStore, quietSqliteWarnings } from './log-helpers'
 
@@ -652,5 +660,131 @@ describe('rebase', () => {
       { id: 2, v: 'a' },
     ])
     expect(await b.info()).toMatchObject({ pendingCount: 0, seq: 3 })
+  })
+})
+
+describe('procedures', () => {
+  const KV = 'CREATE TABLE kv (key TEXT PRIMARY KEY NOT NULL, value BLOB NOT NULL)'
+
+  interface CasArgs {
+    key: string
+    value: Uint8Array
+    expected: Uint8Array | null
+  }
+
+  const PROCEDURES: Procedures = {
+    /** kvgit's compare-and-swap: write `value` if `key` holds `expected` (null: nothing). */
+    cas(tx: Transaction, { key, value, expected }: CasArgs) {
+      const row = tx.query('SELECT value FROM kv WHERE key = ?', [key]).rows[0]
+      const current = row === undefined ? null : (row.value as Uint8Array)
+      const same =
+        current === null || expected === null
+          ? current === expected
+          : current.length === expected.length && current.every((x, i) => x === expected[i])
+      if (!same) return false
+      tx.query(
+        'INSERT INTO kv VALUES (?, ?) ON CONFLICT (key) DO UPDATE SET value = excluded.value',
+        [key, value],
+      )
+      return true
+    },
+    putThenFail(tx: Transaction, key: string) {
+      tx.query("INSERT INTO kv VALUES (?, x'00')", [key])
+      throw new RangeError(`no ${key}`)
+    },
+    putThenFunction(tx: Transaction, key: string) {
+      tx.query("INSERT INTO kv VALUES (?, x'00')", [key])
+      return () => key
+    },
+  }
+
+  function worker(o: Origin, name: string, procedures: Procedures = PROCEDURES): FakeWorker {
+    return o.worker(name, o.open, { procedures })
+  }
+
+  it('runs a procedure as one transaction on the holder, with its args and result cloned', async () => {
+    const o = setup()
+    const db = client(worker(o, 'a').connect(CONFIG))
+    await db.query(KV)
+    const one = new Uint8Array([1])
+    expect(await db.call('cas', { key: 'k', value: one, expected: null })).toBe(true)
+    expect(await db.call('cas', { key: 'k', value: new Uint8Array([2]), expected: null })).toBe(
+      false,
+    )
+    expect(await db.call('cas', { key: 'k', value: new Uint8Array([2]), expected: one })).toBe(true)
+    expect((await db.query('SELECT key, value FROM kv')).rows).toEqual([
+      { key: 'k', value: new Uint8Array([2]) },
+    ])
+    // the schema change, then the two writes; the comparison that failed logged nothing
+    expect(await db.info()).toMatchObject({ seq: 3, pendingCount: 2 })
+
+    const failed = await db.call('putThenFail', 'x').catch((e: unknown) => e)
+    expect(failed).toBeInstanceOf(RangeError)
+    expect((failed as Error).message).toBe('no x')
+    // A result the reply can't carry fails the call before it commits.
+    await expect(db.call('putThenFunction', 'y')).rejects.toMatchObject({ name: 'DataCloneError' })
+    expect((await db.query('SELECT count(*) AS n FROM kv')).rows).toEqual([{ n: 1 }])
+    expect(await db.info()).toMatchObject({ seq: 3 })
+  })
+
+  it('fails a call to a procedure the holder lacks, naming it', async () => {
+    const o = setup()
+    const a = client(worker(o, 'a').connect(CONFIG))
+    await a.query(KV)
+    for (const name of ['nope', 'constructor', 'toString']) {
+      const err = await a.call(name).catch((e: unknown) => e)
+      expect(err).toBeInstanceOf(KvsqlError)
+      expect((err as Error).message).toBe(
+        `kvsql: the worker holding agex.db has no procedure "${name}": every tab's worker must pass the same procedures to serve()`,
+      )
+    }
+    // A tab whose worker has a procedure the holder's doesn't hears the holder's answer.
+    const b = client(
+      worker(o, 'b', { ...PROCEDURES, newer: (tx: Transaction) => tx.query('SELECT 1') }).connect(
+        CONFIG,
+      ),
+    )
+    await expect(b.call('newer')).rejects.toThrow(/has no procedure "newer"/)
+    expect(() => o.worker('c', o.open, { procedures: { bad: 5 as never } })).toThrow(
+      'serve: procedure "bad" is not a function',
+    )
+  })
+
+  it('is run by the holder for a forwarding tab', async () => {
+    const o = setup()
+    const a = client(worker(o, 'a').connect(CONFIG))
+    await a.query(KV)
+    const b = client(worker(o, 'b').connect(CONFIG))
+    const value = new Uint8Array([7, 8, 9])
+    expect(await b.call('cas', { key: 'from b', value, expected: null })).toBe(true)
+    expect(await b.status()).toMatchObject({ role: 'forwarding', holder: 'a' })
+    expect(await b.call('cas', { key: 'from b', value, expected: null })).toBe(false)
+    expect((await a.query('SELECT key, value FROM kv')).rows).toEqual([{ key: 'from b', value }])
+    await expect(b.call('putThenFail', 'z')).rejects.toBeInstanceOf(RangeError)
+    expect((await b.query('SELECT count(*) AS n FROM kv')).rows).toEqual([{ n: 1 }])
+  })
+
+  it('fails a call in flight to a killed holder instead of sending it again', async () => {
+    const o = setup()
+    const wa = worker(o, 'a')
+    const a = wa.connect(CONFIG)
+    await a.query(KV)
+    const b = client(worker(o, 'b').connect(CONFIG))
+    await until(async () => (await role(b)) === 'forwarding', 3_000, 'forwarding')
+    // a dies as b's requests leave for it, before it can answer.
+    let sent = 0
+    o.channels.onSend = (owner, message) => {
+      if (owner === 'b' && (message as { t: string }).t === 'request' && ++sent === 2) wa.kill()
+    }
+    const call = b
+      .call('cas', { key: 'k', value: new Uint8Array([1]), expected: null })
+      .catch((e: unknown) => e)
+    const flush = b.flush()
+    const lost = await call
+    expect(lost).toBeInstanceOf(ConnectionLostError)
+    expect((lost as Error).message).toMatch(/running this call .* may or may not have committed/)
+    await flush
+    expect(await role(b)).toBe('holder')
+    expect((await b.query('SELECT count(*) AS n FROM kv')).rows).toEqual([{ n: 0 }])
   })
 })

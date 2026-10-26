@@ -270,6 +270,19 @@ export interface QueryResult {
   lastInsertRowid: number | bigint
 }
 
+/**
+ * The transaction a {@link LoggedDatabase.transact} function runs in,
+ * open while the function runs.
+ */
+export interface Transaction {
+  /**
+   * Run one statement in the transaction, behind the schema guard, and
+   * return its result. A statement that fails throws its error, and
+   * the transaction rolls back if the function throws it on.
+   */
+  query(sql: string, params?: Params | null): QueryResult
+}
+
 /** What a restore did. */
 export interface RestoreResult {
   /** The checkpoint restored to. */
@@ -557,8 +570,8 @@ export function openDetached(options: DetachedOptions): Promise<LoggedDatabase> 
 
 /**
  * An open logged database, or a detached copy of one. Calls (`query`,
- * `transaction`, `flush`, `close`, ...) run one at a time, in the order
- * they were made.
+ * `transaction`, `transact`, `flush`, `close`, ...) run one at a time,
+ * in the order they were made.
  */
 export class LoggedDatabase {
   readonly name: string
@@ -809,6 +822,29 @@ export class LoggedDatabase {
    */
   transaction(statements: readonly Statement[]): Promise<QueryResult[]> {
     return this.#call(statements, false)
+  }
+
+  /**
+   * Run `fn` as one transaction, its statements run with `tx.query`,
+   * and resolve with what it returns: if it returns, they all land; if
+   * it throws, none does, and the call rejects with its error. `fn`
+   * runs synchronously, so it reads, decides and writes with nothing
+   * else in between, as a compare-and-swap needs; a function that
+   * returns a promise is refused.
+   *
+   * Its statements are refused and checked as a call's are, and its
+   * changes are logged as a changeset, as a `transaction`'s are; one
+   * that changed nothing logs nothing. It can't change the schema: a
+   * schema change is logged as its SQL and run again on replay, and
+   * the choices a function made can't be, so one is refused and the
+   * call rolled back. Change the schema with `query` or `transaction`.
+   */
+  transact<T>(fn: (tx: Transaction) => T): Promise<T> {
+    if (this.#closing) return Promise.reject(closedError())
+    if (typeof fn !== 'function') {
+      return Promise.reject(new TypeError('transact takes a function of the transaction'))
+    }
+    return this.#run(() => this.#runFunction(fn), null)
   }
 
   /**
@@ -1144,9 +1180,27 @@ export class LoggedDatabase {
   async #call(statements: readonly Statement[], single: boolean): Promise<QueryResult[]> {
     if (this.#closing) throw closedError()
     checkStatements(statements)
+    return this.#run(
+      () =>
+        statements.map((statement, i) => {
+          try {
+            return this.#statementIn(statement)
+          } catch (err) {
+            throw single ? err : new StatementError(i, err)
+          }
+        }),
+      statements,
+    )
+  }
+
+  /**
+   * Run `body` as one transaction (`#transact`), after every call
+   * queued before it, then flush or arm as the policy says.
+   */
+  #run<T>(body: () => T, statements: readonly Statement[] | null): Promise<T> {
     return this.#serial(async () => {
-      const { results, logged, bytes } = this.#transact(statements, single)
-      if (logged === 'sql') await this.#autoCheckpoint(statements)
+      const { value, logged, bytes } = this.#transact(body, statements)
+      if (logged === 'sql' && statements) await this.#autoCheckpoint(statements)
       if (logged && this.#reaches(bytes)) {
         // the new epoch's snapshot holds it, so it never becomes a log entry
         this.#startEpochReporting()
@@ -1156,7 +1210,7 @@ export class LoggedDatabase {
       } else if (logged) {
         this.#arm()
       }
-      return results
+      return value
     })
   }
 
@@ -1176,13 +1230,15 @@ export class LoggedDatabase {
   // --- Transactions ---
 
   /**
-   * Run a call's statements as one file transaction, recording what
-   * they changed in the pending table inside it.
+   * Run `body`, a call's statements, as one file transaction, recording
+   * what they changed in the pending table inside it. `statements` are
+   * the call's SQL, logged if it changes the schema; a `transact`
+   * function's call has none, and changing the schema is refused.
    */
-  #transact(
-    statements: readonly Statement[],
-    single: boolean,
-  ): { results: QueryResult[]; logged: ItemKind | undefined; bytes: number } {
+  #transact<T>(
+    body: () => T,
+    statements: readonly Statement[] | null,
+  ): { value: T; logged: ItemKind | undefined; bytes: number } {
     const { capi } = this.#sqlite3
     const db = this.#db
     const guard = this.#guard
@@ -1193,25 +1249,17 @@ export class LoggedDatabase {
       const header = this.#header()
       // A detached copy records nothing, but checks what it runs alike.
       if (this.#log) session = startSession(this.#sqlite3, db)
-      const results = statements.map((statement, i) => {
-        try {
-          const result = guard.run(() => this.#statement(statement))
-          // The guard refuses BEGIN, COMMIT and ROLLBACK; a statement
-          // that ended the transaction anyway must not commit unlogged.
-          if (capi.sqlite3_get_autocommit(db) !== 0) {
-            throw new KvsqlError('the statement ended the transaction')
-          }
-          return result
-        } catch (err) {
-          throw single ? err : new StatementError(i, err)
-        }
-      })
+      const value = body()
+      // A function that caught a failed statement's error goes on, but
+      // that statement may have rolled the transaction back.
+      if (capi.sqlite3_get_autocommit(db) !== 0) throw rolledBackError()
 
       let item: { kind: ItemKind; body: Uint8Array } | undefined
       // A statement that could change the schema, confirmed by the file:
       // `CREATE TABLE IF NOT EXISTS` on a table that exists, run by an
       // app on every load, changes nothing and logs as rows do.
       if (guard.schemaChanged && (guard.analyzed || this.#header() !== header)) {
+        if (statements === null) throw new RefusedError(this.#transactSchemaMessage())
         const fn = guard.nondeterministic
         if (fn !== undefined) throw new RefusedError(this.#nondeterministicMessage(fn))
         const temp = guard.tempDependency
@@ -1257,13 +1305,64 @@ export class LoggedDatabase {
       this.#exec('COMMIT')
       this.#meta = next
       if (item) this.#pending++
-      return { results, logged: item?.kind, bytes: item?.body.byteLength ?? 0 }
+      return { value, logged: item?.kind, bytes: item?.body.byteLength ?? 0 }
     } catch (err) {
       this.#rollback()
       throw err
     } finally {
       session?.dispose()
     }
+  }
+
+  /**
+   * Run a `transact` function, its `tx.query` running statements in
+   * the open transaction while it runs, and none after.
+   */
+  #runFunction<T>(fn: (tx: Transaction) => T): T {
+    let open = true
+    const tx: Transaction = {
+      query: (sql, params) => {
+        if (!open) {
+          throw new KvsqlError(
+            'the transaction is over: tx.query runs statements only while its transact function runs',
+          )
+        }
+        const statement: Statement = [sql, params ?? null]
+        checkStatements([statement])
+        return this.#statementIn(statement)
+      },
+    }
+    try {
+      const value = fn(tx)
+      if (isThenable(value)) {
+        // Its statements after the first await find the transaction
+        // over; the refusal below is the error to report.
+        Promise.resolve(value).catch(() => {})
+        throw new TypeError(
+          "transact's function must be synchronous: it returned a promise, and the transaction can't stay open across an await. Read, decide and write without awaiting, and return the result.",
+        )
+      }
+      return value
+    } finally {
+      open = false
+    }
+  }
+
+  /** Run a caller's statement in the open transaction, behind the schema guard. */
+  #statementIn(statement: Statement): QueryResult {
+    const { capi } = this.#sqlite3
+    const db = this.#db
+    // A failed statement may have rolled the whole transaction back
+    // (`OR ROLLBACK`, a full disk): run nothing more, or it would
+    // commit on its own, unlogged.
+    if (capi.sqlite3_get_autocommit(db) !== 0) throw rolledBackError()
+    const result = this.#guard.run(() => this.#statement(statement))
+    // The guard refuses BEGIN, COMMIT and ROLLBACK; a statement that
+    // ended the transaction anyway must not commit unlogged.
+    if (capi.sqlite3_get_autocommit(db) !== 0) {
+      throw new KvsqlError('the statement ended the transaction')
+    }
+    return result
   }
 
   #statement([sql, params]: Statement): QueryResult {
@@ -1289,6 +1388,11 @@ export class LoggedDatabase {
   #nondeterministicMessage(fn: string): string {
     const label = this.#label ?? 'this database'
     return `${fn}() can't be used in a call that changes the schema of ${label}: schema changes are replayed as SQL on every copy of the database, so they must give the same result wherever they run, and ${fn}() can give a different one each time. Change the schema in one call, then the rows in another, where values are recorded as written.`
+  }
+
+  #transactSchemaMessage(): string {
+    const label = this.#label ?? 'this database'
+    return `The schema of ${label} can't change inside transact(): schema changes are replayed as SQL on every copy of the database, and a function's choices of what to run can't be. Change the schema with query() or transaction() first, then change rows in transact().`
   }
 
   #tempMessage(name: string): string {
@@ -3717,6 +3821,20 @@ function checkStatements(statements: readonly Statement[]): void {
 
 function closedError(): KvsqlError {
   return new KvsqlError('the database is closed')
+}
+
+function rolledBackError(): KvsqlError {
+  return new KvsqlError(
+    'the transaction was rolled back by a statement that failed: nothing more runs in it',
+  )
+}
+
+function isThenable(value: unknown): boolean {
+  return (
+    (typeof value === 'object' || typeof value === 'function') &&
+    value !== null &&
+    typeof (value as { then?: unknown }).then === 'function'
+  )
 }
 
 function messageOf(err: unknown): string {

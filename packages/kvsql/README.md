@@ -144,6 +144,16 @@ await db.close() // flushes first
   transaction). A failing statement rolls the whole call back; in a
   transaction its error is a `StatementError` with the statement's
   `index`. Calls run one at a time, in order.
+- **Read, then write:** `transact((tx) => ...)` runs a function as one
+  transaction, for a write that depends on what it reads, such as a
+  compare-and-swap. The function runs synchronously, its statements
+  through `tx.query(sql, params)` (each returning what `query` does);
+  if it returns, they all land and the call resolves with its result,
+  and if it throws, none does. A function that returns a promise is
+  refused. Its statements are guarded and its changes logged as a
+  transaction's are (one that changed nothing logs nothing), but it
+  can't change the schema, which is logged as SQL and replayed: make
+  schema changes with `query` or `transaction`.
 - **Behind the schema guard.** `BEGIN`, `COMMIT` and `ROLLBACK` are
   refused (each call already is a transaction; savepoints work inside
   one), as is everything the guard refuses, and a schema change that
@@ -401,9 +411,9 @@ await db.close()
 
 - **The calls** are the logged database's (`query`, `transaction`,
   `flush`, `export`, `close`, `contentHash`, `rebase`, `adopt`), as
-  promises, plus `copy(config)` (below),
-  `info()` (the database's
-  sequence number, pending count, recovery, last flush error) and
+  promises, plus `call(name, args)` and `copy(config)` (both below),
+  `info()` (the database's sequence number, pending count, recovery,
+  last flush error) and
   `status()` (this tab's part, below). Values cross as structured
   clones, so blobs stay `Uint8Array` and big integers bigint.
 - **Errors arrive as their classes:** kvsql's (`RefusedError`,
@@ -468,6 +478,41 @@ own reach the opener as they are. `serve(open, { scope: null })`
 listens for nothing and leaves the app to pass `server.connect(config,
 port)` the ports from its own messages.
 
+### Procedures
+
+A function can't cross to the worker, so `transact` reaches a client as
+procedures: functions the worker is given by name, which a client runs
+with `call(name, args)`.
+
+```ts
+// db.worker.ts
+import { type Transaction, serve } from '@agex-ts/kvsql'
+
+type Cas = { key: string; value: Uint8Array; expected: Uint8Array | null }
+
+serve(open, {
+  procedures: {
+    cas(tx: Transaction, { key, value, expected }: Cas) {
+      const row = tx.query('SELECT value FROM kv WHERE key = ?', [key]).rows[0]
+      if (!sameBytes(row?.value ?? null, expected)) return false
+      tx.query('INSERT OR REPLACE INTO kv VALUES (?, ?)', [key, value])
+      return true
+    },
+  },
+})
+
+// the page
+const swapped = await db.call<boolean>('cas', { key: 'head', value, expected })
+```
+
+The worker holding the database runs the procedure in one transaction
+(`transact((tx) => procedure(tx, args))`), whichever tab called, so
+every tab's worker passes the same procedures; a name the holder
+doesn't have fails, naming it. Arguments and results cross as
+structured clones, and a result that can't be cloned fails the call
+before it commits. A call is a write, so one whose holder went away
+before answering fails with `ConnectionLostError`, as a query does.
+
 ### Many tabs, one writer
 
 Each tab runs its own worker, but a database's file can be open in only
@@ -493,8 +538,8 @@ one: its access handles are exclusive.
   call). Its lock, and so the takeover, waits until then.
 - **A request lost with the holder** fails with `ConnectionLostError`:
   sent, not answered, and the worker running it went away, so it may or
-  may not have committed. Nothing retries a query or transaction,
-  since the client can't tell a read from a write; retry it yourself,
+  may not have committed. Nothing retries a query, a transaction or a
+  procedure's `call`, since the client can't tell a read from a write; retry it yourself,
   written so running it twice is safe; the same goes for `rebase`,
   `adopt`, `restore`, `checkpoint`, `newEpoch` and `copy`. `flush()`,
   `export()`, `info()`, `contentHash()`, `checkpoints()`,

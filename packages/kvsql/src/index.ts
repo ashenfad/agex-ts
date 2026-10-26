@@ -73,6 +73,7 @@ export {
   type RebaseSide,
   type Recovery,
   type RestoreResult,
+  type Transaction,
   REPLAY_CHUNK_BYTES,
   REPLAY_CHUNK_TRANSACTIONS,
 } from './log'
@@ -90,6 +91,8 @@ export {
   type Locks,
   type MessageScope,
   type Opener,
+  type Procedure,
+  type Procedures,
   type Server,
   type ServeOptions,
   serve,

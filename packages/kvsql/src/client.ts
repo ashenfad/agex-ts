@@ -157,6 +157,17 @@ export class DatabaseClient {
     return this.#call('transaction', [statements])
   }
 
+  /**
+   * Run the procedure `name` (one the worker's `serve` was given) on
+   * `args`, as one transaction, by the worker holding the database, and
+   * resolve with what it returned. Like a query, it isn't sent again if
+   * that worker goes away before answering: it fails with
+   * `ConnectionLostError`.
+   */
+  call<R = unknown>(name: string, args?: unknown): Promise<R> {
+    return this.#call('call', [name, args]) as Promise<R>
+  }
+
   /** Commit every pending transaction to the log as one entry; null if none were pending. */
   flush(): Promise<FlushResult | null> {
     return this.#call('flush', [])

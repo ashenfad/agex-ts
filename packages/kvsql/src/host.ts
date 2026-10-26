@@ -33,6 +33,7 @@ import {
   type CopyResult,
   type LoggedDatabase,
   type Transaction,
+  isThenable,
   openDetached,
   openLog,
 } from './log'
@@ -520,8 +521,8 @@ class DatabaseHost<C extends DatabaseConfig> {
     }
     return db.transact((tx) => {
       const result = procedure(tx, args as never)
-      // transact refuses a promise with an error of its own
-      return result instanceof Promise ? result : structuredClone(result)
+      // transact refuses a promise, or any thenable, with an error of its own
+      return isThenable(result) ? result : structuredClone(result)
     })
   }
 

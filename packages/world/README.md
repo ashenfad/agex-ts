@@ -116,7 +116,11 @@ const result = await ws.runCode(`
 - **Its worker** is the package's built script (`@agex-ts/world/worker`,
   or `/worker.node` for Node), found next to the module; a bundled app
   whose bundler moves it gives `profile.code.worker.url` (and `target`:
-  `'browser'`, `'node'` or `'auto'`, the default).
+  `'browser'`, `'node'` or `'auto'`, the default). In a browser, a
+  script of another origin than the page's (a world loaded from a CDN)
+  starts through a same-origin `blob:` module that imports it, which
+  the browser allows where it refuses the script itself; it needs CORS
+  from its host, as a CDN serves it.
 - **`fetch('/path')`** reads the world's files with
   `profile.code.routeFetch`: true for every path (a miss goes to the
   network), a list of prefixes (a miss is a 404), or false (the

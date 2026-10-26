@@ -13,6 +13,10 @@
  *     `'error'` and `'messageerror'`.
  *   - **errors** — the browser hands you an `ErrorEvent` (`.message`),
  *     Node an `Error`.
+ *
+ * A browser refuses a module worker whose script is cross-origin to the
+ * page (a world loaded from a CDN), so such a worker starts from a
+ * same-origin `blob:` module that imports the script.
  */
 import type { Host2Worker, Worker2Host } from './messages'
 
@@ -55,11 +59,62 @@ export async function createWorkerHandle(
   return target === 'node' ? createNodeHandle(url) : createBrowserHandle(url)
 }
 
+/** The page a browser worker starts from: its address, which a
+ *  relative worker URL resolves against, and its origin. */
+export interface WorkerPage {
+  readonly href: string
+  readonly origin: string
+}
+
+/**
+ * The absolute address of a worker script the page can't start directly:
+ * an http(s) URL of another origin than the page's (an opaque origin,
+ * `'null'`, matches none). Null when the worker starts from `url` as
+ * given: a same-origin, `blob:` or `data:` URL, or no page to compare
+ * with.
+ */
+export function crossOriginScript(url: string | URL, page: WorkerPage | undefined): string | null {
+  if (page === undefined) return null
+  let resolved: URL
+  try {
+    resolved = new URL(url, page.href)
+  } catch {
+    return null
+  }
+  if (resolved.protocol !== 'http:' && resolved.protocol !== 'https:') return null
+  return resolved.origin === page.origin ? null : resolved.href
+}
+
 function createBrowserHandle(url: string | URL): WorkerHandle {
-  const w = new Worker(url, { type: 'module' })
+  const page = (globalThis as { location?: WorkerPage }).location
+  const script = crossOriginScript(url, page)
+  const shim =
+    script === null
+      ? null
+      : URL.createObjectURL(
+          new Blob([`import ${JSON.stringify(script)}\n`], { type: 'text/javascript' }),
+        )
+  const w = new Worker(shim ?? url, { type: 'module' })
+  // The shim's address is let go once the worker has answered or failed
+  // (by then its module graph is fetched), or when it's terminated.
+  let held = shim
+  const revoke = (): void => {
+    if (held === null) return
+    URL.revokeObjectURL(held)
+    held = null
+    w.removeEventListener('message', revoke)
+    w.removeEventListener('error', revoke)
+  }
+  if (held !== null) {
+    w.addEventListener('message', revoke)
+    w.addEventListener('error', revoke)
+  }
   return {
     postMessage: (msg) => w.postMessage(msg),
-    terminate: () => w.terminate(),
+    terminate: () => {
+      w.terminate()
+      revoke()
+    },
     addMessageListener: (cb) => {
       const h = (ev: MessageEvent<Worker2Host>): void => cb(ev.data)
       w.addEventListener('message', h)

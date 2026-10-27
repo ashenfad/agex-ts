@@ -20,6 +20,7 @@ import {
   STOPPED,
   ScriptedProvider,
   type Session,
+  type ToolSpec,
   aborted,
   cutOff,
   limitReached,
@@ -538,5 +539,32 @@ describe('inbox', () => {
     const second = agent([writes('/workspace/a.txt', 'A'), says('two')]).session(ws, { inbox })
     const outcome = await second.say('go')
     expect(outcome.events.some((e) => e.kind === 'Delivered')).toBe(true)
+  })
+})
+
+describe('what the model is told of the tools', () => {
+  it('follows the world as it changes: a key granted mid-turn is named in the next request', async () => {
+    let secrets: Record<string, { value: string; origins: string[] }> = {}
+    const live = await store.open('live', { profile: { secrets: () => secrets } })
+    const told: string[] = []
+    let n = 0
+    const provider = new ScriptedProvider(() => {
+      n += 1
+      if (n === 1) {
+        // the person grants a key while the turn runs
+        secrets = { LIVE: { value: 'live-secret-6666', origins: ['https://api.good.test'] } }
+        return calls('terminal', { command: 'true' })
+      }
+      return says('done')
+    })
+    const stream = provider.stream.bind(provider)
+    provider.stream = (messages, tools: readonly ToolSpec[], settings, opts) => {
+      told.push(tools.find((t) => t.name === 'terminal')?.description ?? '')
+      return stream(messages, tools, settings, opts)
+    }
+    await new Agent({ model: provider }).session(live).say('go')
+    expect(told).toHaveLength(2)
+    expect(told[0]).not.toContain('$LIVE')
+    expect(told[1]).toContain('$LIVE')
   })
 })

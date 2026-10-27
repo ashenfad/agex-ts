@@ -78,6 +78,7 @@ import {
   type Profile,
   makeCommands,
   makeHostObjects,
+  secretSpecs,
   shellEnv,
 } from './profile'
 import { Queue } from './queue'
@@ -449,7 +450,10 @@ export class Workspace {
       sees: (path) => this.#view?.sees(path) ?? true,
       whyIgnored: (path) => whyIgnored(path, this.root, this.#patterns),
     })
-    this.#secrets = new Secrets(settings.profile.secrets)
+    const secrets = settings.profile.secrets
+    this.#secrets = new Secrets(
+      typeof secrets === 'function' ? () => secretSpecs(settings.profile) : secrets,
+    )
     this.#hostObjects = makeHostObjects(settings.profile, this, { secrets: this.#secrets })
     this.#commands = makeCommands(settings.profile, {
       ws: this.#asPartOf(() => this.#shellCall),

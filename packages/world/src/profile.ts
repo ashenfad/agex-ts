@@ -389,11 +389,21 @@ export function shellEnv(profile: Profile, home: string): Record<string, string>
   return env
 }
 
-/** A profile's secrets as they are now: its own, or what its function
- *  gives (`{}` for none). */
+/**
+ * A profile's secrets as they are now: its own, or what its function
+ * gives (`{}` for none). A function's may not name one of the profile's
+ * variables, which the open checked for fixed ones.
+ *
+ * @throws InvalidNameError for a secret that is also a variable.
+ */
 export function secretSpecs(profile: Profile): SecretSpecs {
   const secrets = profile.secrets
-  return typeof secrets === 'function' ? secrets() : (secrets ?? {})
+  if (typeof secrets !== 'function') return secrets ?? {}
+  const specs = secrets()
+  for (const name of Object.keys(profile.variables ?? {})) {
+    if (name in specs) throw new InvalidNameError(`${name} is both a variable and a secret`)
+  }
+  return specs
 }
 
 /** The host objects of a profile for one workspace, factories made. */

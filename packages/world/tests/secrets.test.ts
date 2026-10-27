@@ -538,7 +538,31 @@ describe('secrets read live', () => {
     ).rejects.toThrow(InvalidNameError)
   })
 
-  it('reads the specs once per request and reuses what it read while they stay the same', () => {
+  it('sees a key changed in place, and a request keeps the key it was filled with', async () => {
+    const specs: Record<string, SecretSpec> = { LIVE: { ...KEY } }
+    const secrets = new Secrets(() => specs)
+    const to = new URL('https://api.good.test')
+    expect(secrets.fill('${LIVE}', to)).toBe('live-secret-4444')
+    specs.LIVE = { ...KEY, value: 'rotated-secret-1212' }
+    expect(secrets.fill('${LIVE}', to)).toBe('rotated-secret-1212')
+    Reflect.deleteProperty(specs, 'LIVE')
+    expect(secrets.names()).toEqual([])
+
+    specs.LIVE = { ...KEY }
+    const { fetch } = fakeFetch((req) => {
+      // revoked in place while the request is out
+      Reflect.deleteProperty(specs, 'LIVE')
+      return new Response(`echo ${req.headers['x-key']}`)
+    })
+    const r = await request(
+      { url: 'https://api.good.test/x', headers: [['X-Key', '${LIVE}']] },
+      secrets,
+      { fetch },
+    )
+    expect(new TextDecoder().decode(r.bytes)).toBe('echo ${LIVE}')
+  })
+
+  it('reads the specs once per fill', () => {
     let calls = 0
     const specs = { LIVE: KEY }
     const secrets = new Secrets(() => {

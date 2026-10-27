@@ -3,7 +3,8 @@
  * Copy nontainer's harness corpus (its exported JSON, and the schemas)
  * into src/conformance/, from a nontainer checkout's origin/main, and
  * regenerate the corpus index. Its ws-git script corpus goes to
- * tests/wsgit-corpus/, for the ws-git port's own test.
+ * tests/wsgit-corpus/, for the ws-git port's own test, and its trace
+ * corpus to tests/traces-corpus/, for the trace renderer's.
  *
  * Usage: node scripts/sync-corpus.mjs PATH/TO/nontainer [ref]
  */
@@ -75,6 +76,21 @@ for (const path of git('ls-tree', '--name-only', `${ref}:nontainer/conformance/w
     writeFileSync(
       join(scripts, path),
       git('show', `${ref}:nontainer/conformance/wsgit/json/${path}`),
+    )
+  }
+}
+
+// The trace cases, recorded by nontainer: every file a trace renders.
+const traces = join(here, '..', '..', 'tests', 'traces-corpus')
+rmSync(traces, { recursive: true, force: true })
+mkdirSync(traces)
+for (const path of git('ls-tree', '--name-only', `${ref}:nontainer/conformance/traces/json/`).split(
+  '\n',
+)) {
+  if (path.endsWith('.json')) {
+    writeFileSync(
+      join(traces, path),
+      git('show', `${ref}:nontainer/conformance/traces/json/${path}`),
     )
   }
 }

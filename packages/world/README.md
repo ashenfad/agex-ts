@@ -391,6 +391,35 @@ await ws.compaction.record({ through: lastFoldedId, summary, runs: 4 }) // lands
   `isOurs` for the ids of inserted messages.
 - **The event:** a new fold is streamed as `Compacted`.
 
+## Traces
+
+A run's stored body is the harness's own format. A trace renders a
+conversation as markdown files a model reads, the same whichever
+harness wrote it: a `TraceSource` reads one stored run into the neutral
+`TraceRun` (status, times, model, token counts, the system prompt, and
+events: user, assistant, thinking, and one per tool call with its
+result), and `Trace` renders every file from that.
+
+```ts
+const runs = bodies.map((body) => new NeutralTraces().read(body))
+const trace = await Trace.create(runs, { session: 'analyst-42', commit: 'a3f9c2e', harness: 'neutral' })
+trace.paths() // README.md, index.md, runs/001-1f3a9c2e/run.md, …
+trace.read('index.md') // one line per run
+```
+
+- **The files:** `README.md` (whose conversation, at which commit),
+  `index.md` (one line per run), `system/<hash>.md` (each distinct
+  prompt once), and per run `run.md` (its facts, input, reply and a line
+  per tool call), `changed.md` (the files it changed, commit by commit)
+  and `events/` (one file per event).
+- **What a run changed** comes from the branch's history: `changes`
+  gives each run's commits, and `runRanges` says which commits are
+  whose, from where each run's turn landed (a fork bounds them).
+  `since` and `new` mark the runs new since a state with `+`.
+- **A port of nontainer's renderer**, checked against its trace corpus
+  byte for byte. `NeutralTraces` reads runs stored in the neutral shape
+  itself (`neutralBody`), which is how the corpora seed them.
+
 ## Planes
 
 A harness's own records in the session, beside the files and the
@@ -590,6 +619,9 @@ scenarios it covers apply. The package's own reference harness passes
 every scenario, tiers 0 to 5; with `delegation`, a harness hands
 the runner a `CorpusDelegates`, which runs each delegate as a session of
 that harness through `untilSettled`.
+
+The same script syncs nontainer's ws-git scripts and trace cases into
+`tests/`, which the ws-git verb and the trace renderer replay.
 
 ## Layout
 

@@ -227,6 +227,24 @@ export {
 } from './sessions'
 export { WorkspacePlane, planePrefix } from './planes'
 export {
+  EVENT_KINDS,
+  NEUTRAL,
+  NeutralTraces,
+  Trace,
+  type TraceCommit,
+  type TraceEvent,
+  type TraceEventKind,
+  type TraceOptions,
+  type TraceRun,
+  type TraceSource,
+  type TraceTokens,
+  commitFromBody,
+  neutralBody,
+  runFromBody,
+  runRanges,
+  traceRun,
+} from './traces'
+export {
   ACK,
   FOLD_PREFIX,
   type Fold,

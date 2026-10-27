@@ -1,5 +1,13 @@
 # @agex-ts/world
 
+## 0.1.5
+
+### Patch Changes
+
+- ab9084c: **A mount inside a mount shows in listings:** `ls`, `find` and `fs.list` of an attached tree name what is attached inside it (a directory it lacks reads as one leading there), and leave out what the inner mount covers.
+- 21020d5: **An agent reads another session's conversation:** `Store.open(kv, { traces })` names a trace source per harness, `ws.files.attach(ref, at, { trace: true, since })` mounts the conversation stored at that commit beside its files, at `<at>/.trace` (each run's `changed.md` read from the branch's history, `+` on the runs new since a state), and ws-git gains `worktree add --trace [--since <ref>]` and `show <ref>:.trace/<path>`, printing what nontainer's does.
+- 297ff23: **A stored conversation renders as files a model reads:** `Trace`, with the neutral `TraceRun` shape a `TraceSource` reads a harness's run into, `NeutralTraces` for runs stored in that shape, and `runRanges` for which commits are whose. A port of nontainer's renderer, checked against its trace corpus byte for byte.
+
 ## 0.1.4
 
 ### Patch Changes

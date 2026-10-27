@@ -1,5 +1,16 @@
 # agex-ts
 
+## 0.6.2
+
+### Patch Changes
+
+- bd58ae2: **A fold's commit says `folded`, not `runs`:** `{ tool: 'fold', through, folded }`, so `runs` on a commit means only what a turn's stamp means by it, the runs it landed.
+- 110bc5b: **An agex session reads as a trace:** `AgexTraces`, the world's `TraceSource` for agex's stored runs, so `Store.open(kv, { traces: { [HARNESS]: new AgexTraces() } })` lets another session mount an agex session's conversation with `ws-git worktree add --trace`. It reads a run as Python agex's `AgexTraces` does: status, times, models, token counts, and each call paired with its result.
+- Updated dependencies [ab9084c]
+- Updated dependencies [21020d5]
+- Updated dependencies [297ff23]
+  - @agex-ts/world@0.1.5
+
 ## 0.6.1
 
 ### Patch Changes

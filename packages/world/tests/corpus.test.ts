@@ -32,7 +32,7 @@ function byName(name: string): Scenario {
 
 describe("nontainer's harness corpus on the world", () => {
   it('holds the scenarios, tiers 0 to 5, and covers every one', () => {
-    expect(SCENARIOS).toHaveLength(21)
+    expect(SCENARIOS).toHaveLength(22)
     expect(new Set(SCENARIOS.flatMap((s) => s.tiers))).toEqual(new Set([0, 1, 2, 3, 4, 5]))
     expect(covered).toEqual(SCENARIOS)
   })

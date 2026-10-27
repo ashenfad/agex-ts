@@ -868,15 +868,17 @@ export class TraceFS implements FileSystem {
     if (!(await this.isDir(path))) throw new FsError('ENOENT', path)
   }
 
-  read(path: string): Promise<Uint8Array> {
-    return this.#bytes(path)
+  /** A copy: what is kept stays as rendered, whatever a reader does
+   *  with what it was given. */
+  async read(path: string): Promise<Uint8Array> {
+    return (await this.#bytes(path)).slice()
   }
 
   async readMany(paths: readonly string[]): Promise<Map<string, Uint8Array>> {
     const out = new Map<string, Uint8Array>()
     for (const path of paths) {
       try {
-        out.set(path, await this.#bytes(path))
+        out.set(path, (await this.#bytes(path)).slice())
       } catch (e) {
         if (!(e instanceof FsError)) throw e
       }

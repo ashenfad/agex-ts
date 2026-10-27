@@ -91,6 +91,12 @@ describe('a trace attached beside the files', () => {
     expect(index).not.toContain('bad')
     await ws.files.readText('an/.trace/README.md')
     expect(source.reads).toBe(3)
+    // what a reader is given is its own: changing it changes no later read
+    const given = await ws.files.fs.read('an/.trace/index.md')
+    given.fill(0)
+    const [many] = (await ws.files.fs.readMany?.(['an/.trace/index.md']))?.values() ?? []
+    many?.fill(0)
+    expect(await ws.files.readText('an/.trace/index.md')).toBe(index)
     await ws.close()
   })
 

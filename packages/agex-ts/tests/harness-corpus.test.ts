@@ -12,6 +12,7 @@ const covered = SCENARIOS.filter((s) => applies(s, agexHarness))
 describe("nontainer's harness corpus on agex-ts", () => {
   it('covers tiers 0 to 5', () => {
     expect(covered.map((s) => s.name)).toEqual([
+      'a-failed-command-is-a-failed-call',
       'a-turn-that-writes-a-file',
       'a-cancel-after-a-tool-keeps-the-run',
       'a-failure-keeps-the-run-with-a-closing-note',

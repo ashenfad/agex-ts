@@ -10,10 +10,10 @@
 import { promises as fsp } from 'node:fs'
 import { tmpdir } from 'node:os'
 import * as nodePath from 'node:path'
-import { Staged, VersionedKV } from '@agex-ts/kvgit'
+import { Repo } from '@agex-ts/kvgit'
 import { Memory as KvgitMemoryStore } from '@agex-ts/kvgit/backends/memory'
 import { afterEach, describe, expect, it } from 'vitest'
-import { KvgitFS, fileRecordDecoder, fileRecordEncoder } from '../src/fs/kvgit'
+import { KvgitFS, fileRecordCodec } from '../src/fs/kvgit'
 import { MemoryFS } from '../src/fs/memory'
 import type { FileSystem } from '../src/fs/protocol'
 import { RealFS } from '../src/fs/real'
@@ -46,13 +46,8 @@ const backends: Backend[] = [
   {
     name: 'KvgitFS',
     make: async () => {
-      const store = new KvgitMemoryStore()
-      const vk = await VersionedKV.open(store)
-      const staged = new Staged(vk, {
-        encoder: fileRecordEncoder,
-        decoder: fileRecordDecoder,
-      })
-      return new KvgitFS(staged)
+      const repo = await Repo.open(new KvgitMemoryStore(), { codec: fileRecordCodec })
+      return new KvgitFS(await repo.worktree('main', { create: true }))
     },
   },
 ]

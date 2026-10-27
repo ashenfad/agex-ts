@@ -1,9 +1,9 @@
 /**
- * `KvgitFS` — `FileSystem` backed by a @agex-ts/kvgit `Staged`.
+ * `KvgitFS` — `FileSystem` backed by a @agex-ts/kvgit `Worktree`.
  *
- * Every path becomes a key in the staging buffer. Writes accumulate
- * locally; the user calls `commit()` to flush them as a single
- * versioned commit (with three-way merge if HEAD has moved).
+ * Every path becomes a key in the worktree. Writes stay pending in it;
+ * the caller's `worktree.commit()` lands them as a single versioned
+ * commit (with three-way merge if HEAD has moved).
  *
  * Storage layout:
  * - File at `/path/to/file` → key `f:/path/to/file`
@@ -24,8 +24,7 @@
  * the main entry never pulls kvgit in.
  */
 
-import type { Staged } from '@agex-ts/kvgit'
-import type { Decoder, Encoder } from '@agex-ts/kvgit'
+import type { Codec, Worktree } from '@agex-ts/kvgit'
 import superjson from 'superjson'
 import { FsError, missingParent } from './errors'
 import { basename, dirname, joinPath, resolve } from './path'
@@ -34,7 +33,7 @@ import type { FileInfo, FileMetadata, FileSystem } from './protocol'
 const TYPE_FILE = 0x46
 const TYPE_DIR = 0x44
 /** Type-tag for JSON-encoded values written by the polymorphic
- *  encoder. Distinct from `F` / `D` so a single `Staged` can carry
+ *  encoder. Distinct from `F` / `D` so a single worktree can carry
  *  both `FileRecord` and arbitrary state values without collisions. */
 const TYPE_JSON = 0x4a
 const ISO_LEN = 24
@@ -46,6 +45,11 @@ interface FileRecord {
   readonly modifiedAt: string
   readonly content: Uint8Array
 }
+
+/** Turns a value into stored bytes. */
+type Encoder = (value: unknown) => Uint8Array
+/** Turns stored bytes back into a value. */
+type Decoder = (bytes: Uint8Array) => unknown
 
 const enc = new TextEncoder()
 const dec = new TextDecoder()
@@ -70,8 +74,8 @@ function isFileRecord(v: unknown): v is FileRecord {
   )
 }
 
-/** Typed as `Encoder` (value: unknown) so it plugs into `Staged`'s
- *  constructor without a generic-variance cast at call sites. */
+/** Typed as `Encoder` (value: unknown) so it serves any worktree's
+ *  codec without a generic-variance cast at call sites. */
 export const fileRecordEncoder: Encoder = (value) => {
   const rec = value as FileRecord
   const out = new Uint8Array(HEADER_LEN + rec.content.byteLength)
@@ -97,8 +101,8 @@ export const fileRecordDecoder: Decoder = (bytes) => {
 
 /** Encoder that handles both `FileRecord` payloads and arbitrary
  *  structured values via a one-byte type tag. Use this on the unified
- *  `Staged` an agex-ts agent shares between its state backend and its
- *  kvgit-backed VFS — one `staged.commit()` then captures both atomically.
+ *  worktree an agex-ts agent shares between its state backend and its
+ *  kvgit-backed VFS — one `worktree.commit()` then captures both atomically.
  *
  *  Wire format:
  *  - `0x46` (`F`) / `0x44` (`D`): existing FileRecord layout.
@@ -137,6 +141,18 @@ export const polymorphicDecoder: Decoder = (bytes) => {
   )
 }
 
+/** The codec for a worktree that holds only files. */
+export const fileRecordCodec: Codec<unknown> = {
+  encode: fileRecordEncoder,
+  decode: fileRecordDecoder,
+}
+
+/** The codec for a worktree that holds files beside other values. */
+export const polymorphicCodec: Codec<unknown> = {
+  encode: polymorphicEncoder,
+  decode: polymorphicDecoder,
+}
+
 export interface KvgitFSOptions {
   /** Initial virtual cwd. Defaults to `/`. */
   readonly cwd?: string
@@ -145,18 +161,18 @@ export interface KvgitFSOptions {
 const ROOT_KEY = 'd:/'
 
 export class KvgitFS implements FileSystem {
-  readonly #staged: Staged
+  readonly #wt: Worktree<unknown>
   #cwd: string
 
-  constructor(staged: Staged, opts: KvgitFSOptions = {}) {
-    this.#staged = staged
+  constructor(worktree: Worktree<unknown>, opts: KvgitFSOptions = {}) {
+    this.#wt = worktree
     this.#cwd = opts.cwd ?? '/'
   }
 
-  /** Expose the underlying `Staged` so callers can `commit()`,
-   *  switch branches, etc. */
-  get staged(): Staged {
-    return this.#staged
+  /** The underlying worktree, so callers can `commit()`, `refresh()`,
+   *  and so on. */
+  get worktree(): Worktree<unknown> {
+    return this.#wt
   }
 
   // ---------- cwd ----------
@@ -246,7 +262,7 @@ export class KvgitFS implements FileSystem {
       modifiedAt: now,
       content: next,
     }
-    this.#staged.set(`f:${abs}`, rec)
+    this.#wt.set(`f:${abs}`, rec)
   }
 
   async mkdir(path: string, opts: { parents?: boolean; existOk?: boolean } = {}): Promise<void> {
@@ -279,7 +295,7 @@ export class KvgitFS implements FileSystem {
       if (await this.#dirExists(abs)) throw new FsError('EISDIR', path)
       throw new FsError('ENOENT', path)
     }
-    this.#staged.delete(`f:${abs}`)
+    await this.#wt.delete(`f:${abs}`)
   }
 
   async rmdir(path: string): Promise<void> {
@@ -294,7 +310,7 @@ export class KvgitFS implements FileSystem {
     if (await this.#dirHasChildren(abs)) {
       throw new FsError('ENOTEMPTY', path)
     }
-    this.#staged.delete(`d:${abs}`)
+    await this.#wt.delete(`d:${abs}`)
   }
 
   async rename(src: string, dst: string): Promise<void> {
@@ -307,21 +323,21 @@ export class KvgitFS implements FileSystem {
       if (!(await this.#dirExists(dirname(absDst)))) {
         throw await missingParent(dirname(absDst), this)
       }
-      this.#staged.delete(`f:${absSrc}`)
-      this.#staged.set(`f:${absDst}`, srcFile)
+      await this.#wt.delete(`f:${absSrc}`)
+      this.#wt.set(`f:${absDst}`, srcFile)
       return
     }
 
     if (await this.#dirExists(absSrc)) {
       const srcPrefix = `${absSrc}/`
-      // Materialize the matching keys up front. Awaiting `staged.get()`
-      // mid-iteration over `staged.keys()` can let an IndexedDB-backed
+      // Materialize the matching keys up front. Awaiting `worktree.get()`
+      // mid-iteration over `worktree.keys()` can let an IndexedDB-backed
       // store auto-commit its read cursor between awaits — pulling the
       // candidates into an array first keeps the cursor walk tight and
       // confines the per-key loads to a separate phase.
       const fileKeys: string[] = []
       const dirKeys: string[] = []
-      for await (const k of this.#staged.keys()) {
+      for (const k of await this.#wt.keys()) {
         if (k.startsWith('f:')) {
           if (k.slice(2).startsWith(srcPrefix)) fileKeys.push(k)
         } else if (k.startsWith('d:')) {
@@ -334,22 +350,22 @@ export class KvgitFS implements FileSystem {
       const dirMoves: Array<[string, FileRecord | null]> = []
       for (const k of fileKeys) {
         const path = k.slice(2)
-        const rec = await this.#staged.get<FileRecord>(k)
+        const rec = (await this.#wt.get(k)) as FileRecord | undefined
         if (rec !== undefined) {
           fileMoves.push([`${absDst}/${path.slice(srcPrefix.length)}`, rec])
-          this.#staged.delete(k)
+          await this.#wt.delete(k)
         }
       }
       for (const k of dirKeys) {
         const path = k.slice(2)
-        const rec = await this.#staged.get<FileRecord>(k)
+        const rec = (await this.#wt.get(k)) as FileRecord | undefined
         const dst = path === absSrc ? absDst : `${absDst}/${path.slice(srcPrefix.length)}`
         dirMoves.push([dst, rec ?? null])
-        this.#staged.delete(k)
+        await this.#wt.delete(k)
       }
-      for (const [dstPath, rec] of fileMoves) this.#staged.set(`f:${dstPath}`, rec)
+      for (const [dstPath, rec] of fileMoves) this.#wt.set(`f:${dstPath}`, rec)
       for (const [dstPath, rec] of dirMoves) {
-        if (rec !== null) this.#staged.set(`d:${dstPath}`, rec)
+        if (rec !== null) this.#wt.set(`d:${dstPath}`, rec)
       }
       return
     }
@@ -367,7 +383,7 @@ export class KvgitFS implements FileSystem {
     const prefix = abs === '/' ? '/' : `${abs}/`
     const direct = new Set<string>()
     const all = new Set<string>()
-    for await (const k of this.#staged.keys()) {
+    for (const k of await this.#wt.keys()) {
       let path2: string
       if (k.startsWith('f:')) path2 = k.slice(2)
       else if (k.startsWith('d:')) path2 = k.slice(2)
@@ -422,20 +438,20 @@ export class KvgitFS implements FileSystem {
   // ---------- internal ----------
 
   async #getFile(abs: string): Promise<FileRecord | undefined> {
-    const rec = await this.#staged.get<FileRecord>(`f:${abs}`)
+    const rec = (await this.#wt.get(`f:${abs}`)) as FileRecord | undefined
     return rec
   }
 
   async #getDir(abs: string): Promise<FileRecord | undefined> {
     if (abs === '/') return undefined
-    return this.#staged.get<FileRecord>(`d:${abs}`)
+    return (await this.#wt.get(`d:${abs}`)) as FileRecord | undefined
   }
 
   async #dirExists(abs: string): Promise<boolean> {
     if (abs === '/') return true
     if ((await this.#getDir(abs)) !== undefined) return true
     const prefix = `${abs}/`
-    for await (const k of this.#staged.keys()) {
+    for (const k of await this.#wt.keys()) {
       if (k.startsWith('f:') || k.startsWith('d:')) {
         if (k.slice(2).startsWith(prefix)) return true
       }
@@ -445,7 +461,7 @@ export class KvgitFS implements FileSystem {
 
   async #dirHasChildren(abs: string): Promise<boolean> {
     const prefix = abs === '/' ? '/' : `${abs}/`
-    for await (const k of this.#staged.keys()) {
+    for (const k of await this.#wt.keys()) {
       if (k.startsWith('f:') || k.startsWith('d:')) {
         const path = k.slice(2)
         if (path !== abs && path.startsWith(prefix)) return true
@@ -463,7 +479,7 @@ export class KvgitFS implements FileSystem {
       modifiedAt: now,
       content: new Uint8Array(0),
     }
-    this.#staged.set(`d:${abs}`, rec)
+    this.#wt.set(`d:${abs}`, rec)
   }
 }
 

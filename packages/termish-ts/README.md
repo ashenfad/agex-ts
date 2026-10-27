@@ -131,7 +131,7 @@ maps Node's codes.
 |---|---|---|
 | `MemoryFS` | `@agex-ts/termish/fs/memory` | Tests, ephemeral use, browser-side state with no persistence |
 | `RealFS` | `@agex-ts/termish/fs/real` | Node only: `new RealFS({ root })` makes an absolute, existing host directory the virtual `/`, and refuses paths that would leave it |
-| `KvgitFS` | `@agex-ts/termish/fs/kvgit` | Files in a `@agex-ts/kvgit` `Staged` (`new KvgitFS(staged, { cwd? })`, its values encoded with `fileRecordEncoder`/`fileRecordDecoder`, or the `polymorphic*` pair to keep other values beside them); `.staged` to commit. Install `@agex-ts/kvgit` beside it |
+| `KvgitFS` | `@agex-ts/termish/fs/kvgit` | Files in a `@agex-ts/kvgit` `Worktree` (`new KvgitFS(worktree, { cwd? })`, on a repository opened with `fileRecordCodec`, or `polymorphicCodec` to keep other values beside them); `.worktree` to commit. Install `@agex-ts/kvgit` beside it |
 
 `@agex-ts/termish/glob` has the glob matching the shell uses (`glob`,
 `globMatch`, `compileGlob`, `hasGlobChars`), also on the main entry.

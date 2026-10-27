@@ -1,64 +1,51 @@
-import { Staged, VersionedKV } from '@agex-ts/kvgit'
+import { Repo } from '@agex-ts/kvgit'
 import { Memory } from '@agex-ts/kvgit/backends/memory'
 import { describe, expect, it } from 'vitest'
 import {
   KvgitFS,
-  fileRecordDecoder,
-  fileRecordEncoder,
+  fileRecordCodec,
+  polymorphicCodec,
   polymorphicDecoder,
   polymorphicEncoder,
 } from '../src/fs/kvgit'
 import { runFsConformance } from './fs-conformance'
 
 async function makeFs(): Promise<KvgitFS> {
-  const store = new Memory()
-  const vk = await VersionedKV.open(store)
-  const staged = new Staged(vk, {
-    encoder: fileRecordEncoder,
-    decoder: fileRecordDecoder,
-  })
-  return new KvgitFS(staged)
+  const repo = await Repo.open(new Memory(), { codec: fileRecordCodec })
+  return new KvgitFS(await repo.worktree('main', { create: true }))
 }
 
 runFsConformance('KvgitFS', makeFs)
 
 describe('KvgitFS — kvgit integration', () => {
-  it('writes accumulate in staging until commit', async () => {
+  it('writes stay pending in the worktree until commit', async () => {
     const fs = await makeFs()
-    const startCommit = fs.staged.currentCommit
+    const start = fs.worktree.head
     await fs.write('/note', new TextEncoder().encode('hi'))
-    expect(fs.staged.hasChanges).toBe(true)
-    expect(fs.staged.currentCommit).toBe(startCommit)
-    await fs.staged.commit()
-    expect(fs.staged.hasChanges).toBe(false)
-    expect(fs.staged.currentCommit).not.toBe(startCommit)
+    expect(fs.worktree.status().clean).toBe(false)
+    expect(fs.worktree.head).toBe(start)
+    await fs.worktree.commit()
+    expect(fs.worktree.status().clean).toBe(true)
+    expect(fs.worktree.head).not.toBe(start)
   })
 
-  it('survives a commit + reopen with the same VersionedKV', async () => {
+  it('survives a commit and a reopen on the same store', async () => {
     const store = new Memory()
-    const vk = await VersionedKV.open(store)
-    const staged = new Staged(vk, {
-      encoder: fileRecordEncoder,
-      decoder: fileRecordDecoder,
-    })
-    const fs1 = new KvgitFS(staged)
+    const repo = await Repo.open(store, { codec: fileRecordCodec })
+    const fs1 = new KvgitFS(await repo.worktree('main', { create: true }))
     await fs1.write('/persist', new TextEncoder().encode('alpha'))
-    await fs1.staged.commit()
+    await fs1.worktree.commit()
 
-    // Re-open: a fresh Staged on the same vk sees the committed file.
-    const staged2 = new Staged(vk, {
-      encoder: fileRecordEncoder,
-      decoder: fileRecordDecoder,
-    })
-    const fs2 = new KvgitFS(staged2)
+    // A fresh worktree on the same branch sees the committed file.
+    const fs2 = new KvgitFS(await repo.worktree('main'))
     expect(await fs2.exists('/persist')).toBe(true)
     expect(new TextDecoder().decode(await fs2.read('/persist'))).toBe('alpha')
   })
 
-  it('exposes the underlying Staged via the staged getter', async () => {
+  it('exposes the underlying worktree', async () => {
     const fs = await makeFs()
-    expect(fs.staged).toBeDefined()
-    expect(typeof fs.staged.commit).toBe('function')
+    expect(fs.worktree).toBeDefined()
+    expect(typeof fs.worktree.commit).toBe('function')
   })
 })
 
@@ -193,29 +180,25 @@ describe('polymorphic encoder/decoder', () => {
     expect(bytes[0]).toBe(0x4a) // 'J' — routed as JSON, not file
   })
 
-  it('shares one Staged for both shapes — atomic mixed-keys commit', async () => {
-    // The unified-substrate scenario: one Staged with the polymorphic
+  it('shares one worktree for both shapes — atomic mixed-keys commit', async () => {
+    // The unified-substrate scenario: one worktree with the polymorphic
     // encoder accepting both file records (via KvgitFS writes) and
-    // arbitrary JSON state values (via direct staged.set). One commit
+    // arbitrary JSON state values (via direct wt.set). One commit
     // captures both atomically, which is the whole point.
-    const store = new Memory()
-    const vk = await VersionedKV.open(store)
-    const staged = new Staged(vk, {
-      encoder: polymorphicEncoder,
-      decoder: polymorphicDecoder,
-    })
-    const fs = new KvgitFS(staged)
+    const repo = await Repo.open(new Memory(), { codec: polymorphicCodec })
+    const wt = await repo.worktree('main', { create: true })
+    const fs = new KvgitFS(wt)
 
     await fs.write('/data.txt', new TextEncoder().encode('payload'))
-    staged.set('cache/answer', { kind: 'success', value: 42 })
+    wt.set('cache/answer', { kind: 'success', value: 42 })
 
-    expect(staged.hasChanges).toBe(true)
-    const result = await staged.commit()
+    expect(wt.status().clean).toBe(false)
+    const result = await wt.commit()
     expect(result.merged).toBe(true)
-    expect(staged.hasChanges).toBe(false)
+    expect(wt.status().clean).toBe(true)
 
     // Both visible after commit through their respective surfaces.
     expect(new TextDecoder().decode(await fs.read('/data.txt'))).toBe('payload')
-    expect(await staged.get('cache/answer')).toEqual({ kind: 'success', value: 42 })
+    expect(await wt.get('cache/answer')).toEqual({ kind: 'success', value: 42 })
   })
 })

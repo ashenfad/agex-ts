@@ -519,6 +519,18 @@ describe('secrets read live', () => {
     await ws.close()
   })
 
+  it('checks each profile against its own variables, though their functions give the same secrets', async () => {
+    const { fetch } = fakeFetch(() => new Response('ok'))
+    const shared = { REGION: KEY }
+    const plain = await open(fetch, { secrets: () => shared })
+    expect((await plain.terminal('echo ok')).exitCode).toBe(0)
+    await plain.close()
+    const store = await Store.open(await newKV())
+    await expect(
+      store.open('t', { profile: { secrets: () => shared, variables: { REGION: 'eu' } } }),
+    ).rejects.toThrow('REGION is both a variable and a secret')
+  })
+
   it('a profile whose function gives a bad secret at open is refused, as a fixed one is', async () => {
     const store = await Store.open(await newKV())
     await expect(

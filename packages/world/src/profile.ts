@@ -389,8 +389,9 @@ export function shellEnv(profile: Profile, home: string): Record<string, string>
   return env
 }
 
-/** What a profile's secret function gave that passed the checks, so
- *  each result is checked once. */
+/** What secret functions gave that passed `checkSecrets`, so each
+ *  result is checked once (the variables, which differ by profile, are
+ *  checked every time). */
 const checkedSpecs = new WeakSet<SecretSpecs>()
 
 /**
@@ -406,12 +407,13 @@ export function secretSpecs(profile: Profile): SecretSpecs {
   const secrets = profile.secrets
   if (typeof secrets !== 'function') return secrets ?? {}
   const specs = secrets()
-  if (checkedSpecs.has(specs)) return specs
-  checkSecrets(specs)
+  if (!checkedSpecs.has(specs)) {
+    checkSecrets(specs)
+    checkedSpecs.add(specs)
+  }
   for (const name of Object.keys(profile.variables ?? {})) {
     if (name in specs) throw new InvalidNameError(`${name} is both a variable and a secret`)
   }
-  checkedSpecs.add(specs)
   return specs
 }
 

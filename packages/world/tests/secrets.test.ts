@@ -389,3 +389,97 @@ describe('interrupting curl', () => {
     await ws.close()
   })
 })
+
+describe('secrets read live', () => {
+  /** A host's keys, as a person grants and revokes them. */
+  function keys() {
+    let now: Record<string, SecretSpec> = {}
+    return {
+      specs: () => now,
+      grant(name: string, spec: SecretSpec) {
+        now = { ...now, [name]: spec }
+      },
+      revoke(name: string) {
+        const { [name]: _, ...rest } = now
+        now = rest
+      },
+    }
+  }
+  const KEY = { value: 'live-secret-4444', origins: ['https://api.good.test'] }
+
+  it('a key granted while the session is open is there for the next call, and one revoked is gone', async () => {
+    const { fetch, seen } = fakeFetch((req) => new Response(`saw ${req.headers['x-key']}`))
+    const live = keys()
+    const ws = await open(fetch, { secrets: live.specs })
+    const curl = 'curl -s -H "X-Key: $LIVE" https://api.good.test/x'
+
+    expect((await ws.runCode(`secret('LIVE')`)).error?.message).toBe("no secret named 'LIVE'")
+    const unbound = { exitCode: 1, stderr: 'LIVE: unbound variable' }
+    expect(await ws.terminal('echo "$LIVE"')).toMatchObject(unbound)
+
+    live.grant('LIVE', KEY)
+    expect((await ws.terminal(curl)).stdout).toBe('saw ${LIVE}')
+    expect(seen.at(-1)?.headers['x-key']).toBe('live-secret-4444')
+    const code = await ws.runCode(`
+      const r = await http.fetch('https://api.good.test/y', { headers: { 'X-Key': secret('LIVE') } })
+      return r.body
+    `)
+    expect(code.value).toBe('saw ${LIVE}')
+
+    live.revoke('LIVE')
+    const sent = seen.length
+    expect((await ws.runCode(`secret('LIVE')`)).error?.message).toBe("no secret named 'LIVE'")
+    expect(await ws.terminal(curl)).toMatchObject(unbound)
+    expect(seen).toHaveLength(sent)
+    await ws.close()
+  })
+
+  it('the tools describe the secrets there are now', async () => {
+    const { fetch } = fakeFetch(() => new Response('ok'))
+    const live = keys()
+    const ws = await open(fetch, { secrets: live.specs })
+    const described = () =>
+      worldTools(ws)
+        .map((t) => t.description)
+        .join('\n')
+    expect(described()).not.toContain('LIVE')
+    live.grant('LIVE', KEY)
+    expect(described()).toContain('$LIVE')
+    expect(described()).toContain("secret('LIVE')")
+    await ws.close()
+  })
+
+  it('checks what the function gives when it changes, refusing the request it would serve', async () => {
+    const { fetch, seen } = fakeFetch(() => new Response('ok'))
+    const live = keys()
+    const ws = await open(fetch, { secrets: live.specs })
+    live.grant('LIVE', { value: 'x-secret-5555', origins: ['not a url'] })
+    const r = await ws.terminal('curl -s -H "X-Key: $LIVE" https://api.good.test/x')
+    expect(r.exitCode).not.toBe(0)
+    expect(r.stderr).toContain('secret LIVE: origin "not a url" is not a URL')
+    expect(seen).toHaveLength(0)
+    await ws.close()
+  })
+
+  it('a profile whose function gives a bad secret at open is refused, as a fixed one is', async () => {
+    const store = await Store.open(await newKV())
+    await expect(
+      store.open('s', { profile: { secrets: () => ({ 'bad name': 'x' }) } }),
+    ).rejects.toThrow(InvalidNameError)
+  })
+
+  it('reads the specs once per request and reuses what it read while they stay the same', () => {
+    let calls = 0
+    const specs = { LIVE: KEY }
+    const secrets = new Secrets(() => {
+      calls += 1
+      return specs
+    })
+    expect(secrets.fill('Bearer ${LIVE} ${LIVE}', new URL('https://api.good.test'))).toBe(
+      'Bearer live-secret-4444 live-secret-4444',
+    )
+    expect(calls).toBe(1)
+    expect(secrets.names()).toEqual(['LIVE'])
+    expect(secrets.scrub('echo live-secret-4444')).toBe('echo ${LIVE}')
+  })
+})

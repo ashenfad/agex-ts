@@ -132,6 +132,7 @@ export {
   SecretOriginError,
   Secrets,
   type SecretSpec,
+  type SecretSpecs,
   secretRef,
 } from './secrets'
 export { EditError, type EditMode, type EditResult, applyEdit, findSimilarLines } from './editing'

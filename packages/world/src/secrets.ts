@@ -21,6 +21,9 @@ import { InvalidNameError } from './errors'
  *  origins, for a secret declared here whose value the host holds. */
 export type SecretSpec = string | { readonly value?: string; readonly origins: readonly string[] }
 
+/** Secrets by name, as a profile gives them. */
+export type SecretSpecs = Readonly<Record<string, SecretSpec>>
+
 /** A secret's reference, as the shell expands it and `secret(name)`
  *  gives it in code. */
 export const secretRef = (name: string): string => `\${${name}}`
@@ -51,24 +54,48 @@ export class DeclaredSecretError extends Error {
 
 const REF = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)/g
 
-/** The secrets of a profile, as host code reaches them. */
-export class Secrets {
-  readonly #values = new Map<
-    string,
-    { value: string | null; origins: ReadonlySet<string> | null }
-  >()
+type Entries = Map<string, { value: string | null; origins: ReadonlySet<string> | null }>
 
-  constructor(specs: Readonly<Record<string, SecretSpec>> = {}) {
-    for (const [name, spec] of Object.entries(specs)) {
-      if (typeof spec === 'string') {
-        this.#values.set(name, { value: spec, origins: null })
-      } else {
-        this.#values.set(name, {
-          value: spec.value ?? null,
-          origins: new Set(spec.origins.map((o) => originOf(o, name))),
-        })
-      }
+/** Secrets read from specs: each name's value (null when declared
+ *  without one) and origins (null when unbound). */
+function entriesOf(specs: SecretSpecs): Entries {
+  const entries: Entries = new Map()
+  for (const [name, spec] of Object.entries(specs)) {
+    if (typeof spec === 'string') {
+      entries.set(name, { value: spec, origins: null })
+    } else {
+      entries.set(name, {
+        value: spec.value ?? null,
+        origins: new Set(spec.origins.map((o) => originOf(o, name))),
+      })
     }
+  }
+  return entries
+}
+
+/**
+ * The secrets of a profile, as host code reaches them. Given a
+ * function, they are what it returns at each use, checked whenever it
+ * returns something new: a key granted while the session is open is
+ * there for the next request, and one revoked is gone.
+ */
+export class Secrets {
+  readonly #source: SecretSpecs | (() => SecretSpecs)
+  #read: { specs: SecretSpecs; entries: Entries } | null = null
+
+  constructor(specs: SecretSpecs | (() => SecretSpecs) = {}) {
+    this.#source = specs
+    if (typeof specs !== 'function') this.#read = { specs, entries: entriesOf(specs) }
+  }
+
+  get #values(): Entries {
+    if (typeof this.#source !== 'function') return (this.#read as { entries: Entries }).entries
+    const specs = this.#source()
+    if (this.#read?.specs !== specs) {
+      checkSecrets(specs)
+      this.#read = { specs, entries: entriesOf(specs) }
+    }
+    return this.#read.entries
   }
 
   /** The secrets' names, sorted. */
@@ -109,9 +136,10 @@ export class Secrets {
    * @throws DeclaredSecretError for a secret declared without a value.
    */
   fill(text: string, to: URL): string {
+    const values = this.#values
     return text.replace(REF, (whole, a, b) => {
       const name = (a ?? b) as string
-      const secret = this.#values.get(name)
+      const secret = values.get(name)
       if (secret === undefined) return whole
       if (secret.origins !== null && !secret.origins.has(to.origin)) {
         throw new SecretOriginError(name, to.origin)
@@ -123,8 +151,9 @@ export class Secrets {
 
   /** Whether `text` refers to a secret bound to origins. */
   refersToBound(text: string): boolean {
+    const values = this.#values
     for (const m of text.matchAll(REF)) {
-      if (this.#values.get((m[1] ?? m[2]) as string)?.origins != null) return true
+      if (values.get((m[1] ?? m[2]) as string)?.origins != null) return true
     }
     return false
   }

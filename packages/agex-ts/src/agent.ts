@@ -273,7 +273,6 @@ export class Session {
   /** The outcome of the last turn that ended. */
   last: Outcome | null = null
   readonly #tools: Map<string, Tool>
-  readonly #specs: ToolSpec[]
   readonly #vision: boolean
   /** What each ask runs on, for `sessions: true`. */
   readonly #runner: Runner | null = null
@@ -303,7 +302,12 @@ export class Session {
     )
     this.#delegation()
     for (const tool of opts.tools ?? []) this.#tools.set(tool.name, tool)
-    this.#specs = [...this.#tools.values()].map(toolSpec)
+  }
+
+  /** The tools as the model is told of them now: a description can
+   *  change while the session is open (the secrets the world has). */
+  get #specs(): ToolSpec[] {
+    return [...this.#tools.values()].map(toolSpec)
   }
 
   toString(): string {
@@ -642,11 +646,13 @@ export class Session {
         let reply: Message | null = null
         inRequest = true
         const sendable = (m: Message) => this.#sendable(m)
+        // what the model is told this step: measured and sent the same
+        const specs = this.#specs
         const prepared = await prepare({
           ws: this.ws,
           policy: this.agent.compaction,
           provider: this.agent.provider,
-          specs: this.#specs,
+          specs,
           settings: this.agent.settings,
           system,
           earlier: earlier.map((run) => run.map(sendable)),
@@ -662,14 +668,9 @@ export class Session {
         }
         const request = prepared.messages
         const afterNotice = told
-        for await (const event of this.agent.provider.stream(
-          request,
-          this.#specs,
-          this.agent.settings,
-          {
-            signal,
-          },
-        )) {
+        for await (const event of this.agent.provider.stream(request, specs, this.agent.settings, {
+          signal,
+        })) {
           checkCancel()
           if (event.kind === 'Reply') reply = event.message
           else push(event)

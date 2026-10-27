@@ -434,14 +434,12 @@ describe('secrets read live', () => {
     await ws.close()
   })
 
-  it('the tools describe the secrets there are now', async () => {
+  it('the tools describe the secrets there are now, the same tools as before', async () => {
     const { fetch } = fakeFetch(() => new Response('ok'))
     const live = keys()
     const ws = await open(fetch, { secrets: live.specs })
-    const described = () =>
-      worldTools(ws)
-        .map((t) => t.description)
-        .join('\n')
+    const tools = worldTools(ws)
+    const described = () => tools.map((t) => t.description).join('\n')
     expect(described()).not.toContain('LIVE')
     live.grant('LIVE', KEY)
     expect(described()).toContain('$LIVE')
@@ -457,6 +455,38 @@ describe('secrets read live', () => {
     const r = await ws.terminal('curl -s -H "X-Key: $LIVE" https://api.good.test/x')
     expect(r.exitCode).not.toBe(0)
     expect(r.stderr).toContain('secret LIVE: origin "not a url" is not a URL')
+    expect(seen).toHaveLength(0)
+    await ws.close()
+  })
+
+  it('scrubs a response with the key the request carried, should it change in flight', async () => {
+    const live = keys()
+    live.grant('LIVE', KEY)
+    const { fetch } = fakeFetch((req) => {
+      // rotated while the request is out
+      live.grant('LIVE', { ...KEY, value: 'rotated-secret-7777' })
+      return new Response(`echo ${req.headers['x-key']}`, {
+        headers: { 'x-echo': req.headers['x-key'] ?? '' },
+      })
+    })
+    const r = await request(
+      { url: 'https://api.good.test/x', headers: [['X-Key', '${LIVE}']] },
+      new Secrets(live.specs),
+      { fetch },
+    )
+    expect(new TextDecoder().decode(r.bytes)).toBe('echo ${LIVE}')
+    expect(r.headers['x-echo']).toBe('${LIVE}')
+  })
+
+  it("refuses a key that comes to share a variable's name, rather than shadow it", async () => {
+    const { fetch, seen } = fakeFetch(() => new Response('ok'))
+    const live = keys()
+    const ws = await open(fetch, { secrets: live.specs, variables: { REGION: 'eu' } })
+    live.grant('REGION', KEY)
+    // the host's mistake, so the call fails, as a bad profile at open does
+    const clash = 'REGION is both a variable and a secret'
+    await expect(ws.terminal('echo "$REGION"')).rejects.toThrow(clash)
+    await expect(ws.runCode(`secret('REGION')`)).rejects.toThrow(clash)
     expect(seen).toHaveLength(0)
     await ws.close()
   })

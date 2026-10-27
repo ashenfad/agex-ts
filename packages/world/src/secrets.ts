@@ -98,6 +98,12 @@ export class Secrets {
     return this.#read.entries
   }
 
+  /** These secrets as they are now, fixed: for work that must fill and
+   *  scrub with the same values (a request). */
+  now(): Secrets {
+    return typeof this.#source === 'function' ? new Secrets(this.#source()) : this
+  }
+
   /** The secrets' names, sorted. */
   names(): string[] {
     return [...this.#values.keys()].sort()

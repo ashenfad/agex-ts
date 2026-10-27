@@ -66,10 +66,13 @@ export class NetError extends Error {
 
 export async function request(
   req: NetRequest,
-  secrets: Secrets,
+  given: Secrets,
   opts: NetOptions = {},
   signal?: AbortSignal,
 ): Promise<NetResponse> {
+  // one snapshot for the whole request: what is filled is what is
+  // scrubbed, should the host's secrets change while it is in flight
+  const secrets = given.now()
   const fetchFn = opts.fetch ?? globalThis.fetch
   const maxBytes = opts.maxBytes ?? DEFAULT_MAX_BYTES
   const seconds = req.timeout ?? opts.timeout ?? DEFAULT_NET_TIMEOUT

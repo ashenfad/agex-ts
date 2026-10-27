@@ -130,7 +130,10 @@ export function worldTools(ws: Workspace, opts: ToolOptions = {}): Tool[] {
   const tools: Tool[] = [
     {
       name: 'terminal',
-      description: terminalDescription(ws, opts.terminalPrimer),
+      // read at each request: it names the secrets there are now
+      get description() {
+        return terminalDescription(ws, opts.terminalPrimer)
+      },
       parameters: object({ command: { type: 'string' } }, ['command']),
       call: guarded('terminal', async (args) => {
         const result = await ws.terminal(str(args, 'command'))
@@ -229,7 +232,9 @@ export function worldTools(ws: Workspace, opts: ToolOptions = {}): Tool[] {
 
   tools.push({
     name: 'run_ts',
-    description: codeDescription(ws, opts.codePrimer),
+    get description() {
+      return codeDescription(ws, opts.codePrimer)
+    },
     parameters: object({ code: { type: 'string' } }, ['code']),
     call: guarded('run_ts', async (args) => {
       const result = await ws.runCode(str(args, 'code'))

@@ -172,9 +172,13 @@ function strOrNull(value: unknown, where: string): string | null {
   throw new WorldError(`${where}: expected a string or null, got ${shown(value)}`)
 }
 
+/** The furthest a JavaScript date reaches from the epoch, in seconds. */
+const MAX_TIME = 8.64e12
+
 function timeOrNull(value: unknown, where: string): number | null {
   if (value === undefined || value === null) return null
-  if (typeof value !== 'number') {
+  // a time that can't print as a date would make the trace unreadable
+  if (typeof value !== 'number' || !(Math.abs(value) <= MAX_TIME)) {
     throw new WorldError(`${where}: expected epoch seconds or null, got ${shown(value)}`)
   }
   return value

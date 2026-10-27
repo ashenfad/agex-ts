@@ -113,6 +113,12 @@ chat.cancel('stopped by the user') // the turn ends cancelled, its work kept
   `readRuns(ws)` reads the same from a workspace alone, with no agent,
   as a page restoring a chat's history needs. A checkout of the
   workspace rewinds them with the files.
+- **As a trace:** with `Store.open(kv, { traces: { [HARNESS]: new
+  AgexTraces() } })`, another session reads an agex session's runs as
+  markdown beside its files (`ws-git worktree add --trace`, or
+  `ws.files.attach(ref, at, { trace: true })`): each run's input,
+  reply, tool calls, failures and the files it changed. agex builds
+  its system prompt per request, so a trace says it wasn't kept.
 - **The agent holds nothing:** a change of model or primer is a new
   `Agent` for the next turn, over the same workspace; pass the old
   session's inbox on (`agent.session(ws, { inbox: chat.inbox })`) so

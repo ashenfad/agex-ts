@@ -116,6 +116,7 @@ export {
   typeText,
 } from './schema'
 export { SCRIPTED, ScriptOverloaded, ScriptedProvider, texts } from './scripted'
+export { AgexTraces } from './traces'
 export {
   Agent,
   type AgentOptions,

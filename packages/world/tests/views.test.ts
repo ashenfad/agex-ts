@@ -420,6 +420,15 @@ describe('attachments', () => {
     ])
     await ws.files.detach('/reviews/.notes')
     expect((await ws.terminal('ls /reviews/.notes')).stdout).toBe('hidden.md\n')
+    // standing where only the inner mount led, its detach sends the cwd home
+    await ws.terminal('cd /reviews/more')
+    await ws.files.detach('/reviews/more/drafts')
+    expect((await ws.terminal('pwd')).stdout).toBe('/workspace\n')
+    // inside the outer mount's own directory, the cwd stays
+    await ws.files.attach('writer', '/reviews/sub/x')
+    await ws.terminal('cd /reviews/sub')
+    await ws.files.detach('/reviews/sub/x')
+    expect((await ws.terminal('pwd')).stdout).toBe('/reviews/sub\n')
     await ws.close()
   })
 

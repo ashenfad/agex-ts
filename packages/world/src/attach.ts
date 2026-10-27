@@ -131,11 +131,20 @@ export class AttachFS implements FileSystem {
 
   async detach(at: string): Promise<void> {
     this.#mounts = this.#mounts.filter(([p]) => p !== at)
-    // Standing inside it, there's nowhere to go back to: home.
-    if (this.#cwd !== null && this.#route(this.#cwd).at === null && !this.#holds(this.#cwd)) {
+    // Standing inside it, or in a directory only it made (one inside
+    // another mount, too), there's nowhere to go back to: home.
+    if (this.#cwd !== null && !(await this.#stands(this.#cwd))) {
       this.#cwd = null
       await this.#base.chdir(this.#home)
     }
+  }
+
+  /** Whether `abs`, a cwd kept here, is still a directory: in a mount,
+   *  or one that leads to a mount. */
+  async #stands(abs: string): Promise<boolean> {
+    if (this.#holds(abs)) return true
+    const r = this.#route(abs)
+    return r.at !== null && (await r.fs.isDir(r.path))
   }
 
   #abs(path: string): string {

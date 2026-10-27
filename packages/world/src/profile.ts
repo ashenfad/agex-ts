@@ -389,20 +389,29 @@ export function shellEnv(profile: Profile, home: string): Record<string, string>
   return env
 }
 
+/** What a profile's secret function gave that passed the checks, so
+ *  each result is checked once. */
+const checkedSpecs = new WeakSet<SecretSpecs>()
+
 /**
  * A profile's secrets as they are now: its own, or what its function
- * gives (`{}` for none). A function's may not name one of the profile's
- * variables, which the open checked for fixed ones.
+ * gives (`{}` for none). What a function gives is checked as the open
+ * checks fixed ones (names, values, origins, and no secret named as one
+ * of the profile's variables), each time it gives something new: every
+ * use of live secrets reads them here.
  *
- * @throws InvalidNameError for a secret that is also a variable.
+ * @throws InvalidNameError or TypeError for a secret that fails them.
  */
 export function secretSpecs(profile: Profile): SecretSpecs {
   const secrets = profile.secrets
   if (typeof secrets !== 'function') return secrets ?? {}
   const specs = secrets()
+  if (checkedSpecs.has(specs)) return specs
+  checkSecrets(specs)
   for (const name of Object.keys(profile.variables ?? {})) {
     if (name in specs) throw new InvalidNameError(`${name} is both a variable and a secret`)
   }
+  checkedSpecs.add(specs)
   return specs
 }
 

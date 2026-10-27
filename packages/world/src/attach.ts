@@ -171,14 +171,30 @@ export class AttachFS implements FileSystem {
     return [...new Set(names)]
   }
 
-  /** Whether `abs` is a directory only because a mount point is under
-   *  it: `/workspace/skills` when a skill is mounted at
-   *  `/workspace/skills/<name>`. It reads as an empty directory holding
-   *  the way to its mounts. */
+  /** Whether a mount point is under `abs`, which is then a directory
+   *  even where nothing else makes it one: `/workspace/skills` when a
+   *  skill is mounted at `/workspace/skills/<name>`, or a directory a
+   *  mount lacks when another is mounted inside it. It reads as an
+   *  empty directory holding the way to its mounts. */
   #holds(abs: string): boolean {
-    if (this.#route(abs).at !== null) return false
     const prefix = abs === '/' ? '/' : `${abs}/`
     return this.#mounts.some(([at]) => at.startsWith(prefix))
+  }
+
+  /** The mount points under `abs`, relative to it: what its own
+   *  listing hides, since a mount covers what is there. */
+  #covered(abs: string): string[] {
+    const prefix = abs === '/' ? '/' : `${abs}/`
+    return this.#mounts
+      .map(([at]) => at)
+      .filter((at) => at.startsWith(prefix))
+      .map((at) => at.slice(prefix.length))
+  }
+
+  /** Whether `rel`, relative to the directory listed, is a mount point
+   *  in `covered` or under one. */
+  #hidden(rel: string, covered: readonly string[]): boolean {
+    return covered.some((c) => rel === c || rel.startsWith(`${c}/`))
   }
 
   #readOnly(path: string, at: string): FsError {
@@ -202,7 +218,7 @@ export class AttachFS implements FileSystem {
       this.#cwd = null
       return
     }
-    if (!(await r.fs.isDir(r.path))) throw new FsError('ENOENT', path)
+    if (!(await r.fs.isDir(r.path)) && !this.#holds(abs)) throw new FsError('ENOENT', path)
     this.#cwd = abs
   }
 
@@ -257,25 +273,29 @@ export class AttachFS implements FileSystem {
     }
   }
 
-  /** What the session's own filesystem lists at `abs`: nothing, for a
+  /** What the filesystem `abs` routes to lists there: nothing, for a
    *  directory that only leads to mounts. */
   async #own<T>(abs: string, list: () => Promise<T[]>): Promise<T[]> {
     try {
       return await list()
     } catch (e) {
-      if (this.#holds(abs) && !(await this.#base.exists(abs))) return []
+      const r = this.#route(abs)
+      if (this.#holds(abs) && !(await r.fs.exists(r.path))) return []
       throw e
     }
   }
 
+  /** A directory's entries, from the filesystem it routes to (the
+   *  session's own, or a mount's) with the mounts inside it: those
+   *  added, and what they cover left out. */
   async list(path = '.', opts: { recursive?: boolean } = {}): Promise<string[]> {
     const abs = this.#abs(path)
     const r = this.#route(abs)
-    if (r.at !== null) return r.fs.list(r.path, opts)
     const own = await this.#own(abs, () => r.fs.list(r.path, opts))
     const points = this.#pointsIn(abs)
     if (points.length === 0) return own
-    const extra = new Set(own)
+    const covered = this.#covered(abs)
+    const extra = new Set(own.filter((e) => !this.#hidden(e, covered)))
     for (const name of points) extra.add(name)
     if (opts.recursive === true) {
       for (const name of points) {
@@ -290,11 +310,16 @@ export class AttachFS implements FileSystem {
     const abs = this.#abs(path)
     const r = this.#route(abs)
     const prefix = path === '/' ? '' : path.replace(/\/$/, '')
-    if (r.at !== null) return this.#mounted(prefix, r.fs, r.path, opts)
-    const infos = await this.#own(abs, () => r.fs.listDetailed(path, opts))
+    let infos = await this.#own(abs, () =>
+      r.at !== null ? this.#mounted(prefix, r.fs, r.path, opts) : r.fs.listDetailed(path, opts),
+    )
+    const points = this.#pointsIn(abs)
+    if (points.length === 0) return infos
+    const covered = this.#covered(abs)
+    infos = infos.filter((i) => !this.#hidden(i.path.slice(prefix.length + 1), covered))
     const seen = new Set(infos.map((i) => i.path))
-    for (const name of this.#pointsIn(abs)) {
-      if (!infos.some((i) => i.name === name && i.path === `${prefix}/${name}`)) {
+    for (const name of points) {
+      if (!seen.has(`${prefix}/${name}`)) {
         infos.push({
           name,
           path: `${prefix}/${name}`,

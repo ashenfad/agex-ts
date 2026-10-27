@@ -372,8 +372,9 @@ export class Session {
    * whatever the budget: the next turn's requests start from the
    * summary. The fold is made as one past the budget is (the agent's
    * model writes it; see `compaction.ts`), recorded, emitted as
-   * `Compacted` to `onEvent`, and committed (`{ tool: 'fold' }`), so a
-   * checkout before it takes it back. `cancel` stops it.
+   * `Compacted` to `onEvent`, and committed (`{ tool: 'fold', through,
+   * folded }`, `folded` the number of runs it covers), so a checkout
+   * before it takes it back. `cancel` stops it.
    *
    * Returns the fold and the summary calls' usage, or null when there
    * was nothing to fold (no turn since the last fold) or the summary
@@ -425,7 +426,7 @@ export class Session {
       // a turn another session opened meanwhile commits the fold with its
       // own work; committing here would put that work under the fold
       if (this.ws.currentTurn === null) {
-        await this.ws.commit({ tool: 'fold', through: made.through, runs: made.runs })
+        await this.ws.commit({ tool: 'fold', through: made.through, folded: made.runs })
       }
       return { fold: made, usage: prepared.usage }
     } finally {

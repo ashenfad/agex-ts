@@ -172,13 +172,16 @@ function strOrNull(value: unknown, where: string): string | null {
   throw new WorldError(`${where}: expected a string or null, got ${shown(value)}`)
 }
 
-/** The furthest a JavaScript date reaches from the epoch, in seconds. */
-const MAX_TIME = 8.64e12
+/** The times a trace prints, in epoch seconds: years 1 to 9999, which
+ *  both ports write the same way (past them JavaScript writes an
+ *  extended year and Python none). */
+const MIN_TIME = -62135596800
+const END_TIME = 253402300800
 
 function timeOrNull(value: unknown, where: string): number | null {
   if (value === undefined || value === null) return null
   // a time that can't print as a date would make the trace unreadable
-  if (typeof value !== 'number' || !(Math.abs(value) <= MAX_TIME)) {
+  if (typeof value !== 'number' || !(value >= MIN_TIME && value < END_TIME)) {
     throw new WorldError(`${where}: expected epoch seconds or null, got ${shown(value)}`)
   }
   return value

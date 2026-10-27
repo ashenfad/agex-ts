@@ -74,6 +74,16 @@ describe("nontainer's trace corpus", () => {
 })
 
 describe('the neutral shape', () => {
+  it('takes times from year 1 through 9999', async () => {
+    const t = await Trace.create(
+      [runFromBody({ id: 'r', status: 'x', started: -62135596800, ended: 253402300799.5 })],
+      { session: 's', commit: 'c', harness: 'h' },
+    )
+    expect(t.read('runs/001-r/run.md')).toContain(
+      '- started: 0001-01-01T00:00:00Z\n- ended: 9999-12-31T23:59:59Z\n',
+    )
+  })
+
   it('leaves unrecorded counts out of the body', () => {
     const r = runFromBody({ id: 'r', status: 'completed', tokens: { input: 5 } })
     expect(r.tokens).toEqual({
@@ -101,7 +111,8 @@ describe('the neutral shape', () => {
     [{ id: 'r', status: 'x', started: 'noon' }, 'run started'],
     [{ id: 'r', status: 'x', started: Number.NaN }, 'run started'],
     [{ id: 'r', status: 'x', ended: Number.POSITIVE_INFINITY }, 'run ended'],
-    [{ id: 'r', status: 'x', started: 1e13 }, 'run started'],
+    [{ id: 'r', status: 'x', started: 253402300800 }, 'run started'],
+    [{ id: 'r', status: 'x', started: -62135596801 }, 'run started'],
     [{ id: 'r', status: 'x', events: [{ kind: 'tool', error: 'false' }] }, 'event error'],
     [{ id: 'r', status: 'x', events: [{ kind: 'tool', error: null }] }, 'event error'],
     [{ id: 'r', status: 'x', events: [{ kind: 'tool', args: [1] }] }, 'args'],

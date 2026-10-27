@@ -319,7 +319,12 @@ describe('folding now', () => {
     expect(out?.fold.runs).toBe(2)
     expect(out?.usage?.inputTokens).toBe(450)
     expect(events).toEqual(['Usage', 'Compacted'])
-    expect((await ws.log({ limit: 1 }))[0]?.info).toMatchObject({ tool: 'fold' })
+    // `folded`, not `runs`: a turn's stamp says which runs it landed
+    expect((await ws.log({ limit: 1 }))[0]?.info).toEqual({
+      tool: 'fold',
+      through: out?.fold.through,
+      folded: 2,
+    })
 
     const after = await folder.session(ws).context()
     expect(after.fold?.through).toBe(out?.fold.through)

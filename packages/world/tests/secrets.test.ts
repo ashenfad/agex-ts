@@ -452,10 +452,24 @@ describe('secrets read live', () => {
     const live = keys()
     const ws = await open(fetch, { secrets: live.specs })
     live.grant('LIVE', { value: 'x-secret-5555', origins: ['not a url'] })
-    const r = await ws.terminal('curl -s -H "X-Key: $LIVE" https://api.good.test/x')
-    expect(r.exitCode).not.toBe(0)
-    expect(r.stderr).toContain('secret LIVE: origin "not a url" is not a URL')
+    await expect(ws.terminal('curl -s -H "X-Key: $LIVE" https://api.good.test/x')).rejects.toThrow(
+      'secret LIVE: origin "not a url" is not a URL',
+    )
     expect(seen).toHaveLength(0)
+    await ws.close()
+  })
+
+  it('every use checks what the function gives: the shell, and the descriptions', async () => {
+    const { fetch } = fakeFetch(() => new Response('ok'))
+    const live = keys()
+    const ws = await open(fetch, { secrets: live.specs })
+    const tools = worldTools(ws)
+    live.grant('LIVE', { value: 'empty-secret-9999', origins: [] })
+    const bad = 'secret LIVE: origins is a non-empty list of URLs'
+    await expect(ws.terminal('true')).rejects.toThrow(bad)
+    for (const tool of tools.filter((t) => t.name === 'terminal' || t.name === 'run_ts')) {
+      expect(() => tool.description).toThrow(bad)
+    }
     await ws.close()
   })
 

@@ -101,7 +101,10 @@ export class Secrets {
   /** These secrets as they are now, fixed: for work that must fill and
    *  scrub with the same values (a request). */
   now(): Secrets {
-    return typeof this.#source === 'function' ? new Secrets(this.#source()) : this
+    if (typeof this.#source !== 'function') return this
+    // read through the check, as every other use is
+    void this.#values
+    return new Secrets((this.#read as { specs: SecretSpecs }).specs)
   }
 
   /** The secrets' names, sorted. */

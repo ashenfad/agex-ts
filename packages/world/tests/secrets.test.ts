@@ -459,6 +459,20 @@ describe('secrets read live', () => {
     await ws.close()
   })
 
+  it('a request checks what the function gives before sending anything', async () => {
+    const live = keys()
+    live.grant('LIVE', { value: 'empty-secret-8888', origins: [] })
+    const { fetch, seen } = fakeFetch(() => new Response('ok'))
+    await expect(
+      request(
+        { url: 'https://api.good.test/x', headers: [['X-Key', '${LIVE}']] },
+        new Secrets(live.specs),
+        { fetch },
+      ),
+    ).rejects.toThrow('secret LIVE: origins is a non-empty list of URLs')
+    expect(seen).toHaveLength(0)
+  })
+
   it('scrubs a response with the key the request carried, should it change in flight', async () => {
     const live = keys()
     live.grant('LIVE', KEY)

@@ -1,5 +1,11 @@
 # @agex-ts/world
 
+## 0.1.4
+
+### Patch Changes
+
+- 80df704: **A secret can be declared without a value:** `{ origins }` alone names a secret the host holds, listed and referenced as any other, and the world's own requests refuse to carry it (`DeclaredSecretError`).
+
 ## 0.1.3
 
 ### Patch Changes

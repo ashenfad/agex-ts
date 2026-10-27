@@ -21,6 +21,7 @@ import {
 } from '@agex-ts/termish'
 import {
   BLOB_KEY,
+  HASH_RE,
   MERGE_TOOL,
   type MergeOutcome,
   PICK_TOOL,
@@ -39,6 +40,7 @@ import { WorkspaceCompaction } from './compaction'
 import {
   WorkspaceConversation,
   readIndex,
+  readRuns,
   rebindConversation,
   reclaimConversation,
   wipeConversation,
@@ -83,6 +85,14 @@ import { repr } from './repr'
 import { Secrets } from './secrets'
 import { skillFS, skillName, skillsRoot } from './skills'
 import type { Store } from './store'
+import {
+  type LoadedTrace,
+  Trace,
+  type TraceCommit,
+  TraceFS,
+  type TraceRun,
+  runRanges,
+} from './traces'
 import { Turn, TurnInProgressError, type TurnOptions, statusOf } from './turns'
 import { type Artifact, writeUi } from './ui'
 import { VIEW_KEY, ViewFS, encodeView, normalizeView, parseView } from './views'
@@ -239,6 +249,23 @@ interface Inner {
   attach(ref: string, at: string, opts: AttachOptions): Promise<string>
   detach(at: string): Promise<void>
   attachments(): Record<string, string>
+  held(at: string): Attachment | undefined
+}
+
+/** One state attached in a session's tree, as `ws-git worktree`
+ *  reports it. */
+export interface Attachment {
+  /** What was attached, as `attach` returned it. */
+  readonly ref: string
+  /** The conversation mounted at `.trace`, or null when none was asked
+   *  for: how many runs it holds, how many are new since the `since`
+   *  ref (null without one), and whether it hides a `.trace` the tree
+   *  holds of its own. */
+  readonly trace: {
+    readonly runs: number
+    readonly new: number | null
+    readonly shadowed: boolean
+  } | null
 }
 
 export interface AttachOptions {
@@ -247,6 +274,36 @@ export interface AttachOptions {
   readonly root?: string
   /** An attachment is read-only; `false` is refused. */
   readonly readonly?: boolean
+  /**
+   * Mount the conversation stored at that commit beside the files, at
+   * `<at>/.trace`, rendered as a {@link Trace} and read-only; it hides
+   * any `.trace` the tree holds of its own. The store reads it with the
+   * trace source for the harness that wrote it (`Store.open(kv, {
+   * traces })`). Refused for a state with no conversation, or one
+   * written by a harness the store has no source for.
+   */
+  readonly trace?: boolean
+  /** With `trace`: mark the runs new since this state with `+` in
+   *  `index.md`. Any ref `attach` takes, or a bare commit of the session
+   *  traced. A run that landed before it and again after is new. */
+  readonly since?: string
+}
+
+/** A ref as a message names it: a store tag's name, or the session and
+ *  seven characters of the commit. */
+function shownRef(label: string): string {
+  const at = label.lastIndexOf('@')
+  if (at < 0) return label.slice(0, 7)
+  const who = label.slice(0, at)
+  if (who.startsWith('@store/tag/')) return who.slice('@store/tag/'.length)
+  return `${who}@${label.slice(at + 1, at + 8)}`
+}
+
+/** The store tag a label names, or null. */
+function tagOf(label: string): string | null {
+  const at = label.lastIndexOf('@')
+  const who = at < 0 ? '' : label.slice(0, at)
+  return who.startsWith('@store/tag/') ? who.slice('@store/tag/'.length) : null
 }
 
 const enc = new TextEncoder()
@@ -304,7 +361,7 @@ export class Workspace {
   readonly #view: ViewFS | null
   /** What the agent and the host see: the view, and attachments. */
   readonly #top: AttachFS
-  readonly #attached = new Map<string, { ref: string; ws: Workspace }>()
+  readonly #attached = new Map<string, Attachment & { ws: Workspace }>()
   readonly #patterns: Patterns
   readonly #cache: WorkspaceCache | null
   readonly #queue = new Queue()
@@ -362,6 +419,10 @@ export class Workspace {
       attach: (ref, at, opts) => this.#attach(ref, at, opts),
       detach: (at) => this.#detach(at),
       attachments: () => Object.fromEntries([...this.#attached].map(([at, { ref }]) => [at, ref])),
+      held: (at) => {
+        const found = this.#attached.get(normalize(resolve(at, this.root)))
+        return found === undefined ? undefined : { ref: found.ref, trace: found.trace }
+      },
     }
     this.files = new WorkspaceFiles(inner, this.#top, (info) => this.autoCommit(info))
     this.tags = new WorkspaceTags(inner)
@@ -1465,6 +1526,9 @@ export class Workspace {
   // ---------- attachments ----------
 
   async #attach(ref: string, at: string, opts: AttachOptions): Promise<string> {
+    if (opts.since !== undefined && opts.trace !== true) {
+      throw new WorldError("since marks a trace's runs that are new: pass trace: true with it")
+    }
     if (opts.readonly === false) {
       throw new WorldError(
         'an attachment is a frozen state, and accepts no writes: readonly: false is refused',
@@ -1486,9 +1550,27 @@ export class Workspace {
     }
     const from = await this.#resolveAny(ref)
     const root = normalize(opts.root ?? this.root)
+    let traced: Awaited<ReturnType<Workspace['_traceOf']>> = null
+    if (opts.trace === true) {
+      const since = opts.since === undefined ? null : await this.#sinceRef(opts.since, from)
+      traced = await this._traceOf(from, root, since)
+      if (traced === null) {
+        throw new WorldError(
+          `${shownRef(from.label)} holds no conversation to trace: no agent's runs are stored at that commit`,
+        )
+      }
+    }
     const frozen = await this.store._frozenView(from.label, from.commit, { root })
+    let trace: Attachment['trace'] = null
+    if (traced !== null) {
+      const shadowed = await frozen.files.fs.exists(`${root}/.trace`).catch(() => false)
+      trace = { runs: traced.runs, new: traced.new, shadowed }
+    }
     this.#top.attach(point, new SubtreeFS(frozen.files.fs, root))
-    this.#attached.set(point, { ref: from.label, ws: frozen })
+    // One attachment: the tree and its conversation, pinned together and
+    // taken down together.
+    if (traced !== null) this.#top.attach(`${point}/.trace`, traced.fs)
+    this.#attached.set(point, { ref: from.label, ws: frozen, trace })
     return from.label
   }
 
@@ -1497,8 +1579,174 @@ export class Workspace {
     const found = this.#attached.get(point)
     if (found === undefined) throw new WorldError(`nothing attached at '${point}'`)
     this.#attached.delete(point)
+    if (found.trace !== null) await this.#top.detach(`${point}/.trace`)
     await this.#top.detach(point)
     await found.ws.close()
+  }
+
+  /** The state `since` names, for a trace of `from`: any ref `attach`
+   *  takes, or a bare commit of the session being traced. */
+  async #sinceRef(
+    since: string,
+    from: { label: string },
+  ): Promise<{ commit: string; label: string }> {
+    const text = since.trim()
+    const at = from.label.lastIndexOf('@')
+    if (at > 0 && tagOf(from.label) === null && HASH_RE.test(text)) {
+      return this.#resolveAny(`${from.label.slice(0, at)}@${text}`)
+    }
+    return this.#resolveAny(since)
+  }
+
+  /**
+   * @internal The conversation stored at a state, as a filesystem: its
+   * runs rendered by the store's trace source for the harness that
+   * wrote them, how many runs it holds and, with `since`, how many are
+   * new since that state. Null for a state with no conversation.
+   *
+   * Nothing is read but the index until the trace is, unless `since`
+   * asks which runs are new: that walks both histories now. The trace
+   * reads every run at that commit, which the source parses (a body it
+   * can't read is left out), and the branch's history, for what each
+   * run changed.
+   *
+   * @throws WorldError for a conversation written by a harness the
+   *   store has no trace source for.
+   */
+  async _traceOf(
+    from: { commit: string; label: string },
+    root: string,
+    since: { commit: string; label: string } | null = null,
+  ): Promise<{ fs: TraceFS; runs: number; new: number | null } | null> {
+    const repo = this.store.repo
+    const snapshot = await repo.snapshot({ commit: from.commit })
+    const index = await readIndex(snapshot)
+    if (index === null) return null
+    const source = this.store.traces.get(index.harness)
+    if (source === undefined) {
+      throw new WorldError(
+        `${shownRef(from.label)} holds a conversation written by ${repr(index.harness)}, which this store cannot read, so it has no trace`,
+      )
+    }
+    const tag = tagOf(from.label)
+    const session =
+      tag !== null ? index.session || tag : from.label.slice(0, from.label.lastIndexOf('@'))
+    const walked = since === null ? null : await this.#oldestFirst(from.commit)
+    const fresh =
+      walked === null || since === null
+        ? new Set<string>()
+        : await this.#newSince(index.runs, walked, since)
+    const load = async (): Promise<LoadedTrace> => {
+      const commits = walked ?? (await this.#oldestFirst(from.commit))
+      const bodies = await readRuns(snapshot, index.runs)
+      const runs: TraceRun[] = []
+      for (const id of index.runs) {
+        if (!bodies.has(id)) continue // named by the index, never stored
+        try {
+          runs.push(source.read(bodies.get(id)))
+        } catch {
+          // a body its source can't read
+        }
+      }
+      const changes = new Map<string, TraceCommit[]>()
+      for (const [id, span] of runRanges(
+        index.runs,
+        commits.map((c) => c.info),
+      )) {
+        changes.set(id, await this.#changes(commits, span, root))
+      }
+      const trace = await Trace.create(runs, {
+        session: session ?? '',
+        commit: from.commit.slice(0, 7),
+        harness: index.harness,
+        changes,
+        since: since === null ? null : shownRef(since.label),
+        new: fresh,
+      })
+      return { trace, time: commits.at(-1)?.time ?? null }
+    }
+    return {
+      fs: new TraceFS(load),
+      runs: index.runs.length,
+      new: since === null ? null : fresh.size,
+    }
+  }
+
+  /** A commit's line of history (first parents), oldest first. */
+  async #oldestFirst(commit: string): Promise<Commit[]> {
+    const out: Commit[] = []
+    for await (const c of this.store.repo.log({ commit }, { firstParent: true })) out.push(c)
+    return out.reverse()
+  }
+
+  /** The runs new since `since`: those whose last landing isn't in its
+   *  history (a run that landed before it and again after is new), or,
+   *  for a run with no landing in `walked`, that its conversation
+   *  doesn't name. */
+  async #newSince(
+    runs: readonly string[],
+    walked: readonly Commit[],
+    since: { commit: string },
+  ): Promise<Set<string>> {
+    const seen = new Set((await this.#oldestFirst(since.commit)).map((c) => c.hash))
+    const known = await readIndex(await this.store.repo.snapshot({ commit: since.commit }))
+    const named = new Set(known?.runs ?? [])
+    const ranges = runRanges(
+      runs,
+      walked.map((c) => c.info),
+    )
+    const out = new Set<string>()
+    for (const id of runs) {
+      const span = ranges.get(id)
+      if (span !== undefined) {
+        if (!seen.has((walked[span[1] - 1] as Commit).hash)) out.add(id)
+      } else if (!named.has(id)) out.add(id)
+    }
+    return out
+  }
+
+  /** The commits at `span` in `commits` that changed a file, each
+   *  against the commit before it, with paths relative to `root`. */
+  async #changes(
+    commits: readonly Commit[],
+    [start, end]: readonly [number, number],
+    root: string,
+  ): Promise<TraceCommit[]> {
+    const repo = this.store.repo
+    const base = root.replace(/\/+$/, '')
+    const rel = (key: string) => {
+      const path = key.slice(FILE_PREFIX.length)
+      return path.startsWith(`${base}/`) ? path.slice(base.length + 1) : path
+    }
+    const files = (keys: Iterable<string>) =>
+      [...keys].filter((k) => k.startsWith(FILE_PREFIX)).map(rel)
+    const out: TraceCommit[] = []
+    for (let i = start; i < end; i++) {
+      const commit = commits[i] as Commit
+      const before = i > 0 ? (commits[i - 1] as Commit).hash : (commit.parents[0] ?? null)
+      let added: string[]
+      let modified: string[] = []
+      let removed: string[] = []
+      if (before === null) {
+        // a root commit: everything in it is added
+        added = files(await (await repo.snapshot({ commit: commit.hash })).keys())
+      } else {
+        const d = await repo.diff(before, commit.hash)
+        added = files(d.added)
+        modified = files(d.modified)
+        removed = files(d.removed)
+      }
+      if (added.length + modified.length + removed.length === 0) continue
+      const tool = commit.info?.tool
+      out.push({
+        id: commit.hash.slice(0, 7),
+        tool: typeof tool === 'string' ? tool : null,
+        added,
+        modified,
+        removed,
+      })
+    }
+    return out
   }
 
   async #seedFork(
@@ -1578,6 +1826,11 @@ export class WorkspaceFiles {
   /** What's attached: mount point → ref. */
   attachments(): Record<string, string> {
     return this.#inner.attachments()
+  }
+
+  /** @internal The attachment at `at`, with its trace's counts. */
+  _held(at: string): Attachment | undefined {
+    return this.#inner.held(at)
   }
 
   /** A file's bytes, or `size` bytes of it from `offset`. */

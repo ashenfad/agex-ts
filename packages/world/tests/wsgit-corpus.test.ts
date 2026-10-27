@@ -10,11 +10,11 @@
 
 import { readFileSync, readdirSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
-import { Store, type Workspace, wsGit } from '../src/index'
+import { NeutralTraces, Store, type Workspace, wsGit } from '../src/index'
 import { newKV } from './backends'
 
 interface Step {
-  readonly kind: 'run' | 'open' | 'write' | 'tag' | 'delete'
+  readonly kind: 'run' | 'open' | 'write' | 'tag' | 'delete' | 'converse'
   readonly session: string
   readonly command?: string
   readonly stdout?: string
@@ -26,6 +26,8 @@ interface Step {
   readonly name?: string
   readonly root?: string | null
   readonly ignore?: readonly string[]
+  readonly harness?: string
+  readonly run?: { readonly id: string; readonly status: string }
 }
 
 interface Script {
@@ -35,16 +37,11 @@ interface Script {
 }
 
 /** Steps known to differ from nontainer's, `script#step` → why. */
-const TRACE =
-  "nontainer's worktree add takes --trace (and show reads .trace/); the world's has no trace yet"
 const KNOWN: Readonly<Record<string, string>> = {
   'a-narrowed-branch#11':
     "nontainer's hint names its Python spelling (paths=None); the world's says to leave paths out",
-  'the-edges#3': TRACE,
-  'the-edges#4': TRACE,
-  'worktrees#0': TRACE,
-  'worktrees#18': TRACE,
-  'worktrees#24': TRACE,
+  'a-worktree-with-its-trace#13':
+    "a write into an attachment: nontainer's refusal names the operation, the world's the path and the attachment",
 }
 
 const dir = new URL('./wsgit-corpus/', import.meta.url)
@@ -102,7 +99,7 @@ class Names {
 
 /** Replay a script; the steps whose output differs, with both. */
 async function replay(script: Script): Promise<Map<string, string>> {
-  const store = await Store.open(await newKV())
+  const store = await Store.open(await newKV(), { traces: { neutral: new NeutralTraces() } })
   const sessions = new Map<string, Workspace>()
   const names = new Names()
   const session = async (
@@ -152,6 +149,13 @@ async function replay(script: Script): Promise<Map<string, string>> {
             ? Uint8Array.from(atob(step.data), (c) => c.charCodeAt(0))
             : new TextEncoder().encode(step.text ?? '')
         await ws.files.write(step.path as string, content)
+        await names.learn(store)
+      } else if (step.kind === 'converse') {
+        // a run stored as a harness's turn stores one, in the neutral shape
+        const ws = await session(step.session)
+        const run = step.run as { id: string; status: string }
+        const turn = await ws.turn(run.id, { harness: step.harness as string })
+        await turn.end(run.status as 'completed', { body: run })
         await names.learn(store)
       } else if (step.kind === 'tag') {
         await store.tags.add(await session(step.session), step.name as string)

@@ -33,7 +33,7 @@ import { normalize, resolve } from '../path'
 import { type CommandFactory, commandFactory } from '../profile'
 import { repr } from '../repr'
 import { parseView } from '../views'
-import type { Workspace } from '../workspace'
+import type { Attachment, Workspace } from '../workspace'
 import { splitLinesKeepEnds, unifiedDiff } from './difflib'
 import { EDGE, FORMS, HELP, USAGE, VERBS, WORKTREE_FORMS } from './texts'
 
@@ -832,17 +832,55 @@ function shortRef(ref: string): string {
   return at <= 0 ? ref : `${ref.slice(0, at)}@${ref.slice(at + 1, at + 8)}`
 }
 
+/** What a worktree line says it holds besides the files: the trace,
+ *  when one was added, and how many of its runs are new. */
+function holds(trace: Attachment['trace'] | undefined): string {
+  if (trace == null) return 'read-only'
+  const held = `read-only; trace: ${plural(trace.runs, 'run')}`
+  return trace.new === null ? held : `${held}, ${trace.new} new`
+}
+
 async function worktreeLines(v: Verb): Promise<string[]> {
   return Object.entries(v.ws.files.attachments())
     .sort(([a], [b]) => (a < b ? -1 : 1))
-    .map(([at, ref]) => `worktree ${v.show(at)}: ${shortRef(ref)} (read-only)`)
+    .map(
+      ([at, ref]) =>
+        `worktree ${v.show(at)}: ${shortRef(ref)} (${holds(v.ws.files._held(at)?.trace)})`,
+    )
 }
 
-async function worktreeAdd(v: Verb, rest: string[]): Promise<Out> {
+/** The one state a ref names for a frozen read: `session@commit`, a
+ *  session at its branch's head, or a store tag. */
+async function snapshotRef(v: Verb, ref: string): Promise<string> {
+  const at = ref.lastIndexOf('@')
+  if (at > 0) return `${ref.slice(0, at)}@${await v.refCommit(ref.slice(0, at), ref.slice(at + 1))}`
+  if (await v.isSession(ref)) return `${ref}@${await v.repo.branches.get(ref)}`
+  if ((await v.storeTag(ref)) === null) throw new Refusal(v.noSuchRef(ref))
+  return ref
+}
+
+async function worktreeAdd(v: Verb, args: string[]): Promise<Out> {
+  let trace = false
+  let since: string | null = null
+  const rest: string[] = []
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] as string
+    if (arg === '--trace') trace = true
+    else if (arg === '--since') {
+      const next = args[++i]
+      if (next === undefined || next.startsWith('-')) {
+        return usage('worktree', '--since takes a ref: the state whose runs you have read.')
+      }
+      since = next
+    } else rest.push(arg)
+  }
+  if (since !== null && !trace) {
+    return usage('worktree', '--since marks the new runs of a trace: add --trace with it.')
+  }
   if (rest.length !== 2 || rest.some((a) => a.startsWith('-'))) {
     return usage(
       'worktree',
-      'worktree add takes a directory and a session (ws-git branch lists them) or a store tag.',
+      'worktree add takes a directory and a session (ws-git branch lists them) or a store tag, and --trace for the conversation.',
     )
   }
   const [where, ref] = rest as [string, string]
@@ -856,13 +894,7 @@ async function worktreeAdd(v: Verb, rest: string[]): Promise<Out> {
     )
   }
   // What is being read first: a name nothing holds is the answer.
-  let wanted: string
-  if (at > 0) wanted = `${session}@${await v.refCommit(session, ref.slice(at + 1))}`
-  else if (await v.isSession(ref)) wanted = `${ref}@${await v.repo.branches.get(ref)}`
-  else {
-    if ((await v.storeTag(ref)) === null) throw new Refusal(v.noSuchRef(ref))
-    wanted = ref
-  }
+  const wanted = await snapshotRef(v, ref)
   const held = v.ws.files.attachments()
   if (point in held) {
     return fail(
@@ -887,8 +919,24 @@ async function worktreeAdd(v: Verb, rest: string[]): Promise<Out> {
     }
     if (reason !== null) return fail(1, `cannot add a worktree at ${repr(where)}: ${reason}.`)
   }
-  const landed = await v.ws.files.attach(wanted, point)
-  v.write(`worktree ${v.show(point)}: ${shortRef(landed)} (read-only)\n`)
+  let before: string | undefined
+  if (since !== null) {
+    // a bare commit is one of the session traced
+    const traced = wanted.lastIndexOf('@')
+    before =
+      traced > 0 && HASH_RE.test(since)
+        ? await snapshotRef(v, `${wanted.slice(0, traced)}@${since}`)
+        : await snapshotRef(v, since)
+  }
+  const landed = await v.ws.files.attach(wanted, point, {
+    ...(trace && { trace }),
+    ...(before !== undefined && { since: before }),
+  })
+  const mounted = v.ws.files._held(point)?.trace
+  v.write(`worktree ${v.show(point)}: ${shortRef(landed)} (${holds(mounted)})\n`)
+  if (mounted?.shadowed === true) {
+    v.write("note: the tree's own .trace is hidden; the conversation is there instead\n")
+  }
   return
 }
 
@@ -997,9 +1045,13 @@ async function showPath(v: Verb, ref: string, path: string): Promise<Out> {
       'show :<path> needs a ref before the colon (HEAD:<path> for your last commit).',
     )
   }
-  const id = await commitForRead(v, ref)
+  const read = await refForRead(v, ref)
   const target = refPath(v, path)
-  const files = await v.filesAt(id)
+  const inside = inTrace(v, target)
+  if (inside !== null && read.session !== v.ws.session) {
+    if (await showTrace(v, read, inside, ref, path)) return
+  }
+  const files = await v.filesAt(read.commit)
   const spelled = `${ref}:${path}`
   if (files.has(target)) {
     const data = files.get(target)
@@ -1032,6 +1084,10 @@ async function showPath(v: Verb, ref: string, path: string): Promise<Out> {
     if (!ref.includes('@') && (ref === v.ws.session || (await v.isSession(ref)))) {
       hint = ` (a session reads at its last ws-git commit; ws-git log ${ref} --all lists every commit it holds)`
     }
+    if (inside !== null && read.session === v.ws.session) {
+      hint =
+        " (.trace/ reads another session's conversation, or a store tag's; this session's own is not shown as a trace)"
+    }
     throw new Refusal(`path ${repr(path)} does not exist in ${repr(ref)}${hint}`)
   }
   v.write(`tree ${spelled}\n\n${[...entries].sort().join('\n')}\n`)
@@ -1039,21 +1095,90 @@ async function showPath(v: Verb, ref: string, path: string): Promise<Out> {
 }
 
 async function commitForRead(v: Verb, ref: string): Promise<string> {
-  if (ref === 'HEAD') return v.git.resolve('HEAD')
+  return (await refForRead(v, ref)).commit
+}
+
+/** The state one ref names, for a verb that only reads: its commit, the
+ *  session it is read on (null for a store tag), and the label that
+ *  names it (`session@commit`, or a store tag's). */
+async function refForRead(
+  v: Verb,
+  ref: string,
+): Promise<{ commit: string; session: string | null; label: string }> {
+  const on = (session: string, commit: string) => ({
+    commit,
+    session,
+    label: `${session}@${commit}`,
+  })
+  const tagged = (name: string, commit: string) => ({
+    commit,
+    session: null,
+    label: `@store/tag/${name}@${commit}`,
+  })
+  if (ref === 'HEAD') return on(v.ws.session, await v.git.resolve('HEAD'))
   if (ref.includes('@')) {
     const at = ref.lastIndexOf('@')
     const session = ref.slice(0, at)
-    if (session.startsWith('@store/tag/')) return tagCommit(v, session, ref.slice(at + 1))
-    return v.refCommit(session, ref.slice(at + 1))
+    if (session.startsWith('@store/tag/')) {
+      return tagged(
+        session.slice('@store/tag/'.length),
+        await tagCommit(v, session, ref.slice(at + 1)),
+      )
+    }
+    return on(session, await v.refCommit(session, ref.slice(at + 1)))
   }
-  if (HASH_RE.test(ref) || ref in (await v.git.tags.list())) return v.refCommit(v.ws.session, ref)
+  if (HASH_RE.test(ref) || ref in (await v.git.tags.list())) {
+    return on(v.ws.session, await v.refCommit(v.ws.session, ref))
+  }
   if (ref === v.ws.session || (await v.isSession(ref))) {
     const head = ref === v.ws.session ? v.ws.head : await v.repo.branches.get(ref)
-    return (await v.git.sourceState(ref, head)).commit
+    return on(ref, (await v.git.sourceState(ref, head)).commit)
   }
-  const tagged = await v.storeTagRef(ref)
-  if (tagged !== null) return tagged
+  const commit = await v.storeTagRef(ref)
+  if (commit !== null) return tagged(ref, commit)
   throw new Refusal(v.noSuchRef(ref))
+}
+
+/** A workspace path's place under the root's `.trace`: `''` for
+ *  `.trace` itself, the rest of the path below it, or null for a path
+ *  outside it. */
+function inTrace(v: Verb, target: string): string | null {
+  const trace = normalize(`${v.ws.root}/.trace`)
+  if (target === trace) return ''
+  return target.startsWith(`${trace}/`) ? target.slice(trace.length + 1) : null
+}
+
+/** `show <ref>:.trace/<path>`: one file of another session's trace,
+ *  rendered as `worktree add --trace` mounts it, with nothing mounted.
+ *  False where the state holds no conversation, so the path reads as
+ *  the tree's own; a harness the store can't read is refused as
+ *  `worktree add --trace` refuses it. */
+async function showTrace(
+  v: Verb,
+  read: { commit: string; label: string },
+  inside: string,
+  ref: string,
+  path: string,
+): Promise<boolean> {
+  const traced = await v.ws._traceOf(read, v.ws.root)
+  if (traced === null) return false
+  const fs = traced.fs
+  if (await fs.isFile(inside)) {
+    v.write(dec.decode(await fs.read(inside)))
+    return true
+  }
+  if (!(await fs.isDir(inside))) {
+    throw new Refusal(
+      `path ${repr(path)} does not exist in the trace of ${repr(ref)} (${ref}:.trace/index.md lists its runs)`,
+    )
+  }
+  const entries: string[] = []
+  for (const name of await fs.list(inside === '' ? '/' : inside)) {
+    const below = inside === '' ? name : `${inside}/${name}`
+    entries.push(name + ((await fs.isDir(below)) ? '/' : ''))
+  }
+  v.write(`tree ${ref}:${path}\n\n${entries.sort().join('\n')}\n`)
+  return true
 }
 
 /** The path half of `<ref>:<path>`, from the root (as git reads

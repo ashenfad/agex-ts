@@ -28,8 +28,9 @@
  */
 
 import type { CommitInfo } from '@agex-ts/kvgit'
-import { FsError } from '@agex-ts/termish'
+import { type FileInfo, type FileMetadata, type FileSystem, FsError } from '@agex-ts/termish'
 import { WorldError } from './errors'
+import { dirname, normalize } from './path'
 
 /** The harness name of runs stored in the neutral shape itself. */
 export const NEUTRAL = 'neutral'
@@ -791,5 +792,164 @@ export class Trace {
     parts.push('', event.error === true ? '## Result (error)' : '## Result', '')
     parts.push(event.text === null ? '(no result)' : fence(event.text))
     return `${parts.join('\n')}\n`
+  }
+}
+
+// ---------- the trace as a filesystem ----------
+
+/** A trace, and the time its files report (epoch seconds, or null). */
+export interface LoadedTrace {
+  readonly trace: Trace
+  readonly time: number | null
+}
+
+/**
+ * A rendered {@link Trace} as a filesystem: what `attach(..., {trace:
+ * true})` mounts at `.trace`. Reads only.
+ *
+ * Nothing is read until something asks: `load` is called once, on the
+ * first call that needs the files, and gives the trace with the time
+ * every file reports as its own (the pinned commit's). Each file is
+ * rendered the first time it is read and kept, since it belongs to a
+ * commit that never changes. The directories are the ones the files'
+ * paths imply.
+ */
+export class TraceFS implements FileSystem {
+  readonly #load: () => Promise<LoadedTrace>
+  #loading: Promise<Trace> | null = null
+  #time = new Date(0).toISOString()
+  #files: ReadonlySet<string> = new Set()
+  #dirs: ReadonlySet<string> = new Set()
+  readonly #rendered = new Map<string, Uint8Array>()
+
+  constructor(load: () => Promise<LoadedTrace>) {
+    this.#load = load
+  }
+
+  #loaded(): Promise<Trace> {
+    this.#loading ??= this.#load().then(({ trace, time }) => {
+      const files = new Set(trace.paths())
+      const dirs = new Set([''])
+      for (const path of files) {
+        for (let dir = dirname(`/${path}`); dir !== '/'; dir = dirname(dir)) dirs.add(dir.slice(1))
+      }
+      this.#time = new Date((time ?? 0) * 1000).toISOString()
+      this.#files = files
+      this.#dirs = dirs
+      return trace
+    })
+    return this.#loading
+  }
+
+  /** `path` as the trace names it: relative to its root, which is also
+   *  this filesystem's working directory. */
+  #key(path: string): string {
+    return normalize(`/${path}`).slice(1)
+  }
+
+  async #bytes(path: string): Promise<Uint8Array> {
+    const trace = await this.#loaded()
+    const key = this.#key(path)
+    let held = this.#rendered.get(key)
+    if (held === undefined) {
+      if (this.#dirs.has(key)) throw new FsError('EISDIR', path)
+      if (!this.#files.has(key)) throw new FsError('ENOENT', path)
+      held = new TextEncoder().encode(trace.read(key))
+      this.#rendered.set(key, held)
+    }
+    return held
+  }
+
+  getcwd(): string {
+    return '/'
+  }
+
+  async chdir(path: string): Promise<void> {
+    if (!(await this.isDir(path))) throw new FsError('ENOENT', path)
+  }
+
+  read(path: string): Promise<Uint8Array> {
+    return this.#bytes(path)
+  }
+
+  async readMany(paths: readonly string[]): Promise<Map<string, Uint8Array>> {
+    const out = new Map<string, Uint8Array>()
+    for (const path of paths) {
+      try {
+        out.set(path, await this.#bytes(path))
+      } catch (e) {
+        if (!(e instanceof FsError)) throw e
+      }
+    }
+    return out
+  }
+
+  async exists(path: string): Promise<boolean> {
+    return (await this.isDir(path)) || (await this.isFile(path))
+  }
+
+  async isFile(path: string): Promise<boolean> {
+    await this.#loaded()
+    return this.#files.has(this.#key(path))
+  }
+
+  async isDir(path: string): Promise<boolean> {
+    await this.#loaded()
+    return this.#dirs.has(this.#key(path))
+  }
+
+  async stat(path: string): Promise<FileMetadata> {
+    const dir = await this.isDir(path)
+    const at = { createdAt: this.#time, modifiedAt: this.#time }
+    if (dir) return { size: 0, ...at, isDir: true }
+    return { size: (await this.#bytes(path)).length, ...at, isDir: false }
+  }
+
+  async list(path = '.', opts: { recursive?: boolean } = {}): Promise<string[]> {
+    const key = this.#key(path)
+    if (!(await this.isDir(key))) {
+      throw new FsError(this.#files.has(key) ? 'ENOTDIR' : 'ENOENT', path)
+    }
+    const prefix = key === '' ? '' : `${key}/`
+    const names = new Set<string>()
+    for (const entry of [...this.#files, ...this.#dirs]) {
+      if (entry === '' || !entry.startsWith(prefix)) continue
+      const rest = entry.slice(prefix.length)
+      names.add(opts.recursive === true ? rest : (rest.split('/')[0] as string))
+    }
+    return [...names].sort()
+  }
+
+  /** Each entry named under the directory as it was asked for, as every
+   *  filesystem here names one. */
+  async listDetailed(path = '.', opts: { recursive?: boolean } = {}): Promise<FileInfo[]> {
+    const shown = path === '' || path === '.' ? '' : path.replace(/\/+$/, '') || '/'
+    const key = this.#key(path)
+    const out: FileInfo[] = []
+    for (const name of await this.list(path, opts)) {
+      const meta = await this.stat(key === '' ? name : `${key}/${name}`)
+      out.push({
+        name: name.slice(name.lastIndexOf('/') + 1),
+        path: shown === '' ? name : shown === '/' ? `/${name}` : `${shown}/${name}`,
+        ...meta,
+      })
+    }
+    return out
+  }
+
+  async write(path: string): Promise<void> {
+    throw new FsError('EROFS', path)
+  }
+  async mkdir(path: string): Promise<void> {
+    throw new FsError('EROFS', path)
+  }
+  async remove(path: string): Promise<void> {
+    throw new FsError('EROFS', path)
+  }
+  async rmdir(path: string): Promise<void> {
+    throw new FsError('EROFS', path)
+  }
+  async rename(src: string): Promise<void> {
+    throw new FsError('EROFS', src)
   }
 }

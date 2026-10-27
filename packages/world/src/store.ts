@@ -17,6 +17,7 @@ import {
   normalizeRoot,
 } from './names'
 import { checkProfile } from './profile'
+import type { TraceSource } from './traces'
 import {
   type ForkOptions,
   Workspace,
@@ -28,6 +29,11 @@ export interface StoreOptions {
   /** The clock commits and tags are stamped with, in seconds. Default:
    *  wall time. */
   readonly now?: () => number
+  /** How to read a stored conversation as a trace, by the harness name
+   *  its index carries (`{ neutral: new NeutralTraces() }`): what
+   *  `attach(..., { trace: true })` and `ws-git worktree add --trace`
+   *  read. None by default, so no conversation has a trace. */
+  readonly traces?: Readonly<Record<string, TraceSource>>
 }
 
 /** How long, in seconds, deleting or cleaning leaves unreachable
@@ -45,10 +51,14 @@ export class Store {
   readonly repo: Repo<unknown>
   /** Tags of the store as a whole, kept as `@store/<name>`. */
   readonly tags: StoreTags
+  /** The trace sources, by harness name. Every session's conversation
+   *  is readable store-wide through them. */
+  readonly traces: ReadonlyMap<string, TraceSource>
 
-  private constructor(repo: Repo<unknown>) {
+  private constructor(repo: Repo<unknown>, traces: ReadonlyMap<string, TraceSource>) {
     this.repo = repo
     this.tags = new StoreTags(this)
+    this.traces = traces
   }
 
   static async open(kv: KVStore, opts: StoreOptions = {}): Promise<Store> {
@@ -58,7 +68,7 @@ export class Store {
       mergePrefixes: WORLD_MERGE_PREFIXES,
       ...(opts.now !== undefined && { now: opts.now }),
     })
-    return new Store(repo)
+    return new Store(repo, new Map(Object.entries(opts.traces ?? {})))
   }
 
   /**

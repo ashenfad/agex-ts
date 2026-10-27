@@ -51,6 +51,7 @@ export { Queue } from './queue'
 export { DEFAULT_MIN_AGE, Store, type StoreOptions, StoreTags } from './store'
 export {
   type AttachOptions,
+  type Attachment,
   type CodeResult,
   type EditOutcome,
   type TerminalResult,
@@ -228,9 +229,11 @@ export {
 export { WorkspacePlane, planePrefix } from './planes'
 export {
   EVENT_KINDS,
+  type LoadedTrace,
   NEUTRAL,
   NeutralTraces,
   Trace,
+  TraceFS,
   type TraceCommit,
   type TraceEvent,
   type TraceEventKind,

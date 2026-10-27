@@ -393,32 +393,46 @@ await ws.compaction.record({ through: lastFoldedId, summary, runs: 4 }) // lands
 
 ## Traces
 
-A run's stored body is the harness's own format. A trace renders a
-conversation as markdown files a model reads, the same whichever
-harness wrote it: a `TraceSource` reads one stored run into the neutral
-`TraceRun` (status, times, model, token counts, the system prompt, and
-events: user, assistant, thinking, and one per tool call with its
-result), and `Trace` renders every file from that.
+A session's conversation, mounted beside its files as markdown a model
+reads: another agent learns from what a session went through, not only
+from what it produced. The store says how to read each harness's runs:
 
 ```ts
-const runs = bodies.map((body) => new NeutralTraces().read(body))
-const trace = await Trace.create(runs, { session: 'analyst-42', commit: 'a3f9c2e', harness: 'neutral' })
-trace.paths() // README.md, index.md, runs/001-1f3a9c2e/run.md, …
-trace.read('index.md') // one line per run
+const store = await Store.open(kv, { traces: { neutral: new NeutralTraces() } })
+await ws.files.attach('analyst', 'an', { trace: true, since: 'analyst@a3f9c2e' })
+// an/ holds the files, an/.trace/ the conversation, at the same commit
 ```
 
+The agent's spelling is `ws-git worktree add --trace [--since <ref>] an
+analyst`, and `ws-git show analyst:.trace/index.md` reads one file with
+nothing mounted.
+
 - **The files:** `README.md` (whose conversation, at which commit),
-  `index.md` (one line per run), `system/<hash>.md` (each distinct
-  prompt once), and per run `run.md` (its facts, input, reply and a line
-  per tool call), `changed.md` (the files it changed, commit by commit)
-  and `events/` (one file per event).
-- **What a run changed** comes from the branch's history: `changes`
-  gives each run's commits, and `runRanges` says which commits are
-  whose, from where each run's turn landed (a fork bounds them).
-  `since` and `new` mark the runs new since a state with `+`.
-- **A port of nontainer's renderer**, checked against its trace corpus
-  byte for byte. `NeutralTraces` reads runs stored in the neutral shape
-  itself (`neutralBody`), which is how the corpora seed them.
+  `index.md` (one line per run: status, time, calls, errors, files,
+  tokens, input), `system/<hash>.md` (each distinct prompt once), and per
+  run `run.md` (its facts, input, reply and a line per tool call),
+  `changed.md` (the files it changed, commit by commit) and `events/`
+  (one file per event). `grep -l notes.md */.trace/runs/*/changed.md`
+  finds the run that wrote a file.
+- **What a run changed** comes from the branch's history: the commits
+  after the run before it landed, through its own landing, the host's
+  among them, and nothing from before the session's fork.
+- **`since`** marks the runs new since a state with `+` (a ref, or a bare
+  commit of the session traced): a run that landed before it and again
+  after is new.
+- **Lazy and read-only:** nothing but the index is read until the trace
+  is, and each file renders on its first read. It hides a `.trace` the
+  tree holds of its own. A state with no conversation is refused, and so
+  is one a harness wrote that the store has no source for. With
+  `traces`, every session's conversation is readable store-wide.
+- **The shape:** a `TraceSource` reads one stored run into the neutral
+  `TraceRun` (status, times, model, token counts, the system prompt, and
+  events: user, assistant, thinking, and one per tool call with its
+  result), and `Trace` renders every file from it, the same whichever
+  harness wrote the run. `NeutralTraces` reads runs stored in that
+  shape itself (`neutralBody`), which is how the corpora seed them.
+- **A port of nontainer's projection**, checked against its trace corpus
+  byte for byte, and its ws-git scripts for what the verb prints.
 
 ## Planes
 
@@ -514,7 +528,8 @@ removed.
 read-only, at `at`: for reading a delegate's work in place before
 deciding to merge it. Not versioned, not carried by a fork, gone when
 the session closes; `detach(at)` and `attachments()` go with it. The
-agent's shell and code see it too.
+agent's shell and code see it too. `{ trace: true }` mounts the
+session's conversation beside it, at `<at>/.trace` ([Traces](#traces)).
 
 **Ignore patterns** (`store.open(id, {ignore: ['*.log', 'node_modules/']})`,
 a `.gitignore` subset) name paths that are never work, as is anything

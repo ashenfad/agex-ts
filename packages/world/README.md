@@ -286,6 +286,12 @@ reference; `secrets.get` throws `DeclaredSecretError` for it, and
 request on to where the value is held, reference and all, has it filled
 there.
 
+`secrets` may also be a function returning them, for a host whose keys
+change while the session is open: the world calls it at each use (a
+request, the shell's environment, the tools' descriptions), so a key
+granted mid-turn is there for the next tool call and one revoked is
+gone. What it returns is checked whenever it changes.
+
 ## The tools
 
 `worldTools(ws)` gives the tools an agent loop hands a model, with

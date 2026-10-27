@@ -8,7 +8,7 @@
 import type { CommandHandler } from '@agex-ts/termish'
 import type { StandardSchemaV1 } from '@standard-schema/spec'
 import { InvalidNameError } from './errors'
-import { type SecretSpec, type Secrets, checkSecrets, secretRef } from './secrets'
+import { type SecretSpec, type SecretSpecs, type Secrets, checkSecrets, secretRef } from './secrets'
 import { type SkillSource, skillName } from './skills'
 import { isSchema } from './values'
 import { describe, inspect } from './values/inspect'
@@ -256,8 +256,13 @@ export interface Profile {
    * alone is declared: the world names it and has its reference, but the
    * host holds its value, so only a host object that sends the request
    * on to the host can have it filled.
+   *
+   * A function is called each time they're needed (a request, the
+   * shell's environment, the tools' descriptions): for a host whose
+   * secrets change while the session is open, as a person grants or
+   * revokes a key.
    */
-  readonly secrets?: Readonly<Record<string, SecretSpec>>
+  readonly secrets?: SecretSpecs | (() => SecretSpecs)
   /** Terminal commands, by name, beside termish's own (a name of
    *  theirs replaces it). */
   readonly commands?: Readonly<Record<string, HostCommand>>
@@ -324,11 +329,11 @@ export function checkProfile(profile: Profile): Profile {
     }
     if (typeof value !== 'string') throw new TypeError(`variable ${name}: a value is a string`)
   }
-  checkSecrets(profile.secrets ?? {})
+  // a function's secrets are checked again whenever it gives new ones
+  const secrets = secretSpecs(profile)
+  checkSecrets(secrets)
   for (const name of Object.keys(profile.variables ?? {})) {
-    if (profile.secrets !== undefined && name in profile.secrets) {
-      throw new InvalidNameError(`${name} is both a variable and a secret`)
-    }
+    if (name in secrets) throw new InvalidNameError(`${name} is both a variable and a secret`)
   }
   for (const [name, command] of Object.entries(profile.commands ?? {})) {
     if (!/^[A-Za-z0-9_][A-Za-z0-9_.+-]*$/.test(name)) {
@@ -380,8 +385,15 @@ export function commandDescriptions(profile: Profile): Map<string, string | unde
  */
 export function shellEnv(profile: Profile, home: string): Record<string, string> {
   const env: Record<string, string> = { HOME: home, ...profile.variables }
-  for (const name of Object.keys(profile.secrets ?? {})) env[name] = secretRef(name)
+  for (const name of Object.keys(secretSpecs(profile))) env[name] = secretRef(name)
   return env
+}
+
+/** A profile's secrets as they are now: its own, or what its function
+ *  gives (`{}` for none). */
+export function secretSpecs(profile: Profile): SecretSpecs {
+  const secrets = profile.secrets
+  return typeof secrets === 'function' ? secrets() : (secrets ?? {})
 }
 
 /** The host objects of a profile for one workspace, factories made. */

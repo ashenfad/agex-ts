@@ -379,6 +379,50 @@ describe('attachments', () => {
     await ws.close()
   })
 
+  it('may sit inside another, and show in its listings', async () => {
+    const store = await fresh()
+    const ws = await seeded(store, { 'a.txt': 'mine\n' })
+    const other = await store.open('reviewer')
+    await other.files.write('review.md', 'looks fine\n')
+    await other.files.write('.notes/hidden.md', 'covered\n')
+    await other.files.write('sub/deep.md', 'deep\n')
+    await other.close()
+    const writer = await store.open('writer')
+    await writer.files.write('draft.md', 'a draft\n')
+    await writer.close()
+    await ws.files.attach('reviewer', '/reviews')
+    // over a directory the mount holds, and below one it lacks
+    await ws.files.attach('writer', '/reviews/.notes')
+    await ws.files.attach('writer', '/reviews/more/drafts')
+    expect((await ws.terminal('ls -a /reviews')).stdout.split('\n')).toEqual(
+      expect.arrayContaining(['.notes', 'more', 'review.md', 'sub']),
+    )
+    expect((await ws.terminal('ls /reviews/.notes')).stdout).toBe('draft.md\n')
+    expect((await ws.terminal('ls /reviews/more')).stdout).toBe('drafts\n')
+    expect(await ws.files.fs.isDir('/reviews/more')).toBe(true)
+    expect((await ws.terminal('cd /reviews/more && ls')).stdout).toBe('drafts\n')
+    expect((await ws.terminal('find /reviews -type f')).stdout.split('\n').sort()).toEqual([
+      '',
+      '/reviews/.notes/draft.md',
+      '/reviews/more/drafts/draft.md',
+      '/reviews/review.md',
+      '/reviews/sub/deep.md',
+    ])
+    expect((await ws.files.fs.list('/reviews', { recursive: true })).sort()).toEqual([
+      '.notes',
+      '.notes/draft.md',
+      'more',
+      'more/drafts',
+      'more/drafts/draft.md',
+      'review.md',
+      'sub',
+      'sub/deep.md',
+    ])
+    await ws.files.detach('/reviews/.notes')
+    expect((await ws.terminal('ls /reviews/.notes')).stdout).toBe('hidden.md\n')
+    await ws.close()
+  })
+
   it('refuse a taken point, writes, and a detach of nothing', async () => {
     const store = await fresh()
     const ws = await seeded(store, { 'a.txt': 'mine\n' })

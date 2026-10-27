@@ -75,36 +75,35 @@ function entriesOf(specs: SecretSpecs): Entries {
 
 /**
  * The secrets of a profile, as host code reaches them. Given a
- * function, they are what it returns at each use, checked whenever it
- * returns something new: a key granted while the session is open is
- * there for the next request, and one revoked is gone.
+ * function, they are what it returns at each use, checked and read
+ * afresh every time (a host may change what it returned in place): a
+ * key granted while the session is open is there for the next request,
+ * and one revoked is gone.
  */
 export class Secrets {
-  readonly #source: SecretSpecs | (() => SecretSpecs)
-  #read: { specs: SecretSpecs; entries: Entries } | null = null
+  readonly #source: (() => SecretSpecs) | null
+  readonly #fixed: Entries | null
 
   constructor(specs: SecretSpecs | (() => SecretSpecs) = {}) {
-    this.#source = specs
-    if (typeof specs !== 'function') this.#read = { specs, entries: entriesOf(specs) }
+    this.#source = typeof specs === 'function' ? specs : null
+    this.#fixed = typeof specs === 'function' ? null : entriesOf(specs)
   }
 
   get #values(): Entries {
-    if (typeof this.#source !== 'function') return (this.#read as { entries: Entries }).entries
+    if (this.#source === null) return this.#fixed as Entries
     const specs = this.#source()
-    if (this.#read?.specs !== specs) {
-      checkSecrets(specs)
-      this.#read = { specs, entries: entriesOf(specs) }
-    }
-    return this.#read.entries
+    checkSecrets(specs)
+    return entriesOf(specs)
   }
 
   /** These secrets as they are now, fixed: for work that must fill and
    *  scrub with the same values (a request). */
   now(): Secrets {
-    if (typeof this.#source !== 'function') return this
-    // read through the check, as every other use is
-    void this.#values
-    return new Secrets((this.#read as { specs: SecretSpecs }).specs)
+    if (this.#source === null) return this
+    const specs = this.#source()
+    checkSecrets(specs)
+    // a copy: what the host changes in place later doesn't reach it
+    return new Secrets(structuredClone(specs))
   }
 
   /** The secrets' names, sorted. */

@@ -1,6 +1,6 @@
 {
   "name": "agex-ts",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Agents that act by writing TypeScript and running a shell, in a versioned world: sessions, typed tasks, agent-defined tasks, delegation and folding, on any AI SDK model. The TypeScript counterpart of agex.",
   "keywords": ["agent", "llm", "ai-agent", "typescript", "code-execution", "browser"],
   "author": "Adam Ashenfelter",

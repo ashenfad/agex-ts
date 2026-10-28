@@ -1,5 +1,11 @@
 # @agex-ts/world
 
+## 0.1.6
+
+### Patch Changes
+
+- 0ee8a71: **A profile's secrets can be read live:** `secrets` may be a function, called at each use, so a key granted or revoked while the session is open takes effect at the next tool call.
+
 ## 0.1.5
 
 ### Patch Changes

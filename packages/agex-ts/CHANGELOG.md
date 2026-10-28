@@ -1,5 +1,13 @@
 # agex-ts
 
+## 0.6.3
+
+### Patch Changes
+
+- ace31b6: **Tool descriptions are read at each request:** a session tells the model of its tools as they are now, so a secret the world gains or loses mid-turn shows in the next request.
+- Updated dependencies [0ee8a71]
+  - @agex-ts/world@0.1.6
+
 ## 0.6.2
 
 ### Patch Changes

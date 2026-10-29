@@ -100,6 +100,107 @@ describe('curl', () => {
     await ws.close()
   })
 
+  it('-i prints the status line and headers before the body, into -o as well', async () => {
+    const { fetch } = fakeFetch(
+      () =>
+        new Response('hello\n', {
+          status: 201,
+          statusText: 'Created',
+          headers: { 'content-type': 'text/plain', 'x-id': '7' },
+        }),
+    )
+    const ws = await open({ fetch })
+    expect(await ws.terminal('curl -si https://h.test/a')).toMatchObject({
+      stdout: 'HTTP/1.1 201 Created\ncontent-type: text/plain\nx-id: 7\n\nhello\n',
+      exitCode: 0,
+    })
+    expect((await ws.terminal('curl --include -o out.txt https://h.test/a')).exitCode).toBe(0)
+    expect(await ws.files.readText('out.txt')).toBe(
+      'HTTP/1.1 201 Created\ncontent-type: text/plain\nx-id: 7\n\nhello\n',
+    )
+    await ws.close()
+  })
+
+  it('-w writes out the response after the transfer', async () => {
+    const { fetch } = fakeFetch(
+      () => new Response('{"a":1}', { headers: { 'content-type': 'application/json' } }),
+    )
+    const ws = await open({ fetch })
+    const r = await ws.terminal(
+      "curl -s -w '\\n%{http_code} %{content_type} %{size_download} %{url_effective} 100%%\\n' https://h.test/a",
+    )
+    expect(r).toMatchObject({
+      stdout: '{"a":1}\n200 application/json 7 https://h.test/a 100%\n',
+      exitCode: 0,
+    })
+    // with -o, the body goes to the file and the write-out to stdout
+    const saved = await ws.terminal("curl -s -o a.json --write-out '%{http_code}' https://h.test/a")
+    expect(saved.stdout).toBe('200')
+    expect(await ws.files.readText('a.json')).toBe('{"a":1}')
+    await ws.close()
+  })
+
+  it('-w writes out a failed transfer too', async () => {
+    const missing = fakeFetch(() => new Response('missing', { status: 404 }))
+    let ws = await open({ fetch: missing.fetch })
+    expect(await ws.terminal("curl -sf -w '%{http_code}' https://h.test/x")).toMatchObject({
+      stdout: '404',
+      exitCode: 22,
+    })
+    await ws.close()
+    const dead = fakeFetch(() => {
+      throw new TypeError('Failed to fetch')
+    })
+    ws = await open({ fetch: dead.fetch })
+    expect(await ws.terminal("curl -s -w '%{http_code}' https://api.test/x")).toMatchObject({
+      stdout: '000',
+      exitCode: 6,
+    })
+    await ws.close()
+  })
+
+  it('-w refuses a variable it does not have, naming those it does', async () => {
+    const { fetch, seen } = fakeFetch(() => new Response('ok'))
+    const ws = await open({ fetch })
+    expect(await ws.terminal("curl -w '%{time_total}' https://h.test")).toMatchObject({
+      exitCode: 2,
+      stdout: '',
+      stderr:
+        'curl: option -w: unknown variable %{time_total}; supported: %{http_code}, %{content_type}, %{url_effective}, %{size_download}',
+    })
+    expect((await ws.terminal("curl --write-out '%{constructor}' https://h.test")).stderr).toMatch(
+      /^curl: option --write-out: unknown variable %\{constructor\}/,
+    )
+    expect(seen).toHaveLength(0)
+    await ws.close()
+  })
+
+  it('scrubs secrets from what -i and -w print', async () => {
+    const { fetch } = fakeFetch(
+      (req) =>
+        new Response('body', {
+          statusText: `OK ${req.headers.authorization}`,
+          headers: {
+            'content-type': `text/plain; token=${req.headers.authorization?.slice(7)}`,
+            'x-echo': `${req.headers.authorization} via ${req.url}`,
+          },
+        }),
+    )
+    const ws = await open({ fetch }, { TOKEN: 'tok-123456', KEY: 'key-abcdef' })
+    const r = await ws.terminal(
+      `curl -i -w '\\n%{url_effective} %{content_type}' -H "Authorization: Bearer $TOKEN" 'https://h.test/?k=$KEY'`,
+    )
+    expect(r.stdout).toBe(
+      'HTTP/1.1 200 OK Bearer ${TOKEN}\ncontent-type: text/plain; token=${TOKEN}\nx-echo: Bearer ${TOKEN} via https://h.test/?k=${KEY}\n\nbody\nhttps://h.test/?k=${KEY} text/plain; token=${TOKEN}',
+    )
+    expect(r.stdout).not.toMatch(/tok-123456|key-abcdef/)
+    await ws.terminal(`curl -s -i -o head.txt -H "Authorization: Bearer $TOKEN" https://h.test/`)
+    const saved = await ws.files.readText('head.txt')
+    expect(saved).toContain('x-echo: Bearer ${TOKEN} via https://h.test/')
+    expect(saved).not.toContain('tok-123456')
+    await ws.close()
+  })
+
   it('-f fails on an HTTP error; without it the body prints', async () => {
     const { fetch } = fakeFetch(() => new Response('missing', { status: 404 }))
     const ws = await open({ fetch })

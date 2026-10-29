@@ -326,6 +326,11 @@ describe('the tools', () => {
     expect(required.text).toMatch(/\[hint: code here is an ES module body/)
     const pkg = await run.call({ code: "import _ from 'lodash'" })
     expect(pkg.text).toMatch(/\[hint: packages are not available here/)
+    await ws.files.write('reads.ts', "export const read = () => fs.read('lib.ts')\n")
+    const unbound = await run.call({ code: "import { read } from './reads'\nawait read()" })
+    expect(unbound.text).toMatch(
+      /ReferenceError: fs is not defined[\s\S]*\[hint: fs, cache and env are bound only in run_ts's code, not in a module/,
+    )
     await ws.close()
   })
 
@@ -361,6 +366,9 @@ describe('descriptions', () => {
     const code = tool(list, 'run_ts').description
     expect(code).toContain('host objects available by name: db')
     expect(code).toContain("import { db } from 'host'")
+    expect(code).toContain(
+      "`fs`, `cache` and `env` are not imports from it, and a module can't reach them",
+    )
     expect(code).toContain('env.API_URL')
     expect(code).toContain('packages: import them by name')
     expect(code).toContain('stops after 12s')

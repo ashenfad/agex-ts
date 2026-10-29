@@ -107,7 +107,10 @@ const result = await ws.runCode(`
   directory, or absolute), `'host'`, URLs, and bare names the profile's
   `resolve` maps to URLs (``(name) => `https://esm.sh/${name}` ``). A
   module reaches the host objects through `import { db } from 'host'`;
-  only the code run has them as bare names. A dynamic `import(spec)`,
+  only the code run has them as bare names. `'host'` holds only the
+  host objects: importing a name it lacks is a `SyntaxError` before the
+  code runs, and `fs`, `cache` and `env` are bound in the code run
+  alone, so a module is passed what it needs. A dynamic `import(spec)`,
   in the code or a module, resolves as a static import from the same
   place would, computed specifiers included.
 - **Output** keeps at most `maxObservation` characters of stdout and of

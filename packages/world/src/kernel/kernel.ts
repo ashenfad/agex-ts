@@ -128,14 +128,8 @@ export class Kernel {
       ui: UiHarvest | null = null,
     ): KernelOutput =>
       this.#render({ ...out, ui }, started, ctx.settings.maxObservation ?? DEFAULT_MAX_OBSERVATION)
-    const failed = (e: unknown) =>
-      finish({
-        stdout: '',
-        stderr: '',
-        images: [],
-        value: null,
-        error: userStack(serializeError(e), 0),
-      })
+    const failed = (e: unknown, error = userStack(serializeError(e), 0)) =>
+      finish({ stdout: '', stderr: '', images: [], value: null, error })
 
     if (this.#closed) return failed(cancelled('the workspace closed'))
     if (this.#stop !== null) return failed(new Error('a run is already in progress'))
@@ -143,9 +137,11 @@ export class Kernel {
     let prepared: Awaited<ReturnType<typeof prepareCode>>
     try {
       const transform = this.#transform
-      prepared = await prepareCode(await transform(code), ctx.fs, ctx.fs.getcwd(), transform)
+      prepared = await prepareCode(await transform(code), ctx.fs, ctx.fs.getcwd(), transform, [
+        ...ctx.hostObjects.keys(),
+      ])
     } catch (e) {
-      return failed(e)
+      return failed(e, preparingStack(serializeError(e)))
     }
 
     let worker: WorkerHandle
@@ -431,7 +427,9 @@ export class Kernel {
       return resolve === undefined ? null : await resolve(String(args[0]))
     }
     if (target === 'import') {
-      return await prepareModule(String(args[0]), ctx.fs, this.#transform)
+      return await prepareModule(String(args[0]), ctx.fs, this.#transform, [
+        ...ctx.hostObjects.keys(),
+      ])
     }
     const name = msg.subject as string
     const entry = ctx.hostObjects.get(name)
@@ -522,6 +520,18 @@ export function userStack(error: SerializedError, codeLines: number): Serialized
       frames.push(mod[1] === undefined ? `    at ${where}` : `    at ${mod[1]} (${where})`)
     }
   }
+  return { ...error, stack: [`${error.name}: ${error.message}`, ...frames].join('\n') }
+}
+
+/** An error preparing the code to run, which the host raised: its
+ *  frames are the host's own, all left out, but for those it gives in
+ *  the code's terms (`at line 3`, `at /workspace/lib.ts:2`). */
+function preparingStack(error: SerializedError): SerializedError {
+  if (error.stack === undefined) return error
+  const frames = error.stack
+    .split('\n')
+    .slice(1)
+    .filter((line) => /^\s*at (?:line \d+|\/[^():\s]*:\d+)$/.test(line))
   return { ...error, stack: [`${error.name}: ${error.message}`, ...frames].join('\n') }
 }
 

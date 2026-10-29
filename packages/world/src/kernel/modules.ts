@@ -13,6 +13,8 @@
  *   are read and compiled on the host, so the worker never fetches
  *   them.
  * - **`'host'`** is the host objects (`import { db } from 'host'`).
+ *   Importing a name it lacks is a SyntaxError before the code runs,
+ *   as a real module's missing export is at link time.
  * - **Anything else** (`'arquero'`, `'https://…'`) is loaded in the
  *   worker: a URL directly, a bare name through the profile's resolver.
  *
@@ -82,21 +84,26 @@ type ImportBinding =
     }
   | { kind: 'sideEffect' }
 
+/** Bound by name in the code run, and never members of `'host'`. */
+const RUN_BINDINGS: readonly string[] = ['fs', 'cache', 'env']
+
 /**
  * Rewrite the code's imports and compile the world modules it reaches.
  *
  * @param source the code, already stripped of types.
  * @param cwd the directory the code's relative imports start from.
  * @param transform turns a module's TypeScript into JavaScript.
+ * @param hostObjects the names `'host'` provides.
  */
 export async function prepareCode(
   source: string,
   fs: ModuleSource,
   cwd: string,
   transform: (src: string) => string | Promise<string>,
+  hostObjects: readonly string[],
 ): Promise<PreparedCode> {
   const imports = parseImports(source)
-  const { modules, walk } = moduleWalker(fs, transform)
+  const { modules, walk } = moduleWalker(fs, transform, hostObjects)
   for (const imp of imports) {
     if (isWorldPath(imp.path)) await walk(imp.path, cwd)
   }
@@ -110,6 +117,7 @@ export async function prepareCode(
     } else if (isWorldPath(imp.path)) {
       replacement = rewriteAsLookup(imp.binding, resolveVfsPath(imp.path, cwd))
     } else if (REGISTERED.has(imp.path)) {
+      checkHostImport(imp.binding, hostObjects, null, lineAt(source, imp.start))
       replacement = rewriteAsRegisteredAccess(imp.binding, imp.path)
     } else {
       replacement = rewriteAsUrlLoad(imp.binding, imp.path)
@@ -130,8 +138,9 @@ export async function prepareModule(
   path: string,
   fs: ModuleSource,
   transform: (src: string) => string | Promise<string>,
+  hostObjects: readonly string[],
 ): Promise<PreparedCode['modules']> {
-  const { modules, walk } = moduleWalker(fs, transform)
+  const { modules, walk } = moduleWalker(fs, transform, hostObjects)
   await walk(path, '/')
   return modules
 }
@@ -141,6 +150,7 @@ export async function prepareModule(
 function moduleWalker(
   fs: ModuleSource,
   transform: (src: string) => string | Promise<string>,
+  hostObjects: readonly string[],
 ): {
   modules: Array<{ path: string; body: string }>
   walk: (importPath: string, baseDir: string) => Promise<void>
@@ -171,7 +181,7 @@ function moduleWalker(
       }
       modules.push({
         path: sourcePath,
-        body: compileHelperBody(stripped, sourcePath, dirOfHelper),
+        body: compileHelperBody(stripped, sourcePath, dirOfHelper, hostObjects),
       })
       compiled.add(sourcePath)
       inFlight.delete(sourcePath)
@@ -202,12 +212,17 @@ function aliasBody(primaryPath: string): string {
  *  code's do: world paths in `__modules`, `'host'` in `__registered`,
  *  anything else `await __load(specifier)`; its dynamic imports call
  *  `__import` from its own directory. */
-function compileHelperBody(stripped: string, sourcePath: string, dirOfHelper: string): string {
+function compileHelperBody(
+  stripped: string,
+  sourcePath: string,
+  dirOfHelper: string,
+  hostObjects: readonly string[],
+): string {
   // Pass 1: rewrite re-exports first (`export { x } from '/path'`,
   // `export * from '/path'`). They become `__exports.X = __modules['/path'].X`
   // assignments. Has to happen BEFORE rewriteHelperExports so the
   // remaining `export` keyword scan doesn't trip on them.
-  const reexported = rewriteHelperReexports(stripped, dirOfHelper)
+  const reexported = rewriteHelperReexports(stripped, sourcePath, dirOfHelper, hostObjects)
   // Pass 2: rewrite `export ...` declarations, tracking exported
   // names for the trailing assignment block.
   const { code, exportNames } = rewriteHelperExports(reexported)
@@ -226,6 +241,9 @@ function compileHelperBody(stripped: string, sourcePath: string, dirOfHelper: st
         keepLines(body.slice(imp.start, imp.end), replacement) +
         body.slice(imp.end)
       continue
+    }
+    if (REGISTERED.has(imp.path)) {
+      checkHostImport(imp.binding, hostObjects, sourcePath, lineAt(code, imp.start))
     }
     const replacement = REGISTERED.has(imp.path)
       ? rewriteAsRegisteredAccess(imp.binding, imp.path, true)
@@ -291,7 +309,12 @@ function isMethodDefinition(masked: string, from: number): boolean {
  *  scope) holds the source helper's exports. Must run BEFORE the
  *  scan for plain `export` declarations so the parser doesn't trip
  *  on the re-export's `export` keyword first. */
-function rewriteHelperReexports(code: string, dirOfHelper: string): string {
+function rewriteHelperReexports(
+  code: string,
+  sourcePath: string,
+  dirOfHelper: string,
+  hostObjects: readonly string[],
+): string {
   // Where a re-export reads from: a world module, the host objects, or
   // a package or URL loaded as an import of it would be.
   const source = (path: string): string =>
@@ -309,7 +332,7 @@ function rewriteHelperReexports(code: string, dirOfHelper: string): string {
   // semicolon and the lookbehind matches).
   out = out.replace(
     /(?<=^|[\n;])[ \t]*export\s*\{([^}]*)\}\s*from\s*['"]([^'"]+)['"][ \t]*;?/gm,
-    (m: string, inside: string, path: string) => {
+    (m: string, inside: string, path: string, offset: number) => {
       const from = source(path)
       const lines: string[] = []
       for (const part of inside.split(',')) {
@@ -318,6 +341,9 @@ function rewriteHelperReexports(code: string, dirOfHelper: string): string {
         const aliased = t.match(/^([A-Za-z_$][\w$]*)\s+as\s+([A-Za-z_$][\w$]*)$/)
         const sourceName = aliased !== null ? (aliased[1] as string) : t
         const exportName = aliased !== null ? (aliased[2] as string) : t
+        if (REGISTERED.has(path) && !hostObjects.includes(sourceName)) {
+          throw missingFromHost(sourceName, hostObjects, sourcePath, lineAt(code, offset))
+        }
         lines.push(
           `__exports[${JSON.stringify(exportName)}] = ${from}[${JSON.stringify(sourceName)}];`,
         )
@@ -718,6 +744,65 @@ function rewriteAsRegisteredAccess(
       return defaultPart === '' ? namedPart : `${defaultPart}\n${namedPart}`
     }
   }
+}
+
+/** Refuse an import of a name `'host'` doesn't provide, as a module
+ *  linking refuses a missing export: before any code runs. `module` is
+ *  the importing module's path, null for the code run, where an import
+ *  of `'host'` as `host` binds the whole of it. */
+function checkHostImport(
+  binding: ImportBinding,
+  hostObjects: readonly string[],
+  module: string | null,
+  line: number,
+): void {
+  const names: string[] = []
+  if (binding.kind === 'named' || binding.kind === 'mixed') {
+    names.push(...binding.entries.map((e) => e.source))
+  }
+  if (binding.kind === 'default' || binding.kind === 'mixed') {
+    const local = binding.kind === 'default' ? binding.local : binding.defaultLocal
+    if (module !== null || local !== 'host') names.push('default')
+  }
+  for (const name of names) {
+    if (!hostObjects.includes(name)) throw missingFromHost(name, hostObjects, module, line)
+  }
+}
+
+/** The SyntaxError for an import of `name`, which `'host'` lacks: what
+ *  `'host'` has, and where the code's other bindings are. Its one frame
+ *  is the import's line, in the terms the code's own errors use. */
+function missingFromHost(
+  name: string,
+  hostObjects: readonly string[],
+  module: string | null,
+  line: number,
+): SyntaxError {
+  const parts = [
+    `The requested module 'host' does not provide an export named '${name}'.`,
+    hostObjects.length === 0
+      ? "'host' has no host objects here."
+      : `'host' has the host objects: ${hostObjects.join(', ')}.`,
+  ]
+  if (RUN_BINDINGS.includes(name)) {
+    parts.push(
+      module === null
+        ? 'fs, cache and env are not imports: they are already bound in this code, so use them by name.'
+        : "fs, cache and env are not imports, and a module can't reach them: they are bound only in run_ts's code, so pass what a module needs to its functions as arguments.",
+    )
+  } else if (name === 'default') {
+    parts.push("Import host objects by name, or all of them with `import * as host from 'host'`.")
+  }
+  const e = new SyntaxError(parts.join(' '))
+  e.stack = `SyntaxError: ${e.message}\n    at ${module === null ? `line ${line}` : `${module}:${line}`}`
+  return e
+}
+
+/** The 1-based line of a character offset. */
+function lineAt(source: string, offset: number): number {
+  let line = 1
+  for (let i = 0; i < offset; i++) if (source.charCodeAt(i) === 10) line++
+  return line
 }
 
 /** Rewrite `import { ... } from '/path'` as a destructuring lookup

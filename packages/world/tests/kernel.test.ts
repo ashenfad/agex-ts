@@ -638,10 +638,58 @@ describe('imports', () => {
     await ws.close()
   })
 
-  it('names a missing module', async () => {
+  it('names a missing module, with none of the host frames', async () => {
     const ws = await open()
     const out = await ws.runCode(`import { x } from './missing'`)
     expect(out.error?.message).toMatch(/Cannot find module '\/workspace\/missing'/)
+    expect(out.error?.stack).toBe(`Error: ${out.error?.message}`)
+    await ws.close()
+  })
+
+  it("refuses a name 'host' lacks before the code runs", async () => {
+    const ws = await open({ hostObjects: { db: { q: () => 1 } } })
+    const out = await ws.runCode(
+      "await fs.write('ran.txt', 'x')\nimport { db, cache } from 'host'\nreturn db",
+    )
+    expect(out.error?.name).toBe('SyntaxError')
+    expect(out.error?.stack).toBe(
+      "SyntaxError: The requested module 'host' does not provide an export named 'cache'. 'host' has the host objects: db. fs, cache and env are not imports: they are already bound in this code, so use them by name.\n    at line 2",
+    )
+    expect(await ws.files.exists('ran.txt')).toBe(false)
+    const whole = await ws.runCode("import host from 'host'\nreturn await host.db.q()")
+    expect(whole.error).toBeNull()
+    expect(whole.value).toBe('1')
+    await ws.close()
+  })
+
+  it("refuses a name 'host' lacks in a module, naming the module's line", async () => {
+    const ws = await open({ hostObjects: { db: { q: () => 1 } } })
+    await ws.files.write('cached.ts', "import { db } from 'host'\nimport { cache } from 'host'\n")
+    const out = await ws.runCode(`import './cached.ts'`)
+    expect(out.error?.stack).toBe(
+      "SyntaxError: The requested module 'host' does not provide an export named 'cache'. 'host' has the host objects: db. fs, cache and env are not imports, and a module can't reach them: they are bound only in run_ts's code, so pass what a module needs to its functions as arguments.\n    at /workspace/cached.ts:2",
+    )
+    await ws.files.write('barrel.ts', "\nexport { db, env as config } from 'host'\n")
+    const reexported = await ws.runCode(`import { config } from './barrel'`)
+    expect(reexported.error?.message).toMatch(/does not provide an export named 'env'/)
+    expect(reexported.error?.stack).toMatch(/at \/workspace\/barrel\.ts:2$/)
+    await ws.files.write('whole.ts', "import h from 'host'\nexport const q = () => h.db.q()\n")
+    const defaulted = await ws.runCode(`import { q } from './whole'`)
+    expect(defaulted.error?.message).toMatch(
+      /does not provide an export named 'default'\. 'host' has the host objects: db\. Import host objects by name, or all of them with `import \* as host from 'host'`\./,
+    )
+    const dynamic = await ws.runCode(`await import('./cached')`)
+    expect(dynamic.error?.name).toBe('SyntaxError')
+    expect(dynamic.error?.message).toMatch(/does not provide an export named 'cache'/)
+    await ws.close()
+  })
+
+  it("says when 'host' has nothing at all", async () => {
+    const ws = await open()
+    const out = await ws.runCode(`import { db } from 'host'`)
+    expect(out.error?.message).toBe(
+      "The requested module 'host' does not provide an export named 'db'. 'host' has no host objects here.",
+    )
     await ws.close()
   })
 

@@ -244,8 +244,12 @@ export interface Profile {
   /**
    * Ordinary configuration, public by design (a service's URL, a
    * public key): `env` in code, and the shell's variables.
+   *
+   * A function is called each time they're needed (a run's `env`, the
+   * shell's environment, the tools' descriptions): for a host whose
+   * configuration changes while the session is open.
    */
-  readonly variables?: Readonly<Record<string, string>>
+  readonly variables?: Variables | (() => Variables)
   /**
    * Values that never enter the world: no code or shell reads them,
    * and nothing stores them. The shell and code have references to them
@@ -291,6 +295,53 @@ const RESERVED = new Set([
 const IDENTIFIER = /^[A-Za-z_$][A-Za-z0-9_$]*$/
 const VARIABLE = /^[A-Za-z_][A-Za-z0-9_]*$/
 
+/** Variables by name, as a profile gives them. */
+export type Variables = Readonly<Record<string, string>>
+
+/** Check variables' names and values. */
+function checkVariables(variables: Variables): void {
+  for (const [name, value] of Object.entries(variables)) {
+    if (!VARIABLE.test(name)) {
+      throw new InvalidNameError(
+        `variable ${JSON.stringify(name)}: a name is [A-Za-z_][A-Za-z0-9_]*`,
+      )
+    }
+    if (typeof value !== 'string') throw new TypeError(`variable ${name}: a value is a string`)
+  }
+}
+
+/** A profile's variables as its function gives them now, checked, or
+ *  its own. */
+function variablesGiven(profile: Profile): Variables {
+  const variables = profile.variables
+  if (typeof variables !== 'function') return variables ?? {}
+  // checked at every read: a host may change what it returned in place
+  const given = variables()
+  checkVariables(given)
+  return given
+}
+
+/** A profile's secrets as its function gives them now, checked, or its
+ *  own. */
+function secretsGiven(profile: Profile): SecretSpecs {
+  const secrets = profile.secrets
+  if (typeof secrets !== 'function') return secrets ?? {}
+  const given = secrets()
+  checkSecrets(given)
+  return given
+}
+
+/** Whether a profile's variables or secrets are read live. */
+const isLive = (profile: Profile): boolean =>
+  typeof profile.variables === 'function' || typeof profile.secrets === 'function'
+
+/** Refuse a name that is both a variable and a secret. */
+function checkDisjoint(variables: Variables, secrets: SecretSpecs): void {
+  for (const name of Object.keys(variables)) {
+    if (name in secrets) throw new InvalidNameError(`${name} is both a variable and a secret`)
+  }
+}
+
 /** Check a profile's names, and return it. */
 export function checkProfile(profile: Profile): Profile {
   for (const [name, given] of Object.entries(profile.hostObjects ?? {})) {
@@ -321,20 +372,13 @@ export function checkProfile(profile: Profile): Profile {
       throw new TypeError(`value ${name} can't be sent to code by value: ${describe(live)}`)
     }
   }
-  for (const [name, value] of Object.entries(profile.variables ?? {})) {
-    if (!VARIABLE.test(name)) {
-      throw new InvalidNameError(
-        `variable ${JSON.stringify(name)}: a name is [A-Za-z_][A-Za-z0-9_]*`,
-      )
-    }
-    if (typeof value !== 'string') throw new TypeError(`variable ${name}: a value is a string`)
-  }
-  // a function's secrets are checked again whenever it gives new ones
-  const secrets = secretSpecs(profile)
+  // a function's variables or secrets are checked again whenever it
+  // gives new ones
+  const variables = variablesGiven(profile)
+  checkVariables(variables)
+  const secrets = secretsGiven(profile)
   checkSecrets(secrets)
-  for (const name of Object.keys(profile.variables ?? {})) {
-    if (name in secrets) throw new InvalidNameError(`${name} is both a variable and a secret`)
-  }
+  checkDisjoint(variables, secrets)
   for (const [name, command] of Object.entries(profile.commands ?? {})) {
     if (!/^[A-Za-z0-9_][A-Za-z0-9_.+-]*$/.test(name)) {
       throw new InvalidNameError(
@@ -384,30 +428,39 @@ export function commandDescriptions(profile: Profile): Map<string, string | unde
  * its value. termish sets `$PWD` itself.
  */
 export function shellEnv(profile: Profile, home: string): Record<string, string> {
-  const env: Record<string, string> = { HOME: home, ...profile.variables }
+  const env: Record<string, string> = { HOME: home, ...variablesNow(profile) }
   for (const name of Object.keys(secretSpecs(profile))) env[name] = secretRef(name)
   return env
 }
 
 /**
+ * A profile's variables as they are now: its own, or what its function
+ * gives (`{}` for none). While either its variables or its secrets are
+ * a function, what they give is checked as the open checks fixed ones
+ * (names, values, and no name both a variable and a secret) each time
+ * it is read: every use of live variables reads them here.
+ *
+ * @throws InvalidNameError or TypeError for a variable that fails them.
+ */
+export function variablesNow(profile: Profile): Variables {
+  const variables = variablesGiven(profile)
+  if (isLive(profile)) checkDisjoint(variables, secretsGiven(profile))
+  return variables
+}
+
+/**
  * A profile's secrets as they are now: its own, or what its function
- * gives (`{}` for none). What a function gives is checked as the open
- * checks fixed ones (names, values, origins, and no secret named as one
- * of the profile's variables), each time it is read: every use of live
- * secrets reads them here.
+ * gives (`{}` for none). While either its variables or its secrets are
+ * a function, what they give is checked as the open checks fixed ones
+ * (names, values, origins, and no name both a variable and a secret)
+ * each time it is read: every use of live secrets reads them here.
  *
  * @throws InvalidNameError or TypeError for a secret that fails them.
  */
 export function secretSpecs(profile: Profile): SecretSpecs {
-  const secrets = profile.secrets
-  if (typeof secrets !== 'function') return secrets ?? {}
-  // checked at every read: a host may change what it returned in place
-  const specs = secrets()
-  checkSecrets(specs)
-  for (const name of Object.keys(profile.variables ?? {})) {
-    if (name in specs) throw new InvalidNameError(`${name} is both a variable and a secret`)
-  }
-  return specs
+  const secrets = secretsGiven(profile)
+  if (isLive(profile)) checkDisjoint(variablesGiven(profile), secrets)
+  return secrets
 }
 
 /** The host objects of a profile for one workspace, factories made. */

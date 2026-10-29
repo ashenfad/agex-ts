@@ -80,6 +80,7 @@ import {
   makeHostObjects,
   secretSpecs,
   shellEnv,
+  variablesNow,
 } from './profile'
 import { Queue } from './queue'
 import { repr } from './repr'
@@ -450,9 +451,13 @@ export class Workspace {
       sees: (path) => this.#view?.sees(path) ?? true,
       whyIgnored: (path) => whyIgnored(path, this.root, this.#patterns),
     })
-    const secrets = settings.profile.secrets
+    const { secrets, variables } = settings.profile
+    // read live while either is a function: a variable given later is
+    // checked against them
     this.#secrets = new Secrets(
-      typeof secrets === 'function' ? () => secretSpecs(settings.profile) : secrets,
+      typeof secrets === 'function' || typeof variables === 'function'
+        ? () => secretSpecs(settings.profile)
+        : secrets,
     )
     this.#hostObjects = makeHostObjects(settings.profile, this, { secrets: this.#secrets })
     this.#commands = makeCommands(settings.profile, {
@@ -605,7 +610,7 @@ export class Workspace {
       const out = await this.#kernelFor().run(code, {
         fs: this.#top,
         cache: this.#cache,
-        env: this.#settings.profile.variables ?? {},
+        env: { ...variablesNow(this.#settings.profile) },
         secrets: this.#secrets.names(),
         hostObjects: this.#hostObjects,
         values: this.#settings.profile.values ?? {},

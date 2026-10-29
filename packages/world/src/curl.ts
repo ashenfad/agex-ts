@@ -297,23 +297,22 @@ async function curl(
     printWriteOut(transfer)
     return undefined
   }
-  if (req.fail && response.status >= 400) {
-    printWriteOut(transfer)
-    return fail(22, `The requested URL returned error: ${response.status}`)
-  }
+  // Under -f an HTTP error keeps its body back, but not -i's headers.
+  const failed = req.fail && response.status >= 400
   const head = req.include ? new TextEncoder().encode(secrets.scrub(headerBlock(response))) : null
-  const bytes = head === null ? response.bytes : concat(head, response.bytes)
-  if (req.output !== null) {
+  const bytes = failed ? head : head === null ? response.bytes : concat(head, response.bytes)
+  if (bytes !== null && req.output !== null) {
     try {
       await ctx.fs.write(resolve(req.output, ctx.fs.getcwd()), bytes)
     } catch (e) {
+      printWriteOut(transfer)
       return fail(23, `Failure writing output to ${req.output}: ${describeFsError(e)}`)
     }
-  } else {
+  } else if (bytes !== null) {
     ctx.stdout.writeBytes(bytes)
   }
   printWriteOut(transfer)
-  return undefined
+  return failed ? fail(22, `The requested URL returned error: ${response.status}`) : undefined
 }
 
 function concat(a: Uint8Array, b: Uint8Array): Uint8Array {

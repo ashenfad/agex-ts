@@ -525,13 +525,14 @@ export function userStack(error: SerializedError, codeLines: number): Serialized
 
 /** An error preparing the code to run, which the host raised: its
  *  frames are the host's own, all left out, but for those it gives in
- *  the code's terms (`at line 3`, `at /workspace/lib.ts:2`). */
+ *  the code's terms (`at line 3`, `at /workspace/my lib.ts:2`), which
+ *  have a line and no column. */
 function preparingStack(error: SerializedError): SerializedError {
   if (error.stack === undefined) return error
   const frames = error.stack
     .split('\n')
     .slice(1)
-    .filter((line) => /^\s*at (?:line \d+|\/[^():\s]*:\d+)$/.test(line))
+    .filter((line) => /^\s*at (?:line \d+|\/.*:\d+)$/.test(line) && !/:\d+:\d+$/.test(line))
   return { ...error, stack: [`${error.name}: ${error.message}`, ...frames].join('\n') }
 }
 

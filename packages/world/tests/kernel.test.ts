@@ -448,8 +448,13 @@ describe('host objects', () => {
 
   it('refuses names code already has', async () => {
     const store = await Store.open(await newKV())
-    for (const name of ['fs', 'env', 'host', 'console', 'class', '1x']) {
+    for (const name of ['fs', 'cache', 'env', 'host', 'console', 'class', '1x']) {
       await expect(store.open('s', { profile: { hostObjects: { [name]: {} } } })).rejects.toThrow(
+        InvalidNameError,
+      )
+    }
+    for (const name of ['fs', 'cache', 'env']) {
+      await expect(store.open('s', { profile: { values: { [name]: 1 } } })).rejects.toThrow(
         InvalidNameError,
       )
     }
@@ -649,11 +654,11 @@ describe('imports', () => {
   it("refuses a name 'host' lacks before the code runs", async () => {
     const ws = await open({ hostObjects: { db: { q: () => 1 } } })
     const out = await ws.runCode(
-      "await fs.write('ran.txt', 'x')\nimport { db, cache } from 'host'\nreturn db",
+      "await fs.write('ran.txt', 'x')\nimport { db, store } from 'host'\nreturn db",
     )
     expect(out.error?.name).toBe('SyntaxError')
     expect(out.error?.stack).toBe(
-      "SyntaxError: The requested module 'host' does not provide an export named 'cache'. 'host' has the host objects: db. fs, cache and env are not imports: they are already bound in this code, so use them by name.\n    at line 2",
+      "SyntaxError: The requested module 'host' does not provide an export named 'store'. 'host' has the host objects (db) plus fs, cache and env.\n    at line 2",
     )
     expect(await ws.files.exists('ran.txt')).toBe(false)
     const whole = await ws.runCode("import host from 'host'\nreturn await host.db.q()")
@@ -664,35 +669,104 @@ describe('imports', () => {
 
   it("refuses a name 'host' lacks in a module, naming the module's line", async () => {
     const ws = await open({ hostObjects: { db: { q: () => 1 } } })
-    await ws.files.write('cached.ts', "import { db } from 'host'\nimport { cache } from 'host'\n")
-    const out = await ws.runCode(`import './cached.ts'`)
+    await ws.files.write('stash.ts', "import { db } from 'host'\nimport { stash } from 'host'\n")
+    const out = await ws.runCode(`import './stash.ts'`)
     expect(out.error?.stack).toBe(
-      "SyntaxError: The requested module 'host' does not provide an export named 'cache'. 'host' has the host objects: db. fs, cache and env are not imports, and a module can't reach them: they are bound only in run_ts's code, so pass what a module needs to its functions as arguments.\n    at /workspace/cached.ts:2",
+      "SyntaxError: The requested module 'host' does not provide an export named 'stash'. 'host' has the host objects (db) plus fs, cache and env.\n    at /workspace/stash.ts:2",
     )
-    await ws.files.write('barrel.ts', "\nexport { db, env as config } from 'host'\n")
+    await ws.files.write('barrel.ts', "\nexport { db, nope as config } from 'host'\n")
     const reexported = await ws.runCode(`import { config } from './barrel'`)
-    expect(reexported.error?.message).toMatch(/does not provide an export named 'env'/)
+    expect(reexported.error?.message).toMatch(/does not provide an export named 'nope'/)
     expect(reexported.error?.stack).toMatch(/at \/workspace\/barrel\.ts:2$/)
     await ws.files.write('whole.ts', "import h from 'host'\nexport const q = () => h.db.q()\n")
     const defaulted = await ws.runCode(`import { q } from './whole'`)
-    expect(defaulted.error?.message).toMatch(
-      /does not provide an export named 'default'\. 'host' has the host objects: db\. Import host objects by name, or all of them with `import \* as host from 'host'`\./,
+    expect(defaulted.error?.message).toBe(
+      "The requested module 'host' does not provide an export named 'default'. 'host' has the host objects (db) plus fs, cache and env. Import them by name, or all of them with `import * as host from 'host'`.",
     )
-    await ws.files.write('my lib.ts', "\nimport { cache } from 'host'\n")
+    await ws.files.write('my lib.ts', "\nimport { stash } from 'host'\n")
     const spaced = await ws.runCode(`import './my lib.ts'`)
     expect(spaced.error?.stack).toMatch(/\n {4}at \/workspace\/my lib\.ts:2$/)
-    const dynamic = await ws.runCode(`await import('./cached')`)
+    const dynamic = await ws.runCode(`await import('./stash')`)
     expect(dynamic.error?.name).toBe('SyntaxError')
-    expect(dynamic.error?.message).toMatch(/does not provide an export named 'cache'/)
+    expect(dynamic.error?.message).toMatch(/does not provide an export named 'stash'/)
     await ws.close()
   })
 
-  it("says when 'host' has nothing at all", async () => {
+  it("says what 'host' has with no host objects, and no cache", async () => {
     const ws = await open()
     const out = await ws.runCode(`import { db } from 'host'`)
     expect(out.error?.message).toBe(
-      "The requested module 'host' does not provide an export named 'db'. 'host' has no host objects here.",
+      "The requested module 'host' does not provide an export named 'db'. 'host' has fs, cache and env.",
     )
+    await ws.close()
+    const store = await Store.open(await newKV())
+    const bare = await store.open('s', { cache: false, profile: { code: code() } })
+    const top = await bare.runCode(`import { fs, cache } from 'host'`)
+    expect(top.error?.stack).toBe(
+      "SyntaxError: The requested module 'host' does not provide an export named 'cache': this workspace has no cache.\n    at line 1",
+    )
+    await bare.files.write('m.ts', "import { cache } from 'host'\n")
+    const inModule = await bare.runCode(`import './m'`)
+    expect(inModule.error?.message).toBe(
+      "The requested module 'host' does not provide an export named 'cache': this workspace has no cache.",
+    )
+    const other = await bare.runCode(`import { db } from 'host'`)
+    expect(other.error?.message).toMatch(/'host' has fs and env\.$/)
+    await bare.close()
+  })
+
+  it("gives modules the run's cache, fs and env through 'host'", async () => {
+    const ws = await open({ variables: { GREETING: 'hello' } })
+    await ws.files.write(
+      'lib/keep.ts',
+      "import { cache } from 'host'\nexport const remember = async (k: string, v: unknown) => {\n  await cache.set(k, v)\n}\n",
+    )
+    await ws.files.write(
+      'lib/note.ts',
+      "import { fs, env } from 'host'\nimport * as host from 'host'\nexport const note = async () => {\n  await fs.write('note.txt', env.GREETING)\n  return [await host.fs.read('note.txt', 'utf8'), host.env === env]\n}\n",
+    )
+    const out = await ws.runCode(`
+      import { remember } from './lib/keep'
+      import { note } from './lib/note'
+      import { env as config } from 'host'
+      await remember('k', { n: 7 })
+      return [await cache.get('k'), await note(), config.GREETING, typeof host.cache]
+    `)
+    expect(out.error).toBeNull()
+    expect(out.value).toBe('[{"n":7},["hello",true],"hello","object"]')
+    expect(await ws.files.readText('note.txt')).toBe('hello')
+    const lazy = await ws.runCode(
+      "const { note } = await import('./lib/note')\nreturn (await note())[0]",
+    )
+    expect(lazy.value).toBe('hello')
+    await ws.close()
+  })
+
+  it("gives each run's modules that run's own 'host'", async () => {
+    let now: Record<string, string> = { GREETING: 'first' }
+    const ws = await open({ variables: () => now })
+    await ws.files.write(
+      'greet.ts',
+      "import { env } from 'host'\nexport const greeting = env.GREETING\n",
+    )
+    const first = await ws.runCode(`import { greeting } from './greet'; return greeting`)
+    expect(first.value).toBe('first')
+    now = { GREETING: 'second' }
+    const second = await ws.runCode(`import { greeting } from './greet'; return greeting`)
+    expect(second.value).toBe('second')
+    await ws.close()
+  })
+
+  it("prints a module's console to the run's output", async () => {
+    const ws = await open()
+    await ws.files.write(
+      'say.ts',
+      "console.log('loaded')\nexport const say = (n: number) => {\n  console.log('said', n)\n  console.error('oops')\n}\n",
+    )
+    const out = await ws.runCode(`import { say } from './say'\nsay(1)`)
+    expect(out.error).toBeNull()
+    expect(out.stdout).toBe('loaded\nsaid 1')
+    expect(out.stderr).toBe('oops')
     await ws.close()
   })
 

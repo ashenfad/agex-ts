@@ -99,18 +99,19 @@ const result = await ws.runCode(`
 - **Its bindings:** `fs` (the session's files, every method async, with
   `read(path, 'utf8')` and string writes), `cache`, `env` (the
   profile's variables), `console` (`log`/`info` to stdout, `warn`/
-  `error` to stderr, images shown as images), the profile's values (a
-  copy each run), and the host objects.
+  `error` to stderr, images shown as images, a module's as well), the
+  profile's values (a copy each run), and the host objects.
 - **Nothing carries over between runs** but the files and the cache,
   as in nontainer: each run gets a fresh scope.
 - **Imports:** the world's own modules by path (relative to the working
   directory, or absolute), `'host'`, URLs, and bare names the profile's
   `resolve` maps to URLs (``(name) => `https://esm.sh/${name}` ``). A
   module reaches the host objects through `import { db } from 'host'`;
-  only the code run has them as bare names. `'host'` holds only the
-  host objects: importing a name it lacks is a `SyntaxError` before the
-  code runs, and `fs`, `cache` and `env` are bound in the code run
-  alone, so a module is passed what it needs. A dynamic `import(spec)`,
+  only the code run has them as bare names. `'host'` also has the run's
+  `fs`, `env` and `cache` (`import { fs, cache } from 'host'`), as
+  nontainer's `host` module does: a module gets the run's own, since
+  modules are evaluated afresh each run. Importing a name `'host'` lacks
+  is a `SyntaxError` before the code runs. A dynamic `import(spec)`,
   in the code or a module, resolves as a static import from the same
   place would, computed specifiers included.
 - **Output** keeps at most `maxObservation` characters of stdout and of

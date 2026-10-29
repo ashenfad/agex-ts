@@ -9,13 +9,15 @@
  * - `env`: the profile's variables, read-only;
  * - `secret(name)`: a reference to one of the profile's secrets, which
  *   a host object fills at a request (the value never comes here);
- * - each host object by name, and all of them as `host` (also
- *   `import { db } from 'host'`): its stub, for one that has one;
+ * - each host object by name: its stub, for one that has one;
+ * - `host`, which is also the module `'host'`: the host objects, and
+ *   `fs`, `env` and `cache` (`import { db, fs } from 'host'`), how the
+ *   world's modules reach them;
  * - each of the profile's values by name, a copy of its own per run;
  * - `ui`, an empty object for the values to show, when the profile
  *   asks for it: what the code leaves there is sent back with the run;
  * - `console`: `log` and `info` to stdout, `warn` and `error` to
- *   stderr, images shown as images.
+ *   stderr, images shown as images, in the world's modules as well.
  *
  * Nothing carries over between runs but what the code writes to the
  * files or the cache: each run gets fresh bindings and a fresh scope.
@@ -409,16 +411,20 @@ async function run(msg: RunMessage): Promise<void> {
       const remote = bridge.stub('host', h.methods, h.name)
       host[h.name] = h.stub === undefined ? remote : stubbed(h.name, h.stub, remote)
     }
+    const fs = wrapAgentFs(bridge.stub('fs', FS_METHODS) as Parameters<typeof wrapAgentFs>[0])
+    const cache = msg.hasCache ? bridge.stub('cache', CACHE_METHODS) : undefined
+    const env = Object.freeze({ ...msg.env })
+    const runConsole = makeConsole(msg.runId)
     const bindings: Record<string, unknown> = {
-      fs: wrapAgentFs(bridge.stub('fs', FS_METHODS) as Parameters<typeof wrapAgentFs>[0]),
-      cache: msg.hasCache ? bridge.stub('cache', CACHE_METHODS) : undefined,
-      env: Object.freeze({ ...msg.env }),
+      fs,
+      cache,
+      env,
       secret: (name: string): string => {
         if (!msg.secrets.includes(name)) throw new Error(`no secret named '${name}'`)
         return `\${${name}}`
       },
-      console: makeConsole(msg.runId),
-      host: Object.freeze(host),
+      console: runConsole,
+      host: Object.freeze({ ...host, fs, env, ...(cache !== undefined && { cache }) }),
       ...host,
       ...msg.values,
       ...(msg.ui && { ui: {} }),
@@ -426,7 +432,8 @@ async function run(msg: RunMessage): Promise<void> {
     const registered: Record<string, unknown> = { host: bindings.host }
     const modules: Record<string, Record<string, unknown>> = {}
     // Each module is evaluated once per run, however many imports
-    // (static or dynamic, at once or not) reach it.
+    // (static or dynamic, at once or not) reach it, with this run's
+    // 'host' and console: no module outlives its run.
     const evaluating = new Map<string, Promise<void>>()
     const evaluate = (m: CompiledModule): Promise<void> => {
       let done = evaluating.get(m.path)
@@ -437,15 +444,20 @@ async function run(msg: RunMessage): Promise<void> {
           '__registered',
           '__load',
           '__import',
+          'console',
           m.body,
         )
         done = (async () => {
           // A body returns its exports object (another spelling of a
           // module returns that module's).
-          modules[m.path] = (await body({}, modules, registered, loader, importer)) as Record<
-            string,
-            unknown
-          >
+          modules[m.path] = (await body(
+            {},
+            modules,
+            registered,
+            loader,
+            importer,
+            runConsole,
+          )) as Record<string, unknown>
         })()
         evaluating.set(m.path, done)
       }

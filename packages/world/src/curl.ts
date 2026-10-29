@@ -36,7 +36,7 @@ export function curlCommand(opts: CurlOptions = {}): CommandFactory {
       (ctx) =>
         curl(ctx, secrets, opts),
     {
-      description: `curl URL fetches from the network: -o FILE saves into the workspace, -L follows redirects, -H 'Name: value', -X METHOD, -d DATA (or -d @file), --json DATA, -f fails on HTTP errors, -s is quiet, -m SECONDS, -i prints the status line and headers before the body, -w FORMAT prints after the transfer (${WRITE_OUT_NAMES}, \\n). Responses over ${Math.round(maxBytes / 1024 / 1024)} MB are refused. A secret goes in a URL or header as $NAME (-H "Authorization: Bearer $TOKEN"); its value never enters the workspace.`,
+      description: `curl URL fetches from the network: -o FILE saves into the workspace, -L follows redirects, -H 'Name: value', -X METHOD, -d DATA (or -d @file), --json DATA, -f fails on HTTP errors, -s is quiet, -m SECONDS, -i prints the status line and headers before the body (with -L, the final response's only), -w FORMAT prints after the transfer (${WRITE_OUT_NAMES}, \\n). Responses over ${Math.round(maxBytes / 1024 / 1024)} MB are refused. A secret goes in a URL or header as $NAME (-H "Authorization: Bearer $TOKEN"); its value never enters the workspace.`,
     },
   )
 }
@@ -134,7 +134,9 @@ function writeOut(format: string, t: Transfer): string {
 
 /** What `-i` prints before the body: the status line (fetch doesn't
  *  say which HTTP version answered, so it says 1.1), the headers, and a
- *  blank line. */
+ *  blank line. The final response's only, under `-L` too: fetch follows
+ *  redirects without showing what they said, and a browser's
+ *  `redirect: 'manual'` hides it as well. */
 function headerBlock(response: NetResponse): string {
   const status = `HTTP/1.1 ${response.status} ${response.statusText}`.trimEnd()
   const lines = Object.entries(response.headers).map(([name, value]) => `${name}: ${value}`)

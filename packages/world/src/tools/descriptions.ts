@@ -5,7 +5,7 @@
  */
 
 import { DEFAULT_TIMEOUT } from '../kernel/kernel'
-import { commandDescriptions, secretSpecs, variablesNow } from '../profile'
+import { commandDescriptions } from '../profile'
 import { skillCatalog } from '../skills'
 import { uiDescription } from '../ui'
 import type { Workspace } from '../workspace'
@@ -144,9 +144,10 @@ const names = (list: readonly string[]): string => list.map((n) => `$${n}`).join
 export function terminalDescription(ws: Workspace, primer?: string): string {
   const profile = ws.settings.profile
   const notes: string[] = []
-  const variables = Object.keys(variablesNow(profile)).sort()
+  const config = ws.configuration()
+  const variables = Object.keys(config.variables).sort()
   if (variables.length > 0) notes.push(`- variables: ${names(variables)}`)
-  const secrets = Object.keys(secretSpecs(profile)).sort()
+  const secrets = Object.keys(config.secrets).sort()
   if (secrets.length > 0) {
     notes.push(
       `- secrets: ${names(secrets)}, usable only where a command takes them (curl's URLs and headers, for the sites each is meant for); their values never appear in the workspace`,
@@ -186,11 +187,12 @@ export function codeDescription(ws: Workspace, primer?: string): string {
       `- values bound by name: ${values.join(', ')} (data, a fresh copy in every call; change a copy freely)`,
     )
   }
-  const variables = Object.keys(variablesNow(profile)).sort()
+  const config = ws.configuration()
+  const variables = Object.keys(config.variables).sort()
   if (variables.length > 0) {
     notes.push(`- env: configuration, e.g. env.${variables[0]} (${variables.join(', ')})`)
   }
-  const secrets = Object.keys(secretSpecs(profile)).sort()
+  const secrets = Object.keys(config.secrets).sort()
   if (secrets.length > 0) {
     notes.push(
       `- secrets: ${secrets.join(', ')}. \`secret('${secrets[0]}')\` is a reference a host object fills at a request (http.fetch fills it in a URL or header, for the sites the secret is meant for); code never sees the value`,

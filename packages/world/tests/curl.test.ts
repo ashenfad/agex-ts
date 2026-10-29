@@ -201,6 +201,33 @@ describe('curl', () => {
     await ws.close()
   })
 
+  it('-f with -i keeps the headers of an HTTP error, not its body', async () => {
+    const { fetch } = fakeFetch(
+      () =>
+        new Response('missing', {
+          status: 404,
+          statusText: 'Not Found',
+          headers: { 'x-id': '7' },
+        }),
+    )
+    const ws = await open({ fetch })
+    const r = await ws.terminal("curl -sfi -w '%{http_code}' https://h.test/x")
+    expect(r).toMatchObject({
+      stdout: 'HTTP/1.1 404 Not Found\ncontent-type: text/plain;charset=UTF-8\nx-id: 7\n\n404',
+      exitCode: 22,
+    })
+    await ws.close()
+  })
+
+  it('-w writes out a transfer whose -o save fails', async () => {
+    const { fetch } = fakeFetch(() => new Response('ok'))
+    const ws = await open({ fetch })
+    await ws.files.write('notes.txt', 'a file, not a directory')
+    const r = await ws.terminal("curl -s -o notes.txt/out -w '%{http_code}' https://h.test/x")
+    expect(r).toMatchObject({ stdout: '200', exitCode: 23 })
+    await ws.close()
+  })
+
   it('-f fails on an HTTP error; without it the body prints', async () => {
     const { fetch } = fakeFetch(() => new Response('missing', { status: 404 }))
     const ws = await open({ fetch })

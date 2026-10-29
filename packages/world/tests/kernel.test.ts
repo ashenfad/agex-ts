@@ -678,6 +678,9 @@ describe('imports', () => {
     expect(defaulted.error?.message).toMatch(
       /does not provide an export named 'default'\. 'host' has the host objects: db\. Import host objects by name, or all of them with `import \* as host from 'host'`\./,
     )
+    await ws.files.write('my lib.ts', "\nimport { cache } from 'host'\n")
+    const spaced = await ws.runCode(`import './my lib.ts'`)
+    expect(spaced.error?.stack).toMatch(/\n {4}at \/workspace\/my lib\.ts:2$/)
     const dynamic = await ws.runCode(`await import('./cached')`)
     expect(dynamic.error?.name).toBe('SyntaxError')
     expect(dynamic.error?.message).toMatch(/does not provide an export named 'cache'/)

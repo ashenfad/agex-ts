@@ -589,10 +589,10 @@ export class Workspace {
    * The profile's variables and secrets as they are now, read once and
    * checked together (its fixed secrets as they were at open): what a
    * run's `env`, the shell's environment and the tools' descriptions
-   * are built from.
+   * are built from. A copy: changing it changes nothing here.
    */
   configuration(): Configuration {
-    return configurationOf(this.#profile)
+    return structuredClone(configurationOf(this.#profile))
   }
 
   /**

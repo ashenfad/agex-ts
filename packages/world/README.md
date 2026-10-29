@@ -252,7 +252,9 @@ persists. `$NAME` expands the profile's variables, and the profile's
 
 `curlCommand()` is a command a host grants (`commands: {curl:
 curlCommand()}`) to fetch over the network: `-o`, `-L`, `-H`, `-X`,
-`-d`, `--json`, `-f`, `-s`, `-m`, and a size cap. In a browser it tells
+`-d`, `--json`, `-f`, `-s`, `-m`, `-i`, `-w` (`%{http_code}`,
+`%{content_type}`, `%{url_effective}`, `%{size_download}`), and a size
+cap. What it prints is scrubbed of the secrets. In a browser it tells
 a CORS refusal from a dead network. A command made with
 `commandFactory` gets a workspace that is part of the shell call it
 runs in, so it can write and commit without waiting on that call.

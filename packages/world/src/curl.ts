@@ -4,7 +4,8 @@
  *
  * It takes the flags agents reach for: `-o FILE`, `-L`, `-H 'Name:
  * value'`, `-X METHOD`, `-d DATA` (or `-d @file`), `--json DATA`, `-f`,
- * `-s`/`-S`, `-m SECONDS`.
+ * `-s`/`-S`, `-m SECONDS`, `-i` (the status line and headers before the
+ * body) and `-w FORMAT` (what the transfer was, after it).
  *
  * **Secrets:** `$NAME` (or `${NAME}`) in the URL or a header is filled
  * with the profile's secret at the request, if the secret may go to
@@ -12,7 +13,8 @@
  * `-H "Authorization: Bearer $TOKEN"` works quoted either way, and the
  * value never passes through the shell. The rest (the size cap,
  * scrubbing an echoed secret, telling CORS from a dead network) is
- * `request`'s, shared with the `http` host object.
+ * `request`'s, shared with the `http` host object. What `-i` and `-w`
+ * print is scrubbed as the body is.
  */
 
 import type { CommandContext, CommandResult } from '@agex-ts/termish'
@@ -34,7 +36,7 @@ export function curlCommand(opts: CurlOptions = {}): CommandFactory {
       (ctx) =>
         curl(ctx, secrets, opts),
     {
-      description: `curl URL fetches from the network: -o FILE saves into the workspace, -L follows redirects, -H 'Name: value', -X METHOD, -d DATA (or -d @file), --json DATA, -f fails on HTTP errors, -s is quiet, -m SECONDS. Responses over ${Math.round(maxBytes / 1024 / 1024)} MB are refused. A secret goes in a URL or header as $NAME (-H "Authorization: Bearer $TOKEN"); its value never enters the workspace.`,
+      description: `curl URL fetches from the network: -o FILE saves into the workspace, -L follows redirects, -H 'Name: value', -X METHOD, -d DATA (or -d @file), --json DATA, -f fails on HTTP errors, -s is quiet, -m SECONDS, -i prints the status line and headers before the body, -w FORMAT prints after the transfer (${WRITE_OUT_NAMES}, \\n). Responses over ${Math.round(maxBytes / 1024 / 1024)} MB are refused. A secret goes in a URL or header as $NAME (-H "Authorization: Bearer $TOKEN"); its value never enters the workspace.`,
     },
   )
 }
@@ -51,6 +53,8 @@ interface Request {
   silent: boolean
   showError: boolean
   maxTime: number | null
+  include: boolean
+  writeOut: string | null
 }
 
 /** Options that take a value, by short and long name. */
@@ -67,9 +71,11 @@ const VALUED: Readonly<Record<string, keyof Request | 'data-file'>> = {
   '--json': 'json',
   m: 'maxTime',
   '--max-time': 'maxTime',
+  w: 'writeOut',
+  '--write-out': 'writeOut',
 }
 
-const FLAGS: Readonly<Record<string, 'follow' | 'fail' | 'silent' | 'showError'>> = {
+const FLAGS: Readonly<Record<string, 'follow' | 'fail' | 'silent' | 'showError' | 'include'>> = {
   L: 'follow',
   '--location': 'follow',
   f: 'fail',
@@ -78,6 +84,61 @@ const FLAGS: Readonly<Record<string, 'follow' | 'fail' | 'silent' | 'showError'>
   '--silent': 'silent',
   S: 'showError',
   '--show-error': 'showError',
+  i: 'include',
+  '--include': 'include',
+}
+
+/** What `-w` reads of a transfer: of no response, status 0. */
+interface Transfer {
+  readonly status: number
+  readonly headers: Readonly<Record<string, string>>
+  readonly url: string
+  readonly size: number
+}
+
+/** The `-w` variables, by name. */
+const WRITE_OUT: Readonly<Record<string, (t: Transfer) => string>> = {
+  http_code: (t) => String(t.status).padStart(3, '0'),
+  content_type: (t) => t.headers['content-type'] ?? '',
+  url_effective: (t) => t.url,
+  size_download: (t) => String(t.size),
+}
+
+const WRITE_OUT_NAMES = Object.keys(WRITE_OUT)
+  .map((name) => `%{${name}}`)
+  .join(', ')
+
+const ESCAPES: Readonly<Record<string, string>> = { n: '\n', r: '\r', t: '\t' }
+
+const WRITE_OUT_PART = /%\{([^}]*)\}|%%|\\([nrt])/g
+
+/** Refuse a `-w` format naming a variable `curl` doesn't have. */
+function checkWriteOut(format: string, opt: string): void {
+  for (const m of format.matchAll(WRITE_OUT_PART)) {
+    const name = m[1]
+    if (name !== undefined && !Object.hasOwn(WRITE_OUT, name)) {
+      throw new Usage(`option ${opt}: unknown variable %{${name}}; supported: ${WRITE_OUT_NAMES}`)
+    }
+  }
+}
+
+/** A `-w` format filled in from a transfer: its variables, `%%` and the
+ *  escapes `\n`, `\r` and `\t`. */
+function writeOut(format: string, t: Transfer): string {
+  return format.replace(WRITE_OUT_PART, (m: string, name?: string, letter?: string) => {
+    if (name !== undefined) return (WRITE_OUT[name] as (t: Transfer) => string)(t)
+    if (letter !== undefined) return ESCAPES[letter] as string
+    return m === '%%' ? '%' : m
+  })
+}
+
+/** What `-i` prints before the body: the status line (fetch doesn't
+ *  say which HTTP version answered, so it says 1.1), the headers, and a
+ *  blank line. */
+function headerBlock(response: NetResponse): string {
+  const status = `HTTP/1.1 ${response.status} ${response.statusText}`.trimEnd()
+  const lines = Object.entries(response.headers).map(([name, value]) => `${name}: ${value}`)
+  return `${[status, ...lines].join('\n')}\n\n`
 }
 
 class Usage extends Error {}
@@ -95,6 +156,8 @@ async function parse(ctx: CommandContext): Promise<Request> {
     silent: false,
     showError: false,
     maxTime: null,
+    include: false,
+    writeOut: null,
   }
   const args = [...ctx.args]
   const take = async (key: keyof Request | 'data-file', value: string | undefined, opt: string) => {
@@ -111,6 +174,9 @@ async function parse(ctx: CommandContext): Promise<Request> {
       const seconds = Number(value)
       if (!(seconds > 0)) throw new Usage(`option ${opt}: expected a number of seconds`)
       req.maxTime = seconds
+    } else if (key === 'writeOut') {
+      checkWriteOut(value, opt)
+      req.writeOut = value
     } else {
       ;(req as unknown as Record<string, string>)[key] = value
     }
@@ -192,6 +258,11 @@ async function curl(
     if (!has('content-type')) headers.push(['content-type', 'application/x-www-form-urlencoded'])
   }
 
+  // `-w` prints after the transfer, failed or not, to stdout.
+  const printWriteOut = (t: Transfer): void => {
+    if (req.writeOut !== null) ctx.stdout.write(secrets.scrub(writeOut(req.writeOut, t)))
+  }
+
   let response: NetResponse
   try {
     response = await request(
@@ -208,23 +279,46 @@ async function curl(
       ctx.signal,
     )
   } catch (e) {
-    if (e instanceof NetError) return fail(e.code, e.message)
+    if (e instanceof NetError) {
+      printWriteOut({ status: 0, headers: {}, url: req.url as string, size: 0 })
+      return fail(e.code, e.message)
+    }
     throw e
+  }
+  const transfer: Transfer = {
+    status: response.status,
+    headers: response.headers,
+    url: response.url,
+    size: response.bytes.byteLength,
   }
 
   // A redirect not followed, which the browser hid: nothing to show.
-  if (response.hiddenRedirect) return undefined
+  if (response.hiddenRedirect) {
+    printWriteOut(transfer)
+    return undefined
+  }
   if (req.fail && response.status >= 400) {
+    printWriteOut(transfer)
     return fail(22, `The requested URL returned error: ${response.status}`)
   }
+  const head = req.include ? new TextEncoder().encode(secrets.scrub(headerBlock(response))) : null
+  const bytes = head === null ? response.bytes : concat(head, response.bytes)
   if (req.output !== null) {
     try {
-      await ctx.fs.write(resolve(req.output, ctx.fs.getcwd()), response.bytes)
+      await ctx.fs.write(resolve(req.output, ctx.fs.getcwd()), bytes)
     } catch (e) {
       return fail(23, `Failure writing output to ${req.output}: ${describeFsError(e)}`)
     }
-    return undefined
+  } else {
+    ctx.stdout.writeBytes(bytes)
   }
-  ctx.stdout.writeBytes(response.bytes)
+  printWriteOut(transfer)
   return undefined
+}
+
+function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
+  const out = new Uint8Array(a.byteLength + b.byteLength)
+  out.set(a)
+  out.set(b, a.byteLength)
+  return out
 }

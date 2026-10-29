@@ -113,6 +113,28 @@ describe('variables read live', () => {
     await ws.close()
   })
 
+  it('fixed secrets stay as they were at open, though the variables are live', async () => {
+    const seen: string[] = []
+    const fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      seen.push(new Headers(init?.headers).get('x-key') ?? '')
+      return new Response('ok')
+    }) as typeof globalThis.fetch
+    const live = config()
+    const secrets: Record<string, { value: string; origins: string[] }> = {
+      TOKEN: { value: 'fixed-secret-3333', origins: ['https://api.good.test'] },
+    }
+    const ws = await open({
+      variables: live.variables,
+      secrets,
+      commands: { curl: curlCommand({ fetch }) },
+    })
+    const token = secrets.TOKEN as { value: string }
+    token.value = 'changed-secret-4444'
+    await ws.terminal('curl -s -H "X-Key: $TOKEN" https://api.good.test/x')
+    expect(seen).toEqual(['fixed-secret-3333'])
+    await ws.close()
+  })
+
   it('code gets a copy: what it does to env reaches neither the host nor the next run', async () => {
     const live = config()
     live.set('API_URL', 'https://a.test')

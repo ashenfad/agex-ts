@@ -5,7 +5,7 @@
  */
 
 import { DEFAULT_TIMEOUT } from '../kernel/kernel'
-import { commandDescriptions, secretSpecs } from '../profile'
+import { commandDescriptions, secretSpecs, variablesNow } from '../profile'
 import { skillCatalog } from '../skills'
 import { uiDescription } from '../ui'
 import type { Workspace } from '../workspace'
@@ -144,7 +144,7 @@ const names = (list: readonly string[]): string => list.map((n) => `$${n}`).join
 export function terminalDescription(ws: Workspace, primer?: string): string {
   const profile = ws.settings.profile
   const notes: string[] = []
-  const variables = Object.keys(profile.variables ?? {}).sort()
+  const variables = Object.keys(variablesNow(profile)).sort()
   if (variables.length > 0) notes.push(`- variables: ${names(variables)}`)
   const secrets = Object.keys(secretSpecs(profile)).sort()
   if (secrets.length > 0) {
@@ -186,7 +186,7 @@ export function codeDescription(ws: Workspace, primer?: string): string {
       `- values bound by name: ${values.join(', ')} (data, a fresh copy in every call; change a copy freely)`,
     )
   }
-  const variables = Object.keys(profile.variables ?? {}).sort()
+  const variables = Object.keys(variablesNow(profile)).sort()
   if (variables.length > 0) {
     notes.push(`- env: configuration, e.g. env.${variables[0]} (${variables.join(', ')})`)
   }

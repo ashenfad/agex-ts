@@ -292,6 +292,11 @@ request, the shell's environment, the tools' descriptions), so a key
 granted mid-turn is there for the next tool call and one revoked is
 gone. What it returns is checked whenever it changes.
 
+`variables` may be a function too, read the same way (a run's `env`,
+the shell's environment, the tools' descriptions), for configuration a
+host changes while the session is open. A name both a variable and a
+secret is refused whenever either is read.
+
 ## The tools
 
 `worldTools(ws)` gives the tools an agent loop hands a model, with

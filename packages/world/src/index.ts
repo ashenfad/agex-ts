@@ -77,6 +77,7 @@ export {
   type MethodContract,
   type Profile,
   type TypedHost,
+  type Variables,
   hostFactory,
   typedHost,
   withStub,

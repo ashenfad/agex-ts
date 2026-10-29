@@ -68,7 +68,7 @@ export function errorHint(e: SerializedError, ctx: HintContext = {}): string | n
     return 'this is a sandboxed worker, not Node: there is no process, Buffer or __dirname; use fs, env and Uint8Array'
   }
   if (/\b(fs|cache|env) is not defined\b/.test(text)) {
-    return "fs, cache and env are bound only in run_ts's code, not in a module: pass what a module needs to its functions as arguments"
+    return "a module imports fs, cache and env from 'host': import { fs, cache, env } from 'host'"
   }
   const missing = /Cannot find module '([^']+)'/.exec(text)
   if (missing !== null && !/^[./]/.test(missing[1] as string)) {

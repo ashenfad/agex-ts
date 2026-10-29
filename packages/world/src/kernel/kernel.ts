@@ -31,7 +31,7 @@ import {
   type Worker2Host,
   serializeError,
 } from './messages'
-import { prepareCode, prepareModule } from './modules'
+import { type HostModule, prepareCode, prepareModule } from './modules'
 import type { UiHarvest } from './ui-values'
 
 /** ts-blank-space, loaded by the first run that needs it: it brings the
@@ -137,9 +137,13 @@ export class Kernel {
     let prepared: Awaited<ReturnType<typeof prepareCode>>
     try {
       const transform = this.#transform
-      prepared = await prepareCode(await transform(code), ctx.fs, ctx.fs.getcwd(), transform, [
-        ...ctx.hostObjects.keys(),
-      ])
+      prepared = await prepareCode(
+        await transform(code),
+        ctx.fs,
+        ctx.fs.getcwd(),
+        transform,
+        hostModule(ctx),
+      )
     } catch (e) {
       return failed(e, preparingStack(serializeError(e)))
     }
@@ -427,9 +431,7 @@ export class Kernel {
       return resolve === undefined ? null : await resolve(String(args[0]))
     }
     if (target === 'import') {
-      return await prepareModule(String(args[0]), ctx.fs, this.#transform, [
-        ...ctx.hostObjects.keys(),
-      ])
+      return await prepareModule(String(args[0]), ctx.fs, this.#transform, hostModule(ctx))
     }
     const name = msg.subject as string
     const entry = ctx.hostObjects.get(name)
@@ -521,6 +523,11 @@ export function userStack(error: SerializedError, codeLines: number): Serialized
     }
   }
   return { ...error, stack: [`${error.name}: ${error.message}`, ...frames].join('\n') }
+}
+
+/** What `'host'` provides a run. */
+function hostModule(ctx: RunContext): HostModule {
+  return { objects: [...ctx.hostObjects.keys()], cache: ctx.cache !== null }
 }
 
 /** An error preparing the code to run, which the host raised: its

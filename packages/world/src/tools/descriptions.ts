@@ -56,7 +56,8 @@ persist:
   will silently hit the wrong occurrence)
 - modules: reusable code goes in workspace files you import by path
   (\`import { summarize } from './lib/stats.ts'\`); a module imports
-  others relative to itself`
+  others relative to itself, and gets \`fs\`, \`env\` and \`cache\` from
+  'host' (\`import { fs, env } from 'host'\`)`
 
 export const FILE_WRITE_DESCRIPTION = `\
 Write a file in the workspace (parents created, overwrites). Use this
@@ -178,7 +179,7 @@ export function codeDescription(ws: Workspace, primer?: string): string {
   const hostObjects = Object.keys(profile.hostObjects ?? {}).sort()
   if (hostObjects.length > 0) {
     notes.push(
-      `- host objects available by name: ${hostObjects.join(', ')} (live host resources; call their methods with await, do not try to construct them). In a module, import them: \`import { ${hostObjects[0]} } from 'host'\`, which also works at the top level. 'host' holds only these: \`fs\`, \`cache\` and \`env\` are not imports from it, and a module can't reach them (they are bound only in this code), so pass a module what it needs as arguments`,
+      `- host objects available by name: ${hostObjects.join(', ')} (live host resources; call their methods with await, do not try to construct them). In a module, import them: \`import { ${hostObjects[0]} } from 'host'\`, which also works at the top level`,
     )
   }
   const values = Object.keys(profile.values ?? {}).sort()

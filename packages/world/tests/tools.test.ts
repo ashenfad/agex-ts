@@ -329,7 +329,7 @@ describe('the tools', () => {
     await ws.files.write('reads.ts', "export const read = () => fs.read('lib.ts')\n")
     const unbound = await run.call({ code: "import { read } from './reads'\nawait read()" })
     expect(unbound.text).toMatch(
-      /ReferenceError: fs is not defined[\s\S]*\[hint: fs, cache and env are bound only in run_ts's code, not in a module/,
+      /ReferenceError: fs is not defined[\s\S]*\[hint: a module imports fs, cache and env from 'host'/,
     )
     await ws.close()
   })
@@ -367,7 +367,7 @@ describe('descriptions', () => {
     expect(code).toContain('host objects available by name: db')
     expect(code).toContain("import { db } from 'host'")
     expect(code).toContain(
-      "`fs`, `cache` and `env` are not imports from it, and a module can't reach them",
+      "gets `fs`, `env` and `cache` from\n  'host' (`import { fs, env } from 'host'`)",
     )
     expect(code).toContain('env.API_URL')
     expect(code).toContain('packages: import them by name')

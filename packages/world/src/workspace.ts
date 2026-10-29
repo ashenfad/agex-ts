@@ -73,14 +73,15 @@ import { checkSessionName, checkTagName } from './names'
 import { dirname, normalize, resolve, within } from './path'
 import { WorkspacePlane } from './planes'
 import {
+  type Configuration,
   type HostCall,
   type HostEntry,
   type Profile,
+  configurationOf,
   makeCommands,
   makeHostObjects,
   secretSpecs,
   shellEnv,
-  variablesNow,
 } from './profile'
 import { Queue } from './queue'
 import { repr } from './repr'
@@ -378,6 +379,8 @@ export class Workspace {
   /** The turn open on this workspace, if any. */
   #turn: Turn | null = null
   readonly #secrets: Secrets
+  /** The profile with its fixed secrets as they were at open. */
+  readonly #profile: Profile
   #kernel: Kernel | null = null
   /** The call a host method made through its `HostCall` is part of,
    *  set while that method's workspace call starts. */
@@ -455,9 +458,10 @@ export class Workspace {
     // fixed secrets stay as they were at open; read live while either is
     // a function, so a variable given later is checked against them
     const given = typeof secrets === 'function' ? secrets : structuredClone(secrets ?? {})
+    this.#profile = { ...settings.profile, secrets: given }
     this.#secrets = new Secrets(
       typeof secrets === 'function' || typeof variables === 'function'
-        ? () => secretSpecs({ ...settings.profile, secrets: given })
+        ? () => secretSpecs(this.#profile)
         : given,
     )
     this.#hostObjects = makeHostObjects(settings.profile, this, { secrets: this.#secrets })
@@ -582,6 +586,16 @@ export class Workspace {
   // ---------- code ----------
 
   /**
+   * The profile's variables and secrets as they are now, read once and
+   * checked together (its fixed secrets as they were at open): what a
+   * run's `env`, the shell's environment and the tools' descriptions
+   * are built from.
+   */
+  configuration(): Configuration {
+    return configurationOf(this.#profile)
+  }
+
+  /**
    * Run TypeScript in the session's kernel, as one call, committed as
    * `{tool: 'run_ts'}` when it changed anything. A run that fails,
    * times out or is interrupted still commits what it wrote before it
@@ -608,11 +622,13 @@ export class Workspace {
       this.#checkOpen()
       const active = this.#queue.active
       const call: HostCall = { ws: this.#asPartOf(() => active) }
+      // one read: the run's env and its secrets' names checked together
+      const config = this.configuration()
       const out = await this.#kernelFor().run(code, {
         fs: this.#top,
         cache: this.#cache,
-        env: { ...variablesNow(this.#settings.profile) },
-        secrets: this.#secrets.names(),
+        env: { ...config.variables },
+        secrets: Object.keys(config.secrets).sort(),
         hostObjects: this.#hostObjects,
         values: this.#settings.profile.values ?? {},
         call,
@@ -742,7 +758,7 @@ export class Workspace {
       try {
         stdout = await execute(command, this.#top, {
           commands: this.#commands,
-          env: shellEnv(this.#settings.profile, this.root),
+          env: shellEnv(this.configuration(), this.root),
           signal: controller.signal,
         })
       } catch (e) {

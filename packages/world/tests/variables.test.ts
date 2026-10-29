@@ -135,6 +135,29 @@ describe('variables read live', () => {
     await ws.close()
   })
 
+  it('a run or a shell call reads the variables once, so what is checked is what is used', async () => {
+    let reads = 0
+    let flip = false
+    const ws = await open({
+      // a provider that changes at every read: TOKEN a variable, then not
+      variables: () => {
+        reads += 1
+        flip = !flip
+        return flip ? { TOKEN: 'public' } : {}
+      },
+      secrets: () =>
+        flip ? {} : { TOKEN: { value: 'live-secret-6666', origins: ['https://a.test'] } },
+    })
+    reads = 0
+    const out = await ws.runCode('return [env.TOKEN, typeof secret]')
+    expect(reads).toBe(1)
+    expect(out.error).toBeNull()
+    reads = 0
+    await ws.terminal('echo "$HOME"')
+    expect(reads).toBe(1)
+    await ws.close()
+  })
+
   it('code gets a copy: what it does to env reaches neither the host nor the next run', async () => {
     const live = config()
     live.set('API_URL', 'https://a.test')

@@ -420,48 +420,44 @@ export function commandDescriptions(profile: Profile): Map<string, string | unde
   return out
 }
 
+/** A profile's variables and secrets as they are at one read. */
+export interface Configuration {
+  readonly variables: Variables
+  readonly secrets: SecretSpecs
+}
+
 /**
  * The shell's variables for one call: `HOME`, the session's root (unless
- * the profile sets it), the profile's variables, and each secret as a
- * reference to itself (`$TOKEN` expands to `${TOKEN}`), so a command
- * that takes secrets can find and fill it, and nothing else ever sees
- * its value. termish sets `$PWD` itself.
+ * the variables set it), the variables, and each secret as a reference to
+ * itself (`$TOKEN` expands to `${TOKEN}`), so a command that takes
+ * secrets can find and fill it, and nothing else ever sees its value.
+ * termish sets `$PWD` itself.
  */
-export function shellEnv(profile: Profile, home: string): Record<string, string> {
-  const env: Record<string, string> = { HOME: home, ...variablesNow(profile) }
-  for (const name of Object.keys(secretSpecs(profile))) env[name] = secretRef(name)
+export function shellEnv(config: Configuration, home: string): Record<string, string> {
+  const env: Record<string, string> = { HOME: home, ...config.variables }
+  for (const name of Object.keys(config.secrets)) env[name] = secretRef(name)
   return env
 }
 
 /**
- * A profile's variables as they are now: its own, or what its function
- * gives (`{}` for none). While either its variables or its secrets are
+ * A profile's variables and secrets as they are now, each read once:
+ * its own, or what its functions give (`{}` for none). While either is
  * a function, what they give is checked as the open checks fixed ones
- * (names, values, and no name both a variable and a secret) each time
- * it is read: every use of live variables reads them here.
+ * (names, values, origins, and no name both a variable and a secret) at
+ * every read, and the two come from the same read, so what is checked is
+ * what is used: every use of live variables or secrets reads them here.
  *
- * @throws InvalidNameError or TypeError for a variable that fails them.
+ * @throws InvalidNameError or TypeError for one that fails them.
  */
-export function variablesNow(profile: Profile): Variables {
+export function configurationOf(profile: Profile): Configuration {
   const variables = variablesGiven(profile)
-  if (isLive(profile)) checkDisjoint(variables, secretsGiven(profile))
-  return variables
+  const secrets = secretsGiven(profile)
+  if (isLive(profile)) checkDisjoint(variables, secrets)
+  return { variables, secrets }
 }
 
-/**
- * A profile's secrets as they are now: its own, or what its function
- * gives (`{}` for none). While either its variables or its secrets are
- * a function, what they give is checked as the open checks fixed ones
- * (names, values, origins, and no name both a variable and a secret)
- * each time it is read: every use of live secrets reads them here.
- *
- * @throws InvalidNameError or TypeError for a secret that fails them.
- */
-export function secretSpecs(profile: Profile): SecretSpecs {
-  const secrets = secretsGiven(profile)
-  if (isLive(profile)) checkDisjoint(variablesGiven(profile), secrets)
-  return secrets
-}
+/** A profile's secrets as they are now (see {@link configurationOf}). */
+export const secretSpecs = (profile: Profile): SecretSpecs => configurationOf(profile).secrets
 
 /** The host objects of a profile for one workspace, factories made. */
 export function makeHostObjects(

@@ -452,12 +452,13 @@ export class Workspace {
       whyIgnored: (path) => whyIgnored(path, this.root, this.#patterns),
     })
     const { secrets, variables } = settings.profile
-    // read live while either is a function: a variable given later is
-    // checked against them
+    // fixed secrets stay as they were at open; read live while either is
+    // a function, so a variable given later is checked against them
+    const given = typeof secrets === 'function' ? secrets : structuredClone(secrets ?? {})
     this.#secrets = new Secrets(
       typeof secrets === 'function' || typeof variables === 'function'
-        ? () => secretSpecs(settings.profile)
-        : secrets,
+        ? () => secretSpecs({ ...settings.profile, secrets: given })
+        : given,
     )
     this.#hostObjects = makeHostObjects(settings.profile, this, { secrets: this.#secrets })
     this.#commands = makeCommands(settings.profile, {

@@ -1,6 +1,6 @@
 {
   "name": "@agex-ts/world",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "A versioned world for agents: sessions as branches of one kvgit repository, with files, a cache, a working directory, forks, checkouts and tags.",
   "publishConfig": {
     "access": "public"

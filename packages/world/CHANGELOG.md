@@ -1,5 +1,12 @@
 # @agex-ts/world
 
+## 0.1.8
+
+### Patch Changes
+
+- 70f8d77: **curl takes -i and -w:** `-i` prints the status line and headers before the body, and `-w` writes out `%{http_code}`, `%{content_type}`, `%{url_effective}` or `%{size_download}` after it, both scrubbed of secrets.
+- 43ba3f5: **'host' gives modules `fs`, `cache` and `env`:** `import { cache } from 'host'` binds the run's own in any module, a module's `console` prints to the run's output, and a name `'host'` lacks is a `SyntaxError` before the code runs.
+
 ## 0.1.7
 
 ### Patch Changes

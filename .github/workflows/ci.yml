@@ -55,7 +55,9 @@ jobs:
 
   browser:
     name: Browser tests (real IndexedDB, OPFS)
-    runs-on: ubuntu-latest
+    # Playwright 1.59 installs no browsers on Ubuntu 26.04, which
+    # ubuntu-latest now is; lift the pin with a Playwright that supports it.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4

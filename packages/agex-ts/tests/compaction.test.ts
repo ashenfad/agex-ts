@@ -10,6 +10,7 @@ import { Memory } from '@agex-ts/kvgit/backends/memory'
 import { Store, type Workspace } from '@agex-ts/world'
 import type { ModelStep } from '@agex-ts/world/conformance'
 import { beforeEach, describe, expect, it } from 'vitest'
+import { settled } from '../src/compaction'
 import { Agent, type Message, Policy, ScriptedProvider, messageText } from '../src/index'
 
 const BUDGET = 1000
@@ -390,5 +391,62 @@ describe('folding now', () => {
     const running = turn.wait()
     await expect(session.fold()).rejects.toThrow(/a turn is running/)
     await running
+  })
+})
+
+const thoughts = (request: readonly Message[] | undefined) =>
+  (request ?? []).flatMap((m) => m.parts.flatMap((p) => (p.kind === 'thinking' ? [p.text] : [])))
+
+describe('reasoning across a fold', () => {
+  it('is sent only under the fold it was written for', async () => {
+    const { agent: a, provider } = agent([
+      { ...(STEPS[0] as ModelStep), thinking: 'FIRST-THOUGHT' },
+      { ...(STEPS[1] as ModelStep), thinking: 'KEPT-THOUGHT' },
+      summarizes(SUMMARY),
+      { ...says('done'), thinking: 'LATE-THOUGHT' },
+      says('again'),
+    ])
+    const session = a.session(ws)
+    await session.say('Do the work in two steps.')
+    // before any fold, reasoning goes back as it is
+    expect(thoughts(provider.seen[1])).toEqual(['FIRST-THOUGHT'])
+    // the summary request is the request before the fold, reasoning and all
+    expect(thoughts(provider.seen[2])).toEqual(['FIRST-THOUGHT'])
+    // after it: the kept step is sent, its reasoning is not
+    expect(texts(provider.seen[3])).toContain('SECOND-OUTPUT')
+    expect(thoughts(provider.seen[3])).toEqual([])
+    // the reply made under the fold keeps its reasoning in the next turn
+    await session.say('And now?')
+    expect(thoughts(provider.seen.at(-1))).toEqual(['LATE-THOUGHT'])
+  })
+
+  it("drops a reply's item ids with its reasoning", () => {
+    const reply: Message = {
+      id: 'm',
+      role: 'assistant',
+      parts: [
+        { kind: 'thinking', text: 't', signature: 'sig', details: { openai: { itemId: 'rs_1' } } },
+        { kind: 'text', text: 'checking', details: { openai: { itemId: 'msg_1', phase: 'x' } } },
+        {
+          kind: 'tool_call',
+          callId: 'c',
+          name: 'f',
+          args: {},
+          id: 'fc_1',
+          details: { openai: { itemId: 'fc_1' }, google: { thoughtSignature: 'g' } },
+        },
+      ],
+      fold: 'old',
+    }
+    expect(settled(reply, 'old')).toBe(reply)
+    const sent = settled(reply, 'new')
+    expect(sent?.parts.map((p) => p.kind)).toEqual(['text', 'tool_call'])
+    expect(sent?.parts[0]).toMatchObject({ id: null, details: { openai: { phase: 'x' } } })
+    expect(sent?.parts[1]).toMatchObject({
+      id: null,
+      details: { openai: {}, google: { thoughtSignature: 'g' } },
+    })
+    const only: Message = { id: 'n', role: 'assistant', parts: [{ kind: 'thinking', text: 't' }] }
+    expect(settled(only, 'new')).toBeNull()
   })
 })

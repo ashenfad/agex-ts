@@ -14,7 +14,13 @@
  *   {@link ACK}). When `through` is inside a run, that run's opening
  *   message (the person's prompt, or a task's brief) is sent again after
  *   the pair, so the model always has the request it is working on, and
- *   the roles still alternate. Everything else is sent as it is.
+ *   the roles still alternate. Everything else is sent as it is, but for
+ *   the reasoning in a reply made under another fold.
+ * - **Reasoning across a fold.** Providers bind reasoning to the exact
+ *   request it was written for, so a reply's reasoning is sent only
+ *   while the fold its request had (`Message.fold`) is the one in force.
+ *   A reply made under another fold, or under none, is sent without its
+ *   reasoning and without its parts' item ids ({@link settled}).
  * - **When it folds.** Before each model call, when the agent has a
  *   {@link Policy} and the request would reach its budget. A request is
  *   measured from the provider's report for the latest reply, adjusted
@@ -58,7 +64,15 @@ import {
   transcript,
 } from '@agex-ts/world'
 import type { Provider, Settings, ToolSpec } from './provider'
-import { type Message, type Usage, addUsage, messageText, newId } from './record'
+import {
+  type Details,
+  type Message,
+  type Part,
+  type Usage,
+  addUsage,
+  messageText,
+  newId,
+} from './record'
 
 const SUMMARY_ID = `${MARK}summary:`
 const ACK_ID = `${MARK}ack:`
@@ -161,13 +175,65 @@ function pair(fold: Pick<Fold, 'through' | 'summary'>): Message[] {
 function view(seq: Seq, fold: Fold | null, upto: number | null = null): Message[] {
   const span = seq.span(fold)
   const removed = seq.removed(fold)
+  const anchor = span === null ? null : (fold?.through ?? null)
   const out: Message[] = []
   seq.messages.forEach((m, i) => {
     if (upto !== null && i > upto) return
     if (fold !== null && span !== null && i === span[0]) out.push(...pair(fold))
-    if (!removed.has(i)) out.push(m)
+    if (removed.has(i)) return
+    const sent = settled(m, anchor)
+    if (sent !== null) out.push(sent)
   })
   return out
+}
+
+/** `message` as it can be sent with the fold ending at `anchor` in
+ *  force (null: none is). Providers bind reasoning to the exact request
+ *  it was written for (Claude checks each thinking block's signature
+ *  against it), so a reply made under another fold, or under none, goes
+ *  without its reasoning, and without the item ids of its other parts,
+ *  which some providers pair with that reasoning (OpenAI refuses a
+ *  stored call whose reasoning item is missing). Null when nothing else
+ *  is left of it. */
+export function settled(message: Message, anchor: string | null): Message | null {
+  if (message.role !== 'assistant' || (message.fold ?? null) === anchor) return message
+  let changed = false
+  const parts: Part[] = []
+  for (const p of message.parts) {
+    if (p.kind === 'thinking') {
+      changed = true
+      continue
+    }
+    if (p.kind === 'text' || p.kind === 'tool_call') {
+      const details = withoutItemIds(p.details)
+      if ((p.id ?? null) !== null || details !== (p.details ?? null)) {
+        changed = true
+        parts.push({ ...p, id: null, details })
+        continue
+      }
+    }
+    parts.push(p)
+  }
+  if (parts.length === 0) return null
+  return changed ? { ...message, parts } : message
+}
+
+/** `details` without each provider's `itemId` (the AI SDK's name for a
+ *  Responses item id); the same object when it has none. */
+function withoutItemIds(details: Details | null | undefined): Details | null {
+  if (details === null || details === undefined) return null
+  let changed = false
+  const out: Record<string, unknown> = {}
+  for (const [provider, value] of Object.entries(details)) {
+    if (typeof value === 'object' && value !== null && !Array.isArray(value) && 'itemId' in value) {
+      const { itemId: _, ...rest } = value as Record<string, unknown>
+      out[provider] = rest
+      changed = true
+    } else {
+      out[provider] = value
+    }
+  }
+  return changed ? out : details
 }
 
 function textOf(message: Message): string {

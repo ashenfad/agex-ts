@@ -1,5 +1,11 @@
 # agex-ts
 
+## 0.6.4
+
+### Patch Changes
+
+- 76147f2: **A fold no longer sends reasoning written for another request:** a reply made under a different fold goes without its thinking and its parts' item ids, which Claude would refuse as bound to a different conversation.
+
 ## 0.6.3
 
 ### Patch Changes
